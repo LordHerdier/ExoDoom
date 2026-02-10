@@ -13,4 +13,4 @@ COPY build/exodoom.iso /work/exodoom.iso
 
 # default: boot ISO with a serial console hooked to your terminal
 ENTRYPOINT ["bash", "-lc"]
-CMD ["qemu-system-i386 -cdrom build/exodoom.iso -m 256M -no-reboot -display curses -serial stdio"]
+CMD ["qemu-system-i386 -cdrom build/exodoom.iso -m 256M -no-reboot -display curses -serial mon:stdio"]
