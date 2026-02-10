@@ -1,0 +1,6 @@
+# build artifacts
+*.o
+*.so
+*.iso
+build/*
+docker/build/*
