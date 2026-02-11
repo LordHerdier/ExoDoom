@@ -57,13 +57,14 @@ size_t strlen(const char* str)
 size_t terminal_row;
 size_t terminal_column;
 uint8_t terminal_color;
+uint8_t terminal_bg_color = 4;
 uint16_t* terminal_buffer = (uint16_t*)VGA_MEMORY;
 
 void terminal_initialize(void) 
 {
 	terminal_row = 0;
 	terminal_column = 0;
-	terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+	terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, terminal_bg_color);
 	
 	for (size_t y = 0; y < VGA_HEIGHT; y++) {
 		for (size_t x = 0; x < VGA_WIDTH; x++) {
@@ -78,6 +79,11 @@ void terminal_setcolor(uint8_t color)
 	terminal_color = color;
 }
 
+void terminal_setbgcolor(uint8_t color)
+{
+	terminal_bg_color = color;
+}
+
 void terminal_putentryat(char c, uint8_t color, size_t x, size_t y) 
 {
 	const size_t index = y * VGA_WIDTH + x;
@@ -87,6 +93,13 @@ void terminal_putentryat(char c, uint8_t color, size_t x, size_t y)
 void terminal_putchar(char c) 
 {
 	terminal_putentryat(c, terminal_color, terminal_column, terminal_row);
+
+	if(c == '\n'){
+		terminal_row += 1;
+		terminal_column = 0;
+		return;
+	}
+
 	if (++terminal_column == VGA_WIDTH) {
 		terminal_column = 0;
 		if (++terminal_row == VGA_HEIGHT)
@@ -108,8 +121,28 @@ void terminal_writestring(const char* data)
 void kernel_main(void) 
 {
 	/* Initialize terminal interface */
-	terminal_initialize();
+	
 
-	/* Newline support is left as an exercise. */
-	terminal_writestring("Hello, World!\n");
+	for(size_t cool = 0; cool < 10000; cool++)
+	{
+		terminal_setbgcolor(4);
+		terminal_initialize();
+		terminal_setbgcolor(2);
+		terminal_initialize();
+		terminal_setbgcolor(1);
+		terminal_initialize();
+	}
+
+
+	/* printing Hello world in different colors
+	for(size_t cool = 0; cool < 3; cool++)
+	{
+		terminal_setcolor(4);
+		terminal_writestring("Hello, World!\n");
+		terminal_setcolor(2);
+		terminal_writestring("Hello, World!\n");
+		terminal_setcolor(1);
+		terminal_writestring("Hello, World!\n");
+	}
+	*/
 }
