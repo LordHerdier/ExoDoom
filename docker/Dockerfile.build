@@ -1,0 +1,21 @@
+FROM techiekeith/gcc-cross-i686-elf
+
+# Add the ISO tooling and basics. The base image is for i686-elf gcc/binutils.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      make \
+      xorriso \
+      grub-pc-bin \
+      grub-common \
+      ca-certificates \
+      libmpc3 \
+      libgmp10 \
+      libmpfr6 \
+ && rm -rf /var/lib/apt/lists/*
+
+
+WORKDIR /work
+COPY scripts/build.sh /usr/local/bin/build.sh
+RUN chmod +x /usr/local/bin/build.sh
+
+ENTRYPOINT ["/usr/local/bin/build.sh"]

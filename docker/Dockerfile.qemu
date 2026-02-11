@@ -1,0 +1,13 @@
+FROM debian:trixie-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      qemu-system-x86 \
+      ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+# default: boot ISO with a serial console hooked to your terminal
+ENTRYPOINT ["bash", "-lc"]
+CMD ["qemu-system-i386 -cdrom build/exodoom.iso -m 256M -no-reboot -display curses -serial mon:stdio"]
