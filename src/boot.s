@@ -1,15 +1,32 @@
-.set ALIGN,    1<<0             /* align loaded modules on page boundaries */
-.set MEMINFO,  1<<1             /* provide memory map */
-.set FLAGS,    ALIGN | MEMINFO  /* NO VIDEO BIT */
-.set MAGIC,    0x1BADB002
-.set CHECKSUM, -(MAGIC + FLAGS)
+.set ALIGN,        1<<0
+.set MEMINFO,      1<<1
+.set VIDEO,        1<<2
+.set AOUT_KLUDGE,  1<<16
+.set FLAGS,        ALIGN | MEMINFO | VIDEO | AOUT_KLUDGE
+.set MAGIC,        0x1BADB002
+.set CHECKSUM,     -(MAGIC + FLAGS)
 
-.section .multiboot
+.section .multiboot, "a"
 .align 4
+.global multiboot_header
+multiboot_header:
 .long MAGIC
 .long FLAGS
 .long CHECKSUM
-/* no extra video fields here */
+
+/* a.out kludge fields */
+.long multiboot_header   /* header_addr */
+.long _load_start        /* load_addr */
+.long _load_end          /* load_end_addr */
+.long _bss_end           /* bss_end_addr */
+.long _start             /* entry_addr */
+
+/* graphics fields */
+.long 0                  /* mode_type: 0=linear graphics */
+.long 1024               /* width */
+.long 768                /* height */
+.long 32                 /* depth */
+
 
 .section .bss
 .align 16
