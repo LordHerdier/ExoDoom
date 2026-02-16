@@ -1,15 +1,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-#if defined(__linux__)
-#error "You are not using a cross-compiler, you will most certainly run into trouble"
-#endif
-
-#if !defined(__i386__)
-#error "This tutorial needs to be compiled with a ix86-elf compiler"
-#endif
-
 // ---------- Multiboot1 info ----------
 
 struct multiboot_info {
@@ -55,6 +46,38 @@ struct multiboot_info {
     uint8_t  framebuffer_type;
     uint8_t  color_info[6];
 } __attribute__((packed));
+
+// ---------- Minimal COM1 serial console ----------
+
+static inline void outb(uint16_t port, uint8_t val) {
+    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+static void serial_init(void) {
+    outb(0x3F8 + 1, 0x00); // Disable interrupts
+    outb(0x3F8 + 3, 0x80); // Enable DLAB
+    outb(0x3F8 + 0, 0x03); // Divisor low  (38400 baud)
+    outb(0x3F8 + 1, 0x00); // Divisor high
+    outb(0x3F8 + 3, 0x03); // 8N1
+    outb(0x3F8 + 2, 0xC7); // FIFO
+    outb(0x3F8 + 4, 0x0B); // IRQs enabled, RTS/DSR set
+}
+
+static int serial_can_tx(void) {
+    return inb(0x3F8 + 5) & 0x20;
+}
+static void serial_putc(char c) {
+    while (!serial_can_tx()) {}
+    outb(0x3F8, (uint8_t)c);
+}
+static void serial_print(const char* s) {
+    while (*s) serial_putc(*s++);
+}
 
 // ---------- Minimal VGA text console ----------
 
@@ -151,6 +174,9 @@ static void print_dec(uint32_t v) {
 
 void kernel_main(uint32_t mb_info_addr)
 {
+    serial_init(); serial_print("hello from kernel\n"); // Debug message to COM1
+
+
     struct multiboot_info* mb = (struct multiboot_info*)mb_info_addr;
 
     terminal_initialize();
