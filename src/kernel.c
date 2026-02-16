@@ -2,17 +2,15 @@
 #include "multiboot.h"
 #include "serial.h"
 #include "fb.h"
+#include "fb_console.h"
 
 void kernel_main(uint32_t mb_info_addr) {
     serial_init();
-    serial_print("hello from kernel\n");
+    serial_print("booted\n");
 
     struct multiboot_info* mb = (struct multiboot_info*)mb_info_addr;
 
-    if (!(mb->flags & MULTIBOOT_INFO_FLAG_FRAMEBUFFER)) {
-        serial_print("no framebuffer info (mb flags bit12 not set)\n");
-        for(;;);
-    }
+    if (!(mb->flags & MULTIBOOT_INFO_FLAG_FRAMEBUFFER)) for(;;);
 
     framebuffer_t fb;
     if (!fb_init_bgrx8888(&fb,
@@ -21,10 +19,17 @@ void kernel_main(uint32_t mb_info_addr) {
                           mb->framebuffer_width,
                           mb->framebuffer_height,
                           mb->framebuffer_bpp)) {
-        serial_print("unsupported framebuffer mode (need 32bpp)\n");
         for(;;);
     }
 
-    fb_test_color_sanity(&fb);
+    fb_console_t con;
+    if (!fbcon_init(&con, &fb)) for(;;);
+
+    fbcon_set_color(&con, 255,255,255, 0,0,0);
+    fbcon_write(&con, "ExoDoom fb console online.\n");
+    fbcon_write(&con, "Now printing to pixels like a proper gremlin.\n\n");
+    fbcon_write(&con, "0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ\n");
+    fbcon_write(&con, "abcdefghijklmnopqrstuvwxyz !@#$%^&*()[]{}\n");
+
     for(;;);
 }
