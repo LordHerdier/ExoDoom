@@ -5,6 +5,7 @@ set -euo pipefail
 cd /work
 
 mkdir -p build/isodir/boot/grub
+cp /usr/share/grub/unicode.pf2 build/isodir/boot/grub/
 
 echo "[1/6] Assemble boot.s"
 i686-elf-as src/boot.s -o build/boot.o
