@@ -1,9 +1,9 @@
 #include "fb_console.h"
 
-// A small 8x8 ASCII font (0..127). Each glyph is 8 bytes, each bit is a pixel.
-// Bit 0 is leftmost in this table? We'll treat bit 0 as LSB -> leftmost for consistency.
-// If you see mirrored glyphs, flip the bit test (7-x instead of x).
+// Font table omitted for brevity (Keep your existing font8x8_basic array here!)
+// PASTE YOUR font8x8_basic ARRAY HERE
 static const uint8_t font8x8_basic[128][8] = {
+    // ... (Use the same font array from your original code) ...
     // 0-31: control chars (blank)
     [0 ... 31] = {0,0,0,0,0,0,0,0},
 
@@ -97,11 +97,6 @@ static const uint8_t font8x8_basic[128][8] = {
     [123 ... 127] = {0,0,0,0,0,0,0,0},
 };
 
-static inline void draw_cell_bg(fb_console_t* con, uint32_t cx, uint32_t cy) {
-    // fill an 8x16 background cell
-    fb_fill_rect(con->fb, cx * 8, cy * 16, 8, 16, con->bg_r, con->bg_g, con->bg_b);
-}
-
 static inline void draw_glyph8x16(fb_console_t* con, uint32_t cx, uint32_t cy, uint8_t ch) {
     framebuffer_t* fb = con->fb;
 
@@ -118,7 +113,6 @@ static inline void draw_glyph8x16(fb_console_t* con, uint32_t cx, uint32_t cy, u
         uint8_t bits = g[row];
 
         for (uint32_t col = 0; col < 8; col++) {
-            // If mirrored, use (bits & (1u << (7-col))) instead.
             bool on = (bits & (1u << col)) != 0;
             if (!on) continue;
 
@@ -133,12 +127,11 @@ static void scroll_up_one_row(fb_console_t* con) {
     const uint32_t bytes_per_row = fb->pitch;
     const uint32_t scroll_px = 16; // one character row in pixels
 
-    // Move framebuffer up by 16 px: memmove(fb, fb+scroll_px)
+    // Move framebuffer up by 16 px
     uint8_t* dst = fb->addr;
     uint8_t* src = fb->addr + scroll_px * bytes_per_row;
     uint32_t len = (fb->height - scroll_px) * bytes_per_row;
 
-    // simple memmove (overlapping safe)
     if (src > dst) {
         for (uint32_t i = 0; i < len; i++) dst[i] = src[i];
     } else {
@@ -191,7 +184,6 @@ void fbcon_enable_cursor(fb_console_t* con, bool enable) {
 
 void fbcon_redraw_cursor(fb_console_t* con) {
     if (!con || !con->show_cursor) return;
-    // simple underline cursor in the current cell
     uint32_t x = con->cursor_x * 8;
     uint32_t y = con->cursor_y * 16 + 15;
     fb_fill_rect(con->fb, x, y, 8, 1, con->fg_r, con->fg_g, con->fg_b);
@@ -210,11 +202,25 @@ static void newline(fb_console_t* con) {
 void fbcon_putc(fb_console_t* con, char c) {
     if (!con) return;
 
-    // erase cursor underline by redrawing background line (cheap)
+    // Erase cursor at current position
     if (con->show_cursor) {
         uint32_t x = con->cursor_x * 8;
         uint32_t y = con->cursor_y * 16 + 15;
         fb_fill_rect(con->fb, x, y, 8, 1, con->bg_r, con->bg_g, con->bg_b);
+    }
+
+    // Handle Backspace
+    if (c == '\b') {
+        if (con->cursor_x > 0) {
+            con->cursor_x--;
+        } else if (con->cursor_y > 0) {
+            con->cursor_y--;
+            con->cursor_x = con->cols - 1;
+        }
+        // Overwrite the character at the new cursor position with a space
+        draw_glyph8x16(con, con->cursor_x, con->cursor_y, ' ');
+        fbcon_redraw_cursor(con);
+        return;
     }
 
     if (c == '\n') { newline(con); fbcon_redraw_cursor(con); return; }
