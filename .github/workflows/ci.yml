@@ -26,7 +26,10 @@ jobs:
 
           echo "$output"
 
-          echo "$output" | grep -q "Kernel Booted"
+          if ! echo "$output" | grep -q "Kernel Booted"; then
+            echo "Boot message not found!"
+            exit 1
+          fi
 
       - name: Success
         run: echo "Kernel boot verified."
