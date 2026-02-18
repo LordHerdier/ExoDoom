@@ -7,26 +7,20 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-
     timeout-minutes: 5
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Build ISO
-        run: make docker-build
-
-      - name: Run kernel in QEMU (CI mode)
+      - name: Build + boot test (QEMU)
         run: |
-          set -e
+          set -euo pipefail
 
-          # Run QEMU and capture output
-          output=$(make docker-ci 2>&1 || true)
-
+          output="$(make docker-ci 2>&1 || true)"
           echo "$output"
 
-          if ! echo "$output" | grep -q "Kernel Booted"; then
+          if ! grep -q "Kernel Booted" <<<"$output"; then
             echo "Boot message not found!"
             exit 1
           fi

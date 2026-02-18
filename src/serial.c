@@ -9,6 +9,15 @@ static inline uint8_t inb(uint16_t port) {
     return ret;
 }
 
+static int serial_tx_empty(void) {
+    return inb(0x3F8 + 5) & 0x40;
+}
+
+void serial_flush(void) {
+    while (!serial_tx_empty()) {}
+}
+
+
 void serial_init(void) {
     outb(0x3F8 + 1, 0x00);
     outb(0x3F8 + 3, 0x80);

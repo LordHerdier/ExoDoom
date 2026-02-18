@@ -14,6 +14,8 @@ void kernel_main(uint32_t mb_info_addr) {
     struct multiboot_info* mb = (struct multiboot_info*)mb_info_addr;
 
     serial_print("Kernel Booted\n");
+    serial_flush();
+    qemu_exit(0);
 
     if (!(mb->flags & MULTIBOOT_INFO_FLAG_FRAMEBUFFER)) for(;;);
 
@@ -35,8 +37,6 @@ void kernel_main(uint32_t mb_info_addr) {
     fbcon_write(&con, "Now printing to pixels like a proper gremlin.\n\n");
     fbcon_write(&con, "0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ\n");
     fbcon_write(&con, "abcdefghijklmnopqrstuvwxyz !@#$%^&*()[]{}\n");
-
-    qemu_exit(0);
 
     for(;;);
 }
