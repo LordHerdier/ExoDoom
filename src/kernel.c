@@ -4,11 +4,18 @@
 #include "fb.h"
 #include "fb_console.h"
 
+static inline void qemu_exit(uint32_t code) {
+    __asm__ volatile ("outl %0, %1" : : "a"(code), "Nd"(0xF4));
+}
+
 void kernel_main(uint32_t mb_info_addr) {
     serial_init();
-    serial_print("booted\n");
 
     struct multiboot_info* mb = (struct multiboot_info*)mb_info_addr;
+
+    serial_print("Kernel Booted\n");
+    serial_flush();
+    qemu_exit(0);
 
     if (!(mb->flags & MULTIBOOT_INFO_FLAG_FRAMEBUFFER)) for(;;);
 

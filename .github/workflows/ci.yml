@@ -1,0 +1,29 @@
+name: ExoDoom CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Build + boot test (QEMU)
+        run: |
+          set -euo pipefail
+
+          output="$(make docker-ci 2>&1 || true)"
+          echo "$output"
+
+          if ! grep -q "Kernel Booted" <<<"$output"; then
+            echo "Boot message not found!"
+            exit 1
+          fi
+
+      - name: Success
+        run: echo "Kernel boot verified."
