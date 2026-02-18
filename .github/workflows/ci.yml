@@ -1,0 +1,32 @@
+name: ExoDoom CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Build ISO
+        run: make docker-build
+
+      - name: Run kernel in QEMU (CI mode)
+        run: |
+          set -e
+
+          # Run QEMU and capture output
+          output=$(make docker-ci 2>&1 || true)
+
+          echo "$output"
+
+          echo "$output" | grep -q "Kernel Booted"
+
+      - name: Success
+        run: echo "Kernel boot verified."
