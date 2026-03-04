@@ -12,7 +12,8 @@ docker-run: docker-build
 docker-run-kernel: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm -it -v "$(PWD):/work" exodoom-qemu \
-	  'qemu-system-i386 -kernel build/exodoom -m 256M -no-reboot -display curses -serial mon:stdio'
+	  'qemu-system-i386 -m 256M -cdrom build/exodoom.iso -no-reboot -serial stdio'
+
 docker-ci: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
