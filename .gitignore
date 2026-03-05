@@ -4,3 +4,7 @@
 *.iso
 build/*
 docker/build/*
+
+# WAD files (copyrighted — see wads/README.md)
+wads/*.wad
+assets/*.wad
