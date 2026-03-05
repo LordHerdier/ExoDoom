@@ -35,5 +35,10 @@ jobs:
             exit 1
           fi
 
+          if ! grep -q "wad checksum=" <<<"$output"; then
+            echo "WAD checksum not found in output!"
+            exit 1
+          fi
+
       - name: Success
         run: echo "Kernel boot and WAD load verified."

@@ -3,6 +3,7 @@
 #include "serial.h"
 #include "fb.h"
 #include "fb_console.h"
+#include "fnv1a.h"
 
 static inline void qemu_exit(uint32_t code) {
     __asm__ volatile ("outl %0, %1" : : "a"(code), "Nd"(0xF4));
@@ -36,10 +37,14 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_print_hex(mb->mods_addr);
     serial_putc('\n');
 
-    if ((mb->flags & MULTIBOOT_INFO_FLAG_MODS) && mb->mods_count > 0) {
+    if (!(mb->flags & MULTIBOOT_INFO_FLAG_MODS) || mb->mods_count == 0) {
+        serial_print("ERROR: no multiboot modules loaded (WAD missing)\n");
+    } else {
         struct multiboot_module *mods = (struct multiboot_module *)mb->mods_addr;
         for (uint32_t i = 0; i < mb->mods_count; i++) {
             uint32_t size = mods[i].mod_end - mods[i].mod_start;
+            const char *name = (const char *)(uintptr_t)mods[i].cmdline;
+
             serial_print("  mod[");
             serial_print_uint(i);
             serial_print("] start=");
@@ -48,6 +53,13 @@ void kernel_main(uint32_t mb_info_addr) {
             serial_print_hex(mods[i].mod_end);
             serial_print(" size=");
             serial_print_uint(size);
+            serial_print(" name=");
+            serial_print(name && *name ? name : "(none)");
+            serial_putc('\n');
+
+            uint32_t checksum = fnv1a32((const void *)(uintptr_t)mods[i].mod_start, size);
+            serial_print("  wad checksum=");
+            serial_print_hex(checksum);
             serial_putc('\n');
         }
     }
