@@ -17,10 +17,10 @@ ERROR: missing WAD — place freedoom2.wad in wads/ or assets/ (see wads/README.
 - Format: standard Doom IWAD (magic bytes `IWAD` at offset 0)
 - Freedoom Phase 2 is a free, open-source IWAD compatible with Doom II.
 
-## Why it is not committed
+## What is committed
 
-WAD files can be large binaries. `wads/*.wad` is listed in `.gitignore` to keep
-them out of the repository regardless of origin.
+`wads/freedoom2.wad` is tracked in git. All other `*.wad` files are ignored by
+`.gitignore` to prevent accidentally committing copyrighted IWADs.
 
 ## Obtaining Freedoom
 
