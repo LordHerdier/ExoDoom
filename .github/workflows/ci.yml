@@ -25,5 +25,15 @@ jobs:
             exit 1
           fi
 
+          if ! grep -q "mods_count=1" <<<"$output"; then
+            echo "WAD module not found (mods_count != 1)!"
+            exit 1
+          fi
+
+          if ! grep -q "mod\[0\]" <<<"$output"; then
+            echo "mod[0] entry not found in output!"
+            exit 1
+          fi
+
       - name: Success
-        run: echo "Kernel boot verified."
+        run: echo "Kernel boot and WAD load verified."
