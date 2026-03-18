@@ -69,10 +69,54 @@ const uint8_t *wad_first_flat(const wad_t *wad, char name_out[9]) {
             uint32_t filepos = read_le32(entry);
             /* Subtraction form avoids overflow when filepos is near UINT32_MAX. */
             if (4096u > wad->data_size || filepos > wad->data_size - 4096u) continue;
-            for (int j = 0; j < 8; j++) name_out[j] = (char)(entry + 8)[j];
-            name_out[8] = '\0';
+            if (name_out) {
+                for (int j = 0; j < 8; j++) name_out[j] = (char)(entry + 8)[j];
+                name_out[8] = '\0';
+            }
             return wad->data + filepos;
         }
+    }
+    return (void *)0;
+}
+
+uint32_t wad_count_flats(const wad_t *wad) {
+    uint32_t count = 0;
+    int in_flats = 0;
+    for (uint32_t i = 0; i < wad->numlumps; i++) {
+        const uint8_t *entry = wad->dir_data + i * 16u;
+        if (lump_name_eq(entry + 8, "F_START")) { in_flats = 1; continue; }
+        if (lump_name_eq(entry + 8, "F_END"))   { break; }
+        if (!in_flats) continue;
+        uint32_t lump_size = read_le32(entry + 4);
+        if (lump_size != 4096) continue;
+        uint32_t filepos = read_le32(entry);
+        if (4096u > wad->data_size || filepos > wad->data_size - 4096u) continue;
+        count++;
+    }
+    return count;
+}
+
+const uint8_t *wad_get_flat(const wad_t *wad, uint32_t index, char name_out[9]) {
+    uint32_t seen = 0;  /* number of valid flats encountered so far */
+    int in_flats = 0;
+    for (uint32_t i = 0; i < wad->numlumps; i++) {
+        const uint8_t *entry = wad->dir_data + i * 16u;
+        if (lump_name_eq(entry + 8, "F_START")) { in_flats = 1; continue; }
+        if (lump_name_eq(entry + 8, "F_END"))   { break; }
+        if (!in_flats) continue;
+        uint32_t lump_size = read_le32(entry + 4);
+        if (lump_size != 4096) continue;
+        uint32_t filepos = read_le32(entry);
+        if (4096u > wad->data_size || filepos > wad->data_size - 4096u) continue;
+        if (seen == index) {
+            if (name_out) {
+                const uint8_t *n = entry + 8;
+                for (int j = 0; j < 8; j++) name_out[j] = (char)n[j];
+                name_out[8] = '\0';
+            }
+            return wad->data + filepos;
+        }
+        seen++;
     }
     return (void *)0;
 }

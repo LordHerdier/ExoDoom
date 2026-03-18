@@ -1,5 +1,4 @@
 #include "flat.h"
-#include "fb.h"
 
 void flat_blit(framebuffer_t *fb, const uint8_t *flat_data, const uint8_t *palette,
                uint32_t x, uint32_t y, uint32_t scale) {

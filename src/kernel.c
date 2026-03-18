@@ -6,6 +6,15 @@
 #include "wad.h"
 #include "flat.h"
 
+#define FLAT_SCALE 2
+/* Scale options:
+ *   1 → 64×64 px per flat, 16×12 grid (192 flats, fills 1024×768)
+ *   2 → 128×128 px per flat,  8×6 grid  (48 flats, fills 1024×768)
+ *   4 → 256×256 px per flat,  4×3 grid  (12 flats, fills 1024×768)
+ */
+#define GRID_COLS (1024 / (64 * FLAT_SCALE))
+#define GRID_ROWS  (768 / (64 * FLAT_SCALE))
+
 static inline void qemu_exit(uint32_t code) {
     __asm__ volatile ("outl %0, %1" : : "a"(code), "Nd"(0xF4));
 }
@@ -38,12 +47,8 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_print_hex(mb->mods_addr);
     serial_putc('\n');
 
-    /* Declared at function scope so they are accessible after the module block,
-       when the framebuffer section is added in Task 2. */
     wad_t wad;
-    const uint8_t *palette  = (void *)0;
-    const uint8_t *flat     = (void *)0;
-    char flat_name[9] = {0};
+    const uint8_t *palette = (void *)0;
 
     if (!(mb->flags & MULTIBOOT_INFO_FLAG_MODS) || mb->mods_count == 0) {
         serial_print("ERROR: no multiboot modules loaded (WAD missing)\n");
@@ -98,16 +103,6 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_print_uint(playpal_size);
     serial_putc('\n');
 
-    flat = wad_first_flat(&wad, flat_name);
-    if (!flat) {
-        serial_print("ERROR: no flat found\n");
-        serial_flush();
-        for (;;);
-    }
-    serial_print("First flat: ");
-    serial_print(flat_name);
-    serial_putc('\n');
-
     serial_flush();
 
     /* --- Framebuffer init --- */
@@ -131,10 +126,30 @@ void kernel_main(uint32_t mb_info_addr) {
 
     fb_clear(&fb, 0, 0, 0);
 
-    /* Blit first flat centred on 1024x768: scale=8 → 512x512, offset (256,128) */
-    flat_blit(&fb, flat, palette, 256, 128, 8);
+    uint32_t num_flats = wad_count_flats(&wad);
+    serial_print("Flats found: ");
+    serial_print_uint(num_flats);
+    serial_putc('\n');
+    serial_flush();
 
-    serial_print("Flat displayed on framebuffer.\n");
+    /* wad_get_flat rescans from lump 0 for each index — O(n*flats) total.
+       Acceptable here: this runs once at boot, and worst case is ~260K
+       iterations (192 grid cells × 1351 WAD lumps). */
+    uint32_t flat_idx = 0;
+    for (uint32_t row = 0; row < GRID_ROWS && flat_idx < num_flats; row++) {
+        for (uint32_t col = 0; col < GRID_COLS && flat_idx < num_flats; col++) {
+            const uint8_t *flat_data = wad_get_flat(&wad, flat_idx, (void *)0);
+            if (flat_data) {
+                flat_blit(&fb, flat_data, palette,
+                          col * 64u * FLAT_SCALE,
+                          row * 64u * FLAT_SCALE,
+                          FLAT_SCALE);
+            }
+            flat_idx++;
+        }
+    }
+
+    serial_print("Grid displayed on framebuffer.\n");
     serial_flush();
 
     for (;;);

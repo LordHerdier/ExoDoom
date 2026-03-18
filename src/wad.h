@@ -19,6 +19,14 @@ const uint8_t *wad_find_lump(const wad_t *wad, const char *name, uint32_t *size_
 
 /* Returns pointer to first 4096-byte lump between F_START and F_END.
    Skips zero-size namespace marker lumps (e.g. F1_START) intentionally.
-   Copies null-terminated name (<=8 chars) into name_out[9].
+   If name_out is non-NULL, copies the null-terminated name (<=8 chars) into name_out[9].
    Returns NULL if no valid flat is found. */
 const uint8_t *wad_first_flat(const wad_t *wad, char name_out[9]);
+
+/* Count all valid flats (4096-byte lumps) between F_START and F_END. */
+uint32_t wad_count_flats(const wad_t *wad);
+
+/* Return the flat at zero-based index among valid flats between F_START and F_END.
+   If name_out is non-NULL, copies the null-terminated name (<=8 chars) into name_out[9].
+   Returns NULL if index is out of range or the lump is out of bounds. */
+const uint8_t *wad_get_flat(const wad_t *wad, uint32_t index, char name_out[9]);
