@@ -6,7 +6,12 @@ cd /work
 mkdir -p build/isodir/boot/grub
 cp /usr/share/grub/unicode.pf2 build/isodir/boot/grub/
 
-CFLAGS=(-std=gnu99 -ffreestanding -O2 -Wall -Wextra)
+if [[ "${DEBUG:-0}" == "1" ]]; then
+  CFLAGS=(-std=gnu99 -ffreestanding -g -O0 -Wall -Wextra)
+else
+  CFLAGS=(-std=gnu99 -ffreestanding -O2 -Wall -Wextra)
+fi
+
 LDFLAGS=(-T src/linker.ld -ffreestanding -O2 -nostdlib)
 
 echo "[1/6] Assemble boot.s"
