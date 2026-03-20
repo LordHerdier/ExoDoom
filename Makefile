@@ -1,8 +1,10 @@
 .PHONY: docker-build docker-run docker-run-kernel docker-test clean
 
+DEBUG ?= 0
+
 docker-build:
 	docker build -t exodoom-build -f docker/Dockerfile.build docker
-	docker run --rm -v "$(PWD):/work" exodoom-build
+	docker run --rm -e DEBUG=$(DEBUG) -v "$(PWD):/work" exodoom-build
 
 docker-run: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
