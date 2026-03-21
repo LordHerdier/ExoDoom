@@ -26,10 +26,24 @@ static void test_strlen(void) {
     ASSERT_EQ(strlen("hello\0x"),  (size_t)5); /* stops at first NUL */
 }
 
+/* ---- strcmp ---- */
+
+static void test_strcmp(void) {
+    ASSERT_EQ(strcmp("",      ""),      0);
+    ASSERT_EQ(strcmp("abc",   "abc"),   0);
+    ASSERT_EQ(strcmp("",      "abc") < 0, 1); /* empty < non-empty */
+    ASSERT_EQ(strcmp("abc",   "") > 0,   1); /* non-empty > empty */
+    ASSERT_EQ(strcmp("abc",   "abd") < 0, 1); /* c < d */
+    ASSERT_EQ(strcmp("abd",   "abc") > 0, 1); /* d > c */
+    ASSERT_EQ(strcmp("abc",   "ab")  > 0, 1); /* longer > shorter */
+    ASSERT_EQ(strcmp("ab",    "abc") < 0, 1); /* shorter < longer */
+}
+
 /* ---- main ---- */
 
 int main(void) {
     test_strlen();
+    test_strcmp();
 
     printf("%d/%d tests passed\n", tests_run - tests_failed, tests_run);
     return tests_failed ? 1 : 0;
