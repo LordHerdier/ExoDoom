@@ -145,6 +145,29 @@ static void test_memmove(void) {
     ASSERT_EQ(memmove(dst, buf, 1), (void *)dst);
 }
 
+/* ---- memcmp ---- */
+
+static void test_memcmp(void) {
+    /* equal regions */
+    ASSERT_EQ(memcmp("abc", "abc", 3), 0);
+
+    /* n=0 always equal */
+    ASSERT_EQ(memcmp("abc", "xyz", 0), 0);
+
+    /* first differing byte determines sign */
+    ASSERT_EQ(memcmp("abc", "abd", 3) < 0, 1); /* c < d */
+    ASSERT_EQ(memcmp("abd", "abc", 3) > 0, 1); /* d > c */
+
+    /* only compares n bytes — trailing difference ignored */
+    ASSERT_EQ(memcmp("abcX", "abcY", 3), 0);
+
+    /* unsigned byte comparison: 0x80 > 0x01 */
+    unsigned char lo[] = {0x01};
+    unsigned char hi[] = {0x80};
+    ASSERT_EQ(memcmp(hi, lo, 1) > 0, 1);
+    ASSERT_EQ(memcmp(lo, hi, 1) < 0, 1);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -153,6 +176,7 @@ int main(void) {
     test_memset();
     test_memcpy();
     test_memmove();
+    test_memcmp();
 
     printf("%d/%d tests passed\n", tests_run - tests_failed, tests_run);
     return tests_failed ? 1 : 0;
