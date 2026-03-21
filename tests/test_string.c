@@ -168,6 +168,43 @@ static void test_memcmp(void) {
     ASSERT_EQ(memcmp(lo, hi, 1) < 0, 1);
 }
 
+/* ---- strcat ---- */
+
+static void test_strcat(void) {
+    char buf[16];
+
+    /* basic append */
+    memcpy(buf, "hello\0", 6);
+    strcat(buf, " world");
+    ASSERT_EQ(strcmp(buf, "hello world"), 0);
+
+    /* append to empty dest */
+    buf[0] = '\0';
+    strcat(buf, "abc");
+    ASSERT_EQ(strcmp(buf, "abc"), 0);
+
+    /* append empty src: no change */
+    memcpy(buf, "abc\0", 4);
+    strcat(buf, "");
+    ASSERT_EQ(strcmp(buf, "abc"), 0);
+
+    /* both empty */
+    buf[0] = '\0';
+    strcat(buf, "");
+    ASSERT_EQ(buf[0], '\0');
+
+    /* chained appends */
+    buf[0] = '\0';
+    strcat(buf, "foo");
+    strcat(buf, "bar");
+    strcat(buf, "baz");
+    ASSERT_EQ(strcmp(buf, "foobarbaz"), 0);
+
+    /* return value is dest */
+    buf[0] = '\0';
+    ASSERT_EQ((void *)strcat(buf, "x"), (void *)buf);
+}
+
 /* ---- strncpy ---- */
 
 static void test_strncpy(void) {
@@ -226,6 +263,7 @@ int main(void) {
     test_memcpy();
     test_memmove();
     test_memcmp();
+    test_strcat();
     test_strncpy();
 
     printf("%d/%d tests passed\n", tests_run - tests_failed, tests_run);
