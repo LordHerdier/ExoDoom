@@ -76,12 +76,41 @@ static void test_memset(void) {
     ASSERT_EQ(memset(buf, 0, 1), (void *)buf);
 }
 
+/* ---- memcpy ---- */
+
+static void test_memcpy(void) {
+    unsigned char src[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    unsigned char dst[8] = {0};
+
+    /* full copy */
+    memcpy(dst, src, 8);
+    for (int i = 0; i < 8; i++)
+        ASSERT_EQ(dst[i], src[i]);
+
+    /* partial copy */
+    memset(dst, 0, 8);
+    memcpy(dst, src, 4);
+    for (int i = 0; i < 4; i++)
+        ASSERT_EQ(dst[i], src[i]);
+    for (int i = 4; i < 8; i++)
+        ASSERT_EQ(dst[i], (unsigned char)0);
+
+    /* n=0 is a no-op */
+    memset(dst, 0xBB, 8);
+    memcpy(dst, src, 0);
+    ASSERT_EQ(dst[0], (unsigned char)0xBB);
+
+    /* return value is dest */
+    ASSERT_EQ(memcpy(dst, src, 1), (void *)dst);
+}
+
 /* ---- main ---- */
 
 int main(void) {
     test_strlen();
     test_strcmp();
     test_memset();
+    test_memcpy();
 
     printf("%d/%d tests passed\n", tests_run - tests_failed, tests_run);
     return tests_failed ? 1 : 0;
