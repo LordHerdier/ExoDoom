@@ -168,6 +168,55 @@ static void test_memcmp(void) {
     ASSERT_EQ(memcmp(lo, hi, 1) < 0, 1);
 }
 
+/* ---- strncpy ---- */
+
+static void test_strncpy(void) {
+    char buf[8];
+
+    /* normal copy: src shorter than n — remainder padded with NUL */
+    memset(buf, 0xFF, sizeof(buf));
+    strncpy(buf, "hi", 6);
+    ASSERT_EQ(buf[0], 'h');
+    ASSERT_EQ(buf[1], 'i');
+    ASSERT_EQ(buf[2], '\0');
+    ASSERT_EQ(buf[3], '\0');
+    ASSERT_EQ(buf[4], '\0');
+    ASSERT_EQ(buf[5], '\0');
+    ASSERT_EQ(buf[6], (char)0xFF); /* beyond n: untouched */
+
+    /* src exactly fills n: no NUL written */
+    memset(buf, 0xFF, sizeof(buf));
+    strncpy(buf, "abc", 3);
+    ASSERT_EQ(buf[0], 'a');
+    ASSERT_EQ(buf[1], 'b');
+    ASSERT_EQ(buf[2], 'c');
+    ASSERT_EQ(buf[3], (char)0xFF); /* not NUL-terminated */
+
+    /* src longer than n: truncated, no NUL written */
+    memset(buf, 0xFF, sizeof(buf));
+    strncpy(buf, "hello!", 4);
+    ASSERT_EQ(buf[0], 'h');
+    ASSERT_EQ(buf[1], 'e');
+    ASSERT_EQ(buf[2], 'l');
+    ASSERT_EQ(buf[3], 'l');
+    ASSERT_EQ(buf[4], (char)0xFF);
+
+    /* n=0 is a no-op */
+    memset(buf, 0xAA, sizeof(buf));
+    strncpy(buf, "xyz", 0);
+    ASSERT_EQ(buf[0], (char)0xAA);
+
+    /* empty src pads entire dest with NUL */
+    memset(buf, 0xFF, sizeof(buf));
+    strncpy(buf, "", 4);
+    for (int i = 0; i < 4; i++)
+        ASSERT_EQ(buf[i], '\0');
+    ASSERT_EQ(buf[4], (char)0xFF);
+
+    /* return value is dest */
+    ASSERT_EQ((void *)strncpy(buf, "x", 2), (void *)buf);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -177,6 +226,7 @@ int main(void) {
     test_memcpy();
     test_memmove();
     test_memcmp();
+    test_strncpy();
 
     printf("%d/%d tests passed\n", tests_run - tests_failed, tests_run);
     return tests_failed ? 1 : 0;
