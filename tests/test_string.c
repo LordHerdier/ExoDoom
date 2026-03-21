@@ -104,6 +104,47 @@ static void test_memcpy(void) {
     ASSERT_EQ(memcpy(dst, src, 1), (void *)dst);
 }
 
+/* ---- memmove ---- */
+
+static void test_memmove(void) {
+    unsigned char buf[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    unsigned char dst[10];
+
+    /* non-overlapping: behaves like memcpy */
+    memcpy(dst, buf, 10);
+    memmove(dst, buf, 10);
+    for (int i = 0; i < 10; i++)
+        ASSERT_EQ(dst[i], buf[i]);
+
+    /* overlap: dest > src (must copy backwards) */
+    unsigned char fwd[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    memmove(fwd + 2, fwd, 6);  /* shift right by 2 */
+    ASSERT_EQ(fwd[2], (unsigned char)1);
+    ASSERT_EQ(fwd[3], (unsigned char)2);
+    ASSERT_EQ(fwd[4], (unsigned char)3);
+    ASSERT_EQ(fwd[5], (unsigned char)4);
+    ASSERT_EQ(fwd[6], (unsigned char)5);
+    ASSERT_EQ(fwd[7], (unsigned char)6);
+
+    /* overlap: dest < src (can copy forwards) */
+    unsigned char bwd[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    memmove(bwd, bwd + 2, 6);  /* shift left by 2 */
+    ASSERT_EQ(bwd[0], (unsigned char)3);
+    ASSERT_EQ(bwd[1], (unsigned char)4);
+    ASSERT_EQ(bwd[2], (unsigned char)5);
+    ASSERT_EQ(bwd[3], (unsigned char)6);
+    ASSERT_EQ(bwd[4], (unsigned char)7);
+    ASSERT_EQ(bwd[5], (unsigned char)8);
+
+    /* n=0 is a no-op */
+    unsigned char nop[4] = {0xAA, 0xBB, 0xCC, 0xDD};
+    memmove(nop + 1, nop, 0);
+    ASSERT_EQ(nop[1], (unsigned char)0xBB);
+
+    /* return value is dest */
+    ASSERT_EQ(memmove(dst, buf, 1), (void *)dst);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -111,6 +152,7 @@ int main(void) {
     test_strcmp();
     test_memset();
     test_memcpy();
+    test_memmove();
 
     printf("%d/%d tests passed\n", tests_run - tests_failed, tests_run);
     return tests_failed ? 1 : 0;
