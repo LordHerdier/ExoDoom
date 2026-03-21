@@ -168,6 +168,38 @@ static void test_memcmp(void) {
     ASSERT_EQ(memcmp(lo, hi, 1) < 0, 1);
 }
 
+/* ---- strchr ---- */
+
+static void test_strchr(void) {
+    const char *s = "hello";
+
+    /* find first occurrence */
+    ASSERT_EQ((void *)strchr(s, 'h'), (void *)s);
+    ASSERT_EQ((void *)strchr(s, 'e'), (void *)(s + 1));
+    ASSERT_EQ((void *)strchr(s, 'o'), (void *)(s + 4));
+
+    /* first of duplicate character */
+    const char *dup = "abac";
+    ASSERT_EQ((void *)strchr(dup, 'a'), (void *)dup);
+
+    /* character not present returns NULL */
+    ASSERT_EQ((void *)strchr(s, 'z'), (void *)NULL);
+
+    /* searching for NUL returns pointer to terminator */
+    ASSERT_EQ((void *)strchr(s, '\0'), (void *)(s + 5));
+
+    /* searching in empty string for NUL */
+    const char *empty = "";
+    ASSERT_EQ((void *)strchr(empty, '\0'), (void *)empty);
+
+    /* searching in empty string for non-NUL returns NULL */
+    ASSERT_EQ((void *)strchr(empty, 'x'), (void *)NULL);
+
+    /* c is treated as unsigned char (high-bit value) */
+    const char *hi = "\x80\x81\x00";
+    ASSERT_EQ((void *)strchr(hi, '\x81'), (void *)(hi + 1));
+}
+
 /* ---- strcat ---- */
 
 static void test_strcat(void) {
@@ -263,6 +295,7 @@ int main(void) {
     test_memcpy();
     test_memmove();
     test_memcmp();
+    test_strchr();
     test_strcat();
     test_strncpy();
 
