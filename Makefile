@@ -40,6 +40,7 @@ docker-run-debug: docker-build
 run: docker-build
 	qemu-system-i386 -m 256M -cdrom build/exodoom.iso -no-reboot -serial stdio
 
+#TODO: Add proper testing pipeline with CUnit
 test:
 	@mkdir -p build
 	gcc -std=c99 -Wall -Wextra -fno-builtin -o build/test_string tests/test_string.c src/string.c
