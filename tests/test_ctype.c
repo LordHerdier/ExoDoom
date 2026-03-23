@@ -55,10 +55,42 @@ static void test_isalpha(void) {
   ASSERT_EQ(isalpha(0xFF), 0);
 }
 
+/* ---- isdigit ---- */
+
+static void test_isdigit(void) {
+  /* all digit characters return nonzero */
+  for (int c = '0'; c <= '9'; c++)
+    ASSERT_EQ(isdigit(c) != 0, 1);
+
+  /* boundaries just outside the digit range */
+  ASSERT_EQ(isdigit('/'), 0); /* '0' - 1 */
+  ASSERT_EQ(isdigit(':'), 0); /* '9' + 1 */
+
+  /* letters return zero */
+  for (int c = 'a'; c <= 'z'; c++)
+    ASSERT_EQ(isdigit(c), 0);
+  for (int c = 'A'; c <= 'Z'; c++)
+    ASSERT_EQ(isdigit(c), 0);
+
+  /* common non-digit characters */
+  ASSERT_EQ(isdigit(' '), 0);
+  ASSERT_EQ(isdigit('\n'), 0);
+  ASSERT_EQ(isdigit('\0'), 0);
+  ASSERT_EQ(isdigit('!'), 0);
+
+  /* EOF (-1) returns zero */
+  ASSERT_EQ(isdigit(-1), 0);
+
+  /* high bytes return zero */
+  ASSERT_EQ(isdigit(0x80), 0);
+  ASSERT_EQ(isdigit(0xFF), 0);
+}
+
 /* ---- main ---- */
 
 int main(void) {
   test_isalpha();
+  test_isdigit();
 
   printf("ctype.c: %d/%d tests passed\n", tests_run - tests_failed, tests_run);
   return tests_failed ? 1 : 0;

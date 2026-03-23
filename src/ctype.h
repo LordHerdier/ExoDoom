@@ -3,3 +3,4 @@
 #include <stdint.h>
 
 int isalpha(int c);
+int isdigit(int c);
