@@ -118,12 +118,46 @@ static void test_isspace(void) {
   ASSERT_EQ(isspace(0xFF), 0);
 }
 
+/* ---- toupper ---- */
+
+static void test_toupper(void) {
+  /* lowercase letters are converted */
+  for (int c = 'a'; c <= 'z'; c++)
+    ASSERT_EQ(toupper(c), c - 32);
+
+  /* uppercase letters are returned unchanged */
+  for (int c = 'A'; c <= 'Z'; c++)
+    ASSERT_EQ(toupper(c), c);
+
+  /* digits are returned unchanged */
+  for (int c = '0'; c <= '9'; c++)
+    ASSERT_EQ(toupper(c), c);
+
+  /* boundaries just outside the lowercase range */
+  ASSERT_EQ(toupper('`'), '`'); /* 'a' - 1 */
+  ASSERT_EQ(toupper('{'), '{'); /* 'z' + 1 */
+
+  /* other characters returned unchanged */
+  ASSERT_EQ(toupper(' '),  ' ');
+  ASSERT_EQ(toupper('\n'), '\n');
+  ASSERT_EQ(toupper('!'),  '!');
+  ASSERT_EQ(toupper('\0'), '\0');
+
+  /* EOF (-1) returned unchanged */
+  ASSERT_EQ(toupper(-1), -1);
+
+  /* high bytes returned unchanged */
+  ASSERT_EQ(toupper(0x80), 0x80);
+  ASSERT_EQ(toupper(0xFF), 0xFF);
+}
+
 /* ---- main ---- */
 
 int main(void) {
   test_isalpha();
   test_isdigit();
   test_isspace();
+  test_toupper();
 
   printf("ctype.c: %d/%d tests passed\n", tests_run - tests_failed, tests_run);
   return tests_failed ? 1 : 0;
