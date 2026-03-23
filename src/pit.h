@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 
-void pitInit(uint32_t hz);
-uint64_t timerTicks();
-uint64_t timerMS();
+void pit_init(uint32_t hz);
+uint64_t timer_ticks();
+uint64_t timer_MS();
 
 #endif

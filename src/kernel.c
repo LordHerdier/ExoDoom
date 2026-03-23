@@ -30,12 +30,12 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_print("\n");
     serial_flush();
 
-    idtInit();
-    picRemap();
+    idt_init();
+    pic_remap();
 
     //IRQ0 = Interrupt Vector 32
-    idtSetGate(32, (uint32_t)irq0_stub);
-    pitInit(100);   //100hz
+    idt_set_gate(32, (uint32_t)irq0_stub);
+    pit_init(100);   //100hz
     serial_print("Timer Initialized\n");
 
     __asm__ volatile ("sti");

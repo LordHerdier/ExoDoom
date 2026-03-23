@@ -8,7 +8,7 @@
 #define PIC2_COMMAND PIC2
 #define PIC2_DATA (PIC2+1)
 
-void picRemap(){
+void pic_remap(){
     uint8_t a1 = inb(PIC1_DATA);
     uint8_t a2 = inb(PIC2_DATA);
 
@@ -28,7 +28,7 @@ void picRemap(){
     outb(PIC2_DATA, a2);
 }
 
-void picSendEOI(unsigned char irq){
+void pic_send_EOI(unsigned char irq){
     if (irq >= 8){
         outb(PIC2_COMMAND, 0x20);
     }

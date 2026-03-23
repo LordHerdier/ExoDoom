@@ -6,7 +6,7 @@
 static volatile uint64_t ticks = 0;
 static uint32_t frequency = 100;
 
-void pitInit(uint32_t hz){
+void pit_init(uint32_t hz){
     frequency = hz;
     uint32_t divisor = 1193180 / hz;
 
@@ -16,11 +16,11 @@ void pitInit(uint32_t hz){
     outb(0x40, (divisor >> 8) & 0xFF);
 }
 
-uint64_t timerTicks(){
+uint64_t timer_ticks(){
     return ticks;
 }
 
-uint64_t timerMS(){
+uint64_t timer_MS(){
     return (ticks * 1000) / frequency;
 }
 
@@ -51,10 +51,11 @@ void irq0_handler(){
         while (j > 0){
             buf[i++] = tmp[--j];
         }
-
+        
+        buf[i] = '\0';
         serial_print(buf);
         serial_print("\n");
     }
 
-    picSendEOI(0);
+    pic_send_EOI(0);
 }
