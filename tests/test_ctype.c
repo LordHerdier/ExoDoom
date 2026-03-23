@@ -151,6 +151,39 @@ static void test_toupper(void) {
   ASSERT_EQ(toupper(0xFF), 0xFF);
 }
 
+/* ---- tolower ---- */
+
+static void test_tolower(void) {
+  /* uppercase letters are converted */
+  for (int c = 'A'; c <= 'Z'; c++)
+    ASSERT_EQ(tolower(c), c + 32);
+
+  /* lowercase letters are returned unchanged */
+  for (int c = 'a'; c <= 'z'; c++)
+    ASSERT_EQ(tolower(c), c);
+
+  /* digits are returned unchanged */
+  for (int c = '0'; c <= '9'; c++)
+    ASSERT_EQ(tolower(c), c);
+
+  /* boundaries just outside the uppercase range */
+  ASSERT_EQ(tolower('@'), '@'); /* 'A' - 1 */
+  ASSERT_EQ(tolower('['), '['); /* 'Z' + 1 */
+
+  /* other characters returned unchanged */
+  ASSERT_EQ(tolower(' '),  ' ');
+  ASSERT_EQ(tolower('\n'), '\n');
+  ASSERT_EQ(tolower('!'),  '!');
+  ASSERT_EQ(tolower('\0'), '\0');
+
+  /* EOF (-1) returned unchanged */
+  ASSERT_EQ(tolower(-1), -1);
+
+  /* high bytes returned unchanged */
+  ASSERT_EQ(tolower(0x80), 0x80);
+  ASSERT_EQ(tolower(0xFF), 0xFF);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -158,6 +191,7 @@ int main(void) {
   test_isdigit();
   test_isspace();
   test_toupper();
+  test_tolower();
 
   printf("ctype.c: %d/%d tests passed\n", tests_run - tests_failed, tests_run);
   return tests_failed ? 1 : 0;
