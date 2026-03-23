@@ -86,11 +86,44 @@ static void test_isdigit(void) {
   ASSERT_EQ(isdigit(0xFF), 0);
 }
 
+/* ---- isspace ---- */
+
+static void test_isspace(void) {
+  /* all six standard whitespace characters return nonzero */
+  ASSERT_EQ(isspace(' ')  != 0, 1);
+  ASSERT_EQ(isspace('\t') != 0, 1);
+  ASSERT_EQ(isspace('\n') != 0, 1);
+  ASSERT_EQ(isspace('\v') != 0, 1);
+  ASSERT_EQ(isspace('\f') != 0, 1);
+  ASSERT_EQ(isspace('\r') != 0, 1);
+
+  /* boundaries just outside the \t–\r block */
+  ASSERT_EQ(isspace('\x08'), 0); /* '\t' - 1 */
+  ASSERT_EQ(isspace('\x0E'), 0); /* '\r' + 1 */
+
+  /* letters and digits return zero */
+  ASSERT_EQ(isspace('a'), 0);
+  ASSERT_EQ(isspace('Z'), 0);
+  ASSERT_EQ(isspace('0'), 0);
+
+  /* other punctuation returns zero */
+  ASSERT_EQ(isspace('!'), 0);
+  ASSERT_EQ(isspace('\0'), 0);
+
+  /* EOF (-1) returns zero */
+  ASSERT_EQ(isspace(-1), 0);
+
+  /* high bytes return zero */
+  ASSERT_EQ(isspace(0x80), 0);
+  ASSERT_EQ(isspace(0xFF), 0);
+}
+
 /* ---- main ---- */
 
 int main(void) {
   test_isalpha();
   test_isdigit();
+  test_isspace();
 
   printf("ctype.c: %d/%d tests passed\n", tests_run - tests_failed, tests_run);
   return tests_failed ? 1 : 0;
