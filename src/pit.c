@@ -4,7 +4,7 @@
 #include "pic.h"
 
 static volatile uint64_t ticks = 0;
-static uint32_t frequency = 100;
+static uint32_t frequency = 1000;
 
 void pit_init(uint32_t hz){
     frequency = hz;
@@ -24,16 +24,20 @@ uint64_t timer_MS(){
     return (ticks * 1000) / frequency;
 }
 
+uint64_t kernel_get_ticks_ms(){
+    return timer_MS();
+}
+
 void irq0_handler(){
     ticks++;
 
     //print once per second
     if (ticks % frequency == 0){
-        serial_print("tick: ");
+        serial_print("ms: ");
 
         char buf[32];
         int i = 0;
-        uint64_t t = ticks;
+        uint64_t t = timer_MS();
 
         //int to string
         char tmp[32];

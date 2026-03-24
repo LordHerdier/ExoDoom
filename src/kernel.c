@@ -8,6 +8,7 @@
 #include "idt.h"
 #include "pic.h"
 #include "pit.h"
+#include "sleep.h"
 
 //IRQ0 stub from assembly
 extern void irq0_stub();
@@ -35,12 +36,17 @@ void kernel_main(uint32_t mb_info_addr) {
 
     //IRQ0 = Interrupt Vector 32
     idt_set_gate(32, (uint32_t)irq0_stub);
-    pit_init(100);   //100hz
+    pit_init(1000);   //1000hz
     serial_print("Timer Initialized\n");
 
     __asm__ volatile ("sti");
 
     serial_print("Interrupts Enabled\n");
+
+    //Sleep test case
+    serial_print("Sleeping for 1 second...\n");
+    kernel_sleep_ms(1000);
+    serial_print("Done sleeping!\n");
 
     //Main loop
     while (1){
