@@ -45,6 +45,8 @@ test:
 	@mkdir -p build
 	gcc -std=c99 -Wall -Wextra -fno-builtin -o build/test_string tests/test_string.c src/string.c
 	./build/test_string
+	gcc -std=c99 -Wall -Wextra -fno-builtin -o build/test_ctype tests/test_ctype.c src/ctype.c
+	./build/test_ctype
 
 clean:
 	rm -rf build
