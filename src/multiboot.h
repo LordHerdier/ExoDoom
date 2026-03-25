@@ -44,8 +44,16 @@ struct multiboot_info {
 } __attribute__((packed));
 
 enum {
+    MULTIBOOT_INFO_FLAG_MMAP = 1u << 6,
     MULTIBOOT_INFO_FLAG_FRAMEBUFFER = 1u << 12,
 };
+
+struct multiboot_mmap_entry {
+    uint32_t size;
+    uint64_t addr;
+    uint64_t len;
+    uint32_t type;
+} __attribute__((packed));	
 
 enum {
     MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED = 0,
