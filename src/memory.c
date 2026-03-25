@@ -9,6 +9,7 @@ static uintptr_t align_up(uintptr_t addr, uintptr_t align) {
 }
 
 void memory_init(void) {
+    if (placement_address != 0) return;
     placement_address = align_up((uintptr_t)&_bss_end, 0x1000);
 }
 
