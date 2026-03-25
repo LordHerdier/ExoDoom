@@ -22,6 +22,19 @@ void serial_init(void) {
     outb(COM1 + 4, 0x0B);   // IRQs enabled, RTS/DSR set
 }
 
+void serial_print_hex(uint32_t num) {
+    char hex[] = "0123456789ABCDEF";
+    char buffer[9];
+    buffer[8] = '\0';
+
+    for (int i = 7; i >= 0; i--) {
+        buffer[i] = hex[num & 0xF];
+        num >>= 4;
+    }
+
+    serial_print(buffer);
+}
+
 static int serial_can_tx(void) {
     return inb(COM1 + 5) & 0x20;
 }
