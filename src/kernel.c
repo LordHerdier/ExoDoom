@@ -11,7 +11,6 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_init();
 
     struct multiboot_info* mb = (struct multiboot_info*)mb_info_addr;
-    (void)mb; // placeholder until mmap parsing is added
 
     serial_print("Kernel Booted\n");
 
