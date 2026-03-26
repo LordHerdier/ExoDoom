@@ -10,6 +10,9 @@ static uintptr_t managed_base = 0;
 static uint32_t total_pages = 0;
 static uint8_t* bitmap = 0;
 
+extern char _load_start;
+extern char _bss_end;
+
 static void bitmap_set(uint32_t index) {
     bitmap[index / 8] |= (1u << (index % 8));
 }
@@ -24,6 +27,20 @@ static int bitmap_test(uint32_t index) {
 
 static uintptr_t align_up_uintptr(uintptr_t value, uintptr_t align) {
     return (value + align - 1) & ~(align - 1);
+}
+
+static void reserve_region(uintptr_t start, uintptr_t end) {
+    start = align_up_uintptr(start, PAGE_SIZE);
+    end   = align_up_uintptr(end, PAGE_SIZE);
+
+    for (uintptr_t addr = start; addr < end; addr += PAGE_SIZE) {
+        if (addr < managed_base) continue;
+
+        uint32_t index = (addr - managed_base) / PAGE_SIZE;
+        if (index < total_pages) {
+            bitmap_set(index);
+        }
+    }
 }
 
 void page_alloc_init(struct multiboot_info* mb) {
@@ -60,10 +77,34 @@ void page_alloc_init(struct multiboot_info* mb) {
                 bitmap[i] = 0;
             }
 
-            serial_print("page_alloc: initialized\n");
-            return;
-        }
+            uintptr_t kernel_start = (uintptr_t)&_load_start;
+            uintptr_t kernel_end   = (uintptr_t)&_bss_end;
 
+            reserve_region(kernel_start, kernel_end);
+            serial_print("page_alloc: kernel reserved\n");
+
+            if ((mb->flags & MULTIBOOT_INFO_FLAG_MODS) && mb->mods_count > 0) {
+    struct multiboot_module* mods =
+        (struct multiboot_module*)mb->mods_addr;
+
+    for (uint32_t i = 0; i < mb->mods_count; i++) {
+        serial_print("module start: ");
+        serial_print_hex(mods[i].mod_start);
+        serial_print("\n");
+
+        serial_print("module end: ");
+        serial_print_hex(mods[i].mod_end);
+        serial_print("\n");
+
+        reserve_region((uintptr_t)mods[i].mod_start,
+                       (uintptr_t)mods[i].mod_end);
+    }
+
+    serial_print("page_alloc: modules reserved\n");
+}
+
+serial_print("page_alloc: initialized\n");
+return;
         cur += entry->size + sizeof(entry->size);
     }
 
@@ -114,3 +155,4 @@ void free_page(void* addr) {
 
     bitmap_clear(index);
 }
+

@@ -24,6 +24,9 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_print("Allocator base: ");
     serial_print_hex(memory_base_address());
     serial_print("\n");
+    serial_print("mods_count: ");
+    serial_print_hex(mb->mods_count);
+    serial_print("\n");
 
     page_alloc_init(mb);
 

@@ -43,7 +43,8 @@ struct multiboot_info {
     uint8_t  color_info[6]; // only meaningful for RGB type
 } __attribute__((packed));
 
-enum {
+    enum {
+    MULTIBOOT_INFO_FLAG_MODS = 1u << 3,
     MULTIBOOT_INFO_FLAG_MMAP = 1u << 6,
     MULTIBOOT_INFO_FLAG_FRAMEBUFFER = 1u << 12,
 };
@@ -64,4 +65,11 @@ enum {
     MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED = 0,
     MULTIBOOT_FRAMEBUFFER_TYPE_RGB     = 1,
     MULTIBOOT_FRAMEBUFFER_TYPE_EGA     = 2,
+};
+
+struct multiboot_module {
+    uint32_t mod_start;
+    uint32_t mod_end;
+    uint32_t cmdline;
+    uint32_t pad;
 };
