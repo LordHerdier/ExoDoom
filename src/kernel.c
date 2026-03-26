@@ -14,7 +14,7 @@ void kernel_main(uint32_t mb_info_addr) {
     struct multiboot_info* mb = (struct multiboot_info*)mb_info_addr;
     serial_print("Kernel Booted\n");
 
-    mmap_print(mb);
+    mmap_init(mb);
 
     memory_init();
 

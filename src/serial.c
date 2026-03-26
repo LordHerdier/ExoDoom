@@ -35,6 +35,38 @@ void serial_print_hex(uint32_t num) {
     serial_print(buffer);
 }
 
+void serial_print_hex64(uint64_t num) {
+    char hex[] = "0123456789ABCDEF";
+    char buffer[17];
+    buffer[16] = '\0';
+
+    for (int i = 15; i >= 0; i--) {
+        buffer[i] = hex[num & 0xF];
+        num >>= 4;
+    }
+
+    serial_print(buffer);
+}
+
+void serial_print_dec(uint32_t num) {
+    char buf[16];
+    int i = 0;
+
+    if (num == 0) {
+        serial_putc('0');
+        return;
+    }
+
+    while (num > 0) {
+        buf[i++] = '0' + (num % 10);
+        num /= 10;
+    }
+
+    while (i > 0) {
+        serial_putc(buf[--i]);
+    }
+}
+
 static int serial_can_tx(void) {
     return inb(COM1 + 5) & 0x20;
 }

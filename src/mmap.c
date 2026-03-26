@@ -2,46 +2,24 @@
 #include "mmap.h"
 #include "serial.h"
 
-static void serial_print_dec(uint32_t num) {
-    char buf[16];
-    int i = 0;
-
-    if (num == 0) {
-        serial_putc('0');
-        return;
-    }
-
-    while (num > 0) {
-        buf[i++] = '0' + (num % 10);
-        num /= 10;
-    }
-
-    while (i > 0) {
-        serial_putc(buf[--i]);
-    }
-}
-
-static void serial_print_hex64(uint64_t num) {
-    char hex[] = "0123456789ABCDEF";
-    char buf[17];
-    buf[16] = '\0';
-
-    for (int i = 15; i >= 0; i--) {
-        buf[i] = hex[num & 0xF];
-        num >>= 4;
-    }
-
-    serial_print(buf);
-}
+static mmap_region_t regions[MAX_MMAP_REGIONS];
+static uint32_t region_count = 0;
 
 static const char* region_type_name(uint32_t type) {
-    if (type == 1) return "usable";
-    return "reserved";
+    switch (type) {
+        case MULTIBOOT_MMAP_AVAILABLE:    return "usable";
+        case MULTIBOOT_MMAP_RESERVED:     return "reserved";
+        case MULTIBOOT_MMAP_ACPI_RECLAIM: return "acpi reclaimable";
+        case MULTIBOOT_MMAP_ACPI_NVS:     return "acpi nvs";
+        case MULTIBOOT_MMAP_BADRAM:       return "bad ram";
+        default:                          return "unknown";
+    }
 }
 
-void mmap_print(struct multiboot_info* mb) {
+void mmap_init(struct multiboot_info* mb) {
     if (!(mb->flags & MULTIBOOT_INFO_FLAG_MMAP)) {
         serial_print("No multiboot mmap available\n");
+        region_count = 0;
         return;
     }
 
@@ -50,9 +28,15 @@ void mmap_print(struct multiboot_info* mb) {
     uintptr_t cur = (uintptr_t)mb->mmap_addr;
     uintptr_t end = cur + mb->mmap_length;
 
-    while (cur < end) {
+    region_count = 0;
+
+    while (cur < end && region_count < MAX_MMAP_REGIONS) {
         struct multiboot_mmap_entry* entry =
             (struct multiboot_mmap_entry*)cur;
+
+        regions[region_count].base = entry->addr;
+        regions[region_count].length = entry->len;
+        regions[region_count].type = entry->type;
 
         serial_print(" base=0x");
         serial_print_hex64(entry->addr);
@@ -67,6 +51,14 @@ void mmap_print(struct multiboot_info* mb) {
         serial_print(region_type_name(entry->type));
         serial_print("\n");
 
+        region_count++;
         cur += entry->size + sizeof(entry->size);
     }
+}
+
+const mmap_region_t* mmap_get_regions(uint32_t* count) {
+    if (count != 0) {
+        *count = region_count;
+    }
+    return regions;
 }
