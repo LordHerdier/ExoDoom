@@ -53,7 +53,12 @@ struct multiboot_mmap_entry {
     uint64_t addr;
     uint64_t len;
     uint32_t type;
-} __attribute__((packed));	
+} __attribute__((packed));
+
+
+enum {
+    MULTIBOOT_MEMORY_AVAILABLE = 1
+};
 
 enum {
     MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED = 0,
