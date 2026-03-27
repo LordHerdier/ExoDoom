@@ -10,6 +10,8 @@ static uintptr_t managed_base = 0;
 static uint32_t total_pages = 0;
 static uint8_t* bitmap = 0;
 
+extern char _load_start;
+
 static void bitmap_set(uint32_t index) {
     bitmap[index / 8] |= (1u << (index % 8));
 }
@@ -24,6 +26,20 @@ static int bitmap_test(uint32_t index) {
 
 static uintptr_t align_up_uintptr(uintptr_t value, uintptr_t align) {
     return (value + align - 1) & ~(align - 1);
+}
+
+static void reserve_region(uintptr_t start, uintptr_t end) {
+    start = align_up_uintptr(start, PAGE_SIZE);
+    end   = align_up_uintptr(end, PAGE_SIZE);
+
+    for (uintptr_t addr = start; addr < end; addr += PAGE_SIZE) {
+        if (addr < managed_base) continue;
+
+        uint32_t index = (uint32_t)((addr - managed_base) / PAGE_SIZE);
+        if (index < total_pages) {
+            bitmap_set(index);
+        }
+    }
 }
 
 void page_alloc_init(struct multiboot_info* mb) {
@@ -43,7 +59,7 @@ void page_alloc_init(struct multiboot_info* mb) {
         struct multiboot_mmap_entry* entry =
             (struct multiboot_mmap_entry*)cur;
 
-        if (entry->type == MULTIBOOT_MEMORY_AVAILABLE &&
+        if (entry->type == MULTIBOOT_MMAP_AVAILABLE &&
             entry->addr >= 0x100000 &&
             entry->len >= PAGE_SIZE) {
 
@@ -59,6 +75,12 @@ void page_alloc_init(struct multiboot_info* mb) {
             for (uint32_t i = 0; i < bitmap_bytes; i++) {
                 bitmap[i] = 0;
             }
+
+            uintptr_t reserve_start = (uintptr_t)&_load_start;
+            uintptr_t reserve_end   = (uintptr_t)memory_base_address();
+
+            reserve_region(reserve_start, reserve_end);
+            serial_print("page_alloc: kernel/heap reserved\n");
 
             serial_print("page_alloc: initialized\n");
             return;

@@ -27,6 +27,7 @@ void kernel_main(uint32_t mb_info_addr) {
 
     page_alloc_init(mb);
 
+#ifdef DEBUG
     void* p1 = alloc_page();
     void* p2 = alloc_page();
 
@@ -42,6 +43,11 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_print("Freed page 1\n");
 
     free_page(p1);
+
+    serial_print("Freed page 1\n");
+
+    free_page(p1);
+#endif 
 
     serial_flush();
     qemu_exit(0);
