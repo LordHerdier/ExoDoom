@@ -1,4 +1,4 @@
-.PHONY: docker-build docker-run docker-run-kernel clean
+.PHONY: docker-build docker-run docker-run-kernel docker-test clean
 
 DEBUG ?= 0
 

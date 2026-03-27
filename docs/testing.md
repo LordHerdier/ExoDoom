@@ -16,8 +16,6 @@ tests/kernel/test_runner.c   Suite registration + run_tests() entry point
 tests/kernel/test_smoke.c    Smoke tests (harness self-check)
 tests/kernel/test_string_k.c String function tests
 tests/kernel/test_ctype_k.c  Ctype function tests
-tests/test_string.c      Host-only tests (legacy, run with `make test`)
-tests/test_ctype.c       Host-only tests (legacy, run with `make test`)
 ```
 
 When the kernel is compiled with `-DTESTING`, `kernel_main` calls
@@ -44,16 +42,6 @@ end.
 `make docker-ci` always builds with `TESTING=1`.  The GitHub Actions workflow
 greps the serial output for `ALL TESTS PASSED` and fails the job if that
 string is absent or if `TESTS FAILED` is present.
-
-### Host-only (legacy)
-
-The original hand-rolled tests still compile and run on the host with:
-
-```bash
-make test
-```
-
-These do not use KUnit and are not the canonical test suite.
 
 ---
 
