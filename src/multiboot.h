@@ -54,13 +54,6 @@ struct multiboot_mmap_entry {
     uint32_t type;
 } __attribute__((packed));
 
-struct multiboot_mmap_entry {
-    uint32_t size;
-    uint64_t addr;
-    uint64_t len;
-    uint32_t type;
-} __attribute__((packed));
-
 struct multiboot_module {
     uint32_t mod_start;
     uint32_t mod_end;
