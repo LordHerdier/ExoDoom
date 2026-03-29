@@ -34,7 +34,7 @@ void kernel_main(uint32_t mb_info_addr) {
     idt_init();
     pic_remap();
 
-    //IRQ0 = Interrupt Vector 32
+    //IRQ0 vector 32
     idt_set_gate(32, (uint32_t)irq0_stub);
     pit_init(1000);   //1000hz
     serial_print("Timer Initialized\n");
@@ -49,7 +49,12 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_print("Done sleeping!\n");
 
     //Main loop
-    while (1){
+    while (1) {
+        if (pit_take_print_pending()) {
+            serial_print("ms: ");
+            serial_print_u32(kernel_get_ticks_ms());
+            serial_print("\n");
+        }
         __asm__ volatile ("hlt");
     }
 }
