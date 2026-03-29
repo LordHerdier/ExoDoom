@@ -8,3 +8,5 @@ Multiboot memory map:
  base=0x00000000FFFC0000 len=0x0000000000040000 type=2 reserved
 Memory subsystem initialized
 Allocator base: 00209000
+page_alloc: kernel/heap reserved
+page_alloc: initialized
