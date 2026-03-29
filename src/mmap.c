@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stddef.h>
 #include "mmap.h"
 #include "serial.h"
 
@@ -57,7 +58,7 @@ void mmap_init(struct multiboot_info* mb) {
 }
 
 const mmap_region_t* mmap_get_regions(uint32_t* count) {
-    if (count != 0) {
+    if (count != NULL) {
         *count = region_count;
     }
     return regions;
