@@ -2,6 +2,7 @@
 #include "multiboot.h"
 #include "serial.h"
 #include "memory.h"
+#include "mmap.h"
 
 static inline void qemu_exit(uint32_t code) {
     __asm__ volatile ("outl %0, %1" : : "a"(code), "Nd"(0xF4));
@@ -11,9 +12,9 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_init();
 
     struct multiboot_info* mb = (struct multiboot_info*)mb_info_addr;
-    (void)mb; // placeholder until mmap parsing is added
-
     serial_print("Kernel Booted\n");
+
+    mmap_init(mb);
 
     memory_init();
 
