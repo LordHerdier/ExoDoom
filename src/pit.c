@@ -1,6 +1,5 @@
 #include "pit.h"
 #include "io.h"
-#include "serial.h"
 #include "pic.h"
 
 static volatile uint32_t ticks = 0;
@@ -10,7 +9,7 @@ static uint32_t divisor = 1193;
 
 void pit_init(uint32_t hz) {
     frequency = hz;
-    uint32_t divisor = (1193180 + hz / 2) / hz;
+    divisor = (1193180 + hz / 2) / hz;
 
     outb(0x43, 0x36);
 
