@@ -3,6 +3,7 @@
 #include "page_alloc.h"
 #include "memory.h"
 #include "serial.h"
+#include "mmap.h"
 
 #define PAGE_SIZE 4096
 
@@ -28,8 +29,12 @@ static uintptr_t align_up_uintptr(uintptr_t value, uintptr_t align) {
     return (value + align - 1) & ~(align - 1);
 }
 
+static uintptr_t align_down_uintptr(uintptr_t value, uintptr_t align) {
+    return value & ~(align - 1);
+}
+
 static void reserve_region(uintptr_t start, uintptr_t end) {
-    start = align_up_uintptr(start, PAGE_SIZE);
+    start = align_down_uintptr(start, PAGE_SIZE);
     end   = align_up_uintptr(end, PAGE_SIZE);
 
     for (uintptr_t addr = start; addr < end; addr += PAGE_SIZE) {
@@ -52,19 +57,16 @@ void page_alloc_init(struct multiboot_info* mb) {
         return;
     }
 
-    uintptr_t cur = (uintptr_t)mb->mmap_addr;
-    uintptr_t end = cur + mb->mmap_length;
+    uint32_t count = 0;
+    const mmap_region_t* regions = mmap_get_regions(&count);
 
-    while (cur < end) {
-        struct multiboot_mmap_entry* entry =
-            (struct multiboot_mmap_entry*)cur;
+    for (uint32_t i = 0; i < count; i++) {
+        if (regions[i].type == MULTIBOOT_MMAP_AVAILABLE &&
+            regions[i].base >= 0x100000 &&
+            regions[i].length >= PAGE_SIZE) {
 
-        if (entry->type == MULTIBOOT_MMAP_AVAILABLE &&
-            entry->addr >= 0x100000 &&
-            entry->len >= PAGE_SIZE) {
-
-            managed_base = align_up_uintptr((uintptr_t)entry->addr, PAGE_SIZE);
-            uintptr_t region_end = (uintptr_t)(entry->addr + entry->len);
+            managed_base = align_up_uintptr((uintptr_t)regions[i].base, PAGE_SIZE);
+            uintptr_t region_end = (uintptr_t)(regions[i].base + regions[i].length);
             uintptr_t usable_len = region_end - managed_base;
 
             total_pages = (uint32_t)(usable_len / PAGE_SIZE);
@@ -72,21 +74,19 @@ void page_alloc_init(struct multiboot_info* mb) {
             uint32_t bitmap_bytes = (total_pages + 7) / 8;
             bitmap = (uint8_t*)kmalloc(bitmap_bytes);
 
-            for (uint32_t i = 0; i < bitmap_bytes; i++) {
-                bitmap[i] = 0;
+            for (uint32_t j = 0; j < bitmap_bytes; j++) {
+                bitmap[j] = 0;
             }
 
             uintptr_t reserve_start = (uintptr_t)&_load_start;
             uintptr_t reserve_end   = (uintptr_t)memory_base_address();
 
             reserve_region(reserve_start, reserve_end);
-            serial_print("page_alloc: kernel/heap reserved\n");
 
+            serial_print("page_alloc: kernel/heap reserved\n");
             serial_print("page_alloc: initialized\n");
             return;
         }
-
-        cur += entry->size + sizeof(entry->size);
     }
 
     serial_print("page_alloc: no usable region found\n");
