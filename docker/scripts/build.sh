@@ -14,10 +14,10 @@ fi
 
 LDFLAGS=(-T src/linker.ld -ffreestanding -O2 -nostdlib)
 
-echo "[1/6] Assemble boot.s"
+echo "[1/7] Assemble boot.s"
 i686-elf-as src/boot.s -o build/boot.o
 
-echo "[2/6] Compile C sources"
+echo "[2/7] Compile C sources"
 objs=(build/boot.o)
 
 for c in src/*.c; do
@@ -34,11 +34,11 @@ if [ -f src/isr.s ]; then
   objs+=(build/isr.o)
 fi
 
-echo "[3/6] Link kernel -> build/exodoom"
+echo "[3/7] Link kernel -> build/exodoom"
 i686-elf-gcc "${LDFLAGS[@]}" -o build/exodoom \
   "${objs[@]}" -lgcc
 
-echo "[4/6] Sanity check multiboot header"
+echo "[4/7] Sanity check multiboot header"
 if grub-file --is-x86-multiboot build/exodoom; then
   echo "    multiboot confirmed"
 else
@@ -46,12 +46,27 @@ else
   exit 1
 fi
 
-echo "[5/6] Build ISO staging tree"
+echo "[5/7] Build ISO staging tree"
 mkdir -p build/isodir/boot
 cp build/exodoom build/isodir/boot/exodoom
 cp src/grub.cfg build/isodir/boot/grub/grub.cfg
 
-echo "[6/6] Create ISO -> build/exodoom.iso"
+echo "[6/7] Copy WAD into ISO"
+WAD_PATH=""
+for candidate in wads/freedoom2.wad assets/freedoom2.wad; do
+    if [[ -f "$candidate" ]]; then
+        WAD_PATH="$candidate"
+        break
+    fi
+done
+if [[ -z "$WAD_PATH" ]]; then
+    echo "ERROR: missing WAD — place freedoom2.wad in wads/ or assets/"
+    exit 1
+fi
+echo "    WAD $WAD_PATH"
+cp "$WAD_PATH" build/isodir/boot/freedoom2.wad
+
+echo "[7/7] Create ISO -> build/exodoom.iso"
 grub-mkrescue -o build/exodoom.iso build/isodir >/dev/null
 
 echo "Done:"
