@@ -48,13 +48,19 @@ void kernel_main(uint32_t mb_info_addr) {
     kernel_sleep_ms(1000);
     serial_print("Done sleeping!\n");
 
-    //Main loop
-    while (1) {
+    //Print monotonic ms counter for 5 seconds then exit
+    uint32_t prints = 0;
+    while (prints < 105) {
         if (pit_take_print_pending()) {
             serial_print("ms: ");
             serial_print_u32(kernel_get_ticks_ms());
             serial_print("\n");
+            prints++;
         }
         __asm__ volatile ("hlt");
     }
+
+    qemu_exit(0);
+
+    (void)mb;
 }

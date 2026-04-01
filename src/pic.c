@@ -12,7 +12,7 @@
 // Think of this as "Hey PIC, here is how we want interrupts to work".
 
 #define ICW1_INIT 0x10      // "Start init" - Without this, we would likely run into unpredictable situations where PIC stays as GRUB left it leading to critical overlap.
-#define ICW1_ICW4 0x01      // "Where should interrupts go?" - Sets interrupt vector offsets - should help negate double faults.
+#define ICW1_ICW4 0x01      // Tell the PIC to expect ICW4 during initialization (required for 8086 mode).
 #define ICW4_8086 0x01      // "Set operating mode" - puts PIC into 8086/88 mode - ensures interrupts behave correctly with CPU on x86
 
 void pic_remap() {

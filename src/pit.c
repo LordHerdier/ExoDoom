@@ -5,11 +5,10 @@
 static volatile uint32_t ticks = 0;
 static uint32_t frequency = 1000;
 static volatile uint8_t print_pending = 0;
-static uint32_t divisor = 1193;
 
 void pit_init(uint32_t hz) {
     frequency = hz;
-    divisor = (1193180 + hz / 2) / hz;
+    uint32_t divisor = (1193180 + hz / 2) / hz;
 
     outb(0x43, 0x36);
 
@@ -17,12 +16,8 @@ void pit_init(uint32_t hz) {
     outb(0x40, (divisor >> 8) & 0xFF);
 }
 
-uint32_t timer_ticks() {
-    return ticks;
-}
-
 uint32_t kernel_get_ticks_ms() {
-    return (ticks * divisor * 1000) / 1193180;
+    return (uint64_t)ticks * 1000 / frequency;
 }
 
 void irq0_handler() {
