@@ -79,3 +79,12 @@ void serial_putc(char c) {
 void serial_print(const char* s) {
     while (*s) serial_putc(*s++);
 }
+
+void serial_print_u32(uint32_t val) {
+    char buf[11];
+    char *p = buf + 10;
+    *p = '\0';
+    if (val == 0) { serial_putc('0'); return; }
+    while (val > 0) { *--p = '0' + (val % 10); val /= 10; }
+    serial_print(p);
+}

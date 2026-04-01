@@ -1,4 +1,4 @@
-.PHONY: docker-build docker-run docker-run-kernel docker-test test clean
+.PHONY: docker-build docker-run docker-run-kernel clean
 
 DEBUG ?= 0
 
@@ -39,14 +39,6 @@ docker-run-debug: docker-build
 
 run: docker-build
 	qemu-system-i386 -m 256M -cdrom build/exodoom.iso -no-reboot -serial stdio
-
-#TODO: Add proper testing pipeline with CUnit
-test:
-	@mkdir -p build
-	gcc -std=c99 -Wall -Wextra -fno-builtin -o build/test_string tests/test_string.c src/string.c
-	./build/test_string
-	gcc -std=c99 -Wall -Wextra -fno-builtin -o build/test_ctype tests/test_ctype.c src/ctype.c
-	./build/test_ctype
 
 clean:
 	rm -rf build

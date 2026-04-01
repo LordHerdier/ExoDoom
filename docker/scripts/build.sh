@@ -27,6 +27,13 @@ for c in src/*.c; do
   objs+=("$o")
 done
 
+#assemble isr.s
+if [ -f src/isr.s ]; then
+  echo "    AS isr.s"
+  i686-elf-as src/isr.s -o build/isr.o
+  objs+=(build/isr.o)
+fi
+
 echo "[3/6] Link kernel -> build/exodoom"
 i686-elf-gcc "${LDFLAGS[@]}" -o build/exodoom \
   "${objs[@]}" -lgcc
