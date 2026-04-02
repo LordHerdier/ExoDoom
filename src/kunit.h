@@ -15,6 +15,7 @@
 #include "string.h"   /* strcmp for CU_ASSERT_STRING_* macros */
 
 /* ---- Capacity limits --------------------------------------------------- */
+/* Increase these if you hit the suite or per-suite test ceiling at link time. */
 #define KUNIT_MAX_SUITES          16
 #define KUNIT_MAX_TESTS_PER_SUITE 64
 #define KUNIT_NAME_LEN            64

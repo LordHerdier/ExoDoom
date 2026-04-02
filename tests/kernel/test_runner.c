@@ -29,6 +29,8 @@ int run_tests(void)
     s = CU_add_suite("ctype",  NULL, NULL);
     suite_ctype_tests(s);
 
+    /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
+
     CU_run_all_tests();
 
     return CU_get_number_of_tests_failed() != 0 ? 1 : 0;
