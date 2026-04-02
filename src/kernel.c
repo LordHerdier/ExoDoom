@@ -23,13 +23,14 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_print("Memory subsystem initialized\n");
     serial_print("Allocator base: ");
     serial_print_hex(memory_base_address());
-    serial_print("\n");
+    serial_print("\n");	
 
     page_alloc_init(mb);
 
 #ifdef DEBUG
     void* p1 = alloc_page();
     void* p2 = alloc_page();
+    // p2 is intentionally not freed here because this is a short-lived smoke test.
 
     serial_print("Allocated page 1: ");
     serial_print_hex((uint32_t)p1);
@@ -40,10 +41,6 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_print("\n");
 
     free_page(p1);
-    serial_print("Freed page 1\n");
-
-    free_page(p1);
-
     serial_print("Freed page 1\n");
 
     free_page(p1);

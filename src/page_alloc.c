@@ -11,7 +11,7 @@ static uintptr_t managed_base = 0;
 static uint32_t total_pages = 0;
 static uint8_t* bitmap = 0;
 
-extern char _load_start;
+extern char _load_start[];
 
 static void bitmap_set(uint32_t index) {
     bitmap[index / 8] |= (1u << (index % 8));
@@ -78,12 +78,24 @@ void page_alloc_init(struct multiboot_info* mb) {
                 bitmap[j] = 0;
             }
 
-            uintptr_t reserve_start = (uintptr_t)&_load_start;
-            uintptr_t reserve_end   = (uintptr_t)memory_base_address();
+            uintptr_t reserve_start = managed_base;
+	    uintptr_t reserve_end   = (uintptr_t)memory_base_address();
 
-            reserve_region(reserve_start, reserve_end);
+	    reserve_region(reserve_start, reserve_end);
 
             serial_print("page_alloc: kernel/heap reserved\n");
+
+	    if ((mb->flags & MULTIBOOT_INFO_FLAG_MODS) && mb->mods_count > 0) {
+    struct multiboot_module* mods =
+        (struct multiboot_module*)mb->mods_addr;
+
+    for (uint32_t i = 0; i < mb->mods_count; i++) {
+        reserve_region((uintptr_t)mods[i].mod_start,
+                       (uintptr_t)mods[i].mod_end);
+    }
+
+    serial_print("page_alloc: modules reserved\n");
+}
             serial_print("page_alloc: initialized\n");
             return;
         }

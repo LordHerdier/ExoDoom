@@ -42,6 +42,7 @@ fi
 echo "[5/6] Build ISO staging tree"
 mkdir -p build/isodir/boot
 cp build/exodoom build/isodir/boot/exodoom
+cp wads/freedoom2.wad build/isodir/boot/freedoom2.wad
 cp src/grub.cfg build/isodir/boot/grub/grub.cfg
 
 echo "[6/6] Create ISO -> build/exodoom.iso"
