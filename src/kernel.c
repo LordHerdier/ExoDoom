@@ -33,6 +33,11 @@ void kernel_main(uint32_t mb_info_addr) {
     memory_init();
 
 #ifdef TESTING
+    idt_init();
+    pic_remap();
+    idt_set_gate(32, (uint32_t)irq0_stub);
+    pit_init(1000);
+    __asm__ volatile ("sti");
     serial_flush();
     qemu_exit((uint32_t)run_tests());
 #else
