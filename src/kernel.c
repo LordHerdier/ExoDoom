@@ -15,6 +15,10 @@
 //IRQ0 stub from assembly
 extern void irq0_stub();
 
+#ifdef TESTING
+extern int run_tests(void);
+#endif
+
 static inline void qemu_exit(uint32_t code) {
     __asm__ volatile ("outl %0, %1" : : "a"(code), "Nd"(0xF4));
 }
@@ -27,6 +31,11 @@ void kernel_main(uint32_t mb_info_addr) {
 
     mmap_init(mb);
     memory_init();
+
+#ifdef TESTING
+    serial_flush();
+    qemu_exit((uint32_t)run_tests());
+#else
     serial_print("Memory subsystem initialized\n");
     serial_print("Allocator base: ");
     serial_print_hex(memory_base_address());
@@ -84,4 +93,5 @@ void kernel_main(uint32_t mb_info_addr) {
     fbcon_write(&con, "Now printing to pixels like a proper gremlin.\n\n");
     fbcon_write(&con, "0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ\n");
     fbcon_write(&con, "abcdefghijklmnopqrstuvwxyz !@#$%^&*()[]{}\n");
+#endif
 }
