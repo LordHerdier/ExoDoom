@@ -3,21 +3,7 @@
 #include "serial.h"
 #include "memory.h"
 #include "mmap.h"
-
-//IDT and Interrupt includes
-#include "idt.h"
-#include "pic.h"
-#include "pit.h"
-#include "sleep.h"
-#include "fb.h"
-#include "fb_console.h"
-
-//IRQ0 stub from assembly
-extern void irq0_stub();
-
-#ifdef TESTING
-extern int run_tests(void);
-#endif
+#include "page_alloc.h"
 
 static inline void qemu_exit(uint32_t code) {
     __asm__ volatile ("outl %0, %1" : : "a"(code), "Nd"(0xF4));
@@ -27,9 +13,11 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_init();
 
     struct multiboot_info* mb = (struct multiboot_info*)mb_info_addr;
+
     serial_print("Kernel Booted\n");
 
     mmap_init(mb);
+
     memory_init();
 
 #ifdef TESTING
@@ -39,7 +27,29 @@ void kernel_main(uint32_t mb_info_addr) {
     serial_print("Memory subsystem initialized\n");
     serial_print("Allocator base: ");
     serial_print_hex(memory_base_address());
+    serial_print("\n");	
+
+    page_alloc_init(mb);
+
+#ifdef DEBUG
+    void* p1 = alloc_page();
+    void* p2 = alloc_page();
+    // p2 is intentionally not freed here because this is a short-lived smoke test.
+
+    serial_print("Allocated page 1: ");
+    serial_print_hex((uint32_t)p1);
     serial_print("\n");
+
+    serial_print("Allocated page 2: ");
+    serial_print_hex((uint32_t)p2);
+    serial_print("\n");
+
+    free_page(p1);
+    serial_print("Freed page 1\n");
+
+    free_page(p1);
+#endif 
+
     serial_flush();
 
     idt_init();
