@@ -1,8 +1,7 @@
 .set ALIGN,        1<<0
 .set MEMINFO,      1<<1
 .set VIDEO,        1<<2
-.set AOUT_KLUDGE,  1<<16
-.set FLAGS,        ALIGN | MEMINFO | VIDEO | AOUT_KLUDGE
+.set FLAGS,        ALIGN | MEMINFO | VIDEO
 .set MAGIC,        0x1BADB002
 .set CHECKSUM,     -(MAGIC + FLAGS)
 
@@ -14,12 +13,12 @@ multiboot_header:
 .long FLAGS
 .long CHECKSUM
 
-/* a.out kludge fields */
-.long multiboot_header   /* header_addr */
-.long _load_start        /* load_addr */
-.long _load_end          /* load_end_addr */
-.long _bss_end           /* bss_end_addr */
-.long _start             /* entry_addr */
+/* reserved (offsets 12-28 unused without AOUT_KLUDGE, kept to preserve VIDEO field offsets) */
+.long 0
+.long 0
+.long 0
+.long 0
+.long 0
 
 /* graphics fields */
 .long 0                  /* mode_type: 0=linear graphics */
