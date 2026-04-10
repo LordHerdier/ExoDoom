@@ -8,12 +8,17 @@
 #include "idt.h"
 #include "pic.h"
 #include "pit.h"
+#include "ps2.h"
 #include "sleep.h"
 #include "fb.h"
 #include "fb_console.h"
 
-//IRQ0 stub from assembly
+// IRQ stubs from assembly
 extern void irq0_stub();
+extern void irq1_stub();
+
+// Keyboard driver
+extern void kbd_init();
 
 #ifdef TESTING
 extern int run_tests(void);
@@ -45,8 +50,15 @@ void kernel_main(uint32_t mb_info_addr) {
     idt_init();
     pic_remap();
 
-    //IRQ0 vector 32
+    // IRQ0 vector 32 (timer)
     idt_set_gate(32, (uint32_t)irq0_stub);
+
+    // IRQ1 vector 33 (keyboard)
+    idt_set_gate(33, (uint32_t)irq1_stub);
+
+    // Keyboard driver init for SCRUM-13/14 ring buffer + modifiers
+    kbd_init();
+
     pit_init(1000);   //1000hz
     serial_print("Timer Initialized\n");
 
@@ -61,7 +73,7 @@ void kernel_main(uint32_t mb_info_addr) {
 
     //Print monotonic ms counter for 5 seconds then exit
     uint32_t prints = 0;
-    while (prints < 5) {
+    while (1) {
         if (pit_take_print_pending()) {
             serial_print("ms: ");
             serial_print_u32(kernel_get_ticks_ms());
@@ -70,8 +82,7 @@ void kernel_main(uint32_t mb_info_addr) {
         }
         __asm__ volatile ("hlt");
     }
-
-    qemu_exit(0);
+    // qemu_exit(0); // keep running for keyboard tests
 
     if (!(mb->flags & MULTIBOOT_INFO_FLAG_FRAMEBUFFER)) for(;;);
 

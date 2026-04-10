@@ -32,8 +32,8 @@ void pic_remap() {
     outb(PIC1_DATA, ICW4_8086); io_wait();
     outb(PIC2_DATA, ICW4_8086); io_wait();
 
-    // Mask
-    outb(PIC1_DATA, 0xFE); io_wait();
+    // Mask: unmask IRQ0(timer) and IRQ1(keyboard)
+    outb(PIC1_DATA, 0xFC); io_wait();
     outb(PIC2_DATA, 0xFF); io_wait();
 }
 
