@@ -41,3 +41,12 @@ int wad_find_map(const wad_t *wad, const char *map_name);
    Returns pointer to lump data, or NULL if not found. */
 const uint8_t *wad_find_map_lump(const wad_t *wad, const char *map_name,
                                   const char *lump_name, uint32_t *size_out);
+
+/* Count the number of MAPxx markers in the WAD (MAP01..MAP32).
+   Returns count (0 if none found). */
+uint32_t wad_count_maps(const wad_t *wad);
+
+/* Get the name of the map at the given zero-based index among MAPxx markers.
+   Copies the name into name_out (must be at least 9 bytes).
+   Returns 0 on success, -1 if index out of range. */
+int wad_get_map_name(const wad_t *wad, uint32_t index, char name_out[9]);

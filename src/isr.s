@@ -19,3 +19,12 @@ irq0_stub:
     call irq0_handler
     popa
     iret
+
+.global irq1_stub
+.extern irq1_handler
+
+irq1_stub:
+    pusha
+    call irq1_handler
+    popa
+    iret

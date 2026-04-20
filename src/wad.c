@@ -128,6 +128,44 @@ const uint8_t *wad_find_map_lump(const wad_t *wad, const char *map_name,
     return (void *)0;
 }
 
+/* Check if a lump name matches the MAPxx pattern (MAP01..MAP32). */
+static int is_map_marker(const uint8_t *name8) {
+    if (name8[0] != 'M' || name8[1] != 'A' || name8[2] != 'P') return 0;
+    if (name8[3] < '0' || name8[3] > '3') return 0;
+    if (name8[4] < '0' || name8[4] > '9') return 0;
+    /* Remaining bytes should be null */
+    for (int i = 5; i < 8; i++)
+        if (name8[i] != '\0') return 0;
+    return 1;
+}
+
+uint32_t wad_count_maps(const wad_t *wad) {
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < wad->numlumps; i++) {
+        const uint8_t *entry = wad->dir_data + i * 16u;
+        if (is_map_marker(entry + 8))
+            count++;
+    }
+    return count;
+}
+
+int wad_get_map_name(const wad_t *wad, uint32_t index, char name_out[9]) {
+    uint32_t seen = 0;
+    for (uint32_t i = 0; i < wad->numlumps; i++) {
+        const uint8_t *entry = wad->dir_data + i * 16u;
+        if (is_map_marker(entry + 8)) {
+            if (seen == index) {
+                const uint8_t *n = entry + 8;
+                for (int j = 0; j < 8; j++) name_out[j] = (char)n[j];
+                name_out[8] = '\0';
+                return 0;
+            }
+            seen++;
+        }
+    }
+    return -1;
+}
+
 const uint8_t *wad_get_flat(const wad_t *wad, uint32_t index, char name_out[9]) {
     uint32_t seen = 0;  /* number of valid flats encountered so far */
     int in_flats = 0;

@@ -12,6 +12,10 @@ else
   CFLAGS=(-std=gnu99 -ffreestanding -O2 -Wall -Wextra)
 fi
 
+if [[ "${TESTING:-0}" == "1" ]]; then
+  CFLAGS+=(-DTESTING)
+fi
+
 LDFLAGS=(-T src/linker.ld -ffreestanding -O2 -nostdlib)
 
 echo "[1/7] Assemble boot.s"
@@ -32,6 +36,16 @@ if [ -f src/isr.s ]; then
   echo "    AS isr.s"
   i686-elf-as src/isr.s -o build/isr.o
   objs+=(build/isr.o)
+fi
+
+if [[ "${TESTING:-0}" == "1" ]]; then
+  echo "[2b/7] Compile kernel test sources"
+  for c in tests/kernel/*.c; do
+    o="build/$(basename "${c%.c}.o")"
+    echo "    CC $(basename "$c")"
+    i686-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/
+    objs+=("$o")
+  done
 fi
 
 echo "[3/7] Link kernel -> build/exodoom"

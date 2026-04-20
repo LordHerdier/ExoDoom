@@ -8,6 +8,7 @@
 #include "multiboot.h"
 #include "pic.h"
 #include "pit.h"
+#include "ps2.h"
 #include "serial.h"
 #include "sleep.h"
 #include "wad.h"
@@ -15,6 +16,11 @@
 #include <stdint.h>
 
 extern void irq0_stub();
+extern void irq1_stub();
+
+#ifdef TESTING
+extern int run_tests(void);
+#endif
 
 static inline void qemu_exit(uint32_t code) {
   __asm__ volatile("outl %0, %1" : : "a"(code), "Nd"(0xF4));
@@ -238,6 +244,12 @@ void kernel_main(uint32_t mb_info_addr) {
 
   // ── Memory subsystem ──────────────────────────────────────────────────────
   memory_init();
+
+#ifdef TESTING
+  serial_flush();
+  qemu_exit((uint32_t)run_tests());
+#endif
+
   log_prefix(&con, 0);
   fbcon_write(&con, "Kernel allocator base: 0x");
   fbcon_set_color(&con, 100, 180, 255, 0, 0, 0);
@@ -245,7 +257,7 @@ void kernel_main(uint32_t mb_info_addr) {
   fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
   fbcon_write(&con, "\n");
 
-  // ── IDT / PIC / PIT ───────────────────────────────────────────────────────
+  // ── IDT / PIC / PIT / PS2 ────────────────────────────────────────────────
   idt_init();
   klog(&con, 0, "IDT initialized (256 entries)");
 
@@ -255,6 +267,10 @@ void kernel_main(uint32_t mb_info_addr) {
   idt_set_gate(32, (uint32_t)irq0_stub);
   pit_init(1000);
   klog(&con, 0, "PIT initialized at 1000 Hz (IRQ0 -> vector 0x20)");
+
+  idt_set_gate(33, (uint32_t)irq1_stub);
+  kbd_init();
+  klog(&con, 0, "PS/2 keyboard initialized (IRQ1 -> vector 0x21)");
 
   __asm__ volatile("sti");
   klog(&con, 0, "Interrupts enabled (STI)");
@@ -357,30 +373,74 @@ void kernel_main(uint32_t mb_info_addr) {
 
   kernel_sleep_ms(5000);
 
-  // ── Automap display ─────────────────────────────────────────────────────
-  fb_clear(&fb, 0, 0, 0);
-  fbcon_init(&con, &fb);
-
-  fbcon_set_color(&con, 100, 220, 255, 0, 0, 0);
-  fbcon_write(&con, "ExoDoom Automap — ");
-  fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
-  fbcon_write(&con, "MAP01\n");
-  fbcon_set_color(&con, 60, 60, 60, 0, 0, 0);
-  fbcon_write(&con, "-----------------------------------------------------------"
-                    "--------------------\n");
-
-  klog(&con, kernel_get_ticks_ms(), "Parsing MAP01 geometry from WAD...");
-
-  if (automap_render(&fb, &wad, "MAP01", 40) == 0) {
-    klog(&con, kernel_get_ticks_ms(), "Automap rendered successfully.");
-    serial_print("Automap: MAP01 rendered.\n");
-  } else {
-    klog(&con, kernel_get_ticks_ms(), "ERROR: Could not render MAP01 automap.");
-    serial_print("Automap: MAP01 render failed.\n");
+  // ── Interactive automap viewer ──────────────────────────────────────────
+  uint32_t num_maps = wad_count_maps(&wad);
+  if (num_maps == 0) {
+    klog(&con, kernel_get_ticks_ms(), "No MAPxx lumps found in WAD.");
+    for (;;)
+      __asm__ volatile("hlt");
   }
 
-  serial_flush();
+  uint32_t current_map = 0;
+  int need_redraw = 1;
 
-  for (;;)
-    ;
+  for (;;) {
+    if (need_redraw) {
+      char map_name[9];
+      wad_get_map_name(&wad, current_map, map_name);
+
+      fb_clear(&fb, 0, 0, 0);
+      fbcon_init(&con, &fb);
+
+      // Header
+      fbcon_set_color(&con, 100, 220, 255, 0, 0, 0);
+      fbcon_write(&con, "ExoDoom Automap");
+      fbcon_set_color(&con, 60, 60, 60, 0, 0, 0);
+      fbcon_write(&con, " | ");
+      fbcon_set_color(&con, 255, 220, 80, 0, 0, 0);
+      fbcon_write(&con, map_name);
+      fbcon_set_color(&con, 60, 60, 60, 0, 0, 0);
+      fbcon_write(&con, " | ");
+      fbcon_set_color(&con, 140, 140, 140, 0, 0, 0);
+      fbcon_write_u32(&con, current_map + 1);
+      fbcon_write(&con, "/");
+      fbcon_write_u32(&con, num_maps);
+      fbcon_set_color(&con, 60, 60, 60, 0, 0, 0);
+      fbcon_write(&con, " | ");
+      fbcon_set_color(&con, 140, 140, 140, 0, 0, 0);
+      fbcon_write(&con, "<-/-> to navigate\n");
+
+      fbcon_set_color(&con, 60, 60, 60, 0, 0, 0);
+      fbcon_write(&con, "-----------------------------------------------------------"
+                        "--------------------\n");
+
+      if (automap_render(&fb, &wad, map_name, 40) == 0) {
+        serial_print("Automap: ");
+        serial_print(map_name);
+        serial_print(" rendered.\n");
+      } else {
+        fbcon_set_color(&con, 230, 50, 50, 0, 0, 0);
+        fbcon_write(&con, "  Could not render ");
+        fbcon_write(&con, map_name);
+        fbcon_write(&con, " (missing VERTEXES/LINEDEFS?)\n");
+      }
+
+      serial_flush();
+      need_redraw = 0;
+    }
+
+    // Poll for keyboard input
+    kbd_event_t ev;
+    if (exo_kbd_poll(&ev) && ev.pressed) {
+      if (ev.key == KEY_RIGHT && current_map + 1 < num_maps) {
+        current_map++;
+        need_redraw = 1;
+      } else if (ev.key == KEY_LEFT && current_map > 0) {
+        current_map--;
+        need_redraw = 1;
+      }
+    }
+
+    __asm__ volatile("hlt");
+  }
 }
