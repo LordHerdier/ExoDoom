@@ -10,4 +10,4 @@ WORKDIR /work
 
 # default: boot ISO with a serial console hooked to your terminal
 ENTRYPOINT ["bash", "-lc"]
-CMD ["qemu-system-i386 -cdrom build/exodoom.iso -m 256M -no-reboot -display curses -serial mon:stdio"]
+CMD ["qemu-system-x86_64 -cdrom build/exodoom.iso -m 256M -no-reboot -display curses -serial mon:stdio"]

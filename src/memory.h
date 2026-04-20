@@ -6,6 +6,6 @@
 
 void memory_init(void);
 void* kmalloc(size_t size);
-uint32_t memory_base_address(void);
+uintptr_t memory_base_address(void);
 
 #endif

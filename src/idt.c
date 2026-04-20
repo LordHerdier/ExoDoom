@@ -3,49 +3,43 @@
 
 #define IDT_ENTRIES 256
 
-struct idt_entry{
-    uint16_t baseLow;
-    uint16_t sel;
-    uint8_t always0;
-    uint8_t flags;
-    uint16_t baseHigh;
+struct idt_entry {
+    uint16_t offset_low;    /* bits  0-15 of handler address */
+    uint16_t selector;      /* code segment selector         */
+    uint8_t  ist;           /* IST index (0 = legacy stack)  */
+    uint8_t  type_attr;     /* type and attributes           */
+    uint16_t offset_mid;    /* bits 16-31                    */
+    uint32_t offset_high;   /* bits 32-63                    */
+    uint32_t reserved;      /* must be 0                     */
 } __attribute__((packed));
 
-struct idt_ptr{
+struct idt_ptr {
     uint16_t limit;
-    uint32_t base;
+    uint64_t base;
 } __attribute__((packed));
-
 
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr idtp;
-static uint16_t kernel_cs;
 
-extern void idt_load(uint32_t);
+extern void idt_load(struct idt_ptr *);
 extern void default_stub(void);
 
 void idt_init() {
-    /* Read the actual code segment selector GRUB gave us rather than
-       assuming 0x08 — a mismatch causes iret to GP-fault on the way out
-       of any interrupt handler. */
-    __asm__ volatile ("mov %%cs, %0" : "=r"(kernel_cs));
-
     idtp.limit = sizeof(struct idt_entry) * IDT_ENTRIES - 1;
-    idtp.base = (uint32_t)&idt;
+    idtp.base  = (uint64_t)(uintptr_t)&idt;
 
-    /* Fill every entry with a safe default so any stray vector irets
-       cleanly instead of cascading into a triple fault. */
     for (int i = 0; i < IDT_ENTRIES; i++)
-        idt_set_gate(i, (uint32_t)default_stub);
+        idt_set_gate(i, (uintptr_t)default_stub);
 
-    idt_load((uint32_t)&idtp);
+    idt_load(&idtp);
 }
 
-
-void idt_set_gate(int n, uint32_t handler) {
-    idt[n].baseLow = handler & 0xFFFF;
-    idt[n].baseHigh = (handler >> 16) & 0xFFFF;
-    idt[n].sel = kernel_cs;
-    idt[n].always0 = 0;
-    idt[n].flags = 0x8E;
+void idt_set_gate(int n, uintptr_t handler) {
+    idt[n].offset_low  = (uint16_t)(handler & 0xFFFF);
+    idt[n].offset_mid  = (uint16_t)((handler >> 16) & 0xFFFF);
+    idt[n].offset_high = (uint32_t)((handler >> 32) & 0xFFFFFFFF);
+    idt[n].selector    = 0x08;  /* kernel code segment from our GDT */
+    idt[n].ist         = 0;
+    idt[n].type_attr   = 0x8E;  /* present, DPL=0, interrupt gate   */
+    idt[n].reserved    = 0;
 }

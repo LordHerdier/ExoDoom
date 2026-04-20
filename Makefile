@@ -14,7 +14,7 @@ docker-run: docker-build
 docker-run-kernel: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm -it -v "$(PWD):/work" exodoom-qemu \
-	  'qemu-system-i386 -kernel build/exodoom -m 256M -no-reboot -display curses -serial mon:stdio'
+	  'qemu-system-x86_64 -kernel build/exodoom -m 256M -no-reboot -display curses -serial mon:stdio'
 
 docker-test:
 	docker build -t exodoom-build -f docker/Dockerfile.build docker
@@ -23,7 +23,7 @@ docker-test:
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
 	  set -eu; \
 	  rm -f /work/serial.log; \
-	  timeout 30 qemu-system-i386 \
+	  timeout 30 qemu-system-x86_64 \
 	  -cdrom build/exodoom.iso \
 	  -m 256M \
 	  -no-reboot \
@@ -42,7 +42,7 @@ docker-ci:
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
 	  set -eu; \
 	  rm -f /work/serial.log; \
-	  timeout 30 qemu-system-i386 \
+	  timeout 30 qemu-system-x86_64 \
 	  -cdrom build/exodoom.iso \
 	  -m 256M \
 	  -no-reboot \
@@ -57,10 +57,10 @@ docker-ci:
 docker-run-debug: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm -it -p 1234:1234 -v "$(PWD):/work" exodoom-qemu \
-	'qemu-system-i386 -cdrom build/exodoom.iso -m 256M -no-reboot -serial mon:stdio -s -S'
+	'qemu-system-x86_64 -cdrom build/exodoom.iso -m 256M -no-reboot -serial mon:stdio -s -S'
 
 run: docker-build
-	qemu-system-i386 -m 256M -cdrom build/exodoom.iso -no-reboot -serial stdio
+	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -no-reboot -serial stdio
 
 clean:
 	rm -rf build
