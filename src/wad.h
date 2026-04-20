@@ -30,3 +30,14 @@ uint32_t wad_count_flats(const wad_t *wad);
    If name_out is non-NULL, copies the null-terminated name (<=8 chars) into name_out[9].
    Returns NULL if index is out of range or the lump is out of bounds. */
 const uint8_t *wad_get_flat(const wad_t *wad, uint32_t index, char name_out[9]);
+
+/* Find a map marker lump (e.g. "MAP01") and return its directory index.
+   Returns -1 if not found. */
+int wad_find_map(const wad_t *wad, const char *map_name);
+
+/* Find a lump by name that follows a map marker (within 11 lumps after it).
+   For example, wad_find_map_lump(wad, "MAP01", "VERTEXES", &size) finds
+   the VERTEXES lump belonging to MAP01.
+   Returns pointer to lump data, or NULL if not found. */
+const uint8_t *wad_find_map_lump(const wad_t *wad, const char *map_name,
+                                  const char *lump_name, uint32_t *size_out);

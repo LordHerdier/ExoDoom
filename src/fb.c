@@ -47,6 +47,37 @@ void fb_fill_rect(framebuffer_t* fb, uint32_t x0, uint32_t y0, uint32_t w, uint3
     }
 }
 
+void fb_put_pixel(framebuffer_t* fb, int32_t x, int32_t y, uint8_t r, uint8_t g, uint8_t b) {
+    if (!fb || fb->fmt != FB_PIXFMT_BGRX8888) return;
+    if (x < 0 || y < 0 || (uint32_t)x >= fb->width || (uint32_t)y >= fb->height) return;
+    put_px32_bgrx(fb, (uint32_t)x, (uint32_t)y, pack_bgrx8888(r, g, b));
+}
+
+void fb_draw_line(framebuffer_t* fb, int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                  uint8_t r, uint8_t g, uint8_t b) {
+    if (!fb || fb->fmt != FB_PIXFMT_BGRX8888) return;
+
+    int32_t dx = x1 - x0;
+    int32_t dy = y1 - y0;
+    int32_t sx = (dx >= 0) ? 1 : -1;
+    int32_t sy = (dy >= 0) ? 1 : -1;
+    if (dx < 0) dx = -dx;
+    if (dy < 0) dy = -dy;
+
+    uint32_t px = pack_bgrx8888(r, g, b);
+    int32_t err = dx - dy;
+
+    for (;;) {
+        if (x0 >= 0 && y0 >= 0 && (uint32_t)x0 < fb->width && (uint32_t)y0 < fb->height)
+            put_px32_bgrx(fb, (uint32_t)x0, (uint32_t)y0, px);
+
+        if (x0 == x1 && y0 == y1) break;
+        int32_t e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 <  dx) { err += dx; y0 += sy; }
+    }
+}
+
 void fb_test_byte_lane_probe(framebuffer_t* fb) {
     if (!fb || fb->fmt != FB_PIXFMT_BGRX8888) return;
 

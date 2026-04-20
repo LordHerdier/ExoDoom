@@ -96,6 +96,38 @@ uint32_t wad_count_flats(const wad_t *wad) {
     return count;
 }
 
+int wad_find_map(const wad_t *wad, const char *map_name) {
+    for (uint32_t i = 0; i < wad->numlumps; i++) {
+        const uint8_t *entry = wad->dir_data + i * 16u;
+        if (lump_name_eq(entry + 8, map_name))
+            return (int)i;
+    }
+    return -1;
+}
+
+const uint8_t *wad_find_map_lump(const wad_t *wad, const char *map_name,
+                                  const char *lump_name, uint32_t *size_out) {
+    int map_idx = wad_find_map(wad, map_name);
+    if (map_idx < 0) return (void *)0;
+
+    /* Map sub-lumps appear within 11 entries after the map marker. */
+    uint32_t end = (uint32_t)map_idx + 12;
+    if (end > wad->numlumps) end = wad->numlumps;
+
+    for (uint32_t i = (uint32_t)map_idx + 1; i < end; i++) {
+        const uint8_t *entry = wad->dir_data + i * 16u;
+        if (lump_name_eq(entry + 8, lump_name)) {
+            uint32_t filepos   = read_le32(entry);
+            uint32_t lump_size = read_le32(entry + 4);
+            if (lump_size > wad->data_size || filepos > wad->data_size - lump_size)
+                return (void *)0;
+            if (size_out) *size_out = lump_size;
+            return wad->data + filepos;
+        }
+    }
+    return (void *)0;
+}
+
 const uint8_t *wad_get_flat(const wad_t *wad, uint32_t index, char name_out[9]) {
     uint32_t seen = 0;  /* number of valid flats encountered so far */
     int in_flats = 0;

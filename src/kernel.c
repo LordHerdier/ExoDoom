@@ -1,3 +1,4 @@
+#include "automap.h"
 #include "fb.h"
 #include "fb_console.h"
 #include "flat.h"
@@ -352,6 +353,32 @@ void kernel_main(uint32_t mb_info_addr) {
   }
 
   serial_print("Flat grid rendered.\n");
+  serial_flush();
+
+  kernel_sleep_ms(5000);
+
+  // ── Automap display ─────────────────────────────────────────────────────
+  fb_clear(&fb, 0, 0, 0);
+  fbcon_init(&con, &fb);
+
+  fbcon_set_color(&con, 100, 220, 255, 0, 0, 0);
+  fbcon_write(&con, "ExoDoom Automap — ");
+  fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
+  fbcon_write(&con, "MAP01\n");
+  fbcon_set_color(&con, 60, 60, 60, 0, 0, 0);
+  fbcon_write(&con, "-----------------------------------------------------------"
+                    "--------------------\n");
+
+  klog(&con, kernel_get_ticks_ms(), "Parsing MAP01 geometry from WAD...");
+
+  if (automap_render(&fb, &wad, "MAP01", 40) == 0) {
+    klog(&con, kernel_get_ticks_ms(), "Automap rendered successfully.");
+    serial_print("Automap: MAP01 rendered.\n");
+  } else {
+    klog(&con, kernel_get_ticks_ms(), "ERROR: Could not render MAP01 automap.");
+    serial_print("Automap: MAP01 render failed.\n");
+  }
+
   serial_flush();
 
   for (;;)
