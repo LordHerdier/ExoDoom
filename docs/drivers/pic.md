@@ -1,7 +1,7 @@
 # Driver: PIC (8259A Programmable Interrupt Controller)
 
 **Files:** `src/pic.c`, `src/pic.h`, `src/io.h` **Status:** ✅ Complete **Last
-updated:** 2 Apr 2026
+updated:** 20 Apr 2026
 
 ---
 
@@ -134,13 +134,13 @@ After `pic_remap()`, the mask state is:
 | IRQ  | Line            | Masked?           |
 | ---- | --------------- | ----------------- |
 | 0    | PIT timer       | **No** — unmasked |
-| 1    | PS/2 keyboard   | Yes               |
+| 1    | PS/2 keyboard   | **No** — unmasked (by `kbd_init()`) |
 | 2    | Cascade (slave) | Yes               |
 | 3–7  | Various         | Yes               |
 | 8–15 | Slave IRQs      | Yes (all)         |
 
-IRQs are unmasked as their drivers come online. To unmask IRQ1 (keyboard) when
-its handler is ready:
+IRQs are unmasked as their drivers come online. To unmask an IRQ when its
+handler is ready:
 
 ```c
 // Read current master mask, clear bit 1
@@ -209,7 +209,7 @@ Post-remap mapping used throughout the codebase:
 | IRQ | Vector    | Source                   | Handler status                  |
 | --- | --------- | ------------------------ | ------------------------------- |
 | 0   | 0x20 (32) | PIT channel 0 (timer)    | ✅ `irq0_stub` → `irq0_handler` |
-| 1   | 0x21 (33) | PS/2 keyboard            | 🔄 In progress (SCRUM-13)       |
+| 1   | 0x21 (33) | PS/2 keyboard            | ✅ `irq1_stub` → `irq1_handler` |
 | 2   | 0x22 (34) | Cascade — not a real IRQ | —                               |
 | 4   | 0x24 (36) | COM1 serial (unused)     | —                               |
 | 12  | 0x2C (44) | PS/2 mouse               | ⬜ Sprint 2 (SCRUM-19)          |
@@ -222,7 +222,7 @@ Post-remap mapping used throughout the codebase:
 **Mask everything except IRQ0 at init.** It is safer to start with all IRQs
 masked and unmask them one at a time as handlers are registered, rather than
 unmasking everything and hoping no stray IRQ fires before a handler is ready. A
-spurious unhandled IRQ with only `default_stub` installed will `iret` cleanly
+spurious unhandled IRQ with only `default_stub` installed will `iretq` cleanly
 (for non-error-code vectors) but silently without sending EOI, which will lock
 out that IRQ line permanently until the PIC is reset.
 

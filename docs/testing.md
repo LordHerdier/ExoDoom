@@ -115,7 +115,7 @@ to the COM1 serial port.
 ## Serial output format
 
 ```
-Kernel Booted
+Kernel Booted (x86_64)
 
 === KUnit Test Runner ===
 

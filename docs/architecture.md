@@ -1,6 +1,6 @@
 # ExoDoom Architecture
 
-**Last updated:** 2 Apr 2026 — reflects Sprint 1 state
+**Last updated:** 20 Apr 2026 — reflects x86_64 migration
 
 ---
 
@@ -27,7 +27,7 @@
 
 ## 1. Project goal
 
-ExoDoom is a bare-metal i386 exokernel whose primary goal is to run
+ExoDoom is a bare-metal x86_64 exokernel whose primary goal is to run
 [Doom](https://github.com/ozkl/doomgeneric) directly on hardware, without a
 conventional operating system underneath it. The project serves as both a
 systems programming exercise and a demonstration that an exokernel can provide
@@ -69,7 +69,7 @@ In ExoDoom's model:
 ├──────────────────────────────────────────────────────┤
 │                  LibOS / libc shim                   │  malloc, printf, FILE*, math stubs
 ├──────────────────────────────────────────────────────┤
-│            Exokernel  (ExoDoom kernel)               │  21 syscalls  ·  int 0x80
+│            Exokernel  (ExoDoom kernel)               │  21 syscalls  ·  syscall
 ├────────────┬──────────┬──────────┬───────────────────┤
 │  Physical  │  Timer   │  Input   │   Framebuffer     │  bare hardware
 │  memory    │  (PIT)   │ PS/2 kbd │   (VESA/BGRX)     │
@@ -82,14 +82,14 @@ In ExoDoom's model:
 
 ### Kernel (ring 0)
 
-Written in freestanding C (gnu99) and x86 assembly. No libc. No external
+Written in freestanding C (gnu99) and x86_64 assembly. No libc. No external
 dependencies beyond `libgcc` for compiler builtins. Responsible for:
 
 - Physical memory management (page allocator, mmap parsing)
-- Virtual memory (page tables, `CR3`)
-- Interrupt handling (IDT, PIC remapping, IRQ dispatch)
+- Virtual memory (4-level page tables, `CR3`)
+- Interrupt handling (64-bit IDT, PIC remapping, IRQ dispatch)
 - Hardware drivers: PIT, PS/2 keyboard, PS/2 mouse, serial (COM1), framebuffer
-- The syscall gate (`int 0x80`) and all 21 `exo_*` syscall implementations
+- The syscall gate (`syscall`/`sysret`) and all 21 `exo_*` syscall implementations
 - A minimal ramdisk filesystem for config and save files
 
 ### LibOS (ring 3, planned)
@@ -122,47 +122,72 @@ mouse events from `exo_mouse_poll` rather than SDL.
 BIOS / UEFI
     │
     ▼
-GRUB 2  (grub.cfg: gfxpayload=keep, multiboot /boot/exodoom)
-    │  loads kernel ELF at 2M, loads freedoom2.wad as multiboot module
-    │  sets up framebuffer via VESA, passes multiboot_info* in %ebx
+GRUB 2  (grub.cfg: gfxpayload=keep, multiboot2 /boot/exodoom)
+    │  loads kernel ELF64 at 2M, loads freedoom2.wad as multiboot2 module
+    │  sets up framebuffer via VESA, passes multiboot2 info struct* in %ebx
+    │  enters kernel in 32-bit protected mode
     ▼
-_start  (src/boot.s)
-    │  sets .set FLAGS = ALIGN|MEMINFO|VIDEO in multiboot header
-    │  requests 1024×768×32 linear framebuffer from GRUB
-    │  sets up 16 KiB stack, pushes %ebx (mb_info_addr), calls kernel_main
+_start  (src/boot.s, .code32 — 32-bit trampoline)
+    │  Multiboot 2 header: magic 0xE85250D6, framebuffer request tag (1024×768×32)
+    │  saves MB2 info pointer from %ebx → %edi
+    │  zeroes 24 KiB of page table memory (PML4 + PDPT + 4×PD)
+    │  builds 4 GB identity map with 2 MB pages:
+    │    PML4[0] → PDPT, PDPT[0..3] → PD0..PD3, each PD has 512 × 2 MB entries
+    │  loads CR3 with PML4 address
+    │  enables PAE (CR4 bit 5)
+    │  sets EFER.LME (MSR 0xC0000080 bit 8) — enables long mode
+    │  sets CR0.PG (bit 31) — activates paging → long mode active
+    │  loads 64-bit GDT (null + code 0x08 + data 0x10)
+    │  ljmp $0x08, $_start64
+    ▼
+_start64  (src/boot.s, .code64 — 64-bit entry)
+    │  sets segment registers (DS/ES/FS/GS/SS) to 0x10 (data selector)
+    │  sets RSP to stack_top (16 KiB stack in BSS)
+    │  zero-extends EDI → RDI (MB2 info pointer, System V AMD64 ABI first arg)
+    │  call kernel_main
     ▼
 kernel_main  (src/kernel.c)
     │
     ├─ serial_init()          — COM1 at 38400 baud, FIFO enabled
-    ├─ mmap_init(mb)          — parse multiboot mmap, record usable/reserved regions
+    ├─ fb init                — parse MB2 framebuffer tag (type 8), init fb_console
+    ├─ mmap_init(mb)          — parse MB2 memory map tag (type 6)
     ├─ memory_init()          — set bump allocator base to align_up(&_bss_end, 4K)
     │
     │  [if compiled with -DTESTING]
     ├─ run_tests()            — KUnit test runner, exits QEMU with pass/fail code
     │
     │  [normal boot]
-    ├─ idt_init()             — fill all 256 IDT entries with default_stub, lidt
+    ├─ idt_init()             — fill all 256 16-byte IDT entries with default_stub, lidt
     ├─ pic_remap()            — remap PIC1→0x20, PIC2→0x28 (avoids BIOS conflict)
     ├─ idt_set_gate(32, irq0_stub) — wire IRQ0 to PIT handler
     ├─ pit_init(1000)         — PIT channel 0 at 1000 Hz (1 ms tick)
+    ├─ idt_set_gate(33, irq1_stub) — wire IRQ1 to keyboard handler
+    ├─ kbd_init()             — PS/2 keyboard initialised, IRQ1 unmasked
     ├─ sti                    — enable interrupts
     │
-    └─ [framebuffer init, fb_console, LibOS launch — Sprint 2+]
+    └─ boot demo (banner, memory map, timer countdown) → hlt loop
 ```
 
 Key details:
 
-- The kernel is linked at **virtual address 2M** (`linker.ld`: `. = 2M`). This
-  is also the physical load address pre-paging, so the initial identity mapping
-  is trivial.
-- GRUB passes a `multiboot_info*` struct in `%ebx`. `boot.s` pushes it as the
-  single argument to `kernel_main` (i386 calling convention: first arg on
-  stack).
-- The multiboot header requests `mode_type=0` (linear framebuffer), 1024×768×32.
-  GRUB picks a compatible mode and fills `mb->framebuffer_*` fields.
+- The kernel is linked at **virtual address 2M** (`linker.ld`: `. = 2M`). The
+  boot trampoline identity-maps the first 4 GB with 2 MB pages, so virtual ==
+  physical for the entire low address space including the framebuffer (typically
+  at ~0xFD000000 in the PCI MMIO aperture).
+- GRUB enters the kernel in **32-bit protected mode** per the Multiboot 2 spec.
+  The trampoline in `boot.s` transitions to 64-bit long mode before calling
+  `kernel_main`.
+- GRUB passes the MB2 info struct address in `%ebx`. The trampoline saves it in
+  `%edi`, which is zero-extended to `%rdi` — the first argument register in the
+  System V AMD64 ABI.
+- The Multiboot 2 info struct uses a **tag-based format**. Tags are iterated
+  with `mb2_find_tag()` to locate the framebuffer (type 8), memory map (type 6),
+  and modules (type 3).
+- The framebuffer is initialised **before** interrupts, so the boot banner and
+  memory map are displayed on screen during early boot.
 - The WAD file (`freedoom2.wad`) is declared as a GRUB module and is already
   mapped in physical memory by the time `kernel_main` runs. Its address and size
-  are in the `multiboot_info` modules list.
+  are in a Multiboot 2 module tag (type 3).
 
 ---
 
@@ -171,14 +196,15 @@ Key details:
 ### 5.1 Memory
 
 **Files:** `src/memory.c`, `src/memory.h`, `src/mmap.c`, `src/mmap.h`,
-`src/multiboot.h`
+`src/multiboot2.h`
 
 **Current state (Sprint 1):** Two-phase design, partially complete.
 
-**Phase 1 — Multiboot mmap parsing** ✅ Done (SCRUM-6): `mmap_init()` walks the
-multiboot memory map entries and stores up to 32 `mmap_region_t` records (base,
-length, type). Usable RAM regions are type 1 (`MULTIBOOT_MMAP_AVAILABLE`). On
-QEMU `-m 256M` this yields a large usable region starting just above 1M.
+**Phase 1 — Multiboot 2 mmap parsing** ✅ Done (SCRUM-6): `mmap_init()` locates
+the memory map tag (type 6) in the Multiboot 2 info struct and stores up to 32
+`mmap_region_t` records (base, length, type). Usable RAM regions are type 1
+(`MB2_MMAP_AVAILABLE`). On QEMU `-m 256M` this yields a large usable region
+starting just above 1M.
 
 **Phase 2 — Bump allocator** ✅ Done: `memory_init()` sets
 `placement_address = align_up(&_bss_end, 4K)`. `kmalloc(size)` bumps the pointer
@@ -193,10 +219,11 @@ bump-allocated region. Double-free detection is required.
 must mark pages occupied by the kernel image (`_load_start`→`_bss_end`) and the
 WAD module as unavailable, so they are never handed out.
 
-**Future (Sprint 2):** Paging enabled (`CR0.PG`), kernel identity-mapped,
-framebuffer and WAD mapped at fixed virtual addresses. `exo_page_alloc` /
-`exo_page_map` / `exo_page_unmap` syscalls exposed to LibOS (SCRUM-15, -16,
--17).
+**Note:** Paging is already enabled at boot — the trampoline in `boot.s` sets up
+4-level page tables (PML4 → PDPT → PD) identity-mapping the first 4 GB with
+2 MB pages before entering long mode. Future work will refine this with proper
+page-granularity mappings and `exo_page_alloc` / `exo_page_map` /
+`exo_page_unmap` syscalls exposed to LibOS (SCRUM-15, -16, -17).
 
 **Memory map (QEMU, at boot, pre-paging):**
 
@@ -219,45 +246,39 @@ framebuffer and WAD mapped at fixed virtual addresses. `exo_page_alloc` /
 **Files:** `src/idt.c`, `src/idt.h`, `src/isr.s`, `src/pic.c`, `src/pic.h`,
 `src/io.h`
 
-The x86 IDT has 256 entries. ExoDoom initialises all of them during
-`idt_init()`:
+The x86_64 IDT has 256 entries, each **16 bytes** (vs. 8 bytes in 32-bit mode).
+ExoDoom initialises all of them during `idt_init()`:
 
-1. The current code segment selector is read from `%cs` at runtime rather than
-   hard-coded — a GRUB-provided selector mismatch causes a triple fault on the
-   first `iret`.
-2. Every entry is filled with `default_stub` — a bare `iret` in `src/isr.s`.
-   This is safe for most vectors but **not** for exception vectors that push an
-   error code (see blocker below).
-3. `idt_load()` executes `lidt` with the IDT pointer.
+1. Every entry is filled with `default_stub` — a bare `iretq` in `src/isr.s`.
+   The code segment selector is hardcoded to `0x08` (the kernel's own GDT code
+   segment).
+2. `idt_load()` is called via the System V AMD64 ABI — the IDT pointer address
+   is passed in `%rdi`, and `lidt (%rdi)` loads the IDT register.
 
 The 8259A PIC ships with IRQ vectors 0–15 mapped to CPU exception vectors 0–15,
 which would conflict. `pic_remap()` reinitialises both PICs via ICW1–ICW4 to map
-IRQ0–7 → vectors 0x20–0x27 and IRQ8–15 → 0x28–0x2F. All IRQs except IRQ0 (timer)
-are then masked.
+IRQ0–7 → vectors 0x20–0x27 and IRQ8–15 → 0x28–0x2F. All IRQs except IRQ0
+(timer) and IRQ1 (keyboard) are then masked.
 
-IRQ0 (the PIT timer) is routed through `irq0_stub` in `src/isr.s`, which saves
-all registers with `pusha`, calls `irq0_handler()` in C, and restores them
-before `iret`.
+IRQ stubs in `src/isr.s` manually save caller-saved registers (`rax`, `rcx`,
+`rdx`, `rsi`, `rdi`, `r8`–`r11`) via `PUSH_REGS`/`POP_REGS` macros, call the
+C handler, restore registers, and execute `iretq`. The 64-bit `pusha`/`popa`
+instructions do not exist in long mode.
 
-> ⚠️ **Active blocker (SCRUM-135, High):** CPU exception vectors 8, 10–14, 17,
-> 21, 29, and 30 push a hardware error code onto the stack before transferring
-> control. The current `default_stub` does a bare `iret`, which pops the error
-> code as the return `%eip` and misaligns the stack — causing a triple fault.
-> **Any page fault (vector 14) or GPF (vector 13) will hard-crash the machine**
-> until a separate `error_stub` (which pops the error code before `iret`) is
-> implemented and installed on these vectors. This must be resolved before
-> paging work begins in Sprint 2.
+> ⚠️ **Open issue (SCRUM-135):** CPU exception vectors that push error codes
+> (8, 10–14, 17, 21, 29, 30) still use `default_stub` which does a bare
+> `iretq`. A dedicated `error_stub` that pops the error code before `iretq`
+> must be installed before paging refinement work begins.
 
-**Planned dedicated handlers (Sprint 2+):**
+**Handler status:**
 
-| Vector | Exception                | Handler plan                                        |
-| ------ | ------------------------ | --------------------------------------------------- |
-| 13     | General Protection Fault | Serial diagnostic + halt                            |
-| 14     | Page Fault               | Print CR2, error code, faulting EIP to serial; halt |
-| 32     | IRQ0 / Timer             | `irq0_stub` → `irq0_handler` ✅ Done                |
-| 33     | IRQ1 / Keyboard          | `irq1_stub` → `irq1_handler` (SCRUM-13)             |
-| 44     | IRQ12 / Mouse            | `irq12_stub` → `irq12_handler` (SCRUM-19)           |
-| 0x80   | Syscall gate             | `syscall_stub` → dispatch table (Sprint 3+)         |
+| Vector | Exception                | Handler status                                       |
+| ------ | ------------------------ | ---------------------------------------------------- |
+| 13     | General Protection Fault | Planned: serial diagnostic + halt                    |
+| 14     | Page Fault               | Planned: print CR2, error code, faulting RIP to serial |
+| 32     | IRQ0 / Timer             | ✅ `irq0_stub` → `irq0_handler`                      |
+| 33     | IRQ1 / Keyboard          | ✅ `irq1_stub` → `irq1_handler`                      |
+| 44     | IRQ12 / Mouse            | ⬜ Sprint 2 (SCRUM-19)                                |
 
 ---
 
@@ -312,11 +333,11 @@ check.
 
 **Files:** `src/fb.c`, `src/fb.h`, `src/fb_console.c`, `src/fb_console.h`
 
-**Status:** Implemented, not yet wired into normal boot path (unreachable after
-`qemu_exit(0)` in current `kernel_main`; will be activated Sprint 2+).
+**Status:** ✅ Implemented and active — wired into the boot path. The boot
+banner, memory map, and timer demo are displayed on the framebuffer console.
 
 GRUB sets up a VESA linear framebuffer and passes its physical address, pitch,
-width, height, and bpp in the `multiboot_info` struct. The empirically confirmed
+width, height, and bpp in a Multiboot 2 framebuffer tag (type 8). The empirically confirmed
 pixel format on QEMU is **BGRX8888** — each pixel is 4 bytes in memory order
 `[B][G][R][X]`, equivalent to the 32-bit value `0x00RRGGBB` on a little-endian
 machine.
@@ -342,10 +363,9 @@ apps each get a virtual framebuffer and the kernel manages which is displayed.
 
 ### 5.6 Keyboard
 
-**Files:** `src/isr.s` (stub), `src/idt.c` (gate) — driver not yet in its own
-file
+**Files:** `src/ps2.c`, `src/ps2.h`, `src/isr.s` (IRQ1 stub), `src/idt.c` (gate)
 
-**Status:** 🔄 In Progress (SCRUM-13, SCRUM-14)
+**Status:** ✅ IRQ1 handler and scan code processing complete (SCRUM-13, SCRUM-14)
 
 The PS/2 keyboard controller maps to IRQ1 (IDT vector 33). When a key is pressed
 or released, the controller raises IRQ1 and places a scan code (Set 1) in port
@@ -366,9 +386,11 @@ PS/2 mouse (IRQ12, port `0x60`/`0x64`, 3-byte packets) follows in Sprint 2
 
 **Full specification:** [`docs/syscall-spec.md`](syscall-spec.md)
 
-Syscalls use `int 0x80` with the syscall number in `EAX` and up to 5 arguments
-in `EBX`, `ECX`, `EDX`, `ESI`, `EDI`. Return value in `EAX`; negative values are
-error codes.
+Syscalls will use the `syscall`/`sysret` instruction pair (x86_64 fast syscall
+mechanism). The syscall number will be in `RAX` and arguments in `RDI`, `RSI`,
+`RDX`, `R10`, `R8`, `R9` (following the System V AMD64 convention with `R10`
+replacing `RCX` since `syscall` clobbers it). Return value in `RAX`; negative
+values are error codes.
 
 The 21 syscalls grouped by category:
 
@@ -395,8 +417,8 @@ paging is stable and the LibOS address space exists.
 
 ### WAD loading
 
-`freedoom2.wad` is passed as a GRUB multiboot module. Its physical address and
-size are available in `multiboot_info->mods_addr`. The recommended approach is a
+`freedoom2.wad` is passed as a GRUB Multiboot 2 module (tag type 3). Its physical
+address and size are available in the module tag. The recommended approach is a
 **memory-mapped WAD reader**: `fopen("freedoom2.wad")` in the LibOS returns a
 fake `FILE*` backed by a pointer into the module's mapped memory, and
 `fread`/`fseek` operate as offset arithmetic over that region. This avoids
@@ -425,7 +447,7 @@ complete audit.
 
 The eventual goal is **cooperative multitasking** between the Doom LibOS and a
 minimal shell LibOS. The kernel maintains a context table (`SCRUM-107`): each
-LibOS has its own page directory (`CR3`), saved register set, and framebuffer
+LibOS has its own PML4 (`CR3`), saved register set, and framebuffer
 region. `exo_yield` triggers a context switch (save registers + `CR3` swap). A
 keyboard hotkey (Ctrl+Tab) swaps input focus and the active framebuffer.
 
@@ -466,22 +488,27 @@ Makefile changes needed.
 
 The entire toolchain runs inside Docker. No host cross-compiler is required.
 
-| Image                            | Purpose                                                       |
-| -------------------------------- | ------------------------------------------------------------- |
-| `techiekeith/gcc-cross-i686-elf` | `i686-elf-gcc`, `i686-elf-as`, `i686-elf-ld` cross toolchain  |
-| `docker/Dockerfile.build`        | Adds GRUB ISO tools (`grub-mkrescue`, `grub-file`, `xorriso`) |
-| `docker/Dockerfile.qemu`         | `qemu-system-i386` for running the ISO                        |
+| Image                     | Purpose                                                                   |
+| ------------------------- | ------------------------------------------------------------------------- |
+| `docker/Dockerfile.build` | Multi-stage build: compiles `x86_64-elf-binutils` 2.42 + `x86_64-elf-gcc` 13.2.0 from source, then creates a slim runtime image with GRUB ISO tools (`grub-mkrescue`, `grub-file`, `xorriso`) |
+| `docker/Dockerfile.qemu`  | `qemu-system-x86_64` for running the ISO                                 |
 
 **Build pipeline (`build.sh`):**
 
-1. Assemble `src/boot.s` → `build/boot.o` (i686-elf-as)
-2. Compile all `src/*.c` with `-std=gnu99 -ffreestanding [-g -O0 | -O2]`
+1. Assemble `src/boot.s` → `build/boot.o` (`x86_64-elf-as`)
+2. Compile all `src/*.c` with `-std=gnu99 -ffreestanding -mno-red-zone -mcmodel=small -mno-sse -mno-sse2 -mno-mmx [-g -O0 | -O2]`
 3. Assemble `src/isr.s` → `build/isr.o`
 4. If `TESTING=1`: compile all `tests/kernel/*.c` with `-I src/`
-5. Link everything with `src/linker.ld`, `-nostdlib`, `-lgcc` → `build/exodoom`
-6. Validate multiboot header with `grub-file --is-x86-multiboot`
+5. Link everything with `src/linker.ld`, `-nostdlib`, `-z max-page-size=0x1000`, `-lgcc` → `build/exodoom` (ELF64)
+6. Validate multiboot header with `grub-file --is-x86-multiboot2`
 7. Stage ISO tree under `build/isodir/boot/`
 8. `grub-mkrescue` → `build/exodoom.iso`
+
+**Critical CFLAGS for x86_64 kernel code:**
+
+- `-mno-red-zone` — mandatory; without it, interrupt handlers corrupt the 128-byte red zone below RSP
+- `-mcmodel=small` — code/data assumed in lower 2 GB
+- `-mno-sse -mno-sse2 -mno-mmx` — prevents GCC from emitting SIMD instructions (avoids needing to save/restore XMM state in ISRs)
 
 **Key make targets:**
 
@@ -507,7 +534,7 @@ bare-metal foundations to a playable game.
 
 | Sprint                                                  | Focus                                    | Key deliverables                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | ------------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Sprint 1: Memory + Timer** _(current)_                | Foundations                              | Multiboot mmap ✅, bump allocator ✅, bitmap page allocator 🔄, PIT/timer ✅, sleep ✅, string.h ✅, ctype.h ✅, KUnit ✅, PS/2 IRQ1 🔄, error_stub bug fix ⬜                                                                                                                                                                                                                                                                              |
+| **Sprint 1: Memory + Timer**                            | Foundations                              | Multiboot 2 mmap ✅, bump allocator ✅, bitmap page allocator 🔄, PIT/timer ✅, sleep ✅, string.h ✅, ctype.h ✅, KUnit ✅, PS/2 keyboard ✅, x86_64 migration ✅, error_stub bug fix ⬜                                                                                                                                                                                                                                                    |
 | **Sprint 2: VMem + Input + libc**                       | Virtual memory + input                   | Paging on (identity map), page fault handler, framebuffer+WAD mapped, keyboard ring buffer, PS/2 mouse init, `printf`→serial shim                                                                                                                                                                                                                                                                                                           |
 | **Sprint 3: Heap+Mouse+Syscalls** _(20 Apr – 4 May)_    | Kernel heap + syscall gate               | First-fit heap allocator (`kmalloc`/`kfree`/`krealloc`) backed by PMM, mouse packet decoding + delta accumulator, `stdlib.h` wrappers (`malloc`/`free`/`realloc`, `atoi`, `abs`, `qsort`), `errno`/`assert`/`abort`, `int 0x80` trap gate in IDT, `exo_get_ticks` as first end-to-end syscall                                                                                                                                               |
 | **Sprint 4: LibOS mem+input+math** _(4 May – 18 May)_   | LibOS address space + remaining syscalls | `exo_page_alloc`/`exo_page_free`/`exo_page_map`/`exo_fb_map` in dispatcher, LibOS-side page allocator + heap, `exo_get_key`/`exo_get_mouse_delta` syscalls, Doom keycode → PS/2 scancode translation, `math.h` (fixed-point sin/cos table, `abs`, `floor`/`ceil`), `FILE*` shim (`fopen`/`fclose`/`fread`/`fwrite`/`fseek`/`ftell`) backed by `exo_file_*`, `strcasecmp`/`strncasecmp`, `exo_file_*` kernel dispatcher                      |

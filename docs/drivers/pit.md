@@ -1,7 +1,7 @@
 # Driver: PIT (8253/8254 Programmable Interval Timer)
 
 **Files:** `src/pit.c`, `src/pit.h`, `src/sleep.c`, `src/sleep.h` **Status:** ✅
-Complete (SCRUM-9, SCRUM-10) **Last updated:** 2 Apr 2026
+Complete (SCRUM-9, SCRUM-10) **Last updated:** 20 Apr 2026
 
 ---
 
@@ -99,8 +99,9 @@ system timer.
 ## 4. IRQ0 handler
 
 `irq0_handler()` is the C function called from the `irq0_stub` assembly stub in
-`src/isr.s`. The stub saves all registers (`pusha`), calls `irq0_handler`,
-restores them (`popa`), and executes `iret`.
+`src/isr.s`. The stub saves caller-saved registers (`PUSH_REGS` macro: `rax`,
+`rcx`, `rdx`, `rsi`, `rdi`, `r8`–`r11`), calls `irq0_handler`, restores them
+(`POP_REGS`), and executes `iretq`.
 
 ```c
 static volatile uint32_t ticks = 0;
