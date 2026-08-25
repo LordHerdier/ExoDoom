@@ -10,6 +10,7 @@
 
 .set MB2_MAGIC,     0xE85250D6
 .set MB2_ARCH_X86,  0
+.set MB2_BOOT_MAGIC, 0x36D76289   /* magic GRUB passes back in EAX */
 .set MB2_HLEN,      multiboot2_header_end - multiboot2_header
 .set MB2_CHECKSUM,  -(MB2_MAGIC + MB2_ARCH_X86 + MB2_HLEN)
 
@@ -83,6 +84,14 @@ gdt64_ptr:
 .type _start, @function
 _start:
     /* EAX = multiboot2 magic, EBX = info struct physical address */
+
+    /* ── Verify GRUB passed the Multiboot2 magic ─────────────────── */
+    /* No serial/console yet this early — an untrusted EAX means EBX  */
+    /* may be garbage, so on mismatch just hang safely instead of     */
+    /* dereferencing it later in kernel_main.                         */
+    cmp $MB2_BOOT_MAGIC, %eax
+    jne .Lhang
+
     mov %ebx, %edi              /* save MB2 info pointer in EDI         */
 
     /* ── Zero page-table memory (6 pages × 4096 bytes = 24 KiB) ───── */
@@ -154,6 +163,11 @@ _start:
     /* ── Load 64-bit GDT and far-jump to 64-bit code ────────────── */
     lgdt gdt64_ptr
     ljmp $0x08, $_start64
+
+.Lhang:
+    cli
+1:  hlt
+    jmp 1b
 
 /* ── 64-bit entry ──────────────────────────────────────────────────── */
 .code64
