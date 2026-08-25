@@ -168,11 +168,8 @@ void kernel_main(void *mb2_info_ptr) {
     const struct mb2_info *mb = (const struct mb2_info *)mb2_info_ptr;
     serial_print("Kernel Booted (x86_64)\n");
 
-    // ── Framebuffer init ────────────────────────────────────────────────
+    // ── Framebuffer discovery (serial diagnostics only; no console yet) ──
     const struct mb2_tag *fb_tag = mb2_find_tag(mb, MB2_TAG_FRAMEBUFFER);
-    framebuffer_t fb;
-    fb_console_t con;
-    int have_fb = 0;
 
     if (fb_tag) {
         const struct mb2_tag_framebuffer *fbi =
@@ -187,6 +184,27 @@ void kernel_main(void *mb2_info_ptr) {
         serial_print(" ");
         serial_print_u32(fbi->bpp);
         serial_print("bpp\n");
+    }
+
+    // ── Memory map ──────────────────────────────────────────────────────
+    mmap_init(mb);
+
+    // ── Memory subsystem ────────────────────────────────────────────────
+    memory_init();
+
+#ifdef TESTING
+    serial_flush();
+    qemu_exit((uint32_t)run_tests());
+#endif
+
+    // ── Framebuffer init ────────────────────────────────────────────────
+    framebuffer_t fb;
+    fb_console_t con;
+    int have_fb = 0;
+
+    if (fb_tag) {
+        const struct mb2_tag_framebuffer *fbi =
+            (const struct mb2_tag_framebuffer *)fb_tag;
 
         if (fb_init_bgrx8888(&fb,
                               (uintptr_t)fbi->addr,
@@ -202,6 +220,7 @@ void kernel_main(void *mb2_info_ptr) {
 
     if (!have_fb) {
         serial_print("FATAL: no framebuffer\n");
+        serial_flush();
         for (;;);
     }
 
@@ -231,17 +250,7 @@ void kernel_main(void *mb2_info_ptr) {
     fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
     fbcon_write(&con, "\n");
 
-    // ── Memory map ──────────────────────────────────────────────────────
-    mmap_init(mb);
     print_mmap(&con);
-
-    // ── Memory subsystem ────────────────────────────────────────────────
-    memory_init();
-
-#ifdef TESTING
-    serial_flush();
-    qemu_exit((uint32_t)run_tests());
-#endif
 
     log_prefix(&con, 0);
     fbcon_write(&con, "Kernel allocator base: 0x");
