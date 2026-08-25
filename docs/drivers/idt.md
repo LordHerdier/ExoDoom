@@ -195,6 +195,30 @@ restore the caller-saved registers:
 .endm
 ```
 
+### `ALIGN_CALL_STACK` / `RESTORE_CALL_STACK`
+
+```asm
+.macro ALIGN_CALL_STACK
+    push %rbp
+    mov  %rsp, %rbp
+    and  $-16, %rsp
+.endm
+
+.macro RESTORE_CALL_STACK
+    mov  %rbp, %rsp
+    pop  %rbp
+.endm
+```
+
+The System V AMD64 ABI requires `%rsp % 16 == 0` immediately before a `call`.
+The CPU does not guarantee any particular alignment of `%rsp` at interrupt
+entry, and the byte-count of `PUSH_REGS` is not a reliable way to *derive*
+alignment for every possible incoming `%rsp`. `ALIGN_CALL_STACK` saves the
+exact pre-alignment `%rsp` via `%rbp` (callee-saved, so safe to use as a
+temporary anchor) and masks `%rsp` to 16 bytes; `RESTORE_CALL_STACK` undoes
+the masking and restores `%rbp`, leaving `%rsp` exactly where it was before
+`ALIGN_CALL_STACK` ran, and `%rbp` restored to its original value.
+
 ### `irq0_stub`
 
 ```asm
@@ -203,14 +227,16 @@ restore the caller-saved registers:
 
 irq0_stub:
     PUSH_REGS
+    ALIGN_CALL_STACK
     call irq0_handler
+    RESTORE_CALL_STACK
     POP_REGS
     iretq
 ```
 
 Installed on vector 32 (IRQ0 / PIT timer). After `irq0_handler` returns
-(having sent EOI), registers are restored and `iretq` returns to the
-interrupted context.
+(having sent EOI), the call stack is restored, registers are restored, and
+`iretq` returns to the interrupted context.
 
 ### `irq1_stub`
 
@@ -220,7 +246,9 @@ interrupted context.
 
 irq1_stub:
     PUSH_REGS
+    ALIGN_CALL_STACK
     call irq1_handler
+    RESTORE_CALL_STACK
     POP_REGS
     iretq
 ```
@@ -428,6 +456,17 @@ by the C handler per the System V AMD64 ABI.
 zone" below RSP that functions can use without adjusting RSP. Interrupt handlers
 would corrupt this zone if the compiler assumes it is safe. The kernel is
 compiled with `-mno-red-zone` to prevent the compiler from using the red zone.
+
+**Stack alignment before `call` is not free.** The System V AMD64 ABI requires
+`%rsp % 16 == 0` immediately before a `call` instruction. The CPU does not
+guarantee any particular alignment of `%rsp` at interrupt entry, so the exact
+byte-count of `PUSH_REGS` (72 bytes) cannot be relied on to produce alignment
+for every possible incoming `%rsp` — it was arithmetic coincidence, not an
+enforced invariant. `irq0_stub`/`irq1_stub` wrap their `call` in
+`ALIGN_CALL_STACK`/`RESTORE_CALL_STACK` (see §5), which saves the exact
+pre-alignment `%rsp` via `%rbp` (callee-saved, so safe to use as a temporary
+anchor), masks `%rsp` to 16 bytes for the call, and restores the saved value
+afterward so `POP_REGS`/`iretq` see the untouched interrupt frame.
 
 **Segment registers are largely irrelevant.** In 64-bit long mode, `CS` is
 required for privilege level transitions but `DS`, `ES`, `SS` are ignored for
