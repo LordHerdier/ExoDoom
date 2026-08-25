@@ -23,6 +23,11 @@ static struct idt_ptr idtp;
 
 extern void idt_load(struct idt_ptr *);
 extern void default_stub(void);
+extern void error_stub(void);
+
+/* Vectors that push a hardware error code (SCRUM-135). default_stub's bare
+ * iretq cannot handle these safely — error_stub must be installed instead. */
+static const int error_code_vectors[] = { 8, 10, 11, 12, 13, 14, 17, 21, 29, 30 };
 
 void idt_init() {
     idtp.limit = sizeof(struct idt_entry) * IDT_ENTRIES - 1;
@@ -30,6 +35,9 @@ void idt_init() {
 
     for (int i = 0; i < IDT_ENTRIES; i++)
         idt_set_gate(i, (uintptr_t)default_stub);
+
+    for (unsigned i = 0; i < sizeof(error_code_vectors) / sizeof(error_code_vectors[0]); i++)
+        idt_set_gate(error_code_vectors[i], (uintptr_t)error_stub);
 
     idt_load(&idtp);
 }
