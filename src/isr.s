@@ -65,3 +65,30 @@ irq1_stub:
     call irq1_handler
     POP_REGS
     iretq
+
+/*
+ * ── error_stub — absorbs the 10 error-code exception vectors ───────────
+ * (SCRUM-135) Installed on vectors 8, 10, 11, 12, 13, 14, 17, 21, 29, 30.
+ * Those vectors push an 8-byte error code below the normal interrupt frame
+ * (RIP/CS/RFLAGS/RSP/SS). default_stub's bare `iretq` would misread that
+ * error code as the return RIP and misalign the stack, triple-faulting the
+ * machine. There is no dedicated C fault handler yet (page-fault handling
+ * is Sprint 2 work), so this stub just needs to safely discard the error
+ * code and return, leaving the machine in a coherent (if diagnostic-free)
+ * state instead of triple-faulting.
+ *
+ * Stack layout at entry (top of stack downward):
+ *   [error code]  <- pushed by CPU
+ *   [RIP][CS][RFLAGS][RSP][SS]  <- pushed by CPU (the iretq frame)
+ *
+ * After PUSH_REGS, the error code sits 72 bytes below the top of our saved
+ * registers (9 * 8 bytes). POP_REGS restores those 9 registers, leaving the
+ * error code back on top of the stack, immediately below the iretq frame —
+ * `add $8, %rsp` discards exactly the error code and nothing else.
+ */
+.global error_stub
+error_stub:
+    PUSH_REGS
+    POP_REGS
+    add  $8, %rsp        // discard the CPU-pushed error code
+    iretq
