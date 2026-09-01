@@ -160,8 +160,9 @@ default_stub:
 ```
 
 Installed on all 256 IDT entries during `idt_init`. Silently returns from any
-unhandled interrupt or exception — correct for non-error-code vectors, **fatal
-for error-code vectors** (see §7 and §10).
+unhandled interrupt or exception — correct for non-error-code vectors. The 10
+error-code vectors (see §7) are overridden with `error_stub` after the fill
+loop, so `default_stub` never actually runs on those.
 
 ### Register save/restore macros
 
@@ -194,6 +195,30 @@ restore the caller-saved registers:
 .endm
 ```
 
+### `ALIGN_CALL_STACK` / `RESTORE_CALL_STACK`
+
+```asm
+.macro ALIGN_CALL_STACK
+    push %rbp
+    mov  %rsp, %rbp
+    and  $-16, %rsp
+.endm
+
+.macro RESTORE_CALL_STACK
+    mov  %rbp, %rsp
+    pop  %rbp
+.endm
+```
+
+The System V AMD64 ABI requires `%rsp % 16 == 0` immediately before a `call`.
+The CPU does not guarantee any particular alignment of `%rsp` at interrupt
+entry, and the byte-count of `PUSH_REGS` is not a reliable way to *derive*
+alignment for every possible incoming `%rsp`. `ALIGN_CALL_STACK` saves the
+exact pre-alignment `%rsp` via `%rbp` (callee-saved, so safe to use as a
+temporary anchor) and masks `%rsp` to 16 bytes; `RESTORE_CALL_STACK` undoes
+the masking and restores `%rbp`, leaving `%rsp` exactly where it was before
+`ALIGN_CALL_STACK` ran, and `%rbp` restored to its original value.
+
 ### `irq0_stub`
 
 ```asm
@@ -202,14 +227,16 @@ restore the caller-saved registers:
 
 irq0_stub:
     PUSH_REGS
+    ALIGN_CALL_STACK
     call irq0_handler
+    RESTORE_CALL_STACK
     POP_REGS
     iretq
 ```
 
 Installed on vector 32 (IRQ0 / PIT timer). After `irq0_handler` returns
-(having sent EOI), registers are restored and `iretq` returns to the
-interrupted context.
+(having sent EOI), the call stack is restored, registers are restored, and
+`iretq` returns to the interrupted context.
 
 ### `irq1_stub`
 
@@ -219,12 +246,33 @@ interrupted context.
 
 irq1_stub:
     PUSH_REGS
+    ALIGN_CALL_STACK
     call irq1_handler
+    RESTORE_CALL_STACK
     POP_REGS
     iretq
 ```
 
 Installed on vector 33 (IRQ1 / PS/2 keyboard).
+
+### `error_stub`
+
+```asm
+.global error_stub
+error_stub:
+    PUSH_REGS
+    POP_REGS
+    add  $8, %rsp        // discard the CPU-pushed error code
+    iretq
+```
+
+Installed on the 10 error-code vectors (8, 10, 11, 12, 13, 14, 17, 21, 29, 30
+— see §7) by `idt_init`. There is no dedicated C fault handler yet, so the
+stub does not call into C; it just discards the CPU-pushed error code so
+`iretq` doesn't misread it as the return `RIP`, and returns. This closes
+SCRUM-135: previously `default_stub` was installed on these vectors and any
+one of them firing (most likely vector 13/GPF or 14/page fault) triple-faulted
+the machine with no diagnostic.
 
 ---
 
@@ -314,23 +362,17 @@ misalign the stack, and triple-fault.
 | **29** | **VMM Communication Exception**  | **Yes**            |
 | **30** | **Security Exception**           | **Yes**            |
 
-> ⚠️ **Open issue (SCRUM-135):** `default_stub` is currently installed on all of
-> these vectors. Any one of them firing — most likely vector 13 (GPF) or vector
-> 14 (page fault) — will immediately triple-fault the machine. A dedicated
-> `error_stub` must be installed on vectors 8, 10, 11, 12, 13, 14, 17, 21, 29,
-> and 30 before any paging refinement work begins.
+> ✅ **Resolved (SCRUM-135):** `default_stub` used to be installed on all of
+> these vectors, so any one of them firing — most likely vector 13 (GPF) or
+> vector 14 (page fault) — would immediately triple-fault the machine.
+> `error_stub` is now installed on vectors 8, 10, 11, 12, 13, 14, 17, 21, 29,
+> and 30 in `idt_init` and safely discards the error code before `iretq` (see
+> §5). It is still a minimal absorb-and-return stub — no diagnostic output —
+> since there is no dedicated C fault handler yet; that's tracked separately
+> as Sprint 2 paging work.
 
-**The `error_stub` fix:**
-
-```asm
-.global error_stub
-error_stub:
-    add $8, %rsp    // discard the 8-byte error code pushed by the CPU
-    iretq
-```
-
-This is the minimal fix. More useful would be a handler that prints diagnostic
-information before halting, particularly for vectors 13 and 14:
+More useful eventually would be a handler that prints diagnostic information
+before halting, particularly for vectors 13 and 14:
 
 ```asm
 .global gpf_stub
@@ -379,13 +421,14 @@ Assembly function. Loads the IDT register from the 10-byte struct at `ptr`
 
 ## 9. Planned handlers
 
-| Vector | Exception                | Handler status                                       |
-| ------ | ------------------------ | ---------------------------------------------------- |
-| 13     | General Protection Fault | Planned: serial diagnostic + halt                    |
-| 14     | Page Fault               | Planned: print CR2, error code, faulting RIP; halt   |
-| 32     | IRQ0 / Timer             | ✅ `irq0_stub` → `irq0_handler`                      |
-| 33     | IRQ1 / Keyboard          | ✅ `irq1_stub` → `irq1_handler`                      |
-| 44     | IRQ12 / Mouse            | ⬜ Sprint 2 (SCRUM-19)                                |
+| Vector                    | Exception                | Handler status                                       |
+| ------------------------- | ------------------------- | ---------------------------------------------------- |
+| 8, 10–14, 17, 21, 29, 30  | Error-code exceptions     | ✅ `error_stub` (absorb + discard; SCRUM-135)         |
+| 13                        | General Protection Fault | Planned: serial diagnostic + halt                    |
+| 14                        | Page Fault               | Planned: print CR2, error code, faulting RIP; halt   |
+| 32                        | IRQ0 / Timer             | ✅ `irq0_stub` → `irq0_handler`                      |
+| 33                        | IRQ1 / Keyboard          | ✅ `irq1_stub` → `irq1_handler`                      |
+| 44                        | IRQ12 / Mouse            | ⬜ Sprint 2 (SCRUM-19)                                |
 
 ---
 
@@ -413,6 +456,17 @@ by the C handler per the System V AMD64 ABI.
 zone" below RSP that functions can use without adjusting RSP. Interrupt handlers
 would corrupt this zone if the compiler assumes it is safe. The kernel is
 compiled with `-mno-red-zone` to prevent the compiler from using the red zone.
+
+**Stack alignment before `call` is not free.** The System V AMD64 ABI requires
+`%rsp % 16 == 0` immediately before a `call` instruction. The CPU does not
+guarantee any particular alignment of `%rsp` at interrupt entry, so the exact
+byte-count of `PUSH_REGS` (72 bytes) cannot be relied on to produce alignment
+for every possible incoming `%rsp` — it was arithmetic coincidence, not an
+enforced invariant. `irq0_stub`/`irq1_stub` wrap their `call` in
+`ALIGN_CALL_STACK`/`RESTORE_CALL_STACK` (see §5), which saves the exact
+pre-alignment `%rsp` via `%rbp` (callee-saved, so safe to use as a temporary
+anchor), masks `%rsp` to 16 bytes for the call, and restores the saved value
+afterward so `POP_REGS`/`iretq` see the untouched interrupt frame.
 
 **Segment registers are largely irrelevant.** In 64-bit long mode, `CS` is
 required for privilege level transitions but `DS`, `ES`, `SS` are ignored for
