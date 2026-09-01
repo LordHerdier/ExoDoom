@@ -13,6 +13,7 @@
 void suite_smoke_tests (CU_pSuite s);
 void suite_string_tests(CU_pSuite s);
 void suite_ctype_tests (CU_pSuite s);
+void suite_stdio_tests (CU_pSuite s);
 
 int run_tests(void)
 {
@@ -28,6 +29,9 @@ int run_tests(void)
 
     s = CU_add_suite("ctype",  NULL, NULL);
     suite_ctype_tests(s);
+
+    s = CU_add_suite("stdio",  NULL, NULL);
+    suite_stdio_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 
