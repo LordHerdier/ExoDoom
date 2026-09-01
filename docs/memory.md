@@ -1,6 +1,6 @@
 # ExoDoom Memory Subsystem
 
-**Last updated:** 2 Apr 2026 — reflects Sprint 1 state
+**Last updated:** 20 Apr 2026 — reflects x86_64 migration
 
 ---
 
@@ -61,7 +61,7 @@ Physical address
            │  (reserved gap)             │
 0x00200000 ├─────────────────────────────┤  ← kernel load address
            │  Kernel image               │  ~512 KB typical
-           │  .multiboot_header          │
+           │  .multiboot2                │
            │  .text                      │
            │  .rodata                    │
            │  .data                      │
@@ -95,7 +95,7 @@ since GRUB loads the kernel at that physical address).
 
 ```
 0x00200000  _load_start
-            .multiboot_header   ALIGN(4)     — magic, flags, checksum, video fields
+            .multiboot2         ALIGN(8)     — MB2 magic, tags (framebuffer request, end)
             .text               BLOCK(4K)    — executable code
             .rodata             BLOCK(4K)    — read-only data (font table, const strings)
             .data               BLOCK(4K)    — initialised globals
@@ -119,15 +119,15 @@ The 16 KiB stack is in `.bss` (`stack_bottom` / `stack_top` defined in
 
 ## 4. Phase 1 — Multiboot mmap parsing
 
-**Files:** `src/mmap.c`, `src/mmap.h`, `src/multiboot.h` **Status:** ✅ Done
+**Files:** `src/mmap.c`, `src/mmap.h`, `src/multiboot2.h` **Status:** ✅ Done
 (SCRUM-6) **Called from:** `kernel_main` before `memory_init`
 
 ### What it does
 
-GRUB populates a memory map in the `multiboot_info` struct. `mmap_init(mb)`
-checks that `MULTIBOOT_INFO_FLAG_MMAP` (bit 6) is set in `mb->flags`, then walks
-the variable-length entry list and records up to `MAX_MMAP_REGIONS` (32) entries
-in a static array.
+GRUB populates a memory map in the Multiboot 2 info struct as a tag (type 6).
+`mmap_init(mb)` uses `mb2_find_tag(mb, MB2_TAG_MMAP)` to locate the memory map
+tag, then iterates entries using the tag's `entry_size` field and records up to
+`MAX_MMAP_REGIONS` (32) entries in a static array.
 
 ```c
 // src/mmap.h
@@ -140,18 +140,17 @@ typedef struct {
 
 Entry types:
 
-| Value | Constant                      | Meaning                                  |
-| ----- | ----------------------------- | ---------------------------------------- |
-| 1     | `MULTIBOOT_MMAP_AVAILABLE`    | Usable RAM — page allocator can use this |
-| 2     | `MULTIBOOT_MMAP_RESERVED`     | Reserved — do not touch                  |
-| 3     | `MULTIBOOT_MMAP_ACPI_RECLAIM` | ACPI reclaimable                         |
-| 4     | `MULTIBOOT_MMAP_ACPI_NVS`     | ACPI NVS                                 |
-| 5     | `MULTIBOOT_MMAP_BADRAM`       | Faulty RAM                               |
+| Value | Constant                  | Meaning                                  |
+| ----- | ------------------------- | ---------------------------------------- |
+| 1     | `MB2_MMAP_AVAILABLE`      | Usable RAM — page allocator can use this |
+| 2     | `MB2_MMAP_RESERVED`       | Reserved — do not touch                  |
+| 3     | `MB2_MMAP_ACPI_RECLAIM`   | ACPI reclaimable                         |
+| 4     | `MB2_MMAP_ACPI_NVS`       | ACPI NVS                                 |
+| 5     | `MB2_MMAP_BADRAM`         | Faulty RAM                               |
 
-Each entry in the multiboot mmap has a `size` field (the entry's own size, not
-the region size) that varies between firmware implementations. The walker
-advances by `entry->size + sizeof(entry->size)` — not a fixed stride — which is
-the correct way to handle this.
+The Multiboot 2 memory map tag contains an `entry_size` field that specifies the
+stride between entries. The walker advances by `entry_size` bytes per entry,
+which is the correct way to handle varying entry sizes across firmware.
 
 ### Output
 
@@ -222,8 +221,7 @@ void* kmalloc(size_t size) {
 | Allocation               | Size                                   | When         |
 | ------------------------ | -------------------------------------- | ------------ |
 | PMM bitmap (Phase 3)     | `total_pages / 8` bytes, rounded to 4K | `pmm_init()` |
-| Page directory (Phase 4) | 4K (1024 × 4-byte entries)             | `vmm_init()` |
-| Initial page tables      | 4K each                                | `vmm_init()` |
+| Page tables (Phase 4)    | 4K per table (512 × 8-byte entries)    | `vmm_init()` |
 
 After Phase 4 (paging enabled), `kmalloc` is retired. All further kernel
 allocations go through `alloc_page` directly.
@@ -307,64 +305,62 @@ Available to alloc: ~62,064  (~242 MiB)
 
 ### Overview
 
-x86 32-bit paging uses a two-level structure: a **page directory** (PD) with
-1024 entries, each pointing to a **page table** (PT) with 1024 entries. Each PT
-entry maps one 4K physical page to a 4K virtual page. Both the PD and each PT
-are exactly 4K in size and must be page-aligned.
+x86_64 long mode uses **4-level paging**: PML4 → PDPT → PD → PT. Each table
+is 4 KB with 512 64-bit entries. The boot trampoline in `boot.s` sets up an
+initial identity map using 2 MB pages (skipping the PT level):
 
 ```
-Virtual address (32-bit):
- 31      22 21      12 11       0
- ┌────────┬──────────┬──────────┐
- │  PD idx│  PT idx  │  offset  │
- │ 10 bits│ 10 bits  │ 12 bits  │
- └────────┴──────────┴──────────┘
-     │           │         │
-     ▼           ▼         │
-  PD entry    PT entry     │
-  (phys addr  (phys addr ──┘─→ physical byte
-   of PT)      of page)
+Virtual address (x86_64, 48-bit canonical):
+ 47    39 38    30 29    21 20    12 11       0
+ ┌──────┬──────┬──────┬──────┬──────────────┐
+ │PML4  │PDPT  │ PD   │ PT   │   offset     │
+ │9 bits│9 bits│9 bits│9 bits│  12 bits      │
+ └──────┴──────┴──────┴──────┴──────────────┘
 ```
 
-`CR3` holds the physical address of the active page directory. Writing `CR3`
-flushes the TLB. Setting bit 31 of `CR0` enables paging.
+With 2 MB pages (PS bit set in PD entries), the PT level is skipped and the
+offset is 21 bits, giving 512 × 2 MB = 1 GB per PD.
 
-### Boot-time mapping plan
+`CR3` holds the physical address of the PML4. Writing `CR3` flushes the TLB.
 
-`vmm_init()` builds the initial page directory and page tables using `kmalloc`,
-then enables paging:
+### Current boot-time mapping (done in boot.s trampoline)
 
-1. **Identity map the kernel** (virtual `0x200000` → physical `0x200000`): all
-   pages from `_load_start` to `memory_base_address()`. This keeps the kernel
-   running without any address changes after `CR0.PG` is set.
-2. **Identity map low memory** (virtual `0x0` → physical `0x0`, first 1M):
-   needed for BIOS data structures and VGA compatibility.
-3. **Map the framebuffer**: virtual address TBD (likely a fixed high address
-   like `0xFD000000` matching physical) → `mb->framebuffer_addr`. Marked
-   present + read/write, not user-accessible.
-4. **Map the WAD module**: virtual address → physical address of the multiboot
-   module. Read-only.
-5. **Load CR3** with the physical address of the page directory.
-6. **Set CR0.PG** to enable paging.
+The trampoline builds a 4 GB identity map before entering long mode:
 
-After this, nothing about the kernel's execution changes (addresses are the
-same), but the MMU is now enforcing page permissions.
+1. PML4[0] → PDPT
+2. PDPT[0..3] → PD0..PD3
+3. Each PD contains 512 entries mapping 2 MB pages (total: 4 × 512 × 2 MB = 4 GB)
+4. Page table memory (24 KB) lives in BSS, 4K-aligned
+
+This maps the entire 32-bit address space including the framebuffer (typically
+at ~0xFD000000 in the PCI MMIO aperture).
+
+### Future refinement (Sprint 2+)
+
+`vmm_init()` will build proper 4K page tables with correct permissions:
+
+1. **Identity map the kernel** with read/write, not user-accessible
+2. **Map the framebuffer** as present + read/write
+3. **Map the WAD module** as read-only
+4. Remove the blanket 4 GB identity map and map only what is needed
+
+After this, the MMU will enforce page permissions per region.
 
 ### Exokernel syscalls
 
-Once paging is running and a LibOS address space exists, three syscalls expose
+Once paging is refined and a LibOS address space exists, three syscalls expose
 page management to the LibOS:
 
 ```c
 // Allocate one 4K physical page; returns physical address or -ENOMEM
-int32_t exo_page_alloc(void);
+int64_t exo_page_alloc(void);
 
-// Map a physical page at a virtual address in the caller's page directory
+// Map a physical page at a virtual address in the caller's PML4
 // flags: PAGE_PRESENT | PAGE_WRITE | PAGE_USER
-int32_t exo_page_map(uint32_t vaddr, uint32_t paddr, uint32_t flags);
+int64_t exo_page_map(uint64_t vaddr, uint64_t paddr, uint64_t flags);
 
 // Unmap a virtual page (does not free the physical page)
-int32_t exo_page_unmap(uint32_t vaddr);
+int64_t exo_page_unmap(uint64_t vaddr);
 ```
 
 `exo_page_free` frees the physical page back to the PMM without unmapping it —
@@ -372,36 +368,25 @@ the LibOS is expected to call `exo_page_unmap` first.
 
 ### LibOS address space
 
-Each LibOS gets its own page directory (allocated from the kernel PMM). The
-kernel is mapped into the upper portion of every LibOS address space (ring 0
-only, not user-accessible) so that syscall entry doesn't require a separate
-kernel page directory switch. The LibOS's own code, heap, and stack live in the
-lower virtual address range.
-
-```
-LibOS virtual address space (planned):
-0x00000000 – 0x00100000   low memory (not mapped for LibOS — access GPFs)
-0x00100000 – 0x40000000   LibOS code + heap + stack
-0x40000000 – 0xFD000000   unmapped
-0xFD000000 – 0xFE000000   framebuffer (mapped by exo_fb_acquire + exo_page_map)
-0xFE000000 – 0xFF000000   WAD module (read-only)
-0xFF000000 – 0xFFFFFFFF   kernel (ring 0 only, not user-accessible)
-```
+Each LibOS gets its own PML4 (allocated from the kernel PMM). The kernel is
+mapped into the upper portion of every LibOS address space (ring 0 only, not
+user-accessible) so that syscall entry doesn't require a separate PML4 switch.
+The LibOS's own code, heap, and stack live in the lower virtual address range.
+The full 64-bit virtual address space provides ample room for separation.
 
 ### Page fault handler (SCRUM-17)
 
-Vector 14 (page fault) must be handled before paging is enabled. On a fault, the
-CPU pushes an error code and the faulting address is in `CR2`. The handler
-should:
+Vector 14 (page fault) must be handled before paging refinement begins. On a
+fault, the CPU pushes an error code and the faulting address is in `CR2`. The
+handler should:
 
-1. Print the faulting virtual address (`CR2`), error code, and `EIP` to serial.
+1. Print the faulting virtual address (`CR2`), error code, and `RIP` to serial.
 2. Determine if it is a kernel fault (fatal — halt) or a LibOS fault (terminate
    the LibOS, log the fault).
 
-> ⚠️ **Blocker:** The current `default_stub` in `isr.s` cannot handle
-> error-code-pushing exceptions (SCRUM-135). A dedicated `error_stub` that pops
-> the error code before `iret` must be installed on vector 14 before paging work
-> begins. Without it, any page fault immediately triple-faults.
+> ⚠️ **Open issue:** The current `default_stub` in `isr.s` does a bare `iretq`
+> and cannot handle error-code-pushing exceptions (SCRUM-135). A dedicated
+> `error_stub` must be installed on vector 14 before paging refinement begins.
 
 ---
 
@@ -501,11 +486,11 @@ prevents a second call from resetting the pointer and clobbering
 already-allocated memory if something calls `kmalloc` before `kernel_main` gets
 to `memory_init()`.
 
-**The SCRUM-135 / paging deadlock.** The page fault handler (vector 14) requires
-an `error_stub` (pops error code before `iret`). That `error_stub` must exist
-before paging is enabled. Paging must be enabled before the LibOS runs. The
-LibOS must run before Doom. This is a strict prerequisite chain — SCRUM-135 must
-be closed before any Sprint 2 paging work begins.
+**The SCRUM-135 / paging issue.** The page fault handler (vector 14) requires
+an `error_stub` (pops error code before `iretq`). That `error_stub` must exist
+before paging refinement begins (the current 4 GB identity map from boot works
+but enforces no permissions). SCRUM-135 must be closed before Sprint 2 paging
+refinement.
 
 **WAD reservation timing.** SCRUM-8 (reserve kernel + WAD pages in PMM) must
 complete before SCRUM-7 (bitmap page allocator) ships, or the allocator could
@@ -513,11 +498,11 @@ hand out pages that overlap the WAD module. In practice both are in-flight
 together; the WAD reservation is part of `pmm_init()` and the two stories should
 be merged or sequenced carefully in review.
 
-**64-bit base/length in mmap entries.** The multiboot mmap uses `uint64_t` for
-`addr` and `len` (as seen in `struct multiboot_mmap_entry`). On a 32-bit kernel,
-addresses above 4 GiB cannot be mapped. The PMM should silently skip any usable
-region whose `base + len` exceeds `0xFFFFFFFF`. On QEMU `-m 256M` no such
-regions exist, but on real hardware with > 4 GiB RAM they will.
+**64-bit base/length in mmap entries.** The Multiboot 2 mmap uses `uint64_t` for
+`base` and `length`. On x86_64, the kernel can address the full 64-bit physical
+space, so no regions need to be skipped due to addressing limitations. However,
+the current 4 GB identity map only covers the low 4 GB — regions above this
+would need additional page table entries to be accessible.
 
 **`serial_flush()` before `qemu_exit()`.** In testing mode, `kernel_main` calls
 `serial_flush()` before `qemu_exit()`. This is important: QEMU's

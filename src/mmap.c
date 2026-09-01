@@ -17,27 +17,33 @@ static const char* region_type_name(uint32_t type) {
     }
 }
 
-void mmap_init(struct multiboot_info* mb) {
-    if (!(mb->flags & MULTIBOOT_INFO_FLAG_MMAP)) {
-        serial_print("No multiboot mmap available\n");
+void mmap_init(const struct mb2_info *info) {
+    const struct mb2_tag *tag = mb2_find_tag(info, MB2_TAG_MMAP);
+    if (!tag) {
+        serial_print("No multiboot2 mmap tag found\n");
         region_count = 0;
         return;
     }
 
-    serial_print("Multiboot memory map:\n");
+    const struct mb2_tag_mmap *mmap = (const struct mb2_tag_mmap *)tag;
 
-    uintptr_t cur = (uintptr_t)mb->mmap_addr;
-    uintptr_t end = cur + mb->mmap_length;
+    serial_print("Multiboot2 memory map:\n");
+
+    const uint8_t *entries_start = (const uint8_t *)mmap + sizeof(*mmap);
+    const uint8_t *entries_end   = (const uint8_t *)mmap + mmap->size;
+    uint32_t entry_size = mmap->entry_size;
 
     region_count = 0;
 
-    while (cur < end && region_count < MAX_MMAP_REGIONS) {
-        struct multiboot_mmap_entry* entry =
-            (struct multiboot_mmap_entry*)cur;
+    for (const uint8_t *p = entries_start;
+         p < entries_end && region_count < MAX_MMAP_REGIONS;
+         p += entry_size)
+    {
+        const struct mb2_mmap_entry *entry = (const struct mb2_mmap_entry *)p;
 
-        regions[region_count].base = entry->addr;
+        regions[region_count].base   = entry->addr;
         regions[region_count].length = entry->len;
-        regions[region_count].type = entry->type;
+        regions[region_count].type   = entry->type;
 
         serial_print(" base=0x");
         serial_print_hex64(entry->addr);
@@ -53,7 +59,6 @@ void mmap_init(struct multiboot_info* mb) {
         serial_print("\n");
 
         region_count++;
-        cur += entry->size + sizeof(entry->size);
     }
 }
 

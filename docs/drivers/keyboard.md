@@ -1,8 +1,8 @@
 # Driver: PS/2 Keyboard
 
-**Files:** `src/isr.s` (IRQ1 stub, planned), keyboard driver files TBD
-**Status:** 🔄 In Progress (SCRUM-13, SCRUM-14) / ⬜ Sprint 2 (SCRUM-18) **Last
-updated:** 2 Apr 2026
+**Files:** `src/ps2.c`, `src/ps2.h`, `src/isr.s` (IRQ1 stub)
+**Status:** ✅ IRQ1 handler and scan code processing complete (SCRUM-13,
+SCRUM-14) / ⬜ Ring buffer (Sprint 2, SCRUM-18) **Last updated:** 20 Apr 2026
 
 ---
 
@@ -57,18 +57,22 @@ The IRQ1 handler is responsible for reading the scan code from `0x60` as quickly
 as possible and queuing it for later processing. It must send EOI to the PIC
 before returning.
 
-**Assembly stub (to be added to `src/isr.s`):**
+**Assembly stub (`src/isr.s`):**
 
 ```asm
 .global irq1_stub
 .extern irq1_handler
 
 irq1_stub:
-    pusha
+    PUSH_REGS
     call irq1_handler
-    popa
-    iret
+    POP_REGS
+    iretq
 ```
+
+The `PUSH_REGS`/`POP_REGS` macros save/restore caller-saved registers (`rax`,
+`rcx`, `rdx`, `rsi`, `rdi`, `r8`–`r11`). In x86_64 long mode, `pusha`/`popa`
+do not exist.
 
 **C handler:**
 
@@ -84,14 +88,12 @@ Registration in `kernel_main` (after `idt_init`, `pic_remap`):
 
 ```c
 extern void irq1_stub(void);
-idt_set_gate(33, (uint32_t)irq1_stub);
-
-// Unmask IRQ1 in the PIC
-outb(0x21, inb(0x21) & ~(1 << 1));
+idt_set_gate(33, (uintptr_t)irq1_stub);
+kbd_init();  // unmasks IRQ1 in the PIC
 ```
 
-**Acceptance criteria (SCRUM-13):** Serial output shows raw scan code bytes on
-every keypress.
+**Status (SCRUM-13):** ✅ Complete — IRQ1 handler reads scan codes and processes
+them.
 
 ---
 

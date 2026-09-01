@@ -23,6 +23,6 @@ void* kmalloc(size_t size) {
     return (void*)addr;
 }
 
-uint32_t memory_base_address(void) {
-    return (uint32_t)placement_address;
+uintptr_t memory_base_address(void) {
+    return placement_address;
 }

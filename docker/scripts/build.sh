@@ -7,19 +7,19 @@ mkdir -p build/isodir/boot/grub
 cp /usr/share/grub/unicode.pf2 build/isodir/boot/grub/
 
 if [[ "${DEBUG:-0}" == "1" ]]; then
-  CFLAGS=(-std=gnu99 -ffreestanding -g -O0 -Wall -Wextra)
+  CFLAGS=(-std=gnu99 -ffreestanding -g -O0 -Wall -Wextra -mno-red-zone -mcmodel=small -mno-sse -mno-sse2 -mno-mmx)
 else
-  CFLAGS=(-std=gnu99 -ffreestanding -O2 -Wall -Wextra)
+  CFLAGS=(-std=gnu99 -ffreestanding -O2 -Wall -Wextra -mno-red-zone -mcmodel=small -mno-sse -mno-sse2 -mno-mmx)
 fi
 
 if [[ "${TESTING:-0}" == "1" ]]; then
   CFLAGS+=(-DTESTING)
 fi
 
-LDFLAGS=(-T src/linker.ld -ffreestanding -O2 -nostdlib)
+LDFLAGS=(-T src/linker.ld -ffreestanding -O2 -nostdlib -z max-page-size=0x1000)
 
 echo "[1/6] Assemble boot.s"
-i686-elf-as src/boot.s -o build/boot.o
+x86_64-elf-as src/boot.s -o build/boot.o
 
 echo "[2/6] Compile C sources"
 objs=(build/boot.o)
@@ -27,14 +27,14 @@ objs=(build/boot.o)
 for c in src/*.c; do
   o="build/$(basename "${c%.c}.o")"
   echo "    CC $(basename "$c")"
-  i686-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}"
+  x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}"
   objs+=("$o")
 done
 
 #assemble isr.s
 if [ -f src/isr.s ]; then
   echo "    AS isr.s"
-  i686-elf-as src/isr.s -o build/isr.o
+  x86_64-elf-as src/isr.s -o build/isr.o
   objs+=(build/isr.o)
 fi
 
@@ -43,20 +43,20 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   for c in tests/kernel/*.c; do
     o="build/$(basename "${c%.c}.o")"
     echo "    CC $(basename "$c")"
-    i686-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/
+    x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/
     objs+=("$o")
   done
 fi
 
 echo "[3/6] Link kernel -> build/exodoom"
-i686-elf-gcc "${LDFLAGS[@]}" -o build/exodoom \
+x86_64-elf-gcc "${LDFLAGS[@]}" -o build/exodoom \
   "${objs[@]}" -lgcc
 
-echo "[4/6] Sanity check multiboot header"
-if grub-file --is-x86-multiboot build/exodoom; then
-  echo "    multiboot confirmed"
+echo "[4/6] Sanity check multiboot2 header"
+if grub-file --is-x86-multiboot2 build/exodoom; then
+  echo "    multiboot2 confirmed"
 else
-  echo "    ERROR: not a valid multiboot kernel"
+  echo "    ERROR: not a valid multiboot2 kernel"
   exit 1
 fi
 

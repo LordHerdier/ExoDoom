@@ -1,17 +1,14 @@
-/* The bootloader will look at this image and start execution at the symbol
-   designated as the entry point. */
+OUTPUT_FORMAT(elf64-x86-64)
 ENTRY(_start)
 
-/* Tell where the various sections of the object files will be put in the final
-   kernel image. */
 SECTIONS
 {
     . = 2M;
     _load_start = .;
 
-    .multiboot_header ALIGN(4) :
+    .multiboot2 ALIGN(8) :
     {
-        KEEP(*(.multiboot))
+        KEEP(*(.multiboot2))
     }
 
     .text BLOCK(4K) : ALIGN(4K)
@@ -19,7 +16,7 @@ SECTIONS
         *(.text)
     }
 
-    .rodata BLOCK(4K) : ALIGN(4K) { *(.rodata) }
+    .rodata BLOCK(4K) : ALIGN(4K) { *(.rodata*) }
     .data   BLOCK(4K) : ALIGN(4K) { *(.data)   }
 
     _load_end = .;

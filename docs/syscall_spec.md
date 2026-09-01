@@ -3,8 +3,7 @@
 Derived from static analysis of
 [doomgeneric](https://github.com/ozkl/doomgeneric) source code.
 
-**Document version:** 1.1 — Updated 2 Apr 2026 to reflect Sprint 1
-implementation status
+**Document version:** 1.2 — Updated 20 Apr 2026 to reflect x86_64 migration
 
 ---
 
@@ -208,17 +207,20 @@ syscall is mapped to the Doom feature that requires it.
 
 ### 3.1 Syscall calling convention
 
-- **Entry:** `int 0x80`
-- **Syscall number:** `EAX`
-- **Arguments:** `EBX`, `ECX`, `EDX`, `ESI`, `EDI` (up to 5 arguments)
-- **Return value:** `EAX` (negative = error code)
-- The kernel saves/restores all other registers.
+- **Entry:** `syscall` instruction (x86_64 fast syscall mechanism)
+- **Syscall number:** `RAX`
+- **Arguments:** `RDI`, `RSI`, `RDX`, `R10`, `R8`, `R9` (up to 6 arguments)
+  - Note: `R10` replaces `RCX` because `syscall` clobbers `RCX` (saves `RIP`
+    there) and `R11` (saves `RFLAGS`)
+- **Return value:** `RAX` (negative = error code)
+- The kernel saves/restores all callee-saved registers.
 
 ```c
 // LibOS-side syscall stub example:
-static inline int32_t exo_syscall1(uint32_t num, uint32_t arg1) {
-    int32_t ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "b"(arg1));
+static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
+    int64_t ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(num), "D"(arg1)
+                     : "rcx", "r11", "memory");
     return ret;
 }
 ```

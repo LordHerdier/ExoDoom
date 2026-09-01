@@ -1,8 +1,8 @@
 # Driver: Framebuffer and FB Console
 
 **Files:** `src/fb.c`, `src/fb.h`, `src/fb_console.c`, `src/fb_console.h`
-**Status:** ✅ Implemented — not yet wired into normal boot path (Sprint 2+)
-**Last updated:** 2 Apr 2026
+**Status:** ✅ Implemented and active in the boot path
+**Last updated:** 20 Apr 2026
 
 ---
 
@@ -36,24 +36,28 @@ sanity checks, and the test pattern.
 ## 2. Hardware background and pixel format
 
 GRUB sets up a VESA linear framebuffer before handing off to the kernel. The
-multiboot header in `src/boot.s` requests:
+Multiboot 2 header in `src/boot.s` includes a framebuffer request tag (type 5):
 
 ```asm
-.long 0      // mode_type: 0 = linear graphics (not text mode)
-.long 1024   // width
-.long 768    // height
-.long 32     // depth (bits per pixel)
+.align 8
+.short 5                    /* type: framebuffer request  */
+.short 0                    /* flags (optional)           */
+.long  20                   /* size                       */
+.long  1024                 /* width                      */
+.long  768                  /* height                     */
+.long  32                   /* depth (bits per pixel)     */
 ```
 
-GRUB picks a compatible mode and fills the `multiboot_info` struct:
+GRUB picks a compatible mode and provides a framebuffer tag (type 8) in the
+Multiboot 2 info struct:
 
-| Field                    | Description                                                    |
-| ------------------------ | -------------------------------------------------------------- |
-| `mb->framebuffer_addr`   | Physical base address of the framebuffer (`uint64_t`)          |
-| `mb->framebuffer_pitch`  | Bytes per scanline (may be > `width * bpp/8` due to alignment) |
-| `mb->framebuffer_width`  | Width in pixels                                                |
-| `mb->framebuffer_height` | Height in pixels                                               |
-| `mb->framebuffer_bpp`    | Bits per pixel (32 in our case)                                |
+| Field       | Description                                                    |
+| ----------- | -------------------------------------------------------------- |
+| `fbi->addr`   | Physical base address of the framebuffer (`uint64_t`)       |
+| `fbi->pitch`  | Bytes per scanline (may be > `width * bpp/8` due to alignment) |
+| `fbi->width`  | Width in pixels                                             |
+| `fbi->height` | Height in pixels                                            |
+| `fbi->bpp`    | Bits per pixel (32 in our case)                             |
 
 ### Pixel format: BGRX8888
 
@@ -126,23 +130,26 @@ populates the struct. Called from `kernel_main` with values from the
 `multiboot_info`:
 
 ```c
+const struct mb2_tag *fb_tag = mb2_find_tag(mb, MB2_TAG_FRAMEBUFFER);
+const struct mb2_tag_framebuffer *fbi =
+    (const struct mb2_tag_framebuffer *)fb_tag;
+
 framebuffer_t fb;
 if (!fb_init_bgrx8888(&fb,
-                      (uintptr_t)mb->framebuffer_addr,
-                      mb->framebuffer_pitch,
-                      mb->framebuffer_width,
-                      mb->framebuffer_height,
-                      mb->framebuffer_bpp)) {
+                      (uintptr_t)fbi->addr,
+                      fbi->pitch,
+                      fbi->width,
+                      fbi->height,
+                      fbi->bpp)) {
     for (;;);  // halt — unsupported pixel format
 }
 ```
 
-`mb->framebuffer_addr` is `uint64_t`. The cast to `uintptr_t` truncates to 32
-bits on i386. On QEMU the framebuffer physical address is typically in the PCI
-MMIO aperture (e.g., `0xFD000000`), which fits in 32 bits. On machines with > 4
-GiB RAM the framebuffer could be above 4 GiB — pre-paging this is inaccessible
-on i386 and `fb_init_bgrx8888` would silently produce a bad pointer. In practice
-QEMU will not place the framebuffer above 32-bit addressable space.
+`fbi->addr` is `uint64_t`. The cast to `uintptr_t` is lossless on x86_64. On
+QEMU the framebuffer physical address is typically in the PCI MMIO aperture
+(e.g., `0xFD000000`), which is within the 4 GB identity map established by the
+boot trampoline. The framebuffer is initialised early in `kernel_main`, before
+interrupts, so the boot banner and memory map are displayed on screen.
 
 ---
 
@@ -480,12 +487,10 @@ pixel data every time the text console scrolls. At serial-debug speeds
 high-frequency output, consider a circular buffer approach that tracks a virtual
 top-of-screen offset instead of physically moving pixels.
 
-**The `qemu_exit(0)` in `kernel_main` makes the framebuffer unreachable.** The
-current `kernel_main` calls `qemu_exit(0)` after the timer demo, before the
-framebuffer initialisation code. This is intentional — the framebuffer path is
-future work — but means `fb.c` and `fb_console.c` are not exercised by the
-normal boot path yet. The framebuffer code is tested by inspection and the
-colour sanity test only.
+**Framebuffer is active in the boot path.** The framebuffer is initialised early
+in `kernel_main` (before interrupts) and displays the boot banner, BIOS memory
+map, allocator info, and a 9-second timer countdown demo. The `fb_console_t` is
+fully exercised during every normal boot.
 
 **`exo_fb_acquire` syscall (Sprint 4, SCRUM-36).** The LibOS will not access the
 framebuffer directly by reading `multiboot_info`. Instead it calls

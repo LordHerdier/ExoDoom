@@ -1,8 +1,49 @@
-FROM techiekeith/gcc-cross-i686-elf
+FROM debian:bookworm-slim AS builder
 
-# Add the ISO tooling and basics. The base image is for i686-elf gcc/binutils.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
+ARG BINUTILS_VERSION=2.42
+ARG GCC_VERSION=13.2.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      wget \
+      libgmp-dev \
+      libmpfr-dev \
+      libmpc-dev \
+      texinfo \
+      ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PREFIX=/opt/cross
+ENV TARGET=x86_64-elf
+ENV PATH="$PREFIX/bin:$PATH"
+
+WORKDIR /tmp/src
+
+# ── binutils ────────────────────────────────────────────────────────────────
+RUN wget -q https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz \
+ && tar xf binutils-${BINUTILS_VERSION}.tar.xz \
+ && mkdir build-binutils && cd build-binutils \
+ && ../binutils-${BINUTILS_VERSION}/configure \
+      --target=$TARGET --prefix=$PREFIX \
+      --with-sysroot --disable-nls --disable-werror \
+ && make -j$(nproc) \
+ && make install
+
+# ── gcc (freestanding cross-compiler) ───────────────────────────────────────
+RUN wget -q https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz \
+ && tar xf gcc-${GCC_VERSION}.tar.xz \
+ && mkdir build-gcc && cd build-gcc \
+ && ../gcc-${GCC_VERSION}/configure \
+      --target=$TARGET --prefix=$PREFIX \
+      --disable-nls --enable-languages=c \
+      --without-headers \
+ && make -j$(nproc) all-gcc all-target-libgcc \
+ && make install-gcc install-target-libgcc
+
+# ── runtime image ────────��────────────────────────────────────���─────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
       make \
       xorriso \
       grub-pc-bin \
@@ -11,8 +52,10 @@ RUN apt-get update \
       libmpc3 \
       libgmp10 \
       libmpfr6 \
- && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
+COPY --from=builder /opt/cross /opt/cross
+ENV PATH="/opt/cross/bin:$PATH"
 
 WORKDIR /work
 COPY scripts/build.sh /usr/local/bin/build.sh

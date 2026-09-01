@@ -7,18 +7,18 @@ required beyond what's already in the repo.
 ## How it works
 
 ```
-gdb (host)  <──RSP/tcp:1234──>  QEMU GDB stub  <──>  exodoom (i386 VM)
+gdb (host)  <──RSP/tcp:1234──>  QEMU GDB stub  <──>  exodoom (x86_64 VM)
 ```
 
 QEMU exposes a GDB Remote Serial Protocol stub on port 1234. Your host GDB reads
-debug symbols from the unstripped ELF (`build/exodoom`) and sends commands
+debug symbols from the unstripped ELF64 (`build/exodoom`) and sends commands
 through that socket. The VM can be frozen at boot so you can set breakpoints
 before any code runs.
 
 ## Prerequisites
 
 - Docker (same as normal builds)
-- `gdb` on your host with i386/multiarch support
+- `gdb` on your host with x86_64/multiarch support
   - **NixOS/Arch/Debian:** `gdb` from your package manager includes multiarch
   - **NixOS one-liner:** `nix-shell -p gdb`
 
@@ -50,7 +50,7 @@ gdb build/exodoom
 Then at the GDB prompt:
 
 ```gdb
-(gdb) set architecture i386
+(gdb) set architecture i386:x86-64
 (gdb) target remote localhost:1234
 (gdb) break kernel_main
 (gdb) continue
@@ -108,13 +108,13 @@ Shortcut: `Ctrl+A X` kills QEMU immediately from anywhere.
 | `print *fb`                    | Dereference and print a struct    |
 | `info locals`                  | All locals in current stack frame |
 | `info registers`               | All CPU registers                 |
-| `info registers eip esp`       | Specific registers                |
+| `info registers rip rsp`       | Specific registers                |
 
 ### Examining memory
 
 ```gdb
 x/10x  0xB8000     # 10 words at address, hex
-x/20i  $eip        # disassemble 20 instructions at EIP
+x/20i  $rip        # disassemble 20 instructions at RIP
 x/4bx  fb->addr    # 4 raw bytes (useful for pixel format checks)
 x/s    0x...       # treat address as a C string
 ```
@@ -146,7 +146,7 @@ info frame         # details about current frame
 ```gdb
 list kernel_main   # show source around a function
 list fb.c:40,60    # show lines 40–60 of a file
-display $eip       # print EIP automatically after every step
+display $rip       # print RIP automatically after every step
 undisplay 1        # stop auto-displaying item #1
 set var x = 5      # modify a variable at runtime
 ```
@@ -177,10 +177,11 @@ Expected for BGRX8888: a red pixel (`fb_fill_rect(..., 255,0,0)`) should show
 `00 00 FF 00`.
 
 **Hang at boot?** If the kernel loops at `for(;;)` before the framebuffer check,
-make sure `MULTIBOOT_INFO_FLAG_FRAMEBUFFER` is set in `mb->flags`. Print it:
+verify the Multiboot 2 framebuffer tag was found. Check `fb_tag` is non-NULL:
 
 ```gdb
-(gdb) print/x mb->flags
+(gdb) print fb_tag
 ```
 
-Bit 12 should be set (`0x1000`).
+If NULL, the framebuffer request tag in `boot.s` may not be formatted correctly,
+or GRUB could not find a compatible video mode.
