@@ -102,10 +102,18 @@
 
 /* ---- Argument constants ------------------------------------------------- */
 
-/* exo_page_map flags.  Present is implied by the mapping itself. */
+/* exo_page_map flags.  Present is implied by the mapping itself.
+ *
+ * EXO_PAGE_READ is not representable on x86 — a present page is always
+ * readable — so the dispatcher accepts it and ignores it rather than treating
+ * its absence as -EXO_EINVAL.  EXO_PAGE_EXEC is defined now, while nothing
+ * consumes the flag word yet, so that data, heap and framebuffer mappings can
+ * be made non-executable once EFER.NXE is enabled; introducing it after the
+ * ABI ships would mean renumbering the bits or bolting on a compat flag. */
 #define EXO_PAGE_READ   (1u << 0)
 #define EXO_PAGE_WRITE  (1u << 1)
 #define EXO_PAGE_USER   (1u << 2)
+#define EXO_PAGE_EXEC   (1u << 3)
 
 /* exo_file_open modes (docs/syscall_spec.md §3.2 #9) */
 #define EXO_O_RDONLY    0

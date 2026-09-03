@@ -209,9 +209,11 @@ syscall is mapped to the Doom feature that requires it.
 > the numbers as `EXO_SYS_*`, the shared argument structs, the `EXO_E*` error
 > codes, and one inline stub per syscall. It is the same interface expressed in
 > C, and the two must be changed together — this document stays the source of
-> truth for *what* each syscall does. Kernel sources define `EXO_KERNEL` before
-> including it, which suppresses the user-side stubs; the LibOS includes it
-> plainly. `tests/kernel/test_exo_syscall_k.c` asserts the header still agrees
+> truth for *what* each syscall does. Kernel sources are compiled with
+> `-DEXO_KERNEL`, which suppresses the user-side stubs; the LibOS includes it
+> plainly. The define comes from the compiler command line rather than a
+> per-file `#define` because `#pragma once` would make a `#define` placed after
+> any transitive include of the header silently ineffective. `tests/kernel/test_exo_syscall_k.c` asserts the header still agrees
 > with §3.1 and §3.2.
 
 ### 3.1 Syscall calling convention
@@ -252,7 +254,7 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | -- | ----------------------------------- | ----------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 0  | `exo_page_alloc()`                  | Memory      | 🔄     | Allocate one 4K physical page. Returns physical address, or `-ENOMEM`. Prerequisite: bitmap page allocator (SCRUM-7, In Review) + kernel/WAD region reservation (SCRUM-8, In Progress).                                                                                        |
 | 1  | `exo_page_free(paddr)`              | Memory      | 🔄     | Free a physical page. Returns `0` or `-EINVAL`. Prerequisite: same as above.                                                                                                                                                                                                   |
-| 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ⬜     | Map physical page at virtual address in caller's page directory. `flags`: read/write/user. Returns `0` or `-EINVAL`/`-EFAULT`. Sprint 2 (SCRUM-15, -16).                                                                                                                       |
+| 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ⬜     | Map physical page at virtual address in caller's page directory. `flags`: `EXO_PAGE_READ`/`WRITE`/`USER`/`EXEC`. `EXEC` is defined now, while the flag word is still unpublished, so that non-executable data mappings are expressible once `EFER.NXE` is enabled — adding it later would mean renumbering. `READ` is not representable on x86 (present implies readable) and is accepted but ignored. Returns `0` or `-EINVAL`/`-EFAULT`. Sprint 2 (SCRUM-15, -16).                                                                                                                       |
 | 3  | `exo_page_unmap(vaddr)`             | Memory      | ⬜     | Unmap a virtual page. Returns `0` or `-EINVAL`. Sprint 2.                                                                                                                                                                                                                      |
 | 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ⬜     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct. LibOS then calls `exo_page_map` to map it. Used by `DG_Init`. Returns `0` or `-EBUSY` if another LibOS holds the FB. Sprint 2 (SCRUM-16).                                        |
 | 5  | `exo_get_ticks()`                   | Timer       | ✅     | Return `uint32_t` milliseconds since boot. Zero arguments. Used by `DG_GetTicksMs` and `DG_SleepMs`. Kernel-side PIT + `kernel_get_ticks_ms()` done (SCRUM-9, -10).                                                                                                            |

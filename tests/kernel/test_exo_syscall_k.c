@@ -14,6 +14,14 @@
  * test_exo_syscall_kview_k.c.
  */
 
+/* Kernel TUs, tests included, are compiled with -DEXO_KERNEL (see
+ * docker/scripts/build.sh).  This is the one file that wants the LibOS view,
+ * so it drops the define before the first include of the header -- which is
+ * only sound because nothing above pulls exo_syscall.h in transitively
+ * (kunit.h includes string.h and nothing else); #pragma once would make a
+ * later #undef a no-op. */
+#undef EXO_KERNEL
+
 #include "kunit.h"
 #include "exo_syscall.h"
 
@@ -164,7 +172,8 @@ static void test_argument_constants(void)
     CU_ASSERT_EQUAL(EXO_SEEK_END, 2);
 
     /* Page flags are a mask, not an enum. */
-    CU_ASSERT_EQUAL(EXO_PAGE_READ | EXO_PAGE_WRITE | EXO_PAGE_USER, 0x7);
+    CU_ASSERT_EQUAL(EXO_PAGE_READ | EXO_PAGE_WRITE | EXO_PAGE_USER
+                    | EXO_PAGE_EXEC, 0xF);
 
     /* Error codes are positive here and returned negated. */
     CU_ASSERT_TRUE(EXO_ENOMEM > 0);

@@ -2,11 +2,10 @@
  * test_exo_syscall_kview_k.c — Kernel-side view of the syscall ABI (SCRUM-24).
  *
  * The other half of the acceptance criterion "both kernel and LibOS sides can
- * include it": this translation unit defines EXO_KERNEL before including the
- * header.  Real kernel sources get it from -DEXO_KERNEL in docker/scripts/
- * build.sh; the #define here reproduces that view for a test compiled without
- * the flag, and must stay ahead of the first include to have any effect.
- * That view must
+ * include it": this translation unit sees the kernel view of the header.  It
+ * gets that from -DEXO_KERNEL in docker/scripts/build.sh, the same way real
+ * kernel sources do — no #define here, which would only redefine the flag the
+ * build already set.  That view must
  *
  *   - still provide the numbers, structs and error codes, and
  *   - suppress the inline `syscall` stubs, which the kernel must never issue
@@ -17,7 +16,6 @@
  * time, not at runtime, if the guard ever regresses.
  */
 
-#define EXO_KERNEL
 #include "kunit.h"
 #include "exo_syscall.h"
 #include "ps2.h"

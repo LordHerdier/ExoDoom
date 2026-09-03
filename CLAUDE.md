@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-ExoDoom is a bare-metal i386 **exokernel** whose goal is to run Doom (via
-[doomgeneric](https://github.com/ozkl/doomgeneric)) directly on hardware/QEMU,
-with no conventional OS underneath. The kernel exposes hardware resources
-(physical pages, framebuffer, I/O) directly and pushes policy into a
+ExoDoom is a bare-metal x86_64 (long mode) **exokernel** whose goal is to run
+Doom (via [doomgeneric](https://github.com/ozkl/doomgeneric)) directly on
+hardware/QEMU, with no conventional OS underneath. The kernel exposes hardware
+resources (physical pages, framebuffer, I/O) directly and pushes policy into a
 user-space **LibOS**; Doom itself runs unmodified against a 6-function
 platform interface plus a libc shim. See `docs/architecture.md` for the full
 design and `docs/syscall_spec.md` for the syscall/libc audit — read these
@@ -35,7 +35,7 @@ make clean                     # rm -rf build
 
 - `docker/scripts/build.sh` runs inside the build container: assembles
   `boot.s`, compiles every `src/*.c`, assembles `isr.s`, links via
-  `src/linker.ld` (`-nostdlib -lgcc`), validates the multiboot header with
+  `src/linker.ld` (`-nostdlib -lgcc`), validates the multiboot2 header with
   `grub-file`, then builds `build/exodoom.iso` with `grub-mkrescue`.
 - Test sources in `tests/kernel/*.c` are picked up **automatically** by
   `build.sh` when `TESTING=1` — no Makefile/build-script changes needed to add
@@ -65,7 +65,8 @@ Full guide: `docs/testing.md`.
 ### Debugging
 
 `make docker-run-debug DEBUG=1`, then in a second terminal:
-`gdb build/exodoom` → `set architecture i386` → `target remote localhost:1234`.
+`gdb build/exodoom` → `set architecture i386:x86-64` →
+`target remote localhost:1234`.
 Full command reference and bare-metal-specific tips (framebuffer byte order,
 `-O2` stepping caveats, `isa-debug-exit` requirements) in `docs/debugging.md`.
 
