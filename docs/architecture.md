@@ -60,6 +60,19 @@ In ExoDoom's model:
 - **Doom itself** is unchanged — it calls standard C library functions and the
   doomgeneric platform API, completely unaware it is running on bare metal.
 
+**Protection model (secure binding).** The protection guarantee above is not a
+property the kernel gets for free from paging — it is enforced by *resource
+ownership tracking*, which is what distinguishes this from a monolithic kernel
+that merely exposes a few syscalls. The kernel tags every physical page and the
+framebuffer with an owner (`KERNEL` / `FREE` / a LibOS context id); resource
+syscalls establish, enforce, and reclaim those bindings, rejecting any
+cross-owner access with `-EPERM`. This is the exokernel's "secure binding"
+mechanism: the kernel protects a resource without managing how the LibOS uses
+it. The kernel also reserves the right to *revoke* a granted resource
+(repossession), which matters once more than one LibOS runs. The full rule set
+lives in `docs/syscall_spec.md` §3.3; the work is tracked under epic SCRUM-151
+(Resource Protection & Secure Binding).
+
 ```
 ┌──────────────────────────────────────────────────────┐
 │                    Doom engine                       │  (unchanged doomgeneric source)

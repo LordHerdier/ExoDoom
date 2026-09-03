@@ -253,10 +253,10 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | #  | Syscall                             | Category    | Status | Description + Doom usage                                                                                                                                                                                                                                                       |
 | -- | ----------------------------------- | ----------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 0  | `exo_page_alloc()`                  | Memory      | 🔄     | Allocate one 4K physical page. Returns physical address, or `-ENOMEM`. Prerequisite: bitmap page allocator (SCRUM-7, In Review) + kernel/WAD region reservation (SCRUM-8, In Progress).                                                                                        |
-| 1  | `exo_page_free(paddr)`              | Memory      | 🔄     | Free a physical page. Returns `0` or `-EINVAL`. Prerequisite: same as above.                                                                                                                                                                                                   |
-| 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ⬜     | Map physical page at virtual address in caller's page directory. `flags`: `EXO_PAGE_READ`/`WRITE`/`USER`/`EXEC`. `EXEC` is defined now, while the flag word is still unpublished, so that non-executable data mappings are expressible once `EFER.NXE` is enabled — adding it later would mean renumbering. `READ` is not representable on x86 (present implies readable) and is accepted but ignored. Returns `0` or `-EINVAL`/`-EFAULT`. Sprint 2 (SCRUM-15, -16).                                                                                                                       |
-| 3  | `exo_page_unmap(vaddr)`             | Memory      | ⬜     | Unmap a virtual page. Returns `0` or `-EINVAL`. Sprint 2.                                                                                                                                                                                                                      |
-| 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ⬜     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct. LibOS then calls `exo_page_map` to map it. Used by `DG_Init`. Returns `0` or `-EBUSY` if another LibOS holds the FB. Sprint 2 (SCRUM-16).                                        |
+| 1  | `exo_page_free(paddr)`              | Memory      | 🔄     | Free a physical page. **Ownership-checked (§3.3):** returns `-EPERM` unless the caller owns `paddr`. Returns `0` or `-EINVAL`/`-EPERM`. Prerequisite: same as above, plus the page ownership table (SCRUM-152).                                                                  |
+| 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ⬜     | Map physical page at virtual address in caller's page directory. `flags`: `EXO_PAGE_READ`/`WRITE`/`USER`/`EXEC`. `EXEC` is defined now, while the flag word is still unpublished, so that non-executable data mappings are expressible once `EFER.NXE` is enabled — adding it later would mean renumbering. `READ` is not representable on x86 (present implies readable) and is accepted but ignored. **Ownership-checked (§3.3):** `paddr` must be owned by the caller (or be the framebuffer the caller has acquired); mapping kernel-owned or another LibOS's pages returns `-EPERM`. Returns `0` or `-EINVAL`/`-EFAULT`/`-EPERM`. Sprint 2 (SCRUM-15, -16), enforcement SCRUM-153.                                                                                                                       |
+| 3  | `exo_page_unmap(vaddr)`             | Memory      | ⬜     | Unmap a virtual page. Only unmaps a mapping the caller owns. Returns `0` or `-EINVAL`/`-EPERM`. Sprint 2 (enforcement SCRUM-153).                                                                                                                                              |
+| 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ⬜     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct and **record the caller as the framebuffer owner (secure binding, §3.3)**. LibOS then calls `exo_page_map` to map it — that map now requires FB ownership. Released on `exo_exit`. Used by `DG_Init`. Returns `0` or `-EBUSY` if another LibOS holds the FB. Sprint 2 (SCRUM-16), binding SCRUM-154.                                        |
 | 5  | `exo_get_ticks()`                   | Timer       | ✅     | Return `uint32_t` milliseconds since boot. Zero arguments. Used by `DG_GetTicksMs` and `DG_SleepMs`. Kernel-side PIT + `kernel_get_ticks_ms()` done (SCRUM-9, -10).                                                                                                            |
 | 6  | `exo_kbd_poll(event_out)`           | Input       | 🔄     | Dequeue next keyboard event into `event_out` struct `{uint8_t pressed; uint8_t key; uint8_t modifiers; uint8_t reserved}`. `key` is a decoded `ps2_key_t` index (`KEY_A`, `KEY_ESC`, …), not a raw PS/2 scancode — the kernel's scancode decoder runs before the event is queued. `modifiers` is the `EXO_MOD_*` shift/ctrl/alt mask sampled when the event was queued, so a chord decodes correctly even if the modifier is released before the LibOS polls — Doom binds shift (run), ctrl (fire) and alt (strafe). Returns `1` if event available, `0` if empty. Prerequisite: IRQ1 handler (SCRUM-13, In Progress) + scancode table (SCRUM-14, In Progress). Ring buffer planned Sprint 2 (SCRUM-18). |
 | 7  | `exo_mouse_poll(state_out)`         | Input       | ⬜     | Write accumulated mouse state `{int16_t dx; int16_t dy; uint8_t buttons; uint8_t reserved}` to `state_out`, then reset accumulators. `reserved` is zeroed by the kernel and keeps the struct a fixed 6 bytes. Returns `0`. Prerequisite: PS/2 mouse init (SCRUM-19, Sprint 2).                                                                                            |
@@ -276,6 +276,46 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 
 **Total: 21 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking.
+
+### 3.3 Secure binding & resource ownership
+
+The syscall numbers above describe *what* each call does; this section
+describes the protection rule that makes them exokernel operations rather than
+an unprotected physical `mmap`/allocator. It is the concrete mechanism behind
+the guarantee in `architecture.md` §2 ("no LibOS can corrupt another's pages or
+access hardware it hasn't been granted"). Tracked under epic **SCRUM-151
+(Resource Protection & Secure Binding)**.
+
+**Ownership model.** The kernel tags every 4 KiB physical page and the
+framebuffer with an *owner*: `KERNEL`, `FREE`, or a specific LibOS context id
+(SCRUM-152). A resource syscall is a *secure binding* — the kernel enforces the
+tag on every operation, without understanding what the LibOS does with the
+resource:
+
+- `exo_page_alloc` **establishes** a binding: the returned page is tagged with
+  the caller's context id.
+- `exo_page_map` / `exo_page_unmap` / `exo_page_free` **enforce** it: an
+  operation on a page the caller does not own returns `-EPERM`
+  (`EXO_EPERM`, `src/exo_syscall.h`; note this error code was reserved from the
+  start as "operation not permitted for this LibOS"). This closes the hole
+  where a LibOS could pass an arbitrary `paddr` to `exo_page_map` and reach
+  kernel or peer memory (SCRUM-153).
+- `exo_fb_acquire` binds the framebuffer to one LibOS at a time (`-EBUSY`
+  otherwise); mapping FB physical pages requires holding that binding
+  (SCRUM-154).
+- `exo_exit` **reclaims** all bindings held by the terminating context — frees
+  its pages, releases the framebuffer, closes its files (SCRUM-155).
+
+**Revocation.** The kernel additionally reserves the right to *revoke* a
+granted resource (the exokernel "repossession" model). For the single-app v1
+demo the policy is trivial (revocation happens only via `exo_exit`), but the
+mechanism and its ownership-table bookkeeping exist so multi-LibOS scheduling
+(§7 / epic SCRUM-147) can reclaim resources from a running LibOS (SCRUM-156).
+
+**Testing.** `tests/kernel/test_ownership_k.c` asserts a context cannot
+map/free a page it does not own and that framebuffer acquisition is mutually
+exclusive — distinct from the paging/privilege-wall tests SCRUM-55/56
+(SCRUM-157).
 
 ---
 
