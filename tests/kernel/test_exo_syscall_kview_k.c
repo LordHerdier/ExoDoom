@@ -3,7 +3,10 @@
  *
  * The other half of the acceptance criterion "both kernel and LibOS sides can
  * include it": this translation unit defines EXO_KERNEL before including the
- * header, which is how every kernel source will consume it.  That view must
+ * header.  Real kernel sources get it from -DEXO_KERNEL in docker/scripts/
+ * build.sh; the #define here reproduces that view for a test compiled without
+ * the flag, and must stay ahead of the first include to have any effect.
+ * That view must
  *
  *   - still provide the numbers, structs and error codes, and
  *   - suppress the inline `syscall` stubs, which the kernel must never issue
@@ -32,21 +35,24 @@ static void test_kernel_view_has_the_abi(void)
 
     /* So do the structs the dispatcher fills in on the caller's behalf. */
     fb.bpp       = 32;
-    ev.scancode  = KEY_ESC;
+    ev.key       = KEY_ESC;
     mouse.dx     = -1;
 
     CU_ASSERT_EQUAL(fb.bpp, 32);
-    CU_ASSERT_EQUAL(ev.scancode, KEY_ESC);
+    CU_ASSERT_EQUAL(ev.key, KEY_ESC);
     CU_ASSERT_EQUAL(mouse.dx, -1);
 }
 
 /* The ABI event mirrors ps2.h's kernel-internal event field for field, but the
  * two remain distinct types: the ABI one has a trailing reserved byte, and the
  * kernel struct may grow.  The SCRUM-32 handler converts field by field rather
- * than casting or memcpy-ing one onto the other. */
+ * than casting or memcpy-ing one onto the other.
+ *
+ * Only the ABI side is pinned here.  Asserting the two sizes differ would fail
+ * the moment kbd_event_t legitimately grows to 4 bytes, which is exactly the
+ * freedom this comment describes. */
 static void test_kernel_event_is_not_the_abi_event(void)
 {
-    CU_ASSERT_NOT_EQUAL(sizeof(kbd_event_t), sizeof(exo_kbd_event_t));
     CU_ASSERT_EQUAL(sizeof(exo_kbd_event_t), 4);
 
     /* The modifier bits the kernel samples are the ones the ABI publishes, so

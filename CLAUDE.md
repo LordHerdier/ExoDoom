@@ -121,12 +121,15 @@ Sprint 2 paging work lands.
   (`src/serial.c`, mapped to QEMU stdio via `-serial mon:stdio`). Test framework
   output and all kernel diagnostics go through it; `serial_flush()` must be
   called before `qemu_exit()` or buffered bytes are lost.
-- **Syscall interface (`int 0x80`, 21 `exo_*` syscalls) is fully specified but
-  mostly unimplemented** — `docs/syscall_spec.md` is the source of truth for
-  what each syscall must do and which doomgeneric/libc call sites need it.
-  Consult it before adding a new syscall or libc shim function so the
-  implementation matches the intended calling convention (`EAX`=number,
-  `EBX/ECX/EDX/ESI/EDI`=args, return in `EAX`, negative=error).
+- **Syscall interface (`syscall` instruction, 21 `exo_*` syscalls) is fully
+  specified but mostly unimplemented** — `docs/syscall_spec.md` §3 and its C
+  expression `src/exo_syscall.h` are the source of truth for what each syscall
+  must do and which doomgeneric/libc call sites need it; change one and change
+  the other. Consult them before adding a new syscall or libc shim function so
+  the implementation matches the intended calling convention (`RAX`=number,
+  `RDI/RSI/RDX/R10/R8/R9`=args, return in `RAX`, negative=error). The 4th
+  argument is in `R10` rather than the SysV `RCX` because `syscall` itself
+  overwrites `RCX` with the return RIP and `R11` with RFLAGS.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - Sprint status/roadmap and current in-flight Jira stories are tracked in

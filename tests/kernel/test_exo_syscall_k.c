@@ -64,19 +64,29 @@ static void test_numbers_are_unique(void)
         EXO_SYS_FILE_REMOVE,  EXO_SYS_FILE_RENAME, EXO_SYS_SOUND_TONE,
         EXO_SYS_SOUND_STOP,   EXO_SYS_YIELD,       EXO_SYS_EXIT,
     };
-    unsigned seen = 0;   /* bit i set once number i has been visited */
+    /* 64-bit so the mask keeps working as the table grows; the assert makes
+     * the ceiling explicit rather than letting the shift go undefined. */
+    uint64_t seen = 0;   /* bit i set once number i has been visited */
     unsigned i;
+
+    _Static_assert(EXO_SYS_COUNT < 64, "uniqueness mask is 64 bits wide");
 
     CU_ASSERT_EQUAL(sizeof(numbers) / sizeof(numbers[0]), EXO_SYS_COUNT);
 
     for (i = 0; i < sizeof(numbers) / sizeof(numbers[0]); i++) {
+        /* CU_ASSERT_* records a failure and keeps going, so an out-of-range
+         * number would otherwise reach the shift below and invoke UB in the
+         * very test written to catch it. */
         CU_ASSERT_TRUE(numbers[i] >= 0 && numbers[i] < (int)EXO_SYS_COUNT);
-        CU_ASSERT_FALSE(seen & (1u << numbers[i]));
-        seen |= 1u << numbers[i];
+        if (numbers[i] < 0 || numbers[i] >= (int)EXO_SYS_COUNT) {
+            continue;
+        }
+        CU_ASSERT_FALSE(seen & (UINT64_C(1) << numbers[i]));
+        seen |= UINT64_C(1) << numbers[i];
     }
 
     /* Dense: every number below EXO_SYS_COUNT is claimed exactly once. */
-    CU_ASSERT_EQUAL(seen, (1u << EXO_SYS_COUNT) - 1u);
+    CU_ASSERT_EQUAL(seen, (UINT64_C(1) << EXO_SYS_COUNT) - 1u);
 }
 
 /* ---- Shared struct layout ---------------------------------------------- */
@@ -95,7 +105,7 @@ static void test_kbd_event_layout(void)
 {
     CU_ASSERT_EQUAL(sizeof(exo_kbd_event_t), 4);
     CU_ASSERT_EQUAL(__builtin_offsetof(exo_kbd_event_t, pressed),   0);
-    CU_ASSERT_EQUAL(__builtin_offsetof(exo_kbd_event_t, scancode),  1);
+    CU_ASSERT_EQUAL(__builtin_offsetof(exo_kbd_event_t, key),       1);
     CU_ASSERT_EQUAL(__builtin_offsetof(exo_kbd_event_t, modifiers), 2);
     CU_ASSERT_EQUAL(__builtin_offsetof(exo_kbd_event_t, reserved),  3);
 }
@@ -168,7 +178,37 @@ static void test_argument_constants(void)
  * asm and the linker to resolve it, so a malformed constraint or a wrapper
  * calling the wrong exo_syscallN arity fails the build rather than lurking
  * until SCRUM-32.  volatile keeps the array from being optimised away.
+ *
+ * That only covers exo_syscall0..3: no syscall in §3.2 takes more than three
+ * arguments, so the 4-, 5- and 6-argument stubs have no caller and GCC never
+ * checks the asm in an uninstantiated static inline — a bogus constraint in
+ * them compiles silently.  These thunks give them a caller so the R10/R8/R9
+ * register variables are validated too.  They are never invoked.
  */
+static int64_t exo_syscall4_thunk(uint64_t n, uint64_t a, uint64_t b,
+                                  uint64_t c, uint64_t d)
+{
+    return exo_syscall4(n, a, b, c, d);
+}
+
+static int64_t exo_syscall5_thunk(uint64_t n, uint64_t a, uint64_t b,
+                                  uint64_t c, uint64_t d, uint64_t e)
+{
+    return exo_syscall5(n, a, b, c, d, e);
+}
+
+static int64_t exo_syscall6_thunk(uint64_t n, uint64_t a, uint64_t b,
+                                  uint64_t c, uint64_t d, uint64_t e,
+                                  uint64_t f)
+{
+    return exo_syscall6(n, a, b, c, d, e, f);
+}
+
+static void *const volatile raw_stub_addresses[] = {
+    (void *)exo_syscall4_thunk,
+    (void *)exo_syscall5_thunk,
+    (void *)exo_syscall6_thunk,
+};
 static void *const volatile stub_addresses[] = {
     (void *)exo_page_alloc,   (void *)exo_page_free,   (void *)exo_page_map,
     (void *)exo_page_unmap,   (void *)exo_fb_acquire,  (void *)exo_get_ticks,
@@ -188,6 +228,13 @@ static void test_every_syscall_has_a_stub(void)
 
     for (i = 0; i < sizeof(stub_addresses) / sizeof(stub_addresses[0]); i++) {
         CU_ASSERT_PTR_NOT_NULL(stub_addresses[i]);
+    }
+
+    /* The 4-6 argument raw stubs have no wrapper of their own; these keep them
+     * compiled and linked so their R10/R8/R9 constraints stay checked. */
+    for (i = 0; i < sizeof(raw_stub_addresses) / sizeof(raw_stub_addresses[0]);
+         i++) {
+        CU_ASSERT_PTR_NOT_NULL(raw_stub_addresses[i]);
     }
 }
 

@@ -24,10 +24,17 @@ x86_64-elf-as src/boot.s -o build/boot.o
 echo "[2/6] Compile C sources"
 objs=(build/boot.o)
 
+# -DEXO_KERNEL selects the kernel view of src/exo_syscall.h (numbers, shared
+# structs and error codes, no user-side `syscall` stubs).  It lives here rather
+# than in a per-file #define so it is guaranteed to precede every transitive
+# include of the header in a kernel TU -- a #define after the first include
+# would be too late.  Deliberately not applied to tests/kernel/*.c: those
+# exercise both views, and test_exo_syscall_k.c needs the LibOS one to
+# instantiate the stubs.
 for c in src/*.c; do
   o="build/$(basename "${c%.c}.o")"
   echo "    CC $(basename "$c")"
-  x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}"
+  x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -DEXO_KERNEL
   objs+=("$o")
 done
 

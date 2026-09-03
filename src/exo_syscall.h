@@ -10,9 +10,13 @@
  *
  * Both sides include this header:
  *
- *   - The kernel defines EXO_KERNEL before including it and gets only the
- *     numbers, the shared argument structs, and the error codes — it must not
- *     see the user-side stubs, which would issue a `syscall` against itself.
+ *   - The kernel builds with EXO_KERNEL defined and gets only the numbers, the
+ *     shared argument structs, and the error codes — it must not see the
+ *     user-side stubs, which would issue a `syscall` against itself.  The
+ *     define comes from -DEXO_KERNEL on the kernel compiler command line in
+ *     docker/scripts/build.sh, not from a #define in each file: with #pragma
+ *     once, a #define placed after any transitive include of this header would
+ *     be too late and would silently lock in the LibOS view.
  *   - The LibOS includes it plainly and additionally gets the inline stubs
  *     (exo_syscall0..6) plus one typed wrapper per syscall.
  *
@@ -25,6 +29,15 @@
  * `syscall` itself overwrites RCX with the return RIP and R11 with RFLAGS,
  * which is why the 4th argument travels in R10 rather than in the RCX the
  * SysV C ABI would use, and why every stub clobbers both.
+ *
+ * The kernel must preserve every other register, argument registers included.
+ * That is the Linux guarantee and it is stronger than the SysV C ABI, under
+ * which RDI/RSI/RDX/R10/R8/R9 are caller-saved.  The stubs below depend on it:
+ * they pass arguments as plain inputs rather than clobbers, so the compiler may
+ * keep a value live in an argument register across the `syscall` and reuse it
+ * on the next call.  A dispatcher (SCRUM-32) that restores only the
+ * callee-saved set would corrupt arguments in any loop that repeats a syscall.
+ * See docs/syscall_spec.md §3.1.
  *
  * Nothing here is implemented yet — the dispatch side is SCRUM-32 and the
  * individual handlers land across Sprints 3-5.  The header exists so the
@@ -139,16 +152,19 @@ typedef struct {
 
 /* exo_kbd_poll(event_out) — #6.
  *
- * Raw scancode, not a Doom keycode: translation is LibOS policy and lives in
+ * `key` is a decoded ps2_key_t index (KEY_A, KEY_ESC, ...), not a raw PS/2
+ * set-1 scancode: the kernel's scancode decoder runs before the event is
+ * queued, so the LibOS never sees the wire bytes or the 0xE0 prefixes.  What
+ * stays LibOS policy is the ps2_key_t -> Doom keycode mapping, which lives in
  * the Doom port (Sprint 4).
  *
- * The layout matches the kernel's kbd_event_t (src/ps2.h) field for field, but
- * the two are not the same type: this one carries a trailing reserved byte and
- * is ABI, while the kernel struct is free to grow.  The #6 handler converts
- * field by field rather than casting. */
+ * The layout matches the kernel's kbd_event_t (src/ps2.h) field for field —
+ * `key` is that struct's `key` — but the two are not the same type: this one
+ * carries a trailing reserved byte and is ABI, while the kernel struct is free
+ * to grow.  The #6 handler converts field by field rather than casting. */
 typedef struct {
     uint8_t pressed;      /* 1 = key down, 0 = key up            */
-    uint8_t scancode;     /* ps2_key_t code                      */
+    uint8_t key;          /* decoded ps2_key_t index             */
     uint8_t modifiers;    /* EXO_MOD_* mask held when queued     */
     uint8_t reserved;     /* zeroed by the kernel                */
 } exo_kbd_event_t;
