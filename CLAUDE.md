@@ -129,7 +129,9 @@ Sprint 2 paging work lands.
   the implementation matches the intended calling convention (`RAX`=number,
   `RDI/RSI/RDX/R10/R8/R9`=args, return in `RAX`, negative=error). The 4th
   argument is in `R10` rather than the SysV `RCX` because `syscall` itself
-  overwrites `RCX` with the return RIP and `R11` with RFLAGS.
+  overwrites `RCX` with the return RIP and `R11` with RFLAGS. The kernel
+  preserves every other register, argument registers included — the stubs
+  depend on it.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - Sprint status/roadmap and current in-flight Jira stories are tracked in
