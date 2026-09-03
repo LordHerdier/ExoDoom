@@ -1,4 +1,4 @@
-.PHONY: docker-build docker-run docker-run-kernel docker-test clean
+.PHONY: docker-build docker-run docker-run-kernel docker-test docker-build-doom clean
 
 DEBUG ?= 0
 
@@ -53,6 +53,12 @@ docker-ci:
 	  || true; \
 	  cat /work/serial.log || true; \
 	  '
+
+# Best-effort compile pass over vendored src/doom/*.c (SCRUM-63/SCRUM-72).
+# Not part of docker-build/docker-ci -- many files still need libc gaps filled.
+docker-build-doom:
+	docker build -t exodoom-build -f docker/Dockerfile.build docker
+	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-build /work/docker/scripts/build-doom.sh
 
 docker-run-debug: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
