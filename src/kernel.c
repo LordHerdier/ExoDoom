@@ -294,7 +294,39 @@ void kernel_main(void *mb2_info_ptr) {
     }
 
     fbcon_write(&con, "\n");
-    klog(&con, kernel_get_ticks_ms(), "Timer demo complete. Halting.");
+    klog(&con, kernel_get_ticks_ms(), "Timer demo complete.");
 
-    for (;;) __asm__ volatile ("hlt");
+    // ── Keyboard event loop ─────────────────────────────────────────────
+    // IRQ1 only decodes scancodes and queues events; draining and printing
+    // them happens here, out of interrupt context.
+    klog(&con, kernel_get_ticks_ms(),
+         "Keyboard ready - key events are logged to serial.");
+
+    for (;;) {
+        kbd_service();
+
+        // Check the queue with interrupts off, so an IRQ1 landing between the
+        // service call and the hlt cannot leave its events sitting unread
+        // until some unrelated interrupt happens to wake the CPU. Today the
+        // 1000 Hz PIT bounds that to ~1 ms, but it becomes a real stall if the
+        // tick rate drops or the timer stops.
+        //
+        // "sti; hlt" is the safe pairing: sti leaves interrupts blocked for
+        // one more instruction, so the hlt is executed before any IRQ is
+        // recognised and a wakeup arriving in that window cannot be lost.
+        //
+        // The "memory" clobbers make the barrier explicit rather than relying
+        // on kbd_pending() being an opaque cross-TU call: without them a build
+        // that can see through it (LTO, or moving it inline) would be free to
+        // hoist the queue read out of the critical section and reintroduce the
+        // race this block closes.
+        __asm__ volatile ("cli" ::: "memory");
+
+        if (kbd_pending()) {
+            __asm__ volatile ("sti" ::: "memory");
+            continue;
+        }
+
+        __asm__ volatile ("sti; hlt" ::: "memory");
+    }
 }
