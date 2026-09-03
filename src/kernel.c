@@ -294,7 +294,16 @@ void kernel_main(void *mb2_info_ptr) {
     }
 
     fbcon_write(&con, "\n");
-    klog(&con, kernel_get_ticks_ms(), "Timer demo complete. Halting.");
+    klog(&con, kernel_get_ticks_ms(), "Timer demo complete.");
 
-    for (;;) __asm__ volatile ("hlt");
+    // ── Keyboard event loop ─────────────────────────────────────────────
+    // IRQ1 only decodes scancodes and queues events; draining and printing
+    // them happens here, out of interrupt context.
+    klog(&con, kernel_get_ticks_ms(),
+         "Keyboard ready - key events are logged to serial.");
+
+    for (;;) {
+        kbd_service();
+        __asm__ volatile ("hlt");
+    }
 }

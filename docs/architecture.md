@@ -365,17 +365,20 @@ apps each get a virtual framebuffer and the kernel manages which is displayed.
 
 **Files:** `src/ps2.c`, `src/ps2.h`, `src/isr.s` (IRQ1 stub), `src/idt.c` (gate)
 
-**Status:** ✅ IRQ1 handler and scan code processing complete (SCRUM-13, SCRUM-14)
+**Status:** ✅ IRQ1 handler and scan code processing complete (SCRUM-13,
+SCRUM-14) / ✅ Event ring buffer complete (SCRUM-18)
 
 The PS/2 keyboard controller maps to IRQ1 (IDT vector 33). When a key is pressed
 or released, the controller raises IRQ1 and places a scan code (Set 1) in port
-`0x60`. `irq1_handler` reads the byte from `0x60` and sends EOI.
+`0x60`. `irq1_handler` drains every buffered byte from `0x60` and sends EOI.
 
 SCRUM-13 implements the IRQ1 handler to read raw scancodes. SCRUM-14 implements
 the Set 1 → key enum translation table, tracking make/break codes and modifier
-state (shift, ctrl, alt). Sprint 2 adds a ring buffer (SCRUM-18) so rapid input
-isn't dropped, and the `exo_kbd_poll(event_out)` syscall to expose the queue to
-the LibOS.
+state (shift, ctrl, alt). SCRUM-18 adds the 256-event ring buffer
+(`src/kbd_ring.c`) so rapid input isn't dropped: the IRQ path only decodes and
+enqueues — no serial I/O — and `kbd_service()` drains the queue from ordinary
+kernel context. SCRUM-39 exposes the queue to the LibOS as the
+`exo_kbd_poll(event_out)` syscall.
 
 PS/2 mouse (IRQ12, port `0x60`/`0x64`, 3-byte packets) follows in Sprint 2
 (SCRUM-19) and feeds `exo_mouse_poll`.
