@@ -1,33 +1,70 @@
 #include "ps2.h"
+#include "kbd_ring.h"
 #include "io.h"
 #include "serial.h"
 #include "pic.h"
 
-#define PS2_DATA_PORT 0x60
+#define PS2_DATA_PORT   0x60
 #define PS2_STATUS_PORT 0x64
 
-static bool ps2_shift = false;
-static bool ps2_ctrl = false;
-static bool ps2_alt = false;
-static bool ps2_extended = false;
-static bool ps2_break = false;
+/* Status register (port 0x64) bits */
+#define PS2_STATUS_OBF  0x01   /* output buffer full — a byte is waiting  */
+#define PS2_STATUS_AUX  0x20   /* byte came from the auxiliary (mouse) port */
 
-#define KBD_BUFFER_SIZE 64
-static kbd_event_t kbd_buffer[KBD_BUFFER_SIZE];
-static volatile uint8_t kbd_head = 0;
-static volatile uint8_t kbd_tail = 0;
+/* Upper bound on bytes consumed per IRQ1.  The controller's buffer holds far
+ * fewer than this; the limit only exists so a wedged controller that reports
+ * OBF forever cannot spin the interrupt handler indefinitely. */
+#define PS2_IRQ_DRAIN_MAX 32u
+
+/* Upper bound on the polled-read spin (see ps2_read_scancode). */
+#define PS2_POLL_SPINS 100000u
+
+/* Upper bound on bytes drained by kbd_init.  Deliberately far larger than
+ * PS2_IRQ_DRAIN_MAX: the two loops guard different hazards.  The IRQ cap keeps
+ * a wedged controller from spinning in interrupt context, but kbd_init runs in
+ * ordinary context before sti, where there is no spin hazard — and stopping
+ * early there leaves OBF set, which is exactly the wedge the drain exists to
+ * prevent.  This bound is a last-resort guard against a controller that reports
+ * OBF forever, not a limit on how much stale input we are willing to clear. */
+#define PS2_INIT_DRAIN_MAX 100000u
+
+static bool ps2_extended = false;
+static uint8_t ps2_skip = 0;      /* bytes of a sequence left to discard */
+
+static kbd_ring_t kbd_queue;
 static volatile uint8_t modifier_state = 0;
 
-#define MOD_LSHIFT (1 << 0)
-#define MOD_RSHIFT (1 << 1)
-#define MOD_LCTRL  (1 << 2)
-#define MOD_RCTRL  (1 << 3)
-#define MOD_LALT   (1 << 4)
-#define MOD_RALT   (1 << 5)
+/* Bytes the IRQ path discarded because the controller tagged them AUX.  Bit 5
+ * of the status register only means "from the mouse port" on a dual-channel
+ * controller; elsewhere it is a transmit-timeout flag, so a discarded byte may
+ * have been a real keystroke.  Counting them keeps that loss visible instead
+ * of silent — a ring overflow is already reported, and this must be too. */
+static volatile uint32_t kbd_aux_bytes = 0;
 
+/* Times ps2_irq1_handler exhausted PS2_IRQ_DRAIN_MAX with OBF still set.  The
+ * handler has to stop somewhere, but leaving OBF set means no further edge is
+ * generated and the keyboard is wedged from that point on, so the event must
+ * not be silent. */
+static volatile uint32_t kbd_irq_overruns = 0;
+
+/* Counters already announced by kbd_service.  Consumer-owned, so the producer
+ * never has to write either counter back down. */
+static uint32_t kbd_reported_drops = 0;
+static uint32_t kbd_reported_aux = 0;
+static uint32_t kbd_reported_overruns = 0;
+
+/*
+ * ps2_read_scancode — Polled read of one byte from the keyboard data port.
+ *
+ * Only for use before IRQ1 is wired up.  The spin is bounded so a keyboard
+ * that never produces a byte cannot hang the caller; on timeout the data port
+ * is read anyway and returns whatever the controller last latched.  The IRQ
+ * path does not use this — see ps2_irq1_handler.
+ */
 uint8_t ps2_read_scancode(void) {
-    while (!(inb(PS2_STATUS_PORT) & 0x01)) {
-        ;
+    for (uint32_t spins = 0; spins < PS2_POLL_SPINS; spins++) {
+        if (inb(PS2_STATUS_PORT) & PS2_STATUS_OBF)
+            break;
     }
     return inb(PS2_DATA_PORT);
 }
@@ -167,52 +204,101 @@ static const char* ps2_key_name(ps2_key_t key) {
         case KEY_BACKSPACE:   return "KEY_BACKSPACE";
         case KEY_TAB:         return "KEY_TAB";
         case KEY_ESC:         return "KEY_ESC";
+        case KEY_F1:          return "KEY_F1";
+        case KEY_F2:          return "KEY_F2";
+        case KEY_F3:          return "KEY_F3";
+        case KEY_F4:          return "KEY_F4";
+        case KEY_F5:          return "KEY_F5";
+        case KEY_F6:          return "KEY_F6";
+        case KEY_F7:          return "KEY_F7";
+        case KEY_F8:          return "KEY_F8";
+        case KEY_F9:          return "KEY_F9";
+        case KEY_F10:         return "KEY_F10";
+        case KEY_F11:         return "KEY_F11";
+        case KEY_F12:         return "KEY_F12";
         default:              return "KEY_UNKNOWN";
     }
 }
 
-static void update_modifier_state(ps2_key_t key, bool pressed) {
+/* Right Ctrl and right Alt arrive as E0-prefixed copies of the left keys, so
+ * the extended flag is what separates MOD_RCTRL/MOD_RALT from their left
+ * counterparts. */
+static void update_modifier_state(ps2_key_t key, bool pressed, bool extended) {
+    uint8_t bit;
+
     switch (key) {
-        case KEY_SHIFT_LEFT:
-            modifier_state = pressed ? modifier_state | MOD_LSHIFT : modifier_state & ~MOD_LSHIFT;
-            break;
-        case KEY_SHIFT_RIGHT:
-            modifier_state = pressed ? modifier_state | MOD_RSHIFT : modifier_state & ~MOD_RSHIFT;
-            break;
-        case KEY_CTRL:
-            modifier_state = pressed ? modifier_state | MOD_LCTRL : modifier_state & ~MOD_LCTRL;
-            break;
-        case KEY_ALT:
-            modifier_state = pressed ? modifier_state | MOD_LALT : modifier_state & ~MOD_LALT;
-            break;
-        default:
-            break;
+        case KEY_SHIFT_LEFT:  bit = MOD_LSHIFT; break;
+        case KEY_SHIFT_RIGHT: bit = MOD_RSHIFT; break;
+        case KEY_CTRL:        bit = extended ? MOD_RCTRL : MOD_LCTRL; break;
+        case KEY_ALT:         bit = extended ? MOD_RALT  : MOD_LALT;  break;
+        default:              return;
     }
+
+    modifier_state = pressed ? (uint8_t)(modifier_state | bit)
+                             : (uint8_t)(modifier_state & (uint8_t)~bit);
 }
 
 void kbd_init(void) {
-    outb(0x21, inb(0x21) & ~(1 << 1));
-}
+    kbd_reset();
 
-void kbd_enqueue(kbd_event_t event) {
-    uint8_t next_head = (kbd_head + 1) & (KBD_BUFFER_SIZE - 1);
-    if (next_head == kbd_tail) {
-        return;
+    /* Drain anything the 8042 already latched before IRQ1 was wired up.
+     *
+     * IRQ1 is edge triggered and the controller will not transfer a new byte
+     * while OBF is set, so a scancode left in the data port — a key tapped
+     * during the GRUB handoff, or while the mmap and framebuffer banners were
+     * printing — suppresses every future edge and leaves the keyboard dead for
+     * the rest of the boot.  pic_remap does not rescue us: its ICW1_INIT
+     * clears the IRR, so a latched pending IRQ1 is discarded rather than
+     * delivered.  Reading the byte out is what re-arms the edge.
+     *
+     * kernel_main enables interrupts only after this returns, so the drain
+     * cannot race the handler.  Unmasking is pic_remap's job (it writes 0xFC,
+     * which already has IRQ1 clear); the mask write that used to live here was
+     * a no-op. */
+    unsigned i;
+
+    for (i = 0; i < PS2_INIT_DRAIN_MAX; i++) {
+        if (!(inb(PS2_STATUS_PORT) & PS2_STATUS_OBF))
+            break;
+        (void)inb(PS2_DATA_PORT);
     }
 
-    event.modifiers = modifier_state;
-    kbd_buffer[kbd_head] = event;
-    kbd_head = next_head;
+    /* Only a buffer that is *still* full means the keyboard is wedged, so
+     * re-read the status port rather than inferring it from the counter:
+     * draining exactly PS2_INIT_DRAIN_MAX bytes and then going empty is a
+     * healthy controller, and claiming "IRQ1 will not fire" there would be a
+     * hard, wrong assertion.  Serial is up by now (kernel_main initialises it
+     * long before this), so a genuine wedge is reported rather than booting to
+     * a silently dead keyboard. */
+    if (i == PS2_INIT_DRAIN_MAX && (inb(PS2_STATUS_PORT) & PS2_STATUS_OBF))
+        serial_print("kbd: output buffer still full after init drain; "
+                     "IRQ1 will not fire\n");
+}
+
+void kbd_reset(void) {
+    kbd_ring_init(&kbd_queue);
+
+    ps2_extended = false;
+    ps2_skip = 0;
+    modifier_state = 0;
+    kbd_aux_bytes = 0;
+    kbd_irq_overruns = 0;
+    kbd_reported_drops = 0;
+    kbd_reported_aux = 0;
+    kbd_reported_overruns = 0;
+}
+
+/* Queues an event exactly as given.  The modifier field is the caller's: the
+ * decoder stamps the live state before calling, and a synthetic event injected
+ * from elsewhere (a test, or the SCRUM-39 replay path) keeps the modifiers it
+ * was built with.  Note the ring is single-producer — callers outside the IRQ1
+ * path must ensure IRQ1 cannot run concurrently. */
+void kbd_enqueue(kbd_event_t event) {
+    kbd_ring_push(&kbd_queue, event);
 }
 
 int kbd_dequeue(kbd_event_t *out) {
-    if (kbd_head == kbd_tail) {
-        return 0;
-    }
-
-    *out = kbd_buffer[kbd_tail];
-    kbd_tail = (kbd_tail + 1) & (KBD_BUFFER_SIZE - 1);
-    return 1;
+    return kbd_ring_pop(&kbd_queue, out);
 }
 
 int exo_kbd_poll(kbd_event_t *event_out) {
@@ -220,76 +306,162 @@ int exo_kbd_poll(kbd_event_t *event_out) {
     return kbd_dequeue(event_out);
 }
 
+uint16_t kbd_pending(void) {
+    return kbd_ring_count(&kbd_queue);
+}
+
+uint32_t kbd_dropped_count(void) {
+    return kbd_ring_dropped(&kbd_queue);
+}
+
+uint32_t kbd_aux_count(void) {
+    return kbd_aux_bytes;
+}
+
+uint32_t kbd_irq_overrun_count(void) {
+    return kbd_irq_overruns;
+}
+
 uint8_t ps2_get_modifier_state(void) {
     return modifier_state;
 }
 
-static void ps2_report_key(ps2_key_t key, bool pressed) {
-    if (key == KEY_UNKNOWN) return;
-
-    update_modifier_state(key, pressed);
-
-    if (key == KEY_SHIFT_LEFT || key == KEY_SHIFT_RIGHT) {
-        ps2_shift = pressed;
-    } else if (key == KEY_CTRL) {
-        ps2_ctrl = pressed;
-    } else if (key == KEY_ALT) {
-        ps2_alt = pressed;
+/*
+ * ps2_process_scancode — Decode one byte of the scancode stream.
+ *
+ * Runs in interrupt context, so it does no serial I/O: at 38400 baud a single
+ * logged keystroke costs milliseconds, long enough for the next scancodes to
+ * pile up behind it.  Logging happens in kbd_service on the consumer side.
+ */
+void ps2_process_scancode(uint8_t scancode) {
+    /* Pause/Break sends E1 1D 45 E1 9D C5 and has no meaningful key event.
+     * Swallow the two bytes after each E1 so 1D is not decoded as Ctrl. */
+    if (ps2_skip) {
+        ps2_skip--;
+        return;
     }
 
-    const char* name = ps2_key_name(key);
-    serial_print(name);
-    serial_print(pressed ? " DOWN" : " UP");
-    serial_print(" (shift=");
-    serial_print(ps2_shift ? "1" : "0");
-    serial_print(" ctrl=");
-    serial_print(ps2_ctrl ? "1" : "0");
-    serial_print(" alt=");
-    serial_print(ps2_alt ? "1" : "0");
-    serial_print(")\n");
-}
+    if (scancode == 0xE1) {
+        ps2_skip = 2;
+        return;
+    }
 
-void ps2_process_scancode(uint8_t scancode) {
     if (scancode == 0xE0) {
         ps2_extended = true;
         return;
     }
 
-    if (scancode == 0xF0) {
-        ps2_break = true;
-        return;
+    /* Controller and keyboard response bytes share the data port with
+     * scancodes and must not reach the decoder: the unconditional bit 7 mask
+     * below would turn them into key events.  Nothing in this driver sends
+     * commands today, so they can only arrive spontaneously — a hot-plug or a
+     * self-test.  Only an *unprefixed* byte can be a response; E0 AA is a
+     * keyboard's "fake shift" around an extended key, not a BAT result. */
+    if (!ps2_extended) {
+        switch (scancode) {
+            case 0xFA:      /* ACK                                     */
+            case 0xFE:      /* resend                                  */
+            case 0xEE:      /* echo                                    */
+            case 0xFF:      /* error / detection error                 */
+            case 0x00:      /* buffer overrun                          */
+                /* These mask to unmapped codes and would be dropped anyway;
+                 * naming them keeps that a decision rather than a coincidence
+                 * that the next table entry could quietly undo. */
+                return;
+
+            case 0xAA:
+                /* BAT completion (self-test passed).  0xAA is also the Left
+                 * Shift break code, and in isolation the two are genuinely
+                 * indistinguishable — so decode it as a release only when
+                 * Left Shift is actually down.  Otherwise it is BAT, or a
+                 * release with no matching press, and letting it through
+                 * would clear a modifier that was never set and hand
+                 * exo_kbd_poll a phantom release event. */
+                if (!(modifier_state & MOD_LSHIFT))
+                    return;
+                break;
+
+            default:
+                break;
+        }
     }
 
-    bool release = false;
-    uint8_t code = scancode;
+    /* No 0xF0 break-prefix branch here on purpose.  The controller hands us
+     * translated set 1, where 0xF0 is not a prefix but an ordinary break code
+     * (the release of 0x70, kana on JP 106/109 keyboards).  Treating it as a
+     * set 2 prefix inverted the *next* key's event every time kana was tapped.
+     * Supporting real set 2 needs more than a prefix flag anyway — the bit 7
+     * mask below corrupts set 2 codes >= 0x80 (F7 is 0x83 -> 0x03) and the
+     * translation table is set 1 — so it belongs behind an explicit set 2
+     * mode, not here. */
 
-    if (!ps2_extended && (scancode & 0x80)) {
-        release = true;
-        code = scancode & 0x7F;
-    }
-
-    if (ps2_break) {
-        release = true;
-        ps2_break = false;
-    }
-
-    ps2_print_scancode(scancode);
+    /* Set 1 marks a release with bit 7, on extended keys too: the up arrow
+     * makes E0 48 and breaks E0 C8.  Masking the bit off unconditionally is
+     * what lets release events reach the queue for extended keys. */
+    bool release = (scancode & 0x80) != 0;
+    uint8_t code = (uint8_t)(scancode & 0x7F);
 
     ps2_key_t key = ps2_translate_scancode(code);
-
-    if (key != KEY_UNKNOWN) {
-        bool pressed = !release;
-        ps2_report_key(key, pressed);
-        kbd_event_t ev = { .pressed = pressed ? 1 : 0, .key = (uint8_t)key, .modifiers = modifier_state };
-        kbd_enqueue(ev);
-    }
-
+    bool extended = ps2_extended;
     ps2_extended = false;
+
+    if (key == KEY_UNKNOWN)
+        return;
+
+    bool pressed = !release;
+
+    update_modifier_state(key, pressed, extended);
+
+    kbd_event_t ev = {
+        .pressed   = pressed ? 1 : 0,
+        .key       = (uint8_t)key,
+        .modifiers = modifier_state,
+    };
+    kbd_enqueue(ev);
 }
 
+/*
+ * ps2_irq1_handler — IRQ1 entry point.
+ *
+ * Drains every byte the controller has buffered rather than reading one.
+ * IRQ1 is edge triggered: bytes left behind are not re-announced, so under
+ * rapid typing a one-byte-per-interrupt handler falls permanently behind and
+ * loses keys.
+ */
 void ps2_irq1_handler(void) {
-    uint8_t scancode = ps2_read_scancode();
-    ps2_process_scancode(scancode);
+    unsigned i;
+
+    for (i = 0; i < PS2_IRQ_DRAIN_MAX; i++) {
+        uint8_t status = inb(PS2_STATUS_PORT);
+
+        if (!(status & PS2_STATUS_OBF))
+            break;
+
+        uint8_t data = inb(PS2_DATA_PORT);
+
+        /* Keyboard and mouse share port 0x60; a byte tagged AUX belongs to
+         * IRQ12 and must not be fed to the scancode decoder.  Bit 5 carries
+         * that meaning only on a dual-channel controller, so count what we
+         * discard: on a controller where the bit is really transmit-timeout,
+         * this is a lost keystroke and kbd_service will say so. */
+        if (status & PS2_STATUS_AUX) {
+            kbd_aux_bytes++;
+            continue;
+        }
+
+        ps2_process_scancode(data);
+    }
+
+    /* Count only a real wedge: the bound ran out *and* the buffer is still
+     * full, so no further edge will be generated.  Exhausting the counter on
+     * its own is not enough — draining exactly PS2_IRQ_DRAIN_MAX bytes and
+     * then going empty is an ordinary burst (key repeat under load), and
+     * reporting that as "controller may be wedged" would cry wolf on a
+     * healthy keyboard.  The extra status read only happens on the rare
+     * bound-exhausted path. */
+    if (i == PS2_IRQ_DRAIN_MAX && (inb(PS2_STATUS_PORT) & PS2_STATUS_OBF))
+        kbd_irq_overruns++;
+
     pic_send_EOI(1);
 }
 
@@ -297,6 +469,68 @@ void irq1_handler(void) {
     ps2_irq1_handler();
 }
 
-bool ps2_shift_active(void) { return ps2_shift; }
-bool ps2_ctrl_active(void)  { return ps2_ctrl; }
-bool ps2_alt_active(void)   { return ps2_alt; }
+/*
+ * kbd_service — Consumer-side drain.
+ *
+ * Prints every queued event and reports overflow drops.  Runs in ordinary
+ * kernel context where blocking on the serial port is harmless.
+ */
+void kbd_service(void) {
+    kbd_event_t ev;
+
+    while (kbd_dequeue(&ev)) {
+        serial_print(ps2_key_name((ps2_key_t)ev.key));
+        serial_print(ev.pressed ? " DOWN" : " UP");
+        serial_print(" (shift=");
+        serial_print((ev.modifiers & (MOD_LSHIFT | MOD_RSHIFT)) ? "1" : "0");
+        serial_print(" ctrl=");
+        serial_print((ev.modifiers & (MOD_LCTRL | MOD_RCTRL)) ? "1" : "0");
+        serial_print(" alt=");
+        serial_print((ev.modifiers & (MOD_LALT | MOD_RALT)) ? "1" : "0");
+        serial_print(")\n");
+    }
+
+    uint32_t dropped = kbd_dropped_count();
+
+    if (dropped != kbd_reported_drops) {
+        serial_print("kbd: queue full, dropped ");
+        serial_print_u32(dropped - kbd_reported_drops);
+        serial_print(" event(s)\n");
+        kbd_reported_drops = dropped;
+    }
+
+    uint32_t aux = kbd_aux_count();
+
+    if (aux != kbd_reported_aux) {
+        serial_print("kbd: discarded ");
+        serial_print_u32(aux - kbd_reported_aux);
+        serial_print(" byte(s) tagged AUX\n");
+        kbd_reported_aux = aux;
+    }
+
+    uint32_t overruns = kbd_irq_overrun_count();
+
+    if (overruns != kbd_reported_overruns) {
+        serial_print("kbd: IRQ drain limit hit ");
+        serial_print_u32(overruns - kbd_reported_overruns);
+        serial_print(" time(s); controller may be wedged\n");
+        kbd_reported_overruns = overruns;
+    }
+}
+
+/* Derived from modifier_state rather than tracked separately: a per-key flag
+ * assigned from the last event alone goes stale when both keys of a pair are
+ * held — press LShift, tap and release RShift, and the flag reads false while
+ * LShift is still down.  modifier_state keeps a bit per physical key, so it
+ * does not have that failure. */
+bool ps2_shift_active(void) {
+    return (modifier_state & (MOD_LSHIFT | MOD_RSHIFT)) != 0;
+}
+
+bool ps2_ctrl_active(void) {
+    return (modifier_state & (MOD_LCTRL | MOD_RCTRL)) != 0;
+}
+
+bool ps2_alt_active(void) {
+    return (modifier_state & (MOD_LALT | MOD_RALT)) != 0;
+}
