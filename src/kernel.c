@@ -314,13 +314,19 @@ void kernel_main(void *mb2_info_ptr) {
         // "sti; hlt" is the safe pairing: sti leaves interrupts blocked for
         // one more instruction, so the hlt is executed before any IRQ is
         // recognised and a wakeup arriving in that window cannot be lost.
-        __asm__ volatile ("cli");
+        //
+        // The "memory" clobbers make the barrier explicit rather than relying
+        // on kbd_pending() being an opaque cross-TU call: without them a build
+        // that can see through it (LTO, or moving it inline) would be free to
+        // hoist the queue read out of the critical section and reintroduce the
+        // race this block closes.
+        __asm__ volatile ("cli" ::: "memory");
 
         if (kbd_pending()) {
-            __asm__ volatile ("sti");
+            __asm__ volatile ("sti" ::: "memory");
             continue;
         }
 
-        __asm__ volatile ("sti; hlt");
+        __asm__ volatile ("sti; hlt" ::: "memory");
     }
 }

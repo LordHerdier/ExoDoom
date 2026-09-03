@@ -19,6 +19,15 @@
 /* Upper bound on the polled-read spin (see ps2_read_scancode). */
 #define PS2_POLL_SPINS 100000u
 
+/* Upper bound on bytes drained by kbd_init.  Deliberately far larger than
+ * PS2_IRQ_DRAIN_MAX: the two loops guard different hazards.  The IRQ cap keeps
+ * a wedged controller from spinning in interrupt context, but kbd_init runs in
+ * ordinary context before sti, where there is no spin hazard — and stopping
+ * early there leaves OBF set, which is exactly the wedge the drain exists to
+ * prevent.  This bound is a last-resort guard against a controller that reports
+ * OBF forever, not a limit on how much stale input we are willing to clear. */
+#define PS2_INIT_DRAIN_MAX 100000u
+
 static bool ps2_extended = false;
 static uint8_t ps2_skip = 0;      /* bytes of a sequence left to discard */
 
@@ -32,10 +41,17 @@ static volatile uint8_t modifier_state = 0;
  * of silent — a ring overflow is already reported, and this must be too. */
 static volatile uint32_t kbd_aux_bytes = 0;
 
+/* Times ps2_irq1_handler exhausted PS2_IRQ_DRAIN_MAX with OBF still set.  The
+ * handler has to stop somewhere, but leaving OBF set means no further edge is
+ * generated and the keyboard is wedged from that point on, so the event must
+ * not be silent. */
+static volatile uint32_t kbd_irq_overruns = 0;
+
 /* Counters already announced by kbd_service.  Consumer-owned, so the producer
  * never has to write either counter back down. */
 static uint32_t kbd_reported_drops = 0;
 static uint32_t kbd_reported_aux = 0;
+static uint32_t kbd_reported_overruns = 0;
 
 /*
  * ps2_read_scancode — Polled read of one byte from the keyboard data port.
@@ -239,11 +255,21 @@ void kbd_init(void) {
      * cannot race the handler.  Unmasking is pic_remap's job (it writes 0xFC,
      * which already has IRQ1 clear); the mask write that used to live here was
      * a no-op. */
-    for (unsigned i = 0; i < PS2_IRQ_DRAIN_MAX; i++) {
+    unsigned i;
+
+    for (i = 0; i < PS2_INIT_DRAIN_MAX; i++) {
         if (!(inb(PS2_STATUS_PORT) & PS2_STATUS_OBF))
             break;
         (void)inb(PS2_DATA_PORT);
     }
+
+    /* Running the bound out means OBF is still set, so the keyboard is wedged
+     * for the rest of the boot.  Nothing here can fix that, but serial is up
+     * by now (kernel_main initialises it long before this), so say so rather
+     * than booting to a silently dead keyboard. */
+    if (i == PS2_INIT_DRAIN_MAX)
+        serial_print("kbd: output buffer still full after init drain; "
+                     "IRQ1 will not fire\n");
 }
 
 void kbd_reset(void) {
@@ -253,8 +279,10 @@ void kbd_reset(void) {
     ps2_skip = 0;
     modifier_state = 0;
     kbd_aux_bytes = 0;
+    kbd_irq_overruns = 0;
     kbd_reported_drops = 0;
     kbd_reported_aux = 0;
+    kbd_reported_overruns = 0;
 }
 
 /* Queues an event exactly as given.  The modifier field is the caller's: the
@@ -285,6 +313,10 @@ uint32_t kbd_dropped_count(void) {
 
 uint32_t kbd_aux_count(void) {
     return kbd_aux_bytes;
+}
+
+uint32_t kbd_irq_overrun_count(void) {
+    return kbd_irq_overruns;
 }
 
 uint8_t ps2_get_modifier_state(void) {
@@ -359,7 +391,9 @@ void ps2_process_scancode(uint8_t scancode) {
  * loses keys.
  */
 void ps2_irq1_handler(void) {
-    for (unsigned i = 0; i < PS2_IRQ_DRAIN_MAX; i++) {
+    unsigned i;
+
+    for (i = 0; i < PS2_IRQ_DRAIN_MAX; i++) {
         uint8_t status = inb(PS2_STATUS_PORT);
 
         if (!(status & PS2_STATUS_OBF))
@@ -379,6 +413,12 @@ void ps2_irq1_handler(void) {
 
         ps2_process_scancode(data);
     }
+
+    /* Bound exhausted: OBF is still set, so this was the last IRQ1 we will
+     * ever see.  Count it — kbd_service reports it, the same way it reports
+     * dropped events and AUX discards. */
+    if (i == PS2_IRQ_DRAIN_MAX)
+        kbd_irq_overruns++;
 
     pic_send_EOI(1);
 }
@@ -424,6 +464,15 @@ void kbd_service(void) {
         serial_print_u32(aux - kbd_reported_aux);
         serial_print(" byte(s) tagged AUX\n");
         kbd_reported_aux = aux;
+    }
+
+    uint32_t overruns = kbd_irq_overrun_count();
+
+    if (overruns != kbd_reported_overruns) {
+        serial_print("kbd: IRQ drain limit hit ");
+        serial_print_u32(overruns - kbd_reported_overruns);
+        serial_print(" time(s); controller may be wedged\n");
+        kbd_reported_overruns = overruns;
     }
 }
 

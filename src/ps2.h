@@ -123,6 +123,10 @@ uint32_t kbd_dropped_count(void);
  * controller where status bit 5 is not an AUX flag means lost keystrokes. */
 uint32_t kbd_aux_count(void);
 
+/* Times the IRQ handler hit its drain limit with the output buffer still full.
+ * Non-zero means IRQ1 stopped being delivered at that point. */
+uint32_t kbd_irq_overrun_count(void);
+
 /* Consumer side: drain queued events to serial and report any overflow.
  * Call from ordinary kernel context, never from an interrupt handler. */
 void kbd_service(void);

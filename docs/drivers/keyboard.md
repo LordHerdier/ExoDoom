@@ -113,7 +113,18 @@ void ps2_irq1_handler(void) {
 ```
 
 `PS2_IRQ_DRAIN_MAX` (32) bounds the loop so a wedged controller that reports
-OBF forever cannot spin inside the interrupt handler.
+OBF forever cannot spin inside the interrupt handler. Hitting that bound is not
+harmless — it means the handler returned with OBF still set, so no further edge
+is generated and IRQ1 is done for good — so exhausting it increments a counter
+that `kbd_service` reports (`kbd_irq_overrun_count()`).
+
+**`kbd_init`'s drain uses a different, much larger bound** (`PS2_INIT_DRAIN_MAX`,
+100000). The two loops guard different hazards: the IRQ cap exists because
+spinning in interrupt context is unacceptable, but `kbd_init` runs in ordinary
+context before `sti`, where there is no spin hazard. Capping it at 32 would
+recreate the exact wedge the drain was added to prevent, just with 33 stale
+bytes instead of one. If even that bound runs out, `kbd_init` says so on serial
+rather than booting to a silently dead keyboard.
 
 **The AUX discard is counted, not silent.** Status bit 5 means "byte came from
 the mouse port" only on a dual-channel controller; on the original 8042 and on
@@ -428,7 +439,6 @@ path must ensure IRQ1 cannot run concurrently.
 
 `ps2_process_scancode` decodes one byte of the scan code stream and enqueues the
 resulting event, if any; it is also the entry point the tests drive directly.
-`kbd_enqueue` stamps the current modifier state onto the event and pushes it.
 Both drop the event when the queue is full, incrementing the drop counter.
 
 ---
@@ -463,7 +473,9 @@ void kbd_service(void);
 Consumer-side drain: pops every queued event, logs it to serial as
 `KEY_x DOWN|UP (shift=n ctrl=n alt=n)`, and prints
 `kbd: queue full, dropped N event(s)` when the drop counter has moved since the
-last call, and `kbd: discarded N byte(s) tagged AUX` when the AUX counter has.
+last call, `kbd: discarded N byte(s) tagged AUX` when the AUX counter has, and
+`kbd: IRQ drain limit hit N time(s)` when the handler has returned with the
+output buffer still full.
 Call from ordinary kernel context — never from an interrupt handler, since it
 blocks on the UART. `kernel_main` calls it from the idle loop:
 
