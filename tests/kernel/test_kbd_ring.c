@@ -336,6 +336,56 @@ static void test_modifier_active_while_paired_key_held(void)
     CU_ASSERT_EQUAL(ps2_get_modifier_state() & MOD_RCTRL, 0);
 }
 
+/*
+ * 0xAA is BAT-OK from the keyboard *and* the Left Shift break code. With no
+ * shift held it must not decode: doing so emitted a release with no matching
+ * press and cleared a modifier that was never set.
+ */
+static void test_bat_ok_does_not_fake_a_shift_release(void)
+{
+    kbd_reset();
+    ps2_process_scancode(0xAA);
+
+    CU_ASSERT_EQUAL(kbd_pending(), 0);
+    CU_ASSERT_EQUAL(ps2_get_modifier_state(), 0);
+    CU_ASSERT_FALSE(ps2_shift_active());
+}
+
+/* ...but a real Left Shift release, which follows a press, still decodes. */
+static void test_shift_release_still_decodes(void)
+{
+    static const uint8_t stream[] = { 0x2A, 0xAA };   /* LShift make, break */
+    kbd_event_t ev;
+
+    kbd_reset();
+    feed(stream, sizeof stream);
+
+    CU_ASSERT_EQUAL(kbd_pending(), 2);
+
+    CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
+    CU_ASSERT_EQUAL(ev.key, KEY_SHIFT_LEFT);
+    CU_ASSERT_EQUAL(ev.pressed, 1);
+
+    CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
+    CU_ASSERT_EQUAL(ev.key, KEY_SHIFT_LEFT);
+    CU_ASSERT_EQUAL(ev.pressed, 0);
+
+    CU_ASSERT_EQUAL(ps2_get_modifier_state(), 0);
+    CU_ASSERT_FALSE(ps2_shift_active());
+}
+
+/* ACK, resend, echo, error and overrun must not reach the decoder. */
+static void test_response_bytes_queue_nothing(void)
+{
+    static const uint8_t stream[] = { 0xFA, 0xFE, 0xEE, 0xFF, 0x00 };
+
+    kbd_reset();
+    feed(stream, sizeof stream);
+
+    CU_ASSERT_EQUAL(kbd_pending(), 0);
+    CU_ASSERT_EQUAL(ps2_get_modifier_state(), 0);
+}
+
 /* kbd_enqueue is driver API: an injected event keeps the modifiers it was
  * built with rather than having the live IRQ-side state stamped over them. */
 static void test_enqueue_preserves_caller_modifiers(void)
@@ -443,6 +493,9 @@ void suite_ps2_decode_tests(CU_pSuite s)
     CU_add_test(s, "set2_prefix_not_a_prefix",  test_set2_break_prefix_does_not_invert_next_key);
     CU_add_test(s, "paired_modifier_held",      test_modifier_active_while_paired_key_held);
     CU_add_test(s, "enqueue_keeps_modifiers",   test_enqueue_preserves_caller_modifiers);
+    CU_add_test(s, "bat_ok_not_shift_release",  test_bat_ok_does_not_fake_a_shift_release);
+    CU_add_test(s, "shift_release_decodes",     test_shift_release_still_decodes);
+    CU_add_test(s, "response_bytes_dropped",    test_response_bytes_queue_nothing);
     CU_add_test(s, "rapid_burst_no_drop",       test_rapid_burst_drops_nothing);
     CU_add_test(s, "overflow_graceful",         test_unserviced_queue_overflows_gracefully);
     CU_add_test(s, "exo_kbd_poll",              test_exo_kbd_poll_matches_dequeue);

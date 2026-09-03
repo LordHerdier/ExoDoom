@@ -115,8 +115,12 @@ void ps2_irq1_handler(void) {
 `PS2_IRQ_DRAIN_MAX` (32) bounds the loop so a wedged controller that reports
 OBF forever cannot spin inside the interrupt handler. Hitting that bound is not
 harmless — it means the handler returned with OBF still set, so no further edge
-is generated and IRQ1 is done for good — so exhausting it increments a counter
-that `kbd_service` reports (`kbd_irq_overrun_count()`).
+is generated and IRQ1 is done for good — so hitting it increments a counter that
+`kbd_service` reports (`kbd_irq_overrun_count()`). The counter tests the status
+port again after the loop rather than trusting the loop counter: draining
+exactly `PS2_IRQ_DRAIN_MAX` bytes and *then* going empty is an ordinary burst
+under key repeat, not a wedge, and counting it would cry wolf on a healthy
+keyboard.
 
 **`kbd_init`'s drain uses a different, much larger bound** (`PS2_INIT_DRAIN_MAX`,
 100000). The two loops guard different hazards: the IRQ cap exists because
@@ -208,6 +212,23 @@ void ps2_process_scancode(uint8_t sc) {
     ...
 }
 ```
+
+**Response bytes are filtered before the mask.** The controller and the keyboard
+share the data port with scancodes, so `0xFA` (ACK), `0xFE` (resend), `0xEE`
+(echo), `0xFF` (error) and `0x00` (overrun) are dropped explicitly. They already
+mask to unmapped codes, but naming them keeps that a decision rather than a
+coincidence the next table entry could quietly undo.
+
+`0xAA` is the one that actually collides: it is BAT-OK (self-test passed) *and*
+the Left Shift break code, `0xAA & 0x7F == 0x2A`. Decoding it unconditionally
+cleared `MOD_LSHIFT` and handed consumers a release with no matching press. It
+is now decoded only when Left Shift is genuinely down; otherwise it is treated
+as BAT and dropped. The two are indistinguishable in isolation, so a BAT
+arriving while Shift is held still reads as a release — but that case
+self-heals, since a keyboard that has just reset re-sends the make through
+typematic repeat if the key is still physically held. Only unprefixed bytes are
+filtered: `E0 AA` is a keyboard's "fake shift" around an extended key, not a BAT
+result.
 
 **There is deliberately no `0xF0` case.** `0xF0` is the scan code set 2 break
 prefix, but the controller hands us *translated set 1*, where `0xF0` is an

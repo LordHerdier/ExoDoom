@@ -263,11 +263,14 @@ void kbd_init(void) {
         (void)inb(PS2_DATA_PORT);
     }
 
-    /* Running the bound out means OBF is still set, so the keyboard is wedged
-     * for the rest of the boot.  Nothing here can fix that, but serial is up
-     * by now (kernel_main initialises it long before this), so say so rather
-     * than booting to a silently dead keyboard. */
-    if (i == PS2_INIT_DRAIN_MAX)
+    /* Only a buffer that is *still* full means the keyboard is wedged, so
+     * re-read the status port rather than inferring it from the counter:
+     * draining exactly PS2_INIT_DRAIN_MAX bytes and then going empty is a
+     * healthy controller, and claiming "IRQ1 will not fire" there would be a
+     * hard, wrong assertion.  Serial is up by now (kernel_main initialises it
+     * long before this), so a genuine wedge is reported rather than booting to
+     * a silently dead keyboard. */
+    if (i == PS2_INIT_DRAIN_MAX && (inb(PS2_STATUS_PORT) & PS2_STATUS_OBF))
         serial_print("kbd: output buffer still full after init drain; "
                      "IRQ1 will not fire\n");
 }
@@ -348,6 +351,41 @@ void ps2_process_scancode(uint8_t scancode) {
         return;
     }
 
+    /* Controller and keyboard response bytes share the data port with
+     * scancodes and must not reach the decoder: the unconditional bit 7 mask
+     * below would turn them into key events.  Nothing in this driver sends
+     * commands today, so they can only arrive spontaneously — a hot-plug or a
+     * self-test.  Only an *unprefixed* byte can be a response; E0 AA is a
+     * keyboard's "fake shift" around an extended key, not a BAT result. */
+    if (!ps2_extended) {
+        switch (scancode) {
+            case 0xFA:      /* ACK                                     */
+            case 0xFE:      /* resend                                  */
+            case 0xEE:      /* echo                                    */
+            case 0xFF:      /* error / detection error                 */
+            case 0x00:      /* buffer overrun                          */
+                /* These mask to unmapped codes and would be dropped anyway;
+                 * naming them keeps that a decision rather than a coincidence
+                 * that the next table entry could quietly undo. */
+                return;
+
+            case 0xAA:
+                /* BAT completion (self-test passed).  0xAA is also the Left
+                 * Shift break code, and in isolation the two are genuinely
+                 * indistinguishable — so decode it as a release only when
+                 * Left Shift is actually down.  Otherwise it is BAT, or a
+                 * release with no matching press, and letting it through
+                 * would clear a modifier that was never set and hand
+                 * exo_kbd_poll a phantom release event. */
+                if (!(modifier_state & MOD_LSHIFT))
+                    return;
+                break;
+
+            default:
+                break;
+        }
+    }
+
     /* No 0xF0 break-prefix branch here on purpose.  The controller hands us
      * translated set 1, where 0xF0 is not a prefix but an ordinary break code
      * (the release of 0x70, kana on JP 106/109 keyboards).  Treating it as a
@@ -414,10 +452,14 @@ void ps2_irq1_handler(void) {
         ps2_process_scancode(data);
     }
 
-    /* Bound exhausted: OBF is still set, so this was the last IRQ1 we will
-     * ever see.  Count it — kbd_service reports it, the same way it reports
-     * dropped events and AUX discards. */
-    if (i == PS2_IRQ_DRAIN_MAX)
+    /* Count only a real wedge: the bound ran out *and* the buffer is still
+     * full, so no further edge will be generated.  Exhausting the counter on
+     * its own is not enough — draining exactly PS2_IRQ_DRAIN_MAX bytes and
+     * then going empty is an ordinary burst (key repeat under load), and
+     * reporting that as "controller may be wedged" would cry wolf on a
+     * healthy keyboard.  The extra status read only happens on the rare
+     * bound-exhausted path. */
+    if (i == PS2_IRQ_DRAIN_MAX && (inb(PS2_STATUS_PORT) & PS2_STATUS_OBF))
         kbd_irq_overruns++;
 
     pic_send_EOI(1);
