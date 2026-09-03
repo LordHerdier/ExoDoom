@@ -304,6 +304,23 @@ void kernel_main(void *mb2_info_ptr) {
 
     for (;;) {
         kbd_service();
-        __asm__ volatile ("hlt");
+
+        // Check the queue with interrupts off, so an IRQ1 landing between the
+        // service call and the hlt cannot leave its events sitting unread
+        // until some unrelated interrupt happens to wake the CPU. Today the
+        // 1000 Hz PIT bounds that to ~1 ms, but it becomes a real stall if the
+        // tick rate drops or the timer stops.
+        //
+        // "sti; hlt" is the safe pairing: sti leaves interrupts blocked for
+        // one more instruction, so the hlt is executed before any IRQ is
+        // recognised and a wakeup arriving in that window cannot be lost.
+        __asm__ volatile ("cli");
+
+        if (kbd_pending()) {
+            __asm__ volatile ("sti");
+            continue;
+        }
+
+        __asm__ volatile ("sti; hlt");
     }
 }

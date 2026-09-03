@@ -100,8 +100,10 @@ void ps2_irq1_handler(void) {
 
         uint8_t data = inb(0x60);
 
-        if (status & PS2_STATUS_AUX)
-            continue;                   // mouse byte, belongs to IRQ12
+        if (status & PS2_STATUS_AUX) {
+            kbd_aux_bytes++;            // mouse byte, belongs to IRQ12
+            continue;
+        }
 
         ps2_process_scancode(data);     // decode + enqueue, no I/O
     }
@@ -113,13 +115,32 @@ void ps2_irq1_handler(void) {
 `PS2_IRQ_DRAIN_MAX` (32) bounds the loop so a wedged controller that reports
 OBF forever cannot spin inside the interrupt handler.
 
+**The AUX discard is counted, not silent.** Status bit 5 means "byte came from
+the mouse port" only on a dual-channel controller; on the original 8042 and on
+some emulated ones it is a transmit-timeout flag, and a real keystroke can
+arrive with it set. Discarding such a byte loses a key, so `kbd_aux_count()`
+tracks them and `kbd_service` reports any increase to serial — the same
+treatment ring overflows get. A non-zero count on a machine with no mouse
+driver is the signal that this filter is eating input.
+
 Registration in `kernel_main` (after `idt_init`, `pic_remap`):
 
 ```c
 extern void irq1_stub(void);
 idt_set_gate(33, (uintptr_t)irq1_stub);
-kbd_init();  // unmasks IRQ1 in the PIC
+kbd_init();  // drains any byte the 8042 already latched
 ```
+
+**`kbd_init` must drain the output buffer.** IRQ1 is edge triggered and the
+controller will not transfer a new byte while OBF is set, so a scancode left in
+port `0x60` from before the handler existed — a key tapped during the GRUB
+handoff, or while the early banners were printing — suppresses every future
+edge and leaves the keyboard dead for the whole boot. `pic_remap` does not
+rescue it: `ICW1_INIT` clears the IRR, so a latched pending IRQ1 is discarded
+rather than delivered. Reading the stale byte out is what re-arms the edge.
+Unmasking is `pic_remap`'s job — it writes mask `0xFC`, which already has IRQ1
+clear — and `kernel_main` enables interrupts only after `kbd_init` returns, so
+the drain cannot race the handler.
 
 **Status (SCRUM-13):** ✅ Complete — IRQ1 handler reads scan codes and processes
 them.
@@ -170,13 +191,22 @@ void ps2_process_scancode(uint8_t sc) {
     if (ps2_skip)     { ps2_skip--;        return; }  // tail of a Pause seq
     if (sc == 0xE1)   { ps2_skip = 2;      return; }  // Pause/Break prefix
     if (sc == 0xE0)   { ps2_extended = 1;  return; }  // extended prefix
-    if (sc == 0xF0)   { ps2_break = 1;     return; }  // set 2 break prefix
 
     bool    release = (sc & 0x80) != 0;               // set 1 break bit
     uint8_t code    = sc & 0x7F;
     ...
 }
 ```
+
+**There is deliberately no `0xF0` case.** `0xF0` is the scan code set 2 break
+prefix, but the controller hands us *translated set 1*, where `0xF0` is an
+ordinary break code — the release of `0x70`, kana on JP 106/109 keyboards.
+Treating it as a prefix inverted the *next* key's event, so tapping kana turned
+the following keypress into a release. A prefix flag would not be enough to
+support real set 2 anyway: the `sc & 0x7F` mask above corrupts every set 2 code
+`>= 0x80` (set 2 F7 is `0x83` → `0x03`) and the translation table is set 1
+throughout. Set 2 support belongs behind an explicit mode switch, not a lone
+prefix branch.
 
 **The break bit applies to extended keys too.** The up arrow makes `E0 48` and
 breaks `E0 C8`; masking bit 7 off only for non-extended codes is what caused
@@ -369,8 +399,10 @@ enums to Doom keycodes:
 void kbd_init(void);
 ```
 
-Reset driver state and unmask IRQ1 in the PIC. Call after `idt_init()`,
-`pic_remap()`, and `idt_set_gate(33, irq1_stub)`.
+Reset driver state and drain any byte the 8042 latched before the handler was
+wired up, so the first real keypress still produces an edge. Call after
+`idt_init()`, `pic_remap()`, and `idt_set_gate(33, irq1_stub)`, and before
+`sti`. Unmasking IRQ1 is `pic_remap`'s job.
 
 ---
 
@@ -384,10 +416,15 @@ against a concurrent IRQ1 — call with IRQ1 masked or before `sti`.
 ---
 
 ```c
-// Called from the IRQ1 handler only
 void kbd_enqueue(kbd_event_t event);
 void ps2_process_scancode(uint8_t scancode);
 ```
+
+`kbd_enqueue` queues the event verbatim — the `modifiers` field is the
+caller's, so a synthetic event injected by a test or a replay path keeps the
+modifiers it was built with. `ps2_process_scancode` stamps the live modifier
+state before calling it. The ring is single-producer: callers outside the IRQ1
+path must ensure IRQ1 cannot run concurrently.
 
 `ps2_process_scancode` decodes one byte of the scan code stream and enqueues the
 resulting event, if any; it is also the entry point the tests drive directly.
@@ -426,15 +463,34 @@ void kbd_service(void);
 Consumer-side drain: pops every queued event, logs it to serial as
 `KEY_x DOWN|UP (shift=n ctrl=n alt=n)`, and prints
 `kbd: queue full, dropped N event(s)` when the drop counter has moved since the
-last call. Call from ordinary kernel context — never from an interrupt handler,
-since it blocks on the UART. `kernel_main` calls it from the idle loop:
+last call, and `kbd: discarded N byte(s) tagged AUX` when the AUX counter has.
+Call from ordinary kernel context — never from an interrupt handler, since it
+blocks on the UART. `kernel_main` calls it from the idle loop:
 
 ```c
 for (;;) {
     kbd_service();
-    __asm__ volatile ("hlt");
+
+    __asm__ volatile ("cli");
+
+    if (kbd_pending()) {
+        __asm__ volatile ("sti");
+        continue;
+    }
+
+    __asm__ volatile ("sti; hlt");
 }
 ```
+
+**Why the `cli` and not a bare `hlt`.** An IRQ1 landing between `kbd_service`
+returning and the `hlt` retiring is handled, but its events then sit unread
+until some *other* interrupt wakes the CPU. The 1000 Hz PIT bounds that to
+about a millisecond today, so it is benign — but it becomes a real stall if the
+tick rate drops or the timer is stopped. Re-checking the queue with interrupts
+disabled closes the window. `sti; hlt` is the safe pairing: `sti` leaves
+interrupts blocked for one more instruction, so the `hlt` always executes
+before an IRQ is recognised and a wakeup arriving in that window cannot be
+lost.
 
 ---
 

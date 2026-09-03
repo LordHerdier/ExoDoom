@@ -287,6 +287,79 @@ static void test_pause_sequence_queues_nothing(void)
 }
 
 /*
+ * 0xF0 is a set 2 break prefix, but the controller gives us translated set 1,
+ * where it is the ordinary break code of 0x70 (kana).  It must not be treated
+ * as a prefix: doing so turned the *next* key's press into a release.
+ */
+static void test_set2_break_prefix_does_not_invert_next_key(void)
+{
+    static const uint8_t stream[] = { 0xF0, 0x1E };   /* kana break, A make */
+    kbd_event_t ev;
+
+    kbd_reset();
+    feed(stream, sizeof stream);
+
+    /* 0x70 is unmapped, so the kana release queues nothing; A must still
+     * arrive as a press. */
+    CU_ASSERT_EQUAL(kbd_pending(), 1);
+    CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
+    CU_ASSERT_EQUAL(ev.key, KEY_A);
+    CU_ASSERT_EQUAL(ev.pressed, 1);
+}
+
+/*
+ * Modifier queries read the per-key mask, so releasing one key of a pair while
+ * the other is held must not clear the state.
+ */
+static void test_modifier_active_while_paired_key_held(void)
+{
+    /* LShift down, RShift down, RShift up */
+    static const uint8_t shifts[] = { 0x2A, 0x36, 0xB6 };
+    /* LCtrl down, RCtrl (E0 1D) down, RCtrl up */
+    static const uint8_t ctrls[] = { 0x1D, 0xE0, 0x1D, 0xE0, 0x9D };
+
+    kbd_reset();
+    feed(shifts, sizeof shifts);
+
+    CU_ASSERT_TRUE(ps2_shift_active());
+    CU_ASSERT_EQUAL(ps2_get_modifier_state() & MOD_LSHIFT, MOD_LSHIFT);
+    CU_ASSERT_EQUAL(ps2_get_modifier_state() & MOD_RSHIFT, 0);
+
+    ps2_process_scancode(0xAA);                      /* LShift up */
+    CU_ASSERT_FALSE(ps2_shift_active());
+
+    kbd_reset();
+    feed(ctrls, sizeof ctrls);
+
+    CU_ASSERT_TRUE(ps2_ctrl_active());
+    CU_ASSERT_EQUAL(ps2_get_modifier_state() & MOD_LCTRL, MOD_LCTRL);
+    CU_ASSERT_EQUAL(ps2_get_modifier_state() & MOD_RCTRL, 0);
+}
+
+/* kbd_enqueue is driver API: an injected event keeps the modifiers it was
+ * built with rather than having the live IRQ-side state stamped over them. */
+static void test_enqueue_preserves_caller_modifiers(void)
+{
+    kbd_event_t ev;
+
+    kbd_reset();
+    ps2_process_scancode(0x2A);                      /* LShift down */
+    CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);            /* drain the shift event */
+
+    kbd_event_t injected = {
+        .pressed   = 1,
+        .key       = (uint8_t)KEY_B,
+        .modifiers = MOD_RALT,
+    };
+
+    kbd_enqueue(injected);
+
+    CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
+    CU_ASSERT_EQUAL(ev.key, KEY_B);
+    CU_ASSERT_EQUAL(ev.modifiers, MOD_RALT);
+}
+
+/*
  * The acceptance criterion itself: a burst far larger than any human can type
  * between two polls arrives complete and in order.
  */
@@ -367,6 +440,9 @@ void suite_ps2_decode_tests(CU_pSuite s)
     CU_add_test(s, "right_ctrl_modifier",       test_right_ctrl_uses_right_modifier_bit);
     CU_add_test(s, "unmapped_queue_nothing",    test_unmapped_scancodes_queue_nothing);
     CU_add_test(s, "pause_queues_nothing",      test_pause_sequence_queues_nothing);
+    CU_add_test(s, "set2_prefix_not_a_prefix",  test_set2_break_prefix_does_not_invert_next_key);
+    CU_add_test(s, "paired_modifier_held",      test_modifier_active_while_paired_key_held);
+    CU_add_test(s, "enqueue_keeps_modifiers",   test_enqueue_preserves_caller_modifiers);
     CU_add_test(s, "rapid_burst_no_drop",       test_rapid_burst_drops_nothing);
     CU_add_test(s, "overflow_graceful",         test_unserviced_queue_overflows_gracefully);
     CU_add_test(s, "exo_kbd_poll",              test_exo_kbd_poll_matches_dequeue);

@@ -103,6 +103,9 @@ void ps2_process_scancode(uint8_t scancode);
 
 /* Driver init + APIs */
 void kbd_init(void);
+
+/* Queue an event verbatim, modifier field included.  Single-producer: safe
+ * from the IRQ1 path, and from elsewhere only with IRQ1 unable to run. */
 void kbd_enqueue(kbd_event_t event);
 int kbd_dequeue(kbd_event_t *out);
 int exo_kbd_poll(kbd_event_t *event_out);
@@ -116,11 +119,16 @@ void kbd_reset(void);
 uint16_t kbd_pending(void);
 uint32_t kbd_dropped_count(void);
 
+/* Bytes the IRQ path discarded as AUX (mouse) traffic.  Non-zero on a
+ * controller where status bit 5 is not an AUX flag means lost keystrokes. */
+uint32_t kbd_aux_count(void);
+
 /* Consumer side: drain queued events to serial and report any overflow.
  * Call from ordinary kernel context, never from an interrupt handler. */
 void kbd_service(void);
 
-/* Access modifier state */
+/* Access modifier state.  Derived from the per-key modifier mask, so holding
+ * one key of a pair while releasing the other still reads as active. */
 bool ps2_shift_active(void);
 bool ps2_ctrl_active(void);
 bool ps2_alt_active(void);
