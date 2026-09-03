@@ -24,10 +24,18 @@ x86_64-elf-as src/boot.s -o build/boot.o
 echo "[2/6] Compile C sources"
 objs=(build/boot.o)
 
+# -DEXO_KERNEL selects the kernel view of src/exo_syscall.h (numbers, shared
+# structs and error codes, no user-side `syscall` stubs).  It lives here rather
+# than in a per-file #define so it is guaranteed to precede every transitive
+# include of the header in a kernel TU -- a #define after the first include
+# would be too late.  tests/kernel/*.c gets it too (see below): those TUs link
+# into the kernel and run in ring 0, so the LibOS view is the wrong default
+# there -- a stub reaching a real `syscall` with IA32_LSTAR unset would triple
+# fault.
 for c in src/*.c; do
   o="build/$(basename "${c%.c}.o")"
   echo "    CC $(basename "$c")"
-  x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}"
+  x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -DEXO_KERNEL
   objs+=("$o")
 done
 
@@ -43,7 +51,10 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   for c in tests/kernel/*.c; do
     o="build/$(basename "${c%.c}.o")"
     echo "    CC $(basename "$c")"
-    x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/
+    # Kernel view by default -- these run in ring 0.  The one TU that needs
+    # the LibOS view (test_exo_syscall_k.c, which instantiates the stubs)
+    # #undefs it before its first include.
+    x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
     objs+=("$o")
   done
 fi

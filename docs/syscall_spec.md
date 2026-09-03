@@ -205,6 +205,17 @@ The following syscall interface is derived bottom-up from the actual
 requirements of doomgeneric, the libc shim, and the LibOS infrastructure. Each
 syscall is mapped to the Doom feature that requires it.
 
+> **This section has a C counterpart:** `src/exo_syscall.h` (SCRUM-24) declares
+> the numbers as `EXO_SYS_*`, the shared argument structs, the `EXO_E*` error
+> codes, and one inline stub per syscall. It is the same interface expressed in
+> C, and the two must be changed together — this document stays the source of
+> truth for *what* each syscall does. Kernel sources are compiled with
+> `-DEXO_KERNEL`, which suppresses the user-side stubs; the LibOS includes it
+> plainly. The define comes from the compiler command line rather than a
+> per-file `#define` because `#pragma once` would make a `#define` placed after
+> any transitive include of the header silently ineffective. `tests/kernel/test_exo_syscall_k.c` asserts the header still agrees
+> with §3.1 and §3.2.
+
 ### 3.1 Syscall calling convention
 
 - **Entry:** `syscall` instruction (x86_64 fast syscall mechanism)
@@ -213,7 +224,16 @@ syscall is mapped to the Doom feature that requires it.
   - Note: `R10` replaces `RCX` because `syscall` clobbers `RCX` (saves `RIP`
     there) and `R11` (saves `RFLAGS`)
 - **Return value:** `RAX` (negative = error code)
-- The kernel saves/restores all callee-saved registers.
+- **Register preservation:** the kernel preserves every register except `RAX`
+  (the return value), `RCX` and `R11` (destroyed by the `syscall` instruction
+  itself). This is deliberately the Linux guarantee, and it is stronger than
+  the SysV C ABI: the argument registers `RDI`/`RSI`/`RDX`/`R10`/`R8`/`R9` are
+  caller-saved in C, but a syscall must leave them intact. The LibOS stubs in
+  `src/exo_syscall.h` declare only `rcx`, `r11` and `memory` as clobbered and
+  pass the arguments as plain inputs, so the compiler is entitled to keep a
+  value live in an argument register across a `syscall` — if the SCRUM-32
+  dispatcher restored only the callee-saved set, a loop that reuses an argument
+  would silently pass garbage on its second iteration.
 
 ```c
 // LibOS-side syscall stub example:
@@ -234,12 +254,12 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | -- | ----------------------------------- | ----------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 0  | `exo_page_alloc()`                  | Memory      | 🔄     | Allocate one 4K physical page. Returns physical address, or `-ENOMEM`. Prerequisite: bitmap page allocator (SCRUM-7, In Review) + kernel/WAD region reservation (SCRUM-8, In Progress).                                                                                        |
 | 1  | `exo_page_free(paddr)`              | Memory      | 🔄     | Free a physical page. Returns `0` or `-EINVAL`. Prerequisite: same as above.                                                                                                                                                                                                   |
-| 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ⬜     | Map physical page at virtual address in caller's page directory. `flags`: read/write/user. Returns `0` or `-EINVAL`/`-EFAULT`. Sprint 2 (SCRUM-15, -16).                                                                                                                       |
+| 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ⬜     | Map physical page at virtual address in caller's page directory. `flags`: `EXO_PAGE_READ`/`WRITE`/`USER`/`EXEC`. `EXEC` is defined now, while the flag word is still unpublished, so that non-executable data mappings are expressible once `EFER.NXE` is enabled — adding it later would mean renumbering. `READ` is not representable on x86 (present implies readable) and is accepted but ignored. Returns `0` or `-EINVAL`/`-EFAULT`. Sprint 2 (SCRUM-15, -16).                                                                                                                       |
 | 3  | `exo_page_unmap(vaddr)`             | Memory      | ⬜     | Unmap a virtual page. Returns `0` or `-EINVAL`. Sprint 2.                                                                                                                                                                                                                      |
 | 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ⬜     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct. LibOS then calls `exo_page_map` to map it. Used by `DG_Init`. Returns `0` or `-EBUSY` if another LibOS holds the FB. Sprint 2 (SCRUM-16).                                        |
 | 5  | `exo_get_ticks()`                   | Timer       | ✅     | Return `uint32_t` milliseconds since boot. Zero arguments. Used by `DG_GetTicksMs` and `DG_SleepMs`. Kernel-side PIT + `kernel_get_ticks_ms()` done (SCRUM-9, -10).                                                                                                            |
-| 6  | `exo_kbd_poll(event_out)`           | Input       | 🔄     | Dequeue next keyboard event into `event_out` struct `{uint8_t pressed; uint8_t scancode}`. Returns `1` if event available, `0` if empty. Prerequisite: IRQ1 handler (SCRUM-13, In Progress) + scancode table (SCRUM-14, In Progress). Ring buffer planned Sprint 2 (SCRUM-18). |
-| 7  | `exo_mouse_poll(state_out)`         | Input       | ⬜     | Write accumulated mouse state `{int16_t dx; int16_t dy; uint8_t buttons}` to `state_out`, then reset accumulators. Returns `0`. Prerequisite: PS/2 mouse init (SCRUM-19, Sprint 2).                                                                                            |
+| 6  | `exo_kbd_poll(event_out)`           | Input       | 🔄     | Dequeue next keyboard event into `event_out` struct `{uint8_t pressed; uint8_t key; uint8_t modifiers; uint8_t reserved}`. `key` is a decoded `ps2_key_t` index (`KEY_A`, `KEY_ESC`, …), not a raw PS/2 scancode — the kernel's scancode decoder runs before the event is queued. `modifiers` is the `EXO_MOD_*` shift/ctrl/alt mask sampled when the event was queued, so a chord decodes correctly even if the modifier is released before the LibOS polls — Doom binds shift (run), ctrl (fire) and alt (strafe). Returns `1` if event available, `0` if empty. Prerequisite: IRQ1 handler (SCRUM-13, In Progress) + scancode table (SCRUM-14, In Progress). Ring buffer planned Sprint 2 (SCRUM-18). |
+| 7  | `exo_mouse_poll(state_out)`         | Input       | ⬜     | Write accumulated mouse state `{int16_t dx; int16_t dy; uint8_t buttons; uint8_t reserved}` to `state_out`, then reset accumulators. `reserved` is zeroed by the kernel and keeps the struct a fixed 6 bytes. Returns `0`. Prerequisite: PS/2 mouse init (SCRUM-19, Sprint 2).                                                                                            |
 | 8  | `exo_serial_write(buf, len)`        | Debug       | ⬜     | Write `len` bytes from `buf` to COM1. Returns bytes written. Used by `printf`/`fprintf` shim. Validates `buf` is in user address space. Kernel serial driver exists; syscall gate not yet wired. `printf` shim planned Sprint 2 (SCRUM-20).                                    |
 | 9  | `exo_file_open(path, mode)`         | File I/O    | ⬜     | Open a file on the ramdisk/ATA filesystem. `mode`: `0`=read, `1`=write, `2`=read+write. Returns file descriptor (≥ 0) or negative error. Used by `fopen` shim.                                                                                                                 |
 | 10 | `exo_file_close(fd)`                | File I/O    | ⬜     | Close file descriptor. Returns `0` or `-EBADF`. Used by `fclose` shim.                                                                                                                                                                                                         |
