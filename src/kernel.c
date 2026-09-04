@@ -11,6 +11,7 @@
 #include "sleep.h"
 #include "fb.h"
 #include "fb_console.h"
+#include "syscall.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -191,6 +192,13 @@ void kernel_main(void *mb2_info_ptr) {
 
     // ── Memory subsystem ────────────────────────────────────────────────
     memory_init();
+
+    // ── Syscall entry (SCRUM-32) ────────────────────────────────────────
+    // Programs EFER.SCE/STAR/LSTAR/FMASK so the `syscall` instruction has a
+    // landing site.  Ahead of the TESTING branch because the ring-3 test
+    // needs it, and harmless on a normal boot: no handler is registered yet,
+    // so every syscall number answers -EXO_ENOSYS until SCRUM-33.
+    syscall_init();
 
 #ifdef TESTING
     serial_flush();

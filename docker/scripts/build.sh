@@ -19,7 +19,17 @@ fi
 LDFLAGS=(-T src/linker.ld -ffreestanding -O2 -nostdlib -z max-page-size=0x1000)
 
 echo "[1/6] Assemble boot.s"
-x86_64-elf-as src/boot.s -o build/boot.o
+# RING3_PROBE makes boot.s set the U/S bit through the identity map, without
+# which the ring-3 syscall test (tests/kernel/ring3_probe.s) cannot execute a
+# single instruction.  It is scoped to test builds on purpose: it opens all of
+# physical memory to ring 3, which is exactly what SCRUM-48 and SCRUM-55/-56
+# exist to close.  A shipped kernel keeps supervisor-only pages.
+BOOT_ASFLAGS=()
+if [[ "${TESTING:-0}" == "1" ]]; then
+  BOOT_ASFLAGS+=(--defsym RING3_PROBE=1)
+fi
+
+x86_64-elf-as "${BOOT_ASFLAGS[@]}" src/boot.s -o build/boot.o
 
 echo "[2/6] Compile C sources"
 objs=(build/boot.o)
@@ -39,12 +49,16 @@ for c in src/*.c; do
   objs+=("$o")
 done
 
-#assemble isr.s
-if [ -f src/isr.s ]; then
-  echo "    AS isr.s"
-  x86_64-elf-as src/isr.s -o build/isr.o
-  objs+=(build/isr.o)
-fi
+# Assemble every other src/*.s.  boot.s is excluded because it is handled
+# above with its own flags; everything else (isr.s, syscall_entry.s, ...) is
+# picked up automatically, the same way src/*.c is.
+for s in src/*.s; do
+  [[ "$s" == "src/boot.s" ]] && continue
+  o="build/$(basename "${s%.s}.o")"
+  echo "    AS $(basename "$s")"
+  x86_64-elf-as "$s" -o "$o"
+  objs+=("$o")
+done
 
 if [[ "${TESTING:-0}" == "1" ]]; then
   echo "[2b/6] Compile kernel test sources"
@@ -55,6 +69,16 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     # the LibOS view (test_exo_syscall_k.c, which instantiates the stubs)
     # #undefs it before its first include.
     x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+    objs+=("$o")
+  done
+
+  # Test-only assembly (ring3_probe.s).  Lives under tests/ rather than src/
+  # so it cannot leak into a shipped kernel.
+  for s in tests/kernel/*.s; do
+    [ -e "$s" ] || continue
+    o="build/$(basename "${s%.s}.o")"
+    echo "    AS $(basename "$s")"
+    x86_64-elf-as "$s" -o "$o"
     objs+=("$o")
   done
 fi

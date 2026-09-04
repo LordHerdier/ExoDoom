@@ -122,17 +122,32 @@ Sprint 2 paging work lands.
   (`src/serial.c`, mapped to QEMU stdio via `-serial mon:stdio`). Test framework
   output and all kernel diagnostics go through it; `serial_flush()` must be
   called before `qemu_exit()` or buffered bytes are lost.
-- **Syscall interface (`syscall` instruction, 21 `exo_*` syscalls) is fully
-  specified but mostly unimplemented** — `docs/syscall_spec.md` §3 and its C
-  expression `src/exo_syscall.h` are the source of truth for what each syscall
-  must do and which doomgeneric/libc call sites need it; change one and change
-  the other. Consult them before adding a new syscall or libc shim function so
-  the implementation matches the intended calling convention (`RAX`=number,
-  `RDI/RSI/RDX/R10/R8/R9`=args, return in `RAX`, negative=error). The 4th
-  argument is in `R10` rather than the SysV `RCX` because `syscall` itself
-  overwrites `RCX` with the return RIP and `R11` with RFLAGS. The kernel
+- **Syscall entry works; no handler is bound yet.** The `syscall`/`sysret`
+  path is implemented (SCRUM-32): `syscall_init()` in `src/syscall.c` programs
+  `EFER.SCE`/`STAR`/`LSTAR`/`FMASK`, `src/syscall_entry.s` is the entry stub,
+  and `exo_syscall_dispatch` routes on the number. But the handler table is
+  empty, so **every syscall number returns `-EXO_ENOSYS` until SCRUM-33** —
+  binding one is `exo_syscall_register(EXO_SYS_*, handler)`.
+  `docs/syscall_spec.md` §3 and its C expression `src/exo_syscall.h` are the
+  source of truth for what each syscall must do and which doomgeneric/libc call
+  sites need it; change one and change the other. The convention is
+  `RAX`=number, `RDI/RSI/RDX/R10/R8/R9`=args, return in `RAX`, negative=error.
+  The 4th argument is in `R10` rather than the SysV `RCX` because `syscall`
+  itself overwrites `RCX` with the return RIP and `R11` with RFLAGS. The kernel
   preserves every other register, argument registers included — the stubs
-  depend on it.
+  depend on it, and `tests/kernel/test_syscall_k.c` proves it from ring 3.
+- **The GDT in `src/boot.s` has a layout `sysret` forces, not one we chose** —
+  kernel code/data at `0x08`/`0x10`, then user code32 (`0x18`, a placeholder
+  long mode never loads), user data (`0x20`), user code64 (`0x28`). `sysretq`
+  derives its selectors as `STAR[63:48] + 8` and `+ 16`, so reordering these or
+  closing the `0x18` gap breaks every syscall return. See
+  `docs/syscall_spec.md` §3.4.
+- **Test builds make the identity map ring-3 accessible.**
+  `docker/scripts/build.sh` assembles `boot.s` with `--defsym RING3_PROBE=1`
+  when `TESTING=1`, setting the U/S bit at every paging level so the ring-3
+  syscall probe can run. All of physical memory is then reachable from CPL 3 —
+  test builds only; a normal build keeps supervisor-only pages. SCRUM-48/-55/-56
+  close this properly.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - Sprint status/roadmap and current in-flight Jira stories are tracked in

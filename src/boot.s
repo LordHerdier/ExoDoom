@@ -69,6 +69,37 @@ gdt64:
 
     /* 0x10: kernel data — P=1, DPL=0, type=read/write                   */
     .quad 0x00CF92000000FFFF
+
+    /*
+     * ── Ring 3 descriptors (SCRUM-32, nominally SCRUM-45) ─────────────
+     *
+     * The order below is not a style choice — `sysretq` computes its
+     * selectors from IA32_STAR[63:48] rather than loading them from a
+     * register:
+     *
+     *     SS = STAR[63:48] + 8      CS = STAR[63:48] + 16
+     *
+     * With STAR[63:48] = 0x18 that fixes user data at 0x20 and user
+     * code64 at 0x28, and it means the 32-bit user code descriptor at
+     * 0x18 must exist as a placeholder even though long mode never
+     * loads it.  Reordering these three, or closing the 0x18 gap,
+     * silently breaks every syscall return.  See docs/syscall_spec.md
+     * §3.4.
+     *
+     * `syscall` uses the other half the same way — CS = STAR[47:32] and
+     * SS = STAR[47:32] + 8 — which the existing 0x08/0x10 pair already
+     * satisfies.
+     */
+
+    /* 0x18: user code32 — DPL=3.  Placeholder: required only so the
+     * arithmetic above lands on the two descriptors that follow. */
+    .quad 0x00CFFA000000FFFF
+
+    /* 0x20: user data — P=1, DPL=3, type=read/write                     */
+    .quad 0x00CFF2000000FFFF
+
+    /* 0x28: 64-bit user code — L=1, D=0, P=1, DPL=3, type=exec/read     */
+    .quad 0x00AFFA000000FFFF
 gdt64_end:
 
 gdt64_ptr:
@@ -94,6 +125,31 @@ _start:
 
     mov %ebx, %edi              /* save MB2 info pointer in EDI         */
 
+    /*
+     * ── Page-table flag selection (SCRUM-32) ──────────────────────
+     *
+     * PT_LINK flags the PML4/PDPT links, PT_LEAF the 2 MB PDEs.
+     *
+     * The U/S bit must be set at *every* level for ring-3 code to
+     * execute at all, so the ring-3 syscall test in
+     * tests/kernel/test_syscall_k.c cannot run without it.  Setting it
+     * makes the whole identity map ring-3 readable and writable, which
+     * is precisely the hole SCRUM-48 (per-LibOS page directories) and
+     * SCRUM-55/-56 (isolation tests) exist to close — so it is gated on
+     * RING3_PROBE, which docker/scripts/build.sh defines only for
+     * TESTING=1 builds.  A normal boot keeps supervisor-only pages.
+     *
+     * SCRUM-47 removes the gate when it launches a real LibOS in ring 3
+     * against page tables that are not the kernel's own.
+     */
+.ifdef RING3_PROBE
+    .set PT_LINK, 0x07              /* present | writable | user       */
+    .set PT_LEAF, 0x87              /* present | writable | user | PS  */
+.else
+    .set PT_LINK, 0x03              /* present | writable              */
+    .set PT_LEAF, 0x83              /* present | writable | PS         */
+.endif
+
     /* ── Zero page-table memory (6 pages × 4096 bytes = 24 KiB) ───── */
     mov $pml4, %eax
     mov $6144, %ecx             /* 6 pages × 4096 / 4 = 6144 dwords    */
@@ -105,34 +161,33 @@ _start:
 
     /* ── PML4[0] → PDPT ──────────────────────────────────────────── */
     mov $pdpt, %eax
-    or  $0x03, %eax             /* present | writable                   */
+    or  $PT_LINK, %eax
     movl %eax, pml4
 
     /* ── PDPT[0..3] → PD0..PD3 ───────────────────────────────────── */
     mov $pd0, %eax
-    or  $0x03, %eax
+    or  $PT_LINK, %eax
     movl %eax, pdpt + 0
 
     mov $pd1, %eax
-    or  $0x03, %eax
+    or  $PT_LINK, %eax
     movl %eax, pdpt + 8
 
     mov $pd2, %eax
-    or  $0x03, %eax
+    or  $PT_LINK, %eax
     movl %eax, pdpt + 16
 
     mov $pd3, %eax
-    or  $0x03, %eax
+    or  $PT_LINK, %eax
     movl %eax, pdpt + 24
 
     /* ── Fill PD0–PD3: 512 entries each, 2 MB pages ──────────────── */
-    /* Flags: present(0) | writable(1) | page-size(7) = 0x83         */
     mov $pd0, %ebx
     xor %ecx, %ecx             /* physical page counter (0..2047)      */
 .Lfill_pd:
     mov %ecx, %eax
     shl $21, %eax              /* EAX = page number × 2 MB             */
-    or  $0x83, %eax            /* present | writable | PS (2 MB page)  */
+    or  $PT_LEAF, %eax         /* flags selected above                 */
     movl %eax, (%ebx)
     movl $0, 4(%ebx)           /* high 32 bits = 0 (< 4 GB)           */
     add  $8, %ebx

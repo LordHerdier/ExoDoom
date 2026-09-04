@@ -317,6 +317,83 @@ map/free a page it does not own and that framebuffer acquisition is mutually
 exclusive — distinct from the paging/privilege-wall tests SCRUM-55/56
 (SCRUM-157).
 
+### 3.4 Entry path (SCRUM-32)
+
+§3.1 states the contract; this section is how the kernel keeps it. Implemented
+in `src/syscall.c` (MSR setup, dispatch), `src/syscall_entry.s` (the stub) and
+`src/boot.s` (the GDT), and tested in `tests/kernel/test_syscall_k.c`.
+
+**MSRs.** `syscall_init()` runs from `kernel_main` before any ring-3 code
+exists and programs:
+
+| MSR | Value | Why |
+| --- | --- | --- |
+| `IA32_EFER` | `\|= SCE` | Makes `syscall` legal at all. Read-modify-write: `boot.s` already set `LME` here and clobbering it drops the CPU out of long mode. |
+| `IA32_STAR` | `[47:32]=0x08`, `[63:48]=0x18\|3` | Segment selectors for entry and return. |
+| `IA32_LSTAR` | `&syscall_entry` | Where `syscall` jumps. |
+| `IA32_FMASK` | `IF\|DF\|TF\|AC\|NT` | RFLAGS bits cleared on entry, so the kernel never inherits a hostile flags word. `IF` matters most — see the reentrancy note below. |
+
+**GDT layout is forced, not chosen.** `syscall` loads `CS = STAR[47:32]` and
+`SS = STAR[47:32] + 8`; `sysretq` loads `CS = STAR[63:48] + 16` and
+`SS = STAR[63:48] + 8`. Both halves name the *base of a descriptor pair*, so
+the selectors in `src/boot.s` must appear in exactly this order:
+
+| Selector | Descriptor |
+| --- | --- |
+| `0x08` | kernel code64, DPL 0 |
+| `0x10` | kernel data, DPL 0 |
+| `0x18` | user code32, DPL 3 — a placeholder long mode never loads, present only so the arithmetic lands correctly |
+| `0x20` | user data, DPL 3 |
+| `0x28` | user code64, DPL 3 |
+
+Reordering these, or closing the `0x18` gap, silently breaks every syscall
+return. The ring-3 descriptors were originally SCRUM-45's; they landed with
+SCRUM-32 because `STAR` cannot be programmed legally without them.
+
+**Stack switch.** Unlike an interrupt, `syscall` does not change `RSP` — the
+caller's stack pointer is still live on entry, and from ring 3 it is
+attacker-controlled. The stub swaps it in two `%rip`-relative moves, which need
+no scratch register (every register except `RCX`/`R11` still belongs to the
+caller at that instant), onto a dedicated 16 KiB kernel stack — deliberately
+not `boot.s`'s boot stack, which the kernel may already be nested on.
+
+The outgoing user `RSP` is parked in a single global, so **the path is not
+reentrant**. That is safe today only because `FMASK` clears `IF` and there is
+one CPU. When SCRUM-107 introduces multiple LibOS contexts this becomes
+`swapgs` plus a per-CPU block reached through `IA32_KERNEL_GS_BASE`.
+
+No TSS is involved: `syscall` never consults `TSS.RSP0`. SCRUM-46 is needed
+before ring-3 code can take an *interrupt*, not before it can make a syscall.
+
+**Register preservation.** The stub saves all 14 registers it must return
+intact — the six argument registers included, not merely the SysV callee-saved
+set — plus `RCX` and `R11`, which `sysretq` needs as the return `RIP` and
+`RFLAGS`. It then shifts each argument one position right into the SysV order
+`exo_syscall_dispatch` expects, with the sixth argument on the stack.
+
+`tests/kernel/test_syscall_k.c` enforces this by dropping to CPL 3
+(`tests/kernel/ring3_probe.s`), loading a distinct sentinel into every
+preserved register, issuing the echo syscall **twice without reloading them**,
+and checking all twelve afterwards. The second call is the point: it is the
+failure §3.1 describes, where a compiler keeps a value live in an argument
+register across a `syscall`. A stub narrowed to the callee-saved set passes the
+first call and fails the second.
+
+**Dispatch.** `exo_syscall_dispatch` unsigned-compares the number against
+`EXO_SYS_COUNT` — a "negative" number from ring 3 is a very large unsigned one,
+and a signed compare would index the table backwards — then calls the
+registered handler, or returns `-EXO_ENOSYS` if the number is unbound. Handlers
+bind with `exo_syscall_register()`. SCRUM-32 binds none: it delivers the entry
+path, and the individual handlers land across Sprints 3-5 starting with
+SCRUM-33.
+
+**Ring-3 access during tests.** `boot.s` builds the identity map without the
+U/S bit, so ring-3 code cannot execute. TESTING builds are assembled with
+`--defsym RING3_PROBE=1`, which sets U/S at every level for the probe's
+benefit. This opens all of physical memory to CPL 3 and is scoped to test
+builds for that reason; SCRUM-48 (per-LibOS page directories) and SCRUM-55/-56
+(isolation tests) close it properly.
+
 ---
 
 ## 4. Architectural decision: file I/O strategy
