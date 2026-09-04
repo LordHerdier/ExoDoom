@@ -150,6 +150,23 @@ _start:
     .set PT_LEAF, 0x83              /* present | writable | PS         */
 .endif
 
+    /*
+     * Export both flag words as absolute symbols so build.sh can assert
+     * which variant was assembled (see its "[1b/6] Verify page-table
+     * protection" step).  Without that check the gate is enforced only by
+     * convention: nothing would fail if a future edit passed TESTING through
+     * to a shipped build, and a kernel with ring-3-accessible kernel memory
+     * would ship quietly.
+     *
+     * `.set` on a .global makes these ABS entries in the symbol table — they
+     * occupy no space in the image, and their value is the constant actually
+     * used above rather than a restatement of it that could drift.
+     */
+    .global boot_pt_link_flags
+    .global boot_pt_leaf_flags
+    .set boot_pt_link_flags, PT_LINK
+    .set boot_pt_leaf_flags, PT_LEAF
+
     /* ── Zero page-table memory (6 pages × 4096 bytes = 24 KiB) ───── */
     mov $pml4, %eax
     mov $6144, %ecx             /* 6 pages × 4096 / 4 = 6144 dwords    */
