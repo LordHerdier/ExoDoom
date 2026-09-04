@@ -7,6 +7,7 @@
   - `kernel.c` — freestanding C kernel entrypoint (writes to VGA text buffer)
   - `linker.ld` — places kernel at 2M, defines sections, entrypoint `_start`
   - `grub.cfg` — GRUB menu entry that multiboot-loads `/boot/exodoom`
+  - `doom/` — vendored [doomgeneric](https://github.com/ozkl/doomgeneric) core engine source (GPL-2.0), used as the Doom port target for this exokernel
 - `docker/`
   - `Dockerfile.build` — i686-elf cross compiler + GRUB ISO tools
   - `Dockerfile.qemu` — QEMU runtime image
@@ -76,6 +77,10 @@ make clean
 * QEMU is run with `-display curses` and serial attached to your terminal (`-serial mon:stdio`).
 * The kernel currently writes to VGA text memory at `0xB8000`, so you should see output in the QEMU display.
 * If you edit `src/grub.cfg`, it gets copied into the ISO staging directory during build.
+
+## Third-party code
+[doomgeneric](https://github.com/ozkl/doomgeneric) is vendored under `src/doom/`
+as the Doom engine this kernel targets — see `src/doom/LICENSE` (GPL-2.0).
 
 ## License
 MIT License (at least for now, may change later...?)

@@ -16,6 +16,7 @@ tests/kernel/test_runner.c   Suite registration + run_tests() entry point
 tests/kernel/test_smoke.c    Smoke tests (harness self-check)
 tests/kernel/test_string_k.c String function tests
 tests/kernel/test_ctype_k.c  Ctype function tests
+tests/kernel/test_kbd_ring.c Keyboard event ring + scan code decoder tests
 ```
 
 When the kernel is compiled with `-DTESTING`, `kernel_main` calls

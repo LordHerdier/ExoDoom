@@ -4,3 +4,6 @@
 *.iso
 build/*
 docker/build/*
+
+# QEMU serial capture from `make docker-test` / docker-run
+serial.log
