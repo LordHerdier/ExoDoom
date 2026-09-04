@@ -440,6 +440,30 @@ fake `FILE*` backed by a pointer into the module's mapped memory, and
 `fread`/`fseek` operate as offset arithmetic over that region. This avoids
 implementing any real file I/O for the game's largest data source.
 
+> ⚠️ **The WAD we currently ship is a `PWAD`, not an `IWAD`.** Verify this
+> before writing `DG_Init` (SCRUM-73).
+>
+> The `freedoom2.wad` in use — 21,699,491 bytes, sha1
+> `b51be0646fb0c682663b523ba08df703ee56fff8`, 1351 lumps — begins with the four
+> bytes `PWAD`. Official Freedoom releases ship `freedoom2.wad` with `IWAD`
+> magic. doomgeneric is Chocolate Doom-derived, and that lineage distinguishes
+> the two: an IWAD is a complete base game, a PWAD is a patch layered on top of
+> one. IWAD identification may therefore reject this file or fail to find a base
+> game at all.
+>
+> This costs nothing until Doom actually boots, which is why it has gone
+> unnoticed — the page allocator only needs *a* module to reserve, and any 21 MB
+> blob satisfies that. The danger is that it surfaces as a startup failure deep
+> in `W_Init`/`Z_Malloc`/`R_Init` (SCRUM-81), where the stack trace points at
+> the allocator or the renderer and the actual cause is four bytes in a file
+> header. Check `head -c4` on the WAD before debugging anything in those
+> routines.
+>
+> The agreed plan (PR #13, not yet implemented) is to fetch the WAD at build
+> time against a pinned sha1 rather than commit it, which would make replacing
+> it a URL and hash change in `docker/scripts/build.sh` rather than another
+> 21 MB commit.
+
 ### libc shim scope
 
 doomgeneric requires 82 C source files' worth of standard library. The most
