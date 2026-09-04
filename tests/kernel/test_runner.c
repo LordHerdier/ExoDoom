@@ -18,6 +18,7 @@ void suite_ps2_decode_tests(CU_pSuite s);
 void suite_exo_syscall_tests(CU_pSuite s);
 void suite_exo_syscall_kview_tests(CU_pSuite s);
 void suite_syscall_tests(CU_pSuite s);
+void suite_sys_time_tests(CU_pSuite s);
 
 int run_tests(void)
 {
@@ -48,6 +49,12 @@ int run_tests(void)
 
     s = CU_add_suite("syscall", NULL, NULL);
     suite_syscall_tests(s);
+
+    /* Keep sys_time last: its final test starts the PIT and enables
+     * interrupts, and ring-3 code cannot survive an interrupt until SCRUM-46
+     * adds a TSS.  Any suite registered after this one must not enter ring 3. */
+    s = CU_add_suite("sys_time", NULL, NULL);
+    suite_sys_time_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

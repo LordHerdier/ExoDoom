@@ -442,9 +442,10 @@ preserves **every** register except `RAX`/`RCX`/`R11` before calling
 `exo_syscall_dispatch`. That is stronger than the SysV callee-saved set; see
 `docs/syscall_spec.md` §3.4 for why, and for the entry path in full.
 
-Handlers register into the dispatch table with `exo_syscall_register()`. As of
-SCRUM-32 none are bound, so every number returns `-EXO_ENOSYS` until SCRUM-33
-lands `exo_get_ticks`.
+Handlers register into the dispatch table with `exo_syscall_register()`, each
+subsystem binding its own numbers from `kernel_main`. `exo_get_ticks` (#5) is
+implemented (SCRUM-33, `src/sys_time.c`) and is the first syscall proven end to
+end from ring 3. Every number without a handler returns `-EXO_ENOSYS`.
 
 ---
 

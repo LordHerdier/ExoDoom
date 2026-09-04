@@ -208,3 +208,28 @@ ring3_probe:
 
     /* Unreachable: SYS_ESCAPE does not come back. */
     ud2
+
+/*
+ * void ring3_ticks_probe(void);  — runs at CPL 3.
+ *
+ * The SCRUM-33 half: issues the real exo_get_ticks (#5) from ring 3 and hands
+ * the value back through ring3_escape, so the test can compare it against
+ * kernel_get_ticks_ms() read directly.  Unlike ring3_probe above this calls a
+ * genuine handler rather than a scratch one, which is what makes it the first
+ * true end-to-end syscall rather than a test of the entry path alone.
+ *
+ * The escape still borrows SYS_ESCAPE, so the caller must bind that before
+ * running this and unbind it after.
+ */
+.set SYS_GET_TICKS, 5        /* EXO_SYS_GET_TICKS */
+
+.global ring3_ticks_probe
+ring3_ticks_probe:
+    movq $SYS_GET_TICKS, %rax
+    syscall
+
+    movq %rax, %rdi             /* the tick value -> ring3_escape's result */
+    movq $SYS_ESCAPE, %rax
+    syscall
+
+    ud2

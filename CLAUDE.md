@@ -122,12 +122,15 @@ Sprint 2 paging work lands.
   (`src/serial.c`, mapped to QEMU stdio via `-serial mon:stdio`). Test framework
   output and all kernel diagnostics go through it; `serial_flush()` must be
   called before `qemu_exit()` or buffered bytes are lost.
-- **Syscall entry works; no handler is bound yet.** The `syscall`/`sysret`
+- **Syscall entry works; one handler is bound.** The `syscall`/`sysret`
   path is implemented (SCRUM-32): `syscall_init()` in `src/syscall.c` programs
   `EFER.SCE`/`STAR`/`LSTAR`/`FMASK`, `src/syscall_entry.s` is the entry stub,
-  and `exo_syscall_dispatch` routes on the number. But the handler table is
-  empty, so **every syscall number returns `-EXO_ENOSYS` until SCRUM-33** —
-  binding one is `exo_syscall_register(EXO_SYS_*, handler)`.
+  and `exo_syscall_dispatch` routes on the number. `exo_get_ticks` (#5) is
+  implemented in `src/sys_time.c` (SCRUM-33) and is the pattern to copy: write
+  the handler, call `exo_syscall_register(EXO_SYS_*, handler)` from a
+  `<subsystem>_init()`, and call that from `kernel_main` **before** the
+  `TESTING` branch so tests see the same table a normal boot has. Every other
+  number still returns `-EXO_ENOSYS`.
   `docs/syscall_spec.md` §3 and its C expression `src/exo_syscall.h` are the
   source of truth for what each syscall must do and which doomgeneric/libc call
   sites need it; change one and change the other. The convention is
