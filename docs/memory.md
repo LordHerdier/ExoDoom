@@ -335,6 +335,33 @@ The trampoline builds a 4 GB identity map before entering long mode:
 This maps the entire 32-bit address space including the framebuffer (typically
 at ~0xFD000000 in the PCI MMIO aperture).
 
+#### U/S bit: supervisor-only, except in test builds (SCRUM-32)
+
+The links and PDEs above are written **without** the U/S bit, so nothing in the
+identity map is reachable from ring 3. That is the shipped behaviour and the
+right default.
+
+TESTING builds are the exception. `docker/scripts/build.sh` assembles `boot.s`
+with `--defsym RING3_PROBE=1`, which sets U/S at *every* level (`0x07` on the
+links, `0x87` on the 2 MB PDEs) — the ring-3 syscall probe in
+`tests/kernel/ring3_probe.s` cannot execute a single instruction otherwise, and
+the U/S bit is only honoured when set at all four levels of the walk.
+
+This is not left to convention. `boot.s` exports the two flag words it
+actually used as absolute symbols (`boot_pt_link_flags`, `boot_pt_leaf_flags`,
+costing no space in the image), and `build.sh` step `[1b/6]` asserts they match
+the build variant — supervisor-only unless `TESTING=1`. A shipped kernel that
+somehow acquired the U/S bit fails the build rather than shipping, and a test
+kernel that lost it fails loudly instead of triple-faulting into an
+unexplained CI timeout. Do not delete those symbols; the check depends on them.
+
+The consequence is blunt: in a test build, all 4 GB of the identity map is
+readable and writable from CPL 3, including kernel text and the page tables
+themselves. There is no isolation to speak of yet. That is precisely the hole
+the refinement below closes, and it is gated to test builds so a shipped kernel
+never carries it. SCRUM-48 gives each LibOS its own page directory; SCRUM-55
+and SCRUM-56 then assert that a LibOS faults on kernel memory and on port I/O.
+
 ### Future refinement (Sprint 2+)
 
 `vmm_init()` will build proper 4K page tables with correct permissions:

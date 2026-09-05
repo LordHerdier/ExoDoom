@@ -18,6 +18,7 @@ void suite_kbd_ring_tests(CU_pSuite s);
 void suite_ps2_decode_tests(CU_pSuite s);
 void suite_exo_syscall_tests(CU_pSuite s);
 void suite_exo_syscall_kview_tests(CU_pSuite s);
+void suite_syscall_tests(CU_pSuite s);
 
 int run_tests(void)
 {
@@ -48,6 +49,9 @@ int run_tests(void)
 
     s = CU_add_suite("exo_syscall_kview", NULL, NULL);
     suite_exo_syscall_kview_tests(s);
+
+    s = CU_add_suite("syscall", NULL, NULL);
+    suite_syscall_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

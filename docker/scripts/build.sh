@@ -19,7 +19,66 @@ fi
 LDFLAGS=(-T src/linker.ld -ffreestanding -O2 -nostdlib -z max-page-size=0x1000)
 
 echo "[1/6] Assemble boot.s"
-x86_64-elf-as src/boot.s -o build/boot.o
+# RING3_PROBE makes boot.s set the U/S bit through the identity map, without
+# which the ring-3 syscall test (tests/kernel/ring3_probe.s) cannot execute a
+# single instruction.  It is scoped to test builds on purpose: it opens all of
+# physical memory to ring 3, which is exactly what SCRUM-48 and SCRUM-55/-56
+# exist to close.  A shipped kernel keeps supervisor-only pages.
+BOOT_ASFLAGS=()
+if [[ "${TESTING:-0}" == "1" ]]; then
+  BOOT_ASFLAGS+=(--defsym RING3_PROBE=1)
+fi
+
+x86_64-elf-as "${BOOT_ASFLAGS[@]}" src/boot.s -o build/boot.o
+
+echo "[1b/6] Verify page-table protection"
+# Assert the U/S gate landed the way this build intends, rather than trusting
+# that it did.  boot.s exports the two flag words it actually used as absolute
+# symbols, so this reads the real constants -- not a restatement of them that
+# could drift, and not instruction encodings that could change.
+#
+# Both directions are worth checking:
+#   - a shipped kernel with U/S set would expose all kernel memory to ring 3;
+#   - a test kernel *without* it triple-faults the moment the ring-3 probe is
+#     entered, which surfaces as an unexplained CI timeout rather than a
+#     failing assertion.
+pt_flag() {
+  x86_64-elf-nm build/boot.o | awk -v s="$1" '$3 == s { print $1 }'
+}
+
+pt_link="$(pt_flag boot_pt_link_flags)"
+pt_leaf="$(pt_flag boot_pt_leaf_flags)"
+
+if [[ -z "$pt_link" || -z "$pt_leaf" ]]; then
+  echo "    ERROR: boot.s no longer exports boot_pt_link_flags/boot_pt_leaf_flags."
+  echo "           These guard the ring-3 U/S gate -- restore them, do not"
+  echo "           delete this check.  See docs/memory.md."
+  exit 1
+fi
+
+if [[ "${TESTING:-0}" == "1" ]]; then
+  want_link=0000000000000007; want_leaf=0000000000000087
+  want_desc="user-accessible (ring-3 probe)"
+else
+  want_link=0000000000000003; want_leaf=0000000000000083
+  want_desc="supervisor-only"
+fi
+
+if [[ "$pt_link" != "$want_link" || "$pt_leaf" != "$want_leaf" ]]; then
+  echo "    ERROR: identity map has the wrong protection for this build."
+  echo "           expected ($want_desc): link=0x${want_link: -2} leaf=0x${want_leaf: -2}"
+  echo "           got:                     link=0x${pt_link: -2} leaf=0x${pt_leaf: -2}"
+  if [[ "${TESTING:-0}" != "1" ]]; then
+    echo
+    echo "           A shipped kernel must NOT set the U/S bit: it would make"
+    echo "           all 4 GB of the identity map readable and writable from"
+    echo "           ring 3, including kernel text and the page tables."
+    echo "           RING3_PROBE belongs to TESTING=1 builds only."
+  fi
+  exit 1
+fi
+
+echo "    identity map is $want_desc (link=0x${pt_link: -2} leaf=0x${pt_leaf: -2})"
 
 echo "[2/6] Compile C sources"
 objs=(build/boot.o)
@@ -39,12 +98,16 @@ for c in src/*.c; do
   objs+=("$o")
 done
 
-#assemble isr.s
-if [ -f src/isr.s ]; then
-  echo "    AS isr.s"
-  x86_64-elf-as src/isr.s -o build/isr.o
-  objs+=(build/isr.o)
-fi
+# Assemble every other src/*.s.  boot.s is excluded because it is handled
+# above with its own flags; everything else (isr.s, syscall_entry.s, ...) is
+# picked up automatically, the same way src/*.c is.
+for s in src/*.s; do
+  [[ "$s" == "src/boot.s" ]] && continue
+  o="build/$(basename "${s%.s}.o")"
+  echo "    AS $(basename "$s")"
+  x86_64-elf-as "$s" -o "$o"
+  objs+=("$o")
+done
 
 if [[ "${TESTING:-0}" == "1" ]]; then
   echo "[2b/6] Compile kernel test sources"
@@ -55,6 +118,16 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     # the LibOS view (test_exo_syscall_k.c, which instantiates the stubs)
     # #undefs it before its first include.
     x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+    objs+=("$o")
+  done
+
+  # Test-only assembly (ring3_probe.s).  Lives under tests/ rather than src/
+  # so it cannot leak into a shipped kernel.
+  for s in tests/kernel/*.s; do
+    [ -e "$s" ] || continue
+    o="build/$(basename "${s%.s}.o")"
+    echo "    AS $(basename "$s")"
+    x86_64-elf-as "$s" -o "$o"
     objs+=("$o")
   done
 fi

@@ -422,8 +422,29 @@ The 21 syscalls grouped by category:
 | Scheduling  | `exo_yield`                                                         | Sprint 12  |
 | Lifecycle   | `exo_exit`                                                          | Sprint 3   |
 
-The syscall gate (`int 0x80` → dispatch table) is planned for Sprint 3 once
-paging is stable and the LibOS address space exists.
+### 6.1 Syscall entry (implemented, SCRUM-32)
+
+The gate is the x86_64 fast `syscall` instruction, not an `int 0x80` trap gate
+— an earlier i386-era plan that SCRUM-150 retired. `syscall_init()`
+(`src/syscall.c`) programs four MSRs at boot: `EFER.SCE` to enable the
+instruction, `STAR` with the segment selectors, `LSTAR` with the entry point,
+and `FMASK` with the RFLAGS bits to clear on entry.
+
+`sysret` computes its selectors arithmetically from `STAR[63:48]` rather than
+loading them, which fixes the GDT layout in `src/boot.s`: kernel code/data at
+`0x08`/`0x10`, then user code32 (`0x18`, a required placeholder), user data
+(`0x20`) and user code64 (`0x28`). Reordering those breaks every syscall
+return, so the layout is asserted in `tests/kernel/test_syscall_k.c`.
+
+Unlike an interrupt, `syscall` does not switch stacks — the entry stub
+(`src/syscall_entry.s`) does it, onto a dedicated 16 KiB kernel stack, then
+preserves **every** register except `RAX`/`RCX`/`R11` before calling
+`exo_syscall_dispatch`. That is stronger than the SysV callee-saved set; see
+`docs/syscall_spec.md` §3.4 for why, and for the entry path in full.
+
+Handlers register into the dispatch table with `exo_syscall_register()`. As of
+SCRUM-32 none are bound, so every number returns `-EXO_ENOSYS` until SCRUM-33
+lands `exo_get_ticks`.
 
 ---
 
@@ -576,7 +597,7 @@ bare-metal foundations to a playable game.
 | ------------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Sprint 1: Memory + Timer**                            | Foundations                              | Multiboot 2 mmap ✅, bump allocator ✅, bitmap page allocator 🔄, PIT/timer ✅, sleep ✅, string.h ✅, ctype.h ✅, KUnit ✅, PS/2 keyboard ✅, x86_64 migration ✅, error_stub bug fix ⬜                                                                                                                                                                                                                                                    |
 | **Sprint 2: VMem + Input + libc**                       | Virtual memory + input                   | Paging on (identity map), page fault handler, framebuffer+WAD mapped, keyboard ring buffer, PS/2 mouse init, `printf`→serial shim                                                                                                                                                                                                                                                                                                           |
-| **Sprint 3: Heap+Mouse+Syscalls** _(20 Apr – 4 May)_    | Kernel heap + syscall gate               | First-fit heap allocator (`kmalloc`/`kfree`/`krealloc`) backed by PMM, mouse packet decoding + delta accumulator, `stdlib.h` wrappers (`malloc`/`free`/`realloc`, `atoi`, `abs`, `qsort`), `errno`/`assert`/`abort`, `int 0x80` trap gate in IDT, `exo_get_ticks` as first end-to-end syscall                                                                                                                                               |
+| **Sprint 3: Heap+Mouse+Syscalls** _(20 Apr – 4 May)_    | Kernel heap + syscall gate               | First-fit heap allocator (`kmalloc`/`kfree`/`krealloc`) backed by PMM, mouse packet decoding + delta accumulator, `stdlib.h` wrappers (`malloc`/`free`/`realloc`, `atoi`, `abs`, `qsort`), `errno`/`assert`/`abort`, `syscall`/`sysret` entry path via MSRs (SCRUM-32), `exo_get_ticks` as first end-to-end syscall                                                                                                                                               |
 | **Sprint 4: LibOS mem+input+math** _(4 May – 18 May)_   | LibOS address space + remaining syscalls | `exo_page_alloc`/`exo_page_free`/`exo_page_map`/`exo_fb_map` in dispatcher, LibOS-side page allocator + heap, `exo_get_key`/`exo_get_mouse_delta` syscalls, Doom keycode → PS/2 scancode translation, `math.h` (fixed-point sin/cos table, `abs`, `floor`/`ceil`), `FILE*` shim (`fopen`/`fclose`/`fread`/`fwrite`/`fseek`/`ftell`) backed by `exo_file_*`, `strcasecmp`/`strncasecmp`, `exo_file_*` kernel dispatcher                      |
 | **Sprint 5: LibOS struct+ring 3** _(18 May – 1 Jun)_    | Ring 0 → ring 3 transition               | GDT with ring 0 + ring 3 segments, TSS for kernel stack on syscall entry, boot LibOS in ring 3 via `iret` to user-mode entry point, separate page directory per LibOS, LibOS binary loading at fixed user-space address, `libos_main()` entry framework, port libc shim to use syscall stubs, `exo_serial_write` syscall                                                                                                                    |
 | **Sprint 6: Syscall harden+Iso** _(1 Jun – 15 Jun)_     | Security + correctness                   | Syscall argument validation (bounds-check pointers, reject kernel addresses), test LibOS cannot read/write kernel memory (GPF), test LibOS cannot execute IN/OUT instructions (GPF), consistent `exo_errno.h` error codes, automated LibOS test suite via serial, memory isolation stress test (allocate/free all pages, verify no kernel corruption), syscall round-trip benchmarks                                                        |
