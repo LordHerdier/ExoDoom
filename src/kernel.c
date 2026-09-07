@@ -3,6 +3,7 @@
 #include "serial.h"
 #include "memory.h"
 #include "mmap.h"
+#include "page_alloc.h"
 
 #include "idt.h"
 #include "pic.h"
@@ -192,6 +193,8 @@ void kernel_main(void *mb2_info_ptr) {
 
     // ── Memory subsystem ────────────────────────────────────────────────
     memory_init();
+    // ── Page allocator (SCRUM-7) ───────────────────────────────────────
+    page_alloc_init(mb);
 
     // ── Syscall entry (SCRUM-32) ────────────────────────────────────────
     // Programs EFER.SCE/STAR/LSTAR/FMASK so the `syscall` instruction has a
