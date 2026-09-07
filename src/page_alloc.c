@@ -74,32 +74,32 @@ void page_alloc_init(const struct mb2_info* mb) {
             }
 
             uintptr_t reserve_start = managed_base;
-	    uintptr_t reserve_end   = (uintptr_t)memory_base_address();
+            uintptr_t reserve_end   = (uintptr_t)memory_base_address();
 
-	    reserve_region(reserve_start, reserve_end);
+            reserve_region(reserve_start, reserve_end);
 
             serial_print("page_alloc: kernel/heap reserved\n");
 
-	    const struct mb2_tag *tag = mb2_first_tag(mb);
-const uintptr_t tags_end = (uintptr_t)mb + mb->total_size;
-unsigned mods = 0;
+            const struct mb2_tag *tag = mb2_first_tag(mb);
+            const uintptr_t tags_end = (uintptr_t)mb + mb->total_size;
+            unsigned mods = 0;
 
-while ((uintptr_t)tag < tags_end && tag->type != MB2_TAG_END) {
-    if (tag->type == MB2_TAG_MODULE) {
-        const struct mb2_tag_module *m =
-            (const struct mb2_tag_module *)tag;
+            while ((uintptr_t)tag < tags_end && tag->type != MB2_TAG_END) {
+                if (tag->type == MB2_TAG_MODULE) {
+                    const struct mb2_tag_module *m =
+                        (const struct mb2_tag_module *)tag;
 
-        reserve_region((uintptr_t)m->mod_start,
-                       (uintptr_t)m->mod_end);
-        mods++;
-    }
+                    reserve_region((uintptr_t)m->mod_start,
+                                   (uintptr_t)m->mod_end);
+                    mods++;
+                }
 
-    tag = mb2_next_tag(tag);
-}
+                tag = mb2_next_tag(tag);
+            }
 
-if (mods > 0) {
-    serial_print("page_alloc: modules reserved\n");
-}
+            if (mods > 0) {
+                serial_print("page_alloc: modules reserved\n");
+            }
             serial_print("page_alloc: initialized\n");
             return;
         }
