@@ -13,6 +13,7 @@
 #include "fb.h"
 #include "fb_console.h"
 #include "syscall.h"
+#include "syscall_mem.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -202,6 +203,12 @@ void kernel_main(void *mb2_info_ptr) {
     // needs it, and harmless on a normal boot: no handler is registered yet,
     // so every syscall number answers -EXO_ENOSYS until SCRUM-33.
     syscall_init();
+
+    // ── Memory syscalls (SCRUM-34) ──────────────────────────────────────
+    // Binds exo_page_alloc (#0) and exo_page_free (#1) to the dispatcher.
+    // After page_alloc_init + syscall_init, and ahead of the TESTING branch
+    // so the handlers are registered for both a normal boot and the tests.
+    syscall_mem_init();
 
 #ifdef TESTING
     serial_flush();
