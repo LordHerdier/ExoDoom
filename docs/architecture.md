@@ -73,6 +73,13 @@ it. The kernel also reserves the right to *revoke* a granted resource
 lives in `docs/syscall_spec.md` §3.3; the work is tracked under epic SCRUM-151
 (Resource Protection & Secure Binding).
 
+The first piece of this mechanism has landed: the PMM now carries a per-page
+owner tag (`page_owner_t` in `src/page_alloc.c`), `exo_page_alloc` stamps the
+calling context as owner, and `exo_page_free` returns `-EPERM` for a page the
+caller does not own (SCRUM-152). Page-map/unmap enforcement (SCRUM-153),
+framebuffer secure binding (SCRUM-154), and ownership-driven reclamation on
+`exo_exit` (SCRUM-155) extend the same table.
+
 ```
 ┌──────────────────────────────────────────────────────┐
 │                    Doom engine                       │  (unchanged doomgeneric source)

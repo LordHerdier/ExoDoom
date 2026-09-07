@@ -29,7 +29,7 @@ progressively builds up the infrastructure needed to hand Doom a working
 ```
 Phase 1  mmap_init()       Parse multiboot memory map → usable/reserved regions
 Phase 2  memory_init()     Bump allocator from &_bss_end → used for early boot allocs
-Phase 3  pmm_init()        Bitmap page allocator (alloc_page / free_page) [Sprint 1]
+Phase 3  page_alloc_init()        Bitmap page allocator (alloc_page / free_page) [Sprint 1]
 Phase 4  vmm_init()        Enable paging, build page tables, exo_page_* syscalls [Sprint 2]
 Phase 5  LibOS heap        first-fit allocator backed by exo_page_alloc [Sprint 3]
 ```
@@ -220,7 +220,7 @@ void* kmalloc(size_t size) {
 
 | Allocation               | Size                                   | When         |
 | ------------------------ | -------------------------------------- | ------------ |
-| PMM bitmap (Phase 3)     | `total_pages / 8` bytes, rounded to 4K | `pmm_init()` |
+| PMM bitmap (Phase 3)     | `total_pages / 8` bytes, rounded to 4K | `page_alloc_init()` |
 | Page tables (Phase 4)    | 4K per table (512 × 8-byte entries)    | `vmm_init()` |
 
 After Phase 4 (paging enabled), `kmalloc` is retired. All further kernel
@@ -230,8 +230,9 @@ allocations go through `alloc_page` directly.
 
 ## 6. Phase 3 — Bitmap page allocator
 
-**Files:** `src/pmm.c`, `src/pmm.h` _(not yet merged — SCRUM-7, SCRUM-8)_
-**Status:** 🔄 In Review / In Progress (SCRUM-7 open PR, SCRUM-8 in progress)
+**Files:** `src/page_alloc.c`, `src/page_alloc.h` **Status:** ✅ Done (SCRUM-7
+bitmap allocator, SCRUM-152 ownership table); SCRUM-8 (region reservation) in
+progress
 
 ### Design
 
@@ -249,14 +250,22 @@ For QEMU `-m 256M`: 256 MiB / 4K = 65,536 pages → 8,192 bytes (8 KB) bitmap.
 ### API
 
 ```c
-void   pmm_init(void);               // build bitmap, mark all pages used, free usable ones
-void*  alloc_page(void);             // find first free page, mark used, return phys addr
-void   free_page(void* phys_addr);   // mark page free; detect + log double-free
+void   page_alloc_init(const struct mb2_info* mb); // build bitmap + owner table, reserve kernel/WAD
+void*  alloc_page(void);              // KERNEL-owned page (kernel-internal use)
+void   free_page(void* phys_addr);    // free a KERNEL page; detect + log double-free
+
+// Ownership-aware API (SCRUM-152) — see "Ownership table" below.
+void*        alloc_page_owned(page_owner_t owner);        // stamp owner on the page
+int          free_page_owned(void* phys_addr, page_owner_t owner); // owner-checked free
+page_owner_t page_owner(void* phys_addr);                 // query a page's owner
 ```
+
+(`alloc_page` / `free_page_checked` are thin `PAGE_OWNER_KERNEL` wrappers over
+the owned variants.)
 
 ### Initialisation sequence
 
-`pmm_init()` must be called after both `mmap_init()` and `memory_init()`:
+`page_alloc_init()` must be called after both `mmap_init()` and `memory_init()`:
 
 1. Allocate bitmap via `kmalloc` — marks all pages as used by default.
 2. Walk the mmap regions: for each `MULTIBOOT_MMAP_AVAILABLE` region, mark pages
@@ -283,6 +292,48 @@ current page count.
 Computes `page_index = (uintptr_t)phys_addr / 4096`, checks the bit is currently
 `1` (double-free detection — logs to serial and returns without corrupting the
 bitmap if it is `0`), then clears it.
+
+### Ownership table (SCRUM-152)
+
+The bitmap answers *is this page allocated*; it cannot answer *who may free or
+map it*. That second question is what turns a physical `alloc`/`mmap` into an
+exokernel **secure binding** (`docs/syscall_spec.md` §3.3, architecture.md §2).
+So the PMM keeps a second array parallel to the bitmap and sharing its indexing:
+
+```c
+typedef uint16_t page_owner_t;      // 16-bit: room for the multi-LibOS future (SCRUM-147)
+static page_owner_t* owners;        // owners[i] tags page i
+
+#define PAGE_OWNER_FREE    0        // not allocated
+#define PAGE_OWNER_KERNEL  1        // reserved kernel memory / kernel-internal alloc
+#define PAGE_OWNER_LIBOS   2        // a LibOS context id (v1 uses this single id)
+```
+
+- The table is `kmalloc`'d right after the bitmap in `page_alloc_init` and
+  zero-initialised to `PAGE_OWNER_FREE`. Its own backing lives below
+  `memory_base_address()`, so it falls inside the reserved range and is tagged
+  `KERNEL` — it is never handed out.
+- `reserve_region` stamps every page it marks used as `PAGE_OWNER_KERNEL`
+  (kernel image, bump pool, WAD module), keeping the bit and the tag in step.
+- `alloc_page_owned(owner)` sets the free bit **and** stamps `owner`.
+  `alloc_page()` is `alloc_page_owned(PAGE_OWNER_KERNEL)`, so kernel-internal
+  pages (e.g. future page tables) can never be freed by a LibOS.
+- `free_page_owned(addr, owner)` enforces the tag and returns an ABI-agnostic
+  status; the syscall layer (`src/syscall_mem.c`) maps it to an `EXO_E*` code:
+
+  | condition | `free_page_owned` | `exo_page_free` |
+  | --- | --- | --- |
+  | unaligned / out-of-range address | `PAGE_FREE_EINVAL` | `-EXO_EINVAL` |
+  | page bit clear (double free / never allocated) | `PAGE_FREE_EINVAL` | `-EXO_EINVAL` |
+  | allocated but owned by KERNEL / another LibOS | `PAGE_FREE_EPERM` | `-EXO_EPERM` |
+  | owned by the caller | `PAGE_FREE_OK` (tag → FREE) | `0` |
+
+The "current context" a syscall handler stamps/checks comes from
+`syscall_current_context()` (`src/syscall.c`), which returns `PAGE_OWNER_LIBOS`
+in v1 and is the hook the SCRUM-147 scheduler will make context-aware. Enforcing
+the same tag in `exo_page_map`/`exo_page_unmap` is SCRUM-153; framebuffer
+binding is SCRUM-154; reclaiming a terminating context's pages on `exo_exit` is
+SCRUM-155.
 
 ### Page accounting (QEMU `-m 256M`)
 
@@ -522,7 +573,7 @@ refinement.
 **WAD reservation timing.** SCRUM-8 (reserve kernel + WAD pages in PMM) must
 complete before SCRUM-7 (bitmap page allocator) ships, or the allocator could
 hand out pages that overlap the WAD module. In practice both are in-flight
-together; the WAD reservation is part of `pmm_init()` and the two stories should
+together; the WAD reservation is part of `page_alloc_init()` and the two stories should
 be merged or sequenced carefully in review.
 
 **64-bit base/length in mmap entries.** The Multiboot 2 mmap uses `uint64_t` for

@@ -8,7 +8,10 @@
  * and page_alloc_init() has already made the PMM live, so these call into the
  * real allocator.
  *
- * No ownership model yet (SCRUM-152): a bad free is -EXO_EINVAL, not -EXO_EPERM.
+ * These exercise the same-owner happy path and the address-validation failures,
+ * which return -EXO_EINVAL: an unaligned/out-of-range address or a double free
+ * of an already-free page.  Cross-owner freeing (-EXO_EPERM, SCRUM-152) is
+ * covered by test_ownership_k.c.
  */
 
 #include "kunit.h"

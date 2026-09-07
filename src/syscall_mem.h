@@ -9,8 +9,9 @@
  * called from kernel_main ahead of the TESTING branch so the handlers are bound
  * for both a normal boot and the in-kernel test run.
  *
- * No ownership tracking yet — a page is handed out and taken back with no
- * per-caller tag.  The owner table and -EXO_EPERM enforcement are SCRUM-152,
- * which layers on top of these handlers.
+ * Ownership-enforced (SCRUM-152): exo_page_alloc stamps the calling context as
+ * the owner of the returned page and exo_page_free refuses to free a page the
+ * caller does not own (-EXO_EPERM).  The owner tags live in the PMM
+ * (src/page_alloc.c); the current context comes from syscall_current_context().
  */
 void syscall_mem_init(void);

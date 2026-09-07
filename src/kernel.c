@@ -14,6 +14,7 @@
 #include "fb_console.h"
 #include "syscall.h"
 #include "syscall_mem.h"
+#include "exo_syscall.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -163,6 +164,80 @@ static void print_mmap(fb_console_t *con) {
     fbcon_write(con, "\n");
 }
 
+// ── Page ownership self-check (SCRUM-152) ──────────────────────────────────
+//
+// A *visible* companion to the serial-only KUnit suite: it drives the real
+// exo_page_alloc / exo_page_free dispatch path at boot and renders the result
+// to the framebuffer console, with a green/red status swatch in the top-right
+// corner.  It demonstrates the secure-binding guarantee — a LibOS cannot free a
+// page it does not own — on screen rather than only in CI serial output.
+
+static int ownership_check(fb_console_t *con, const char *label, int ok) {
+    log_prefix(con, 0);
+    fbcon_write(con, label);
+    if (ok) {
+        fbcon_set_color(con, 80, 210, 80, 0, 0, 0);
+        fbcon_write(con, "PASS");
+    } else {
+        fbcon_set_color(con, 230, 50, 50, 0, 0, 0);
+        fbcon_write(con, "FAIL");
+    }
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, "\n");
+    return ok;
+}
+
+static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
+    klog(con, 0, "Page ownership self-check (SCRUM-152):");
+    int all = 1;
+
+    // 1. The LibOS context allocates a page; the kernel stamps it as owner.
+    int64_t p = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
+    log_prefix(con, 0);
+    fbcon_write(con, "  exo_page_alloc -> 0x");
+    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
+    fbcon_write_hex64(con, (uint64_t)p);
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, "\n");
+    all &= ownership_check(con, "  page handed out (owner = LibOS)         ", p > 0);
+
+    // 2. A kernel-owned page cannot be freed by the LibOS -> -EXO_EPERM.
+    void *kp = alloc_page();   // KERNEL-owned
+    int64_t r_kern = exo_syscall_dispatch(EXO_SYS_PAGE_FREE,
+                                          (uint64_t)(uintptr_t)kp, 0, 0, 0, 0, 0);
+    all &= ownership_check(con, "  free of kernel page rejected (EPERM)    ",
+                           r_kern == -EXO_EPERM);
+    free_page(kp);             // kernel reclaims its own page
+
+    // 3. The owner may free its own page -> 0.
+    int64_t r_ok = exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)p, 0, 0, 0, 0, 0);
+    all &= ownership_check(con, "  owner frees its own page                ",
+                           r_ok == 0);
+
+    // 4. Freeing it again is a double free -> -EXO_EINVAL.
+    int64_t r_dbl = exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)p, 0, 0, 0, 0, 0);
+    all &= ownership_check(con, "  double free rejected (EINVAL)           ",
+                           r_dbl == -EXO_EINVAL);
+
+    // Visible status swatch, top-right corner: green = enforced, red = broken.
+    const uint32_t sw = 24;
+    if (fb->width > sw + 8) {
+        if (all) fb_fill_rect(fb, fb->width - sw - 8, 8, sw, sw, 80, 210, 80);
+        else     fb_fill_rect(fb, fb->width - sw - 8, 8, sw, sw, 230, 50, 50);
+    }
+
+    log_prefix(con, 0);
+    fbcon_write(con, "Ownership enforcement: ");
+    if (all) {
+        fbcon_set_color(con, 80, 210, 80, 0, 0, 0);
+        fbcon_write(con, "ENFORCED\n");
+    } else {
+        fbcon_set_color(con, 230, 50, 50, 0, 0, 0);
+        fbcon_write(con, "BROKEN\n");
+    }
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+}
+
 // ── Kernel entry ──────────────────────────────────────────────────────────
 
 void kernel_main(void *mb2_info_ptr) {
@@ -275,6 +350,11 @@ void kernel_main(void *mb2_info_ptr) {
     fbcon_set_color(&con, 100, 180, 255, 0, 0, 0);
     fbcon_write_hex32(&con, (uint32_t)memory_base_address());
     fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(&con, "\n");
+
+    // ── Page ownership self-check (SCRUM-152) ───────────────────────────────
+    fbcon_write(&con, "\n");
+    run_ownership_demo(&con, &fb);
     fbcon_write(&con, "\n");
 
     // ── IDT / PIC / PIT / PS2 ─────────────────────────────────────���────
