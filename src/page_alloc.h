@@ -23,4 +23,10 @@ void free_page(void* addr);
 // error it returns to ring 3.  free_page() is a void wrapper around this.
 int free_page_checked(void* addr);
 
+// One past the last address the allocator manages (managed_base +
+// total_pages * PAGE_SIZE), or 0 if page_alloc_init() hasn't run yet. Lets
+// callers (tests included) derive a genuinely out-of-range address instead of
+// hardcoding one that assumes a particular QEMU memory size.
+uintptr_t page_alloc_pool_end(void);
+
 #endif

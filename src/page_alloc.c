@@ -156,3 +156,10 @@ int free_page_checked(void* addr) {
 void free_page(void* addr) {
     (void)free_page_checked(addr);
 }
+
+uintptr_t page_alloc_pool_end(void) {
+    if (bitmap == NULL) {
+        return 0;
+    }
+    return managed_base + (uintptr_t)total_pages * PAGE_SIZE;
+}

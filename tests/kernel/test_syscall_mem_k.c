@@ -14,6 +14,7 @@
 #include "kunit.h"
 #include "syscall.h"
 #include "exo_syscall.h"
+#include "page_alloc.h"
 
 #define PAGE_SIZE 4096
 
@@ -71,8 +72,12 @@ static void test_bogus_free_rejected(void)
     /* Unaligned: one byte into a genuinely allocated page. */
     CU_ASSERT_EQUAL(do_page_free((uint64_t)p + 1), -EXO_EINVAL);
 
-    /* Out of range: page-aligned but well past a 256 MiB QEMU pool. */
-    CU_ASSERT_EQUAL(do_page_free((uint64_t)0x40000000ull), -EXO_EINVAL);
+    /* Out of range: page-aligned but past the pool's managed end, derived
+     * from the allocator itself so this stays correct regardless of QEMU's
+     * configured memory size. */
+    uintptr_t out_of_range = page_alloc_pool_end();
+    CU_ASSERT(out_of_range != 0);
+    CU_ASSERT_EQUAL(do_page_free((uint64_t)out_of_range), -EXO_EINVAL);
 
     do_page_free((uint64_t)p);                 /* p itself is still allocated */
 }
