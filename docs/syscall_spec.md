@@ -20,6 +20,9 @@ Derived from static analysis of
 3. [Exokernel syscall specification](#3-exokernel-syscall-specification)
    - [3.1 Calling convention](#31-syscall-calling-convention)
    - [3.2 Syscall table](#32-syscall-table)
+   - [3.3 Secure binding & resource ownership](#33-secure-binding--resource-ownership)
+   - [3.4 Entry path](#34-entry-path-scrum-32)
+   - [3.5 Framebuffer binding](#35-framebuffer-binding-scrum-154)
 4. [Architectural decision: file I/O strategy](#4-architectural-decision-file-io-strategy)
 5. [Memory allocation pattern](#5-memory-allocation-pattern)
 6. [Sound architecture](#6-sound-architecture)
@@ -256,7 +259,7 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 1  | `exo_page_free(paddr)`              | Memory      | ✅     | Free a physical page. Bound to the dispatcher (SCRUM-34); currently `0` or `-EINVAL`. **Ownership-checked (§3.3)** — will return `-EPERM` unless the caller owns `paddr` once the page ownership table (SCRUM-152) lands.                  |
 | 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ⬜     | Map physical page at virtual address in caller's page directory. `flags`: `EXO_PAGE_READ`/`WRITE`/`USER`/`EXEC`. `EXEC` is defined now, while the flag word is still unpublished, so that non-executable data mappings are expressible once `EFER.NXE` is enabled — adding it later would mean renumbering. `READ` is not representable on x86 (present implies readable) and is accepted but ignored. **Ownership-checked (§3.3):** `paddr` must be owned by the caller (or be the framebuffer the caller has acquired); mapping kernel-owned or another LibOS's pages returns `-EPERM`. Returns `0` or `-EINVAL`/`-EFAULT`/`-EPERM`. Sprint 2 (SCRUM-15, -16), enforcement SCRUM-153.                                                                                                                       |
 | 3  | `exo_page_unmap(vaddr)`             | Memory      | ⬜     | Unmap a virtual page. Only unmaps a mapping the caller owns. Returns `0` or `-EINVAL`/`-EPERM`. Sprint 2 (enforcement SCRUM-153).                                                                                                                                              |
-| 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ⬜     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct and **record the caller as the framebuffer owner (secure binding, §3.3)**. LibOS then calls `exo_page_map` to map it — that map now requires FB ownership. Released on `exo_exit`. Used by `DG_Init`. Returns `0` or `-EBUSY` if another LibOS holds the FB. Sprint 2 (SCRUM-16), binding SCRUM-154.                                        |
+| 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ✅     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct and **record the caller as the framebuffer owner (secure binding, §3.3, §3.5)**. LibOS then calls `exo_page_map` to map it — that map requires FB ownership. Released on `exo_exit`. Used by `DG_Init`. Returns `0` (including a re-acquire by the current owner), `-EBUSY` if another LibOS holds the FB, `-EFAULT` for an unusable `info_out`, or `-ENODEV` on a machine the bootloader gave no framebuffer. Implemented in SCRUM-154 (`src/syscall_fb.c`, `src/fb_binding.c`); the LibOS-side mapping of the returned range still waits on SCRUM-16/-35. |
 | 5  | `exo_get_ticks()`                   | Timer       | ✅     | Return `uint32_t` milliseconds since boot. Zero arguments. Used by `DG_GetTicksMs` and `DG_SleepMs`. Kernel-side PIT + `kernel_get_ticks_ms()` done (SCRUM-9, -10).                                                                                                            |
 | 6  | `exo_kbd_poll(event_out)`           | Input       | 🔄     | Dequeue next keyboard event into `event_out` struct `{uint8_t pressed; uint8_t key; uint8_t modifiers; uint8_t reserved}`. `key` is a decoded `ps2_key_t` index (`KEY_A`, `KEY_ESC`, …), not a raw PS/2 scancode — the kernel's scancode decoder runs before the event is queued. `modifiers` is the `EXO_MOD_*` shift/ctrl/alt mask sampled when the event was queued, so a chord decodes correctly even if the modifier is released before the LibOS polls — Doom binds shift (run), ctrl (fire) and alt (strafe). Returns `1` if event available, `0` if empty. Prerequisite: IRQ1 handler (SCRUM-13, In Progress) + scancode table (SCRUM-14, In Progress). Ring buffer planned Sprint 2 (SCRUM-18). |
 | 7  | `exo_mouse_poll(state_out)`         | Input       | ⬜     | Write accumulated mouse state `{int16_t dx; int16_t dy; uint8_t buttons; uint8_t reserved}` to `state_out`, then reset accumulators. `reserved` is zeroed by the kernel and keeps the struct a fixed 6 bytes. Returns `0`. Prerequisite: PS/2 mouse init (SCRUM-19, Sprint 2).                                                                                            |
@@ -302,7 +305,10 @@ resource:
   kernel or peer memory (SCRUM-153).
 - `exo_fb_acquire` binds the framebuffer to one LibOS at a time (`-EBUSY`
   otherwise); mapping FB physical pages requires holding that binding
-  (SCRUM-154).
+  (SCRUM-154, §3.5). Framebuffer pages need a table of their own rather than
+  the PMM's owner tags, because MMIO sits outside the usable-RAM region the
+  page allocator manages — `page_owner()` reports `FREE` for every one of
+  them, so the generic check above cannot speak for them.
 - `exo_exit` **reclaims** all bindings held by the terminating context — frees
   its pages, releases the framebuffer, closes its files (SCRUM-155).
 
@@ -393,6 +399,62 @@ U/S bit, so ring-3 code cannot execute. TESTING builds are assembled with
 benefit. This opens all of physical memory to CPL 3 and is scoped to test
 builds for that reason; SCRUM-48 (per-LibOS page directories) and SCRUM-55/-56
 (isolation tests) close it properly.
+
+### 3.5 Framebuffer binding (SCRUM-154)
+
+§3.3 states the rule for the framebuffer; this section is the mechanism.
+Implemented in `src/fb_binding.c` (the ownership table, ABI-agnostic) and
+`src/syscall_fb.c` (the `#4` handler and the `-EXO_E*` mapping), tested in
+`tests/kernel/test_fb_binding_k.c`. The split mirrors `page_alloc.c` /
+`syscall_mem.c`.
+
+**Publication.** `kernel_main` calls `syscall_fb_init(fb_tag)` with the
+multiboot2 framebuffer tag, before the `TESTING` branch so acquire behaves
+identically under the test runner. A NULL tag — or a degenerate geometry (zero
+base, zero extent, or a range that would wrap the physical address space) — is
+published as "this machine has no framebuffer", and every acquire then answers
+`-EXO_ENODEV`. `#4` is registered either way: the syscall exists, so reporting
+`-EXO_ENOSYS` would tell the LibOS the kernel is too old rather than that the
+machine is headless.
+
+**Establish.** `exo_fb_acquire` validates `info_out` *before* taking the
+binding — a caller that passes garbage must not walk away owning a screen it
+never received a handle to — then records `syscall_current_context()` as the
+owner and fills the caller's `exo_fb_info_t`, zeroing its reserved bytes. A
+re-acquire by the current owner succeeds and re-fills the struct: §3.2 makes
+`-EBUSY` the answer to "another LibOS holds it", and a LibOS re-running
+`DG_Init` is not that.
+
+**Enforce.** `fb_binding_check_map(paddr, who)` is the per-page permission gate
+`exo_page_map` / `exo_page_unmap` consult (SCRUM-153). It is deliberately
+three-valued so a caller cannot read "not framebuffer memory" as "permitted":
+
+```c
+switch (fb_binding_check_map(paddr, syscall_current_context())) {
+case FB_MAP_ALLOW:  break;              /* FB owner — proceed              */
+case FB_MAP_DENY:   return -EXO_EPERM;  /* FB memory, someone else's       */
+case FB_MAP_NOT_FB: /* fall through to page_owner(paddr) == caller        */
+}
+```
+
+The extent is page-granular: the framebuffer's physical range is widened to
+whole 4 KiB pages, because mapping permission is decided per page and the base
+need not be page-aligned. An *unheld* framebuffer denies too — it is not public
+property, the LibOS has to bind it first — and there is no kernel bypass: the
+kernel reaches the framebuffer through the identity map (`src/fb.c`), never
+through `exo_page_map`.
+
+**Reclaim.** `fb_binding_release(who)` drops the binding if `who` holds it and
+is a no-op otherwise, so reclamation can call it unconditionally for a context
+that may never have acquired. This is the hook SCRUM-155's `exo_exit` calls
+when tearing a context down, and the mechanism half of the revocation model
+(SCRUM-156). Until SCRUM-155 binds `#20`, nothing calls it on the boot path: a
+LibOS that exits without releasing keeps the binding for the rest of the boot.
+
+**No locking.** Syscalls run with `IF` cleared by `IA32_FMASK` (§3.4) and the
+entry path is single-threaded, so the read-modify-write in
+`fb_binding_acquire()` cannot be interleaved. Preemptive multi-LibOS
+scheduling (SCRUM-147) invalidates that assumption and will need a lock here.
 
 ---
 

@@ -21,6 +21,12 @@ void suite_exo_syscall_kview_tests(CU_pSuite s);
 void suite_syscall_tests(CU_pSuite s);
 void suite_syscall_mem_tests(CU_pSuite s);
 void suite_ownership_tests(CU_pSuite s);
+void suite_fb_binding_tests(CU_pSuite s);
+
+/* Suite init/cleanup for the framebuffer binding suite: it swaps in a
+ * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
+int fb_binding_suite_init(void);
+int fb_binding_suite_cleanup(void);
 
 int run_tests(void)
 {
@@ -60,6 +66,10 @@ int run_tests(void)
 
     s = CU_add_suite("ownership", NULL, NULL);
     suite_ownership_tests(s);
+
+    s = CU_add_suite("fb_binding", fb_binding_suite_init,
+                     fb_binding_suite_cleanup);
+    suite_fb_binding_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

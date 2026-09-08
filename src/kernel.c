@@ -14,6 +14,8 @@
 #include "fb_console.h"
 #include "syscall.h"
 #include "syscall_mem.h"
+#include "syscall_fb.h"
+#include "fb_binding.h"
 #include "exo_syscall.h"
 
 extern void irq0_stub();
@@ -187,6 +189,64 @@ static int ownership_check(fb_console_t *con, const char *label, int ok) {
     return ok;
 }
 
+// ── Framebuffer secure binding self-check (SCRUM-154) ─────────────────────
+//
+// The same idea one resource up: the framebuffer is bound to one LibOS at a
+// time, and mapping its physical pages requires holding that binding.  Runs on
+// the real exo_fb_acquire dispatch path and leaves the framebuffer unbound, so
+// the kernel console below keeps the screen for the rest of the boot.
+
+// A second, distinct context id — the "another LibOS" the binding must refuse.
+#define DEMO_OTHER_LIBOS ((page_owner_t)(PAGE_OWNER_LIBOS + 1))
+
+static int run_fb_binding_demo(fb_console_t *con) {
+    exo_fb_info_t info = { 0, 0, 0, 0, 0, { 0, 0, 0 } };
+    int all = 1;
+
+    klog(con, 0, "Framebuffer binding self-check (SCRUM-154):");
+
+    // 1. Acquire binds the framebuffer to the calling context.
+    int64_t r_acq = exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE,
+                                         (uint64_t)(uintptr_t)&info,
+                                         0, 0, 0, 0, 0);
+    log_prefix(con, 0);
+    fbcon_write(con, "  exo_fb_acquire -> phys 0x");
+    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
+    fbcon_write_hex64(con, info.phys_addr);
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, "\n");
+    all &= ownership_check(con, "  framebuffer bound to LibOS              ",
+                           r_acq == 0 &&
+                           fb_binding_owner() == syscall_current_context());
+
+    // 2. The owner may map framebuffer pages; nobody else may (SCRUM-153 asks
+    //    fb_binding_check_map before consulting per-page ownership).
+    all &= ownership_check(con, "  owner may map FB pages                  ",
+                           fb_binding_check_map(info.phys_addr,
+                                                syscall_current_context())
+                           == FB_MAP_ALLOW);
+    all &= ownership_check(con, "  foreign FB map rejected (EPERM)         ",
+                           fb_binding_check_map(info.phys_addr,
+                                                DEMO_OTHER_LIBOS)
+                           == FB_MAP_DENY);
+
+    // 3. With another context holding it, acquire answers -EXO_EBUSY.
+    fb_binding_release(syscall_current_context());
+    fb_binding_acquire(DEMO_OTHER_LIBOS);
+    int64_t r_busy = exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE,
+                                          (uint64_t)(uintptr_t)&info,
+                                          0, 0, 0, 0, 0);
+    all &= ownership_check(con, "  second acquirer rejected (EBUSY)        ",
+                           r_busy == -EXO_EBUSY);
+
+    // 4. Reclamation (what SCRUM-155's exo_exit will do) frees it again.
+    fb_binding_release(DEMO_OTHER_LIBOS);
+    all &= ownership_check(con, "  release frees the binding               ",
+                           fb_binding_owner() == PAGE_OWNER_FREE);
+
+    return all;
+}
+
 static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
     klog(con, 0, "Page ownership self-check (SCRUM-152):");
     int all = 1;
@@ -219,6 +279,8 @@ static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
     all &= ownership_check(con, "  double free rejected (EINVAL)           ",
                            r_dbl == -EXO_EINVAL);
 
+    all &= run_fb_binding_demo(con);
+
     // Visible status swatch, top-right corner: green = enforced, red = broken.
     const uint32_t sw = 24;
     if (fb->width > sw + 8) {
@@ -227,7 +289,7 @@ static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
     }
 
     log_prefix(con, 0);
-    fbcon_write(con, "Ownership enforcement: ");
+    fbcon_write(con, "Resource ownership enforcement: ");
     if (all) {
         fbcon_set_color(con, 80, 210, 80, 0, 0, 0);
         fbcon_write(con, "ENFORCED\n");
@@ -284,6 +346,13 @@ void kernel_main(void *mb2_info_ptr) {
     // After page_alloc_init + syscall_init, and ahead of the TESTING branch
     // so the handlers are registered for both a normal boot and the tests.
     syscall_mem_init();
+
+    // ── Framebuffer secure binding (SCRUM-154) ──────────────────────────
+    // Publishes the framebuffer's geometry to the binding table and binds
+    // exo_fb_acquire (#4).  Same placement rule as the memory syscalls: after
+    // syscall_init, ahead of the TESTING branch.  fb_tag may be NULL, in which
+    // case acquire reports -EXO_ENODEV rather than -EXO_ENOSYS.
+    syscall_fb_init((const struct mb2_tag_framebuffer *)fb_tag);
 
 #ifdef TESTING
     serial_flush();

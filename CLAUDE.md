@@ -99,6 +99,8 @@ Sprint 2 paging work lands.
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
+| Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h` |
+| Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer) |
 | Keyboard (PS/2) | `src/ps2.c/h` |
 | Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h` |
 | Test framework | `src/kunit.h`, `tests/kernel/*.c` |
@@ -122,12 +124,16 @@ Sprint 2 paging work lands.
   (`src/serial.c`, mapped to QEMU stdio via `-serial mon:stdio`). Test framework
   output and all kernel diagnostics go through it; `serial_flush()` must be
   called before `qemu_exit()` or buffered bytes are lost.
-- **Syscall entry works; no handler is bound yet.** The `syscall`/`sysret`
+- **Syscall entry works; three handlers are bound.** The `syscall`/`sysret`
   path is implemented (SCRUM-32): `syscall_init()` in `src/syscall.c` programs
   `EFER.SCE`/`STAR`/`LSTAR`/`FMASK`, `src/syscall_entry.s` is the entry stub,
-  and `exo_syscall_dispatch` routes on the number. But the handler table is
-  empty, so **every syscall number returns `-EXO_ENOSYS` until SCRUM-33** —
-  binding one is `exo_syscall_register(EXO_SYS_*, handler)`.
+  and `exo_syscall_dispatch` routes on the number. Bound today:
+  `exo_page_alloc` (#0) and `exo_page_free` (#1) in `src/syscall_mem.c`
+  (SCRUM-34), and `exo_fb_acquire` (#4) in `src/syscall_fb.c` (SCRUM-154).
+  **Every other number still returns `-EXO_ENOSYS`**; binding one is
+  `exo_syscall_register(EXO_SYS_*, handler)` from an `*_init()` called in
+  `kernel_main` ahead of the `TESTING` branch, so the handler exists for both a
+  normal boot and the test run.
   `docs/syscall_spec.md` §3 and its C expression `src/exo_syscall.h` are the
   source of truth for what each syscall must do and which doomgeneric/libc call
   sites need it; change one and change the other. The convention is
@@ -136,6 +142,19 @@ Sprint 2 paging work lands.
   itself overwrites `RCX` with the return RIP and `R11` with RFLAGS. The kernel
   preserves every other register, argument registers included — the stubs
   depend on it, and `tests/kernel/test_syscall_k.c` proves it from ring 3.
+- **Resources are owned, and the owner is enforced.** Every managed physical
+  page carries a `page_owner_t` tag (`FREE`/`KERNEL`/a LibOS id) in
+  `src/page_alloc.c`, and the framebuffer has its own binding table in
+  `src/fb_binding.c` — it needs one because MMIO lies outside the RAM the page
+  allocator manages, so `page_owner()` cannot speak for it. `exo_page_free`
+  returns `-EXO_EPERM` for a page the caller does not own (SCRUM-152) and
+  `exo_fb_acquire` binds the framebuffer to one context, `-EXO_EBUSY` to
+  anyone else (SCRUM-154). **When you implement `exo_page_map` (SCRUM-35/-153),
+  it must ask `fb_binding_check_map()` first and only fall through to
+  `page_owner()` when that answers `FB_MAP_NOT_FB`** — see
+  `docs/syscall_spec.md` §3.3/§3.5. `fb_binding_release()` is the hook
+  SCRUM-155's `exo_exit` reclamation calls; nothing calls it yet, so a LibOS
+  that exits keeps the framebuffer for the rest of the boot.
 - **The GDT in `src/boot.s` has a layout `sysret` forces, not one we chose** —
   kernel code/data at `0x08`/`0x10`, then user code32 (`0x18`, a placeholder
   long mode never loads), user data (`0x20`), user code64 (`0x28`). `sysretq`
