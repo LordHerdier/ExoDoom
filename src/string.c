@@ -1,4 +1,5 @@
 #include "string.h"
+#include "ctype.h"
 
 size_t strlen(const char *s) {
   const char *p = s;
@@ -13,6 +14,28 @@ int strcmp(const char *s1, const char *s2) {
     s2++;
   }
   return (unsigned char)*s1 - (unsigned char)*s2;
+}
+
+/* strcasecmp/strncasecmp are POSIX, not C standard, but doomgeneric leans on
+ * them for WAD/config/argv parsing.  Cast through unsigned char before tolower
+ * to avoid negative-char UB, matching strcmp/memcmp's unsigned-char diffs. */
+int strcasecmp(const char *s1, const char *s2) {
+  while (*s1 && (tolower((unsigned char)*s1) == tolower((unsigned char)*s2))) {
+    s1++;
+    s2++;
+  }
+  return tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
+}
+
+int strncasecmp(const char *s1, const char *s2, size_t n) {
+  while (n && *s1 && (tolower((unsigned char)*s1) == tolower((unsigned char)*s2))) {
+    s1++;
+    s2++;
+    n--;
+  }
+  if (n == 0)
+    return 0;
+  return tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
 }
 
 void *memset(void *s, int c, size_t n) {

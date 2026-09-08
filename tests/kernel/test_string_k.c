@@ -97,6 +97,48 @@ static void test_strchr_nul_terminator(void)
     CU_ASSERT_PTR_NOT_NULL(strchr(s, '\0'));
 }
 
+static void test_strcasecmp_equal(void)
+{
+    /* Acceptance criterion from SCRUM-43 */
+    CU_ASSERT_EQUAL(strcasecmp("Doom", "doom"), 0);
+    CU_ASSERT_EQUAL(strcasecmp("DOOM", "doom"), 0);
+    CU_ASSERT_EQUAL(strcasecmp("", ""), 0);
+}
+
+static void test_strcasecmp_order(void)
+{
+    /* Ordering is case-insensitive but preserves sign */
+    CU_ASSERT(strcasecmp("abc", "ABD") < 0);
+    CU_ASSERT(strcasecmp("ABD", "abc") > 0);
+    CU_ASSERT(strcasecmp("a", "aa")   < 0);
+}
+
+static void test_strncasecmp_acceptance(void)
+{
+    /* Acceptance criterion from SCRUM-43 */
+    CU_ASSERT_EQUAL(strncasecmp("DOOM2.WAD", "doom", 4), 0);
+}
+
+static void test_strncasecmp_zero_len(void)
+{
+    /* n == 0 compares nothing -> always equal */
+    CU_ASSERT_EQUAL(strncasecmp("abc", "xyz", 0), 0);
+}
+
+static void test_strncasecmp_limit(void)
+{
+    /* Equal within the limit, differ past it */
+    CU_ASSERT_EQUAL(strncasecmp("DOOMX", "doomy", 4), 0);
+    CU_ASSERT(strncasecmp("DOOMX", "doomy", 5) != 0);
+}
+
+static void test_strncasecmp_short_string(void)
+{
+    /* Differing length within n -> nonzero (NUL vs char) */
+    CU_ASSERT(strncasecmp("doom", "doomsday", 8) < 0);
+    CU_ASSERT(strncasecmp("doomsday", "doom", 8) > 0);
+}
+
 void suite_string_tests(CU_pSuite s)
 {
     CU_add_test(s, "strlen_basic",           test_strlen_basic);
@@ -112,4 +154,10 @@ void suite_string_tests(CU_pSuite s)
     CU_add_test(s, "strchr_found",           test_strchr_found);
     CU_add_test(s, "strchr_not_found",       test_strchr_not_found);
     CU_add_test(s, "strchr_nul_terminator",  test_strchr_nul_terminator);
+    CU_add_test(s, "strcasecmp_equal",        test_strcasecmp_equal);
+    CU_add_test(s, "strcasecmp_order",        test_strcasecmp_order);
+    CU_add_test(s, "strncasecmp_acceptance",  test_strncasecmp_acceptance);
+    CU_add_test(s, "strncasecmp_zero_len",    test_strncasecmp_zero_len);
+    CU_add_test(s, "strncasecmp_limit",       test_strncasecmp_limit);
+    CU_add_test(s, "strncasecmp_short_string",test_strncasecmp_short_string);
 }
