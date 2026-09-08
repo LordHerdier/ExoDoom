@@ -174,14 +174,20 @@ _start64  (src/boot.s, .code64 — 64-bit entry)
 kernel_main  (src/kernel.c)
     │
     ├─ serial_init()          — COM1 at 38400 baud, FIFO enabled
-    ├─ fb init                — parse MB2 framebuffer tag (type 8), init fb_console
+    ├─ framebuffer tag        — locate MB2 tag (type 8); serial diagnostics only here
     ├─ mmap_init(mb)          — parse MB2 memory map tag (type 6)
     ├─ memory_init()          — set bump allocator base to align_up(&_bss_end, 4K)
+    ├─ page_alloc_init(mb)    — bitmap PMM + owner table, kernel/WAD reserved
+    ├─ vmm_init(mb, fb)       — build the kernel page tables, load CR3 (SCRUM-15)
+    ├─ syscall_init()         — EFER.SCE / STAR / LSTAR / FMASK
+    ├─ syscall_mem_init()     — bind exo_page_alloc / exo_page_free
+    ├─ syscall_fb_init(fb)    — publish FB geometry, bind exo_fb_acquire
     │
     │  [if compiled with -DTESTING]
     ├─ run_tests()            — KUnit test runner, exits QEMU with pass/fail code
     │
     │  [normal boot]
+    ├─ fb_init_bgrx8888() + fbcon_init()  — framebuffer console (halts if absent)
     ├─ idt_init()             — fill all 256 16-byte IDT entries with default_stub, lidt
     ├─ pic_remap()            — remap PIC1→0x20, PIC2→0x28 (avoids BIOS conflict)
     ├─ idt_set_gate(32, irq0_stub) — wire IRQ0 to PIT handler
@@ -196,9 +202,14 @@ kernel_main  (src/kernel.c)
 Key details:
 
 - The kernel is linked at **virtual address 2M** (`linker.ld`: `. = 2M`). The
-  boot trampoline identity-maps the first 4 GB with 2 MB pages, so virtual ==
-  physical for the entire low address space including the framebuffer (typically
-  at ~0xFD000000 in the PCI MMIO aperture).
+  boot trampoline identity-maps the first 4 GB with 2 MB pages, and `vmm_init()`
+  then replaces that with a narrower identity map of only the memory that exists
+  (§5.1) — so virtual == physical throughout, framebuffer included (typically at
+  ~0xFD000000 in the PCI MMIO aperture).
+- **Anything the ring-3 tests need must be initialised above the `TESTING`
+  branch**, which exits QEMU and never returns. That is why the PMM, the kernel
+  page tables and the syscall bindings sit there, and the framebuffer console,
+  IDT, PIC, PIT and keyboard below.
 - GRUB enters the kernel in **32-bit protected mode** per the Multiboot 2 spec.
   The trampoline in `boot.s` transitions to 64-bit long mode before calling
   `kernel_main`.
@@ -221,7 +232,7 @@ Key details:
 ### 5.1 Memory
 
 **Files:** `src/memory.c`, `src/memory.h`, `src/mmap.c`, `src/mmap.h`,
-`src/multiboot2.h`
+`src/page_alloc.c/h`, `src/vmm.c/h`, `src/multiboot2.h`
 
 **Current state (Sprint 1):** Two-phase design, partially complete.
 
@@ -244,11 +255,19 @@ bump-allocated region. Double-free detection is required.
 must mark pages occupied by the kernel image (`_load_start`→`_bss_end`) and the
 WAD module as unavailable, so they are never handed out.
 
-**Note:** Paging is already enabled at boot — the trampoline in `boot.s` sets up
-4-level page tables (PML4 → PDPT → PD) identity-mapping the first 4 GB with
-2 MB pages before entering long mode. Future work will refine this with proper
-page-granularity mappings and `exo_page_alloc` / `exo_page_map` /
-`exo_page_unmap` syscalls exposed to LibOS (SCRUM-15, -16, -17).
+**Phase 5 — Kernel page tables** ✅ Done (SCRUM-15): paging is on from the
+`boot.s` trampoline (a static 4 GB identity map of 2 MB pages in `.bss`, built
+only to reach long mode), but the map the kernel actually runs on is built by
+`vmm_init()` in `src/vmm.c` from PMM pages — `PAGE_OWNER_KERNEL`, so no LibOS
+can free one — and loaded into `CR3` before the `TESTING` branch in
+`kernel_main`. It identity-maps low memory, the kernel image and bump pool,
+every usable RAM region (WAD module included), the multiboot info and the
+framebuffer aperture, and nothing else; page 0 is left unmapped as a NULL
+guard. 2 MB leaves are used where alignment allows and split on demand when a
+4 KiB mapping lands inside one, which is the primitive `exo_page_map`
+(SCRUM-153) needs. Cost on QEMU `-m 256M`: 8 pages. Still ahead: per-section
+permissions and a read-only WAD (SCRUM-16), a page-fault handler (SCRUM-17),
+and per-LibOS address spaces (SCRUM-48). Full detail in `docs/memory.md` §7.
 
 **Memory map (QEMU, at boot, pre-paging):**
 
@@ -616,7 +635,7 @@ bare-metal foundations to a playable game.
 | Sprint                                                  | Focus                                    | Key deliverables                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | ------------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Sprint 1: Memory + Timer**                            | Foundations                              | Multiboot 2 mmap ✅, bump allocator ✅, bitmap page allocator 🔄, PIT/timer ✅, sleep ✅, string.h ✅, ctype.h ✅, KUnit ✅, PS/2 keyboard ✅, x86_64 migration ✅, error_stub bug fix ⬜                                                                                                                                                                                                                                                    |
-| **Sprint 2: VMem + Input + libc**                       | Virtual memory + input                   | Paging on (identity map), page fault handler, framebuffer+WAD mapped, keyboard ring buffer, PS/2 mouse init, `printf`→serial shim                                                                                                                                                                                                                                                                                                           |
+| **Sprint 2: VMem + Input + libc**                       | Virtual memory + input                   | Paging on (kernel page tables from the PMM ✅ SCRUM-15), page fault handler, framebuffer+WAD mapped, keyboard ring buffer, PS/2 mouse init, `printf`→serial shim                                                                                                                                                                                                                                                                                                           |
 | **Sprint 3: Heap+Mouse+Syscalls** _(20 Apr – 4 May)_    | Kernel heap + syscall gate               | First-fit heap allocator (`kmalloc`/`kfree`/`krealloc`) backed by PMM, mouse packet decoding + delta accumulator, `stdlib.h` wrappers (`malloc`/`free`/`realloc`, `atoi`, `abs`, `qsort`), `errno`/`assert`/`abort`, `syscall`/`sysret` entry path via MSRs (SCRUM-32), `exo_get_ticks` as first end-to-end syscall                                                                                                                                               |
 | **Sprint 4: LibOS mem+input+math** _(4 May – 18 May)_   | LibOS address space + remaining syscalls | `exo_page_alloc`/`exo_page_free`/`exo_page_map`/`exo_fb_map` in dispatcher, LibOS-side page allocator + heap, `exo_get_key`/`exo_get_mouse_delta` syscalls, Doom keycode → PS/2 scancode translation, `math.h` (fixed-point sin/cos table, `abs`, `floor`/`ceil`), `FILE*` shim (`fopen`/`fclose`/`fread`/`fwrite`/`fseek`/`ftell`) backed by `exo_file_*`, `strcasecmp`/`strncasecmp`, `exo_file_*` kernel dispatcher                      |
 | **Sprint 5: LibOS struct+ring 3** _(18 May – 1 Jun)_    | Ring 0 → ring 3 transition               | GDT with ring 0 + ring 3 segments, TSS for kernel stack on syscall entry, boot LibOS in ring 3 via `iret` to user-mode entry point, separate page directory per LibOS, LibOS binary loading at fixed user-space address, `libos_main()` entry framework, port libc shim to use syscall stubs, `exo_serial_write` syscall                                                                                                                    |

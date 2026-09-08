@@ -4,6 +4,7 @@
 #include "memory.h"
 #include "mmap.h"
 #include "page_alloc.h"
+#include "vmm.h"
 
 #include "idt.h"
 #include "pic.h"
@@ -334,6 +335,20 @@ void kernel_main(void *mb2_info_ptr) {
     // ── Page allocator (SCRUM-7) ───────────────────────────────────────
     page_alloc_init(mb);
 
+    // ── Kernel page tables (SCRUM-15) ───────────────────────────────────
+    // Replaces boot.s's blanket 4 GB identity map with tables built from PMM
+    // pages that describe only what the kernel has: low memory, the kernel
+    // image and bump pool, usable RAM (WAD module included) and the
+    // framebuffer aperture.  Needs the PMM, so it sits after page_alloc_init;
+    // ahead of the TESTING branch because run_tests() -- the ring-3 probe
+    // included -- then runs against this map rather than the boot one.
+    //
+    // On failure CR3 is untouched and the boot map stays live, so the kernel
+    // keeps running (degraded, still on the boot map) and says so.
+    if (vmm_init(mb, (const struct mb2_tag_framebuffer *)fb_tag) != VMM_OK) {
+        serial_print("WARN: vmm_init failed; continuing on the boot map\n");
+    }
+
     // ── Syscall entry (SCRUM-32) ────────────────────────────────────────
     // Programs EFER.SCE/STAR/LSTAR/FMASK so the `syscall` instruction has a
     // landing site.  Ahead of the TESTING branch because the ring-3 test
@@ -420,6 +435,22 @@ void kernel_main(void *mb2_info_ptr) {
     fbcon_write_hex32(&con, (uint32_t)memory_base_address());
     fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
     fbcon_write(&con, "\n");
+
+    // ── Kernel page tables (SCRUM-15) ───────────────────────────────────
+    log_prefix(&con, 0);
+    if (vmm_kernel_pml4() != 0) {
+        fbcon_write(&con, "Kernel page tables: PML4 @ 0x");
+        fbcon_set_color(&con, 100, 180, 255, 0, 0, 0);
+        fbcon_write_hex64(&con, vmm_kernel_pml4());
+        fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
+        fbcon_write(&con, " (");
+        fbcon_write_u32(&con, vmm_table_pages());
+        fbcon_write(&con, " table pages from the PMM)\n");
+    } else {
+        fbcon_set_color(&con, 230, 50, 50, 0, 0, 0);
+        fbcon_write(&con, "Kernel page tables: FAILED - running on the boot map\n");
+        fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
+    }
 
     // ── Page ownership self-check (SCRUM-152) ───────────────────────────────
     fbcon_write(&con, "\n");
