@@ -300,8 +300,9 @@ static inline int64_t exo_page_alloc(void)
     return exo_syscall0(EXO_SYS_PAGE_ALLOC);
 }
 
-/* #1 — release a page from exo_page_alloc.  0, or -EXO_EINVAL if paddr was
- * never allocated to this LibOS. */
+/* #1 — release a page from exo_page_alloc.  0 on success, -EXO_EPERM if paddr
+ * is allocated but owned by the kernel or another LibOS, -EXO_EINVAL if it is
+ * unaligned, out of range, or already free. */
 static inline int64_t exo_page_free(uint64_t paddr)
 {
     return exo_syscall1(EXO_SYS_PAGE_FREE, paddr);

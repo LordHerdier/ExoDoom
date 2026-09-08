@@ -11,6 +11,8 @@
 static uintptr_t managed_base = 0;
 static uint32_t total_pages = 0;
 static uint8_t* bitmap = NULL;
+/* Parallel to `bitmap`, same indexing: owners[i] tags page i (SCRUM-152). */
+static page_owner_t* owners = NULL;
 
 
 static void bitmap_set(uint32_t index) {
@@ -43,6 +45,7 @@ static void reserve_region(uintptr_t start, uintptr_t end) {
         uint32_t index = (uint32_t)((addr - managed_base) / PAGE_SIZE);
         if (index < total_pages) {
             bitmap_set(index);
+            owners[index] = PAGE_OWNER_KERNEL;
         }
     }
 }
@@ -71,6 +74,16 @@ void page_alloc_init(const struct mb2_info* mb) {
 
             for (uint32_t j = 0; j < bitmap_bytes; j++) {
                 bitmap[j] = 0;
+            }
+
+            /* Owner table: one tag per page, all FREE to start.  Allocated
+             * before reserve_region() so it can stamp KERNEL as it marks
+             * reserved pages used.  Its own backing lives below
+             * memory_base_address(), so it is inside the reserved range and
+             * ends up tagged KERNEL — it is never handed out. */
+            owners = (page_owner_t*)kmalloc(total_pages * sizeof(page_owner_t));
+            for (uint32_t j = 0; j < total_pages; j++) {
+                owners[j] = PAGE_OWNER_FREE;
             }
 
             uintptr_t reserve_start = managed_base;
@@ -108,7 +121,7 @@ void page_alloc_init(const struct mb2_info* mb) {
     serial_print("page_alloc: no usable region found\n");
 }
 
-void* alloc_page(void) {
+void* alloc_page_owned(page_owner_t owner) {
     if (bitmap == NULL || total_pages == 0) {
         serial_print("alloc_page: allocator not initialized\n");
         return NULL;
@@ -117,6 +130,7 @@ void* alloc_page(void) {
     for (uint32_t i = 0; i < total_pages; i++) {
         if (!bitmap_test(i)) {
             bitmap_set(i);
+            owners[i] = owner;
             return (void*)(managed_base + ((uintptr_t)i * PAGE_SIZE));
         }
     }
@@ -125,32 +139,68 @@ void* alloc_page(void) {
     return NULL;
 }
 
-int free_page_checked(void* addr) {
-    if (bitmap == NULL || total_pages == 0) {
-        serial_print("free_page: allocator not initialized\n");
-        return -1;
-    }
+void* alloc_page(void) {
+    return alloc_page_owned(PAGE_OWNER_KERNEL);
+}
+
+// Resolve `addr` to a managed page index.  Returns 0 and writes *index on a
+// valid page-aligned in-range address; returns non-zero otherwise.
+static int page_index_of(void* addr, uint32_t* index) {
     uintptr_t page = (uintptr_t)addr;
 
     if (page < managed_base || ((page - managed_base) % PAGE_SIZE) != 0) {
-        serial_print("free_page: invalid page address\n");
         return -1;
     }
 
-    uint32_t index = (uint32_t)((page - managed_base) / PAGE_SIZE);
-
-    if (index >= total_pages) {
-        serial_print("free_page: page out of range\n");
+    uint32_t i = (uint32_t)((page - managed_base) / PAGE_SIZE);
+    if (i >= total_pages) {
         return -1;
+    }
+
+    *index = i;
+    return 0;
+}
+
+page_owner_t page_owner(void* addr) {
+    uint32_t index;
+    if (bitmap == NULL || total_pages == 0 || page_index_of(addr, &index) != 0) {
+        return PAGE_OWNER_FREE;
+    }
+    return owners[index];
+}
+
+int free_page_owned(void* addr, page_owner_t owner) {
+    if (bitmap == NULL || total_pages == 0) {
+        serial_print("free_page: allocator not initialized\n");
+        return PAGE_FREE_EINVAL;
+    }
+
+    uint32_t index;
+    if (page_index_of(addr, &index) != 0) {
+        serial_print("free_page: invalid page address\n");
+        return PAGE_FREE_EINVAL;
     }
 
     if (!bitmap_test(index)) {
         serial_print("free_page: double free detected\n");
-        return -1;
+        return PAGE_FREE_EINVAL;
+    }
+
+    /* Bit is set (page is allocated): the tag decides whether this caller may
+     * free it.  A mismatch is a LibOS reaching for kernel or peer memory. */
+    if (owners[index] != owner) {
+        serial_print("free_page: ownership violation\n");
+        return PAGE_FREE_EPERM;
     }
 
     bitmap_clear(index);
-    return 0;
+    owners[index] = PAGE_OWNER_FREE;
+    return PAGE_FREE_OK;
+}
+
+int free_page_checked(void* addr) {
+    /* Kernel-internal free: pages taken by alloc_page() are KERNEL-owned. */
+    return free_page_owned(addr, PAGE_OWNER_KERNEL) == PAGE_FREE_OK ? 0 : -1;
 }
 
 void free_page(void* addr) {

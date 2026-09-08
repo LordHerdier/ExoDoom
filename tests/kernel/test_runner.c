@@ -20,6 +20,7 @@ void suite_exo_syscall_tests(CU_pSuite s);
 void suite_exo_syscall_kview_tests(CU_pSuite s);
 void suite_syscall_tests(CU_pSuite s);
 void suite_syscall_mem_tests(CU_pSuite s);
+void suite_ownership_tests(CU_pSuite s);
 
 int run_tests(void)
 {
@@ -56,6 +57,9 @@ int run_tests(void)
 
     s = CU_add_suite("syscall_mem", NULL, NULL);
     suite_syscall_mem_tests(s);
+
+    s = CU_add_suite("ownership", NULL, NULL);
+    suite_ownership_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

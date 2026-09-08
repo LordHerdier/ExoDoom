@@ -1,6 +1,8 @@
 #pragma once
 #include <stdint.h>
 
+#include "page_alloc.h"   /* page_owner_t — the resource ownership tag type */
+
 /*
  * syscall.h — kernel side of the exokernel syscall ABI (SCRUM-32).
  *
@@ -66,3 +68,12 @@ int64_t exo_syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2,
 /* Defined in src/syscall_entry.s — the LSTAR target.  Declared here so
  * syscall_init and the MSR readback test can both name it. */
 extern void syscall_entry(void);
+
+/*
+ * The owner tag of the context currently executing a syscall — what resource
+ * handlers stamp on pages they hand out (exo_page_alloc) and check on pages
+ * they operate on (exo_page_free, and SCRUM-153+ map/unmap).  v1 has a single
+ * LibOS, so this is a constant (PAGE_OWNER_LIBOS); it is the hook the SCRUM-147
+ * scheduler will make return the running context's id.
+ */
+page_owner_t syscall_current_context(void);

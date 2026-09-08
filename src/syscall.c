@@ -48,6 +48,13 @@
  * the traffic. */
 static exo_handler_t handlers[EXO_SYS_COUNT];
 
+page_owner_t syscall_current_context(void)
+{
+    /* Single-LibOS v1: every ring-3 caller is the same context.  SCRUM-147
+     * (multi-LibOS scheduling) will replace this with the running context id. */
+    return PAGE_OWNER_LIBOS;
+}
+
 void syscall_init(void)
 {
     /* Read-modify-write: boot.s already set LME here, and clobbering it
