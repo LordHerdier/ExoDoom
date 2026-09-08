@@ -95,6 +95,7 @@
 #define EXO_EACCES   13   /* permission denied                            */
 #define EXO_EFAULT   14   /* pointer argument outside caller address space */
 #define EXO_EBUSY    16   /* resource held by another LibOS (framebuffer) */
+#define EXO_ENODEV   19   /* the hardware resource does not exist here     */
 #define EXO_EINVAL   22   /* malformed or out-of-range argument           */
 #define EXO_EMFILE   24   /* file descriptor table full                   */
 #define EXO_ENOSPC   28   /* ramdisk full                                 */
@@ -323,9 +324,13 @@ static inline int64_t exo_page_unmap(uint64_t vaddr)
     return exo_syscall1(EXO_SYS_PAGE_UNMAP, vaddr);
 }
 
-/* #4 — claim the framebuffer and describe it.  The LibOS maps the reported
- * physical range itself with exo_page_map.  0, or -EXO_EBUSY if another LibOS
- * holds it.  Used by DG_Init. */
+/* #4 — claim the framebuffer and describe it, binding it to the caller
+ * (secure binding, docs/syscall_spec.md §3.3).  The LibOS maps the reported
+ * physical range itself with exo_page_map, which from SCRUM-154 on requires
+ * holding this binding.  Returns 0 (also for a re-acquire by the current
+ * owner), -EXO_EBUSY if another LibOS holds it, -EXO_EFAULT for a bad
+ * info_out, or -EXO_ENODEV on a machine with no framebuffer.  The binding is
+ * released by exo_exit.  Used by DG_Init. */
 static inline int64_t exo_fb_acquire(exo_fb_info_t *info_out)
 {
     return exo_syscall1(EXO_SYS_FB_ACQUIRE, (uint64_t)(uintptr_t)info_out);

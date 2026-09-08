@@ -492,11 +492,32 @@ in `kernel_main` (before interrupts) and displays the boot banner, BIOS memory
 map, allocator info, and a 9-second timer countdown demo. The `fb_console_t` is
 fully exercised during every normal boot.
 
-**`exo_fb_acquire` syscall (Sprint 4, SCRUM-36).** The LibOS will not access the
-framebuffer directly by reading `multiboot_info`. Instead it calls
-`exo_fb_acquire(info_out)`, which writes the physical address, pitch, width,
-height, and bpp to a user-space struct, then the LibOS maps the physical pages
-into its own address space via `exo_page_map`. This keeps the LibOS from knowing
-or assuming the framebuffer's physical address, and allows the kernel to enforce
-exclusive access (returning `-EBUSY` if another LibOS already holds the
-framebuffer).
+**`exo_fb_acquire` syscall (SCRUM-154).** The LibOS does not access the
+framebuffer by reading `multiboot_info`. It calls `exo_fb_acquire(info_out)`,
+which writes the physical address, pitch, width, height and bpp to a user-space
+struct, then maps the physical pages into its own address space via
+`exo_page_map`. This keeps the LibOS from knowing or assuming the framebuffer's
+physical address, and lets the kernel enforce exclusive access.
+
+The exclusivity is not advisory. `exo_fb_acquire` **binds** the framebuffer to
+the calling context in `src/fb_binding.c`, and `fb_binding_check_map()` is the
+gate `exo_page_map` consults before mapping any physical page: framebuffer
+pages are mappable only by the LibOS that acquired them, and only after it has
+acquired them — an unheld framebuffer denies too. A second acquirer gets
+`-EBUSY`; a machine the bootloader gave no framebuffer answers `-ENODEV`; the
+owner may re-acquire without penalty. `fb_binding_release()` drops the binding
+when the owner exits (SCRUM-155), so a LibOS that dies holding the screen does
+not lock the display for the rest of the boot. Full mechanism in
+`docs/syscall_spec.md` §3.5; the enforcement point inside `exo_page_map` itself
+lands with SCRUM-153.
+
+Framebuffer memory needs this separate table rather than the PMM's per-page
+owner tags (SCRUM-152) for a concrete reason: the framebuffer is MMIO, outside
+the usable-RAM region `page_alloc_init()` manages, so `page_owner()` reports
+`PAGE_OWNER_FREE` for every framebuffer page and cannot speak for them.
+
+**The kernel console still owns the screen.** Nothing yet stops `fb_console`
+from drawing after a LibOS has acquired the framebuffer — the kernel reaches it
+through the identity map, not through `exo_page_map`, so the binding does not
+see those writes. Handing the screen over (and taking it back) is the
+revocation story, SCRUM-156.

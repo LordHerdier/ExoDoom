@@ -73,12 +73,17 @@ it. The kernel also reserves the right to *revoke* a granted resource
 lives in `docs/syscall_spec.md` §3.3; the work is tracked under epic SCRUM-151
 (Resource Protection & Secure Binding).
 
-The first piece of this mechanism has landed: the PMM now carries a per-page
-owner tag (`page_owner_t` in `src/page_alloc.c`), `exo_page_alloc` stamps the
-calling context as owner, and `exo_page_free` returns `-EPERM` for a page the
-caller does not own (SCRUM-152). Page-map/unmap enforcement (SCRUM-153),
-framebuffer secure binding (SCRUM-154), and ownership-driven reclamation on
-`exo_exit` (SCRUM-155) extend the same table.
+Two pieces of this mechanism have landed. The PMM carries a per-page owner tag
+(`page_owner_t` in `src/page_alloc.c`), `exo_page_alloc` stamps the calling
+context as owner, and `exo_page_free` returns `-EPERM` for a page the caller
+does not own (SCRUM-152). The framebuffer is bound the same way
+(`src/fb_binding.c`, SCRUM-154): `exo_fb_acquire` binds it to one LibOS at a
+time (`-EBUSY` to anyone else), and `fb_binding_check_map` is the gate that
+makes mapping its physical pages require that binding. Framebuffer pages need
+their own table because MMIO lies outside the RAM the page allocator manages,
+so the per-page tags cannot speak for them. Page-map/unmap enforcement
+(SCRUM-153) and ownership-driven reclamation on `exo_exit` (SCRUM-155) — which
+calls `fb_binding_release()` — extend the same model.
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -372,12 +377,20 @@ foreground/background colour, cursor rendering, newline/carriage return/tab, and
 scrolling by `memmove`-ing the framebuffer up by 16 pixels and clearing the
 bottom row.
 
-**Future (Sprint 2):** `exo_fb_acquire()` will return the framebuffer's physical
-address to the LibOS, which maps it into its own address space via
-`exo_page_map`. `DG_DrawFrame` will blit the 640×400 RGBA8888 `DG_ScreenBuffer`
+**Secure binding (SCRUM-154, done):** `exo_fb_acquire()` returns the
+framebuffer's physical address and geometry to the LibOS *and* binds the
+framebuffer to it — one owner at a time, `-EBUSY` to anyone else, `-ENODEV` on
+a machine with no framebuffer. The binding table is `src/fb_binding.c`; the
+syscall handler is `src/syscall_fb.c`. **Future (Sprint 2):** the LibOS maps the
+returned range into its own address space via `exo_page_map`, which consults
+`fb_binding_check_map()` and refuses any caller that does not hold the binding
+(SCRUM-153). `DG_DrawFrame` will blit the 640×400 RGBA8888 `DG_ScreenBuffer`
 into this region (with format conversion, since Doom produces RGBA and the
-hardware is BGRX). **Sprint 12:** Framebuffer multiplexing so multiple LibOS
-apps each get a virtual framebuffer and the kernel manages which is displayed.
+hardware is BGRX). One consequence still to handle: while a LibOS holds the
+framebuffer, the kernel's own `fb_console` must stop drawing to it — that is
+the revocation story (SCRUM-156). **Sprint 12:** Framebuffer multiplexing so
+multiple LibOS apps each get a virtual framebuffer and the kernel manages which
+is displayed.
 
 ---
 
