@@ -221,6 +221,7 @@ void* kmalloc(size_t size) {
 | Allocation               | Size                                   | When         |
 | ------------------------ | -------------------------------------- | ------------ |
 | PMM bitmap (Phase 3)     | `total_pages / 8` bytes, rounded to 4K | `page_alloc_init()` |
+| Page owner table (SCRUM-152) | `total_pages * 2` bytes, rounded to 4K | `page_alloc_init()` |
 | Page tables (Phase 4)    | 4K per table (512 × 8-byte entries)    | `vmm_init()` |
 
 After Phase 4 (paging enabled), `kmalloc` is retired. All further kernel
@@ -243,9 +244,12 @@ used.
 ```
 total_pages  = (top of usable RAM) / 4096
 bitmap_size  = ceil(total_pages / 8) bytes   — bump-allocated, 4K aligned
+owners_size  = total_pages * sizeof(page_owner_t) bytes  — ditto (SCRUM-152)
 ```
 
-For QEMU `-m 256M`: 256 MiB / 4K = 65,536 pages → 8,192 bytes (8 KB) bitmap.
+For QEMU `-m 256M`: 256 MiB / 4K = 65,536 pages → 8,192 bytes (8 KB) bitmap,
+plus a 131,072-byte (128 KB) owner table — `page_owner_t` is a `uint16_t`, so
+the owner table dominates the bump-allocator budget at 16× the bitmap.
 
 ### API
 
