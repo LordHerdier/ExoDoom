@@ -92,26 +92,24 @@ framebuffer) → `_start` in `src/boot.s` (sets up a 16 KiB stack, pushes
 ```
 serial_init() -> framebuffer tag discovery (serial diagnostics only)
   -> mmap_init(mb) -> memory_init() -> page_alloc_init(mb) -> vmm_init(mb, fb)
-  -> syscall_init()
+  -> syscall_init() -> syscall_mem_init() -> syscall_fb_init(fb)
   [if -DTESTING]  serial_flush() -> qemu_exit(run_tests())
   [normal boot]   fb_init_bgrx8888() + fbcon_init()  (halts if absent)
-                  -> banner/mmap dump -> idt_init() -> pic_remap()
-                  -> idt_set_gate(32, irq0_stub) -> pit_init(1000)
+                  -> banner/mmap dump -> ownership self-check -> idt_init()
+                  -> pic_remap() -> idt_set_gate(32, irq0_stub) -> pit_init(1000)
                   -> idt_set_gate(33, irq1_stub) -> kbd_init()
                   -> sti -> `sti; hlt` idle loop
 ```
 
 **Anything the ring-3 tests need must be initialised before the `TESTING`
 branch** — that branch exits QEMU and never returns, so `page_alloc_init`,
-`vmm_init` and `syscall_init` sit above it deliberately (the ring-3 probe runs
-against the page tables `vmm_init` installs). The framebuffer, IDT, PIC, PIT and
-keyboard are all below it and do **not** exist during tests.
+`vmm_init` and the syscall `*_init()`s sit above it deliberately (the ring-3
+probe runs against the page tables `vmm_init` installs). The framebuffer, IDT,
+PIC, PIT and keyboard are all below it and do **not** exist during tests.
 
-`src/boot.s` builds a PML4 identity map and loads CR3, so paging is on before
-any C runs; `vmm_init` replaces those tables with the kernel's own. The kernel
-links at virtual/physical `2M` (`src/linker.ld`) and both maps are identity, so
-virtual == physical throughout. Per-address-space paging is still ahead (see
-below).
+The kernel links at virtual/physical `2M` (`src/linker.ld`) and both the boot
+map and the kernel map are identity maps, so virtual == physical throughout.
+Per-address-space paging is still ahead (see below).
 
 ### Subsystem map
 
@@ -121,10 +119,11 @@ below).
 | Memory (mmap parse, bump allocator, bitmap PMM) | `src/mmap.c/h`, `src/memory.c/h`, `src/page_alloc.c/h` |
 | Virtual memory (kernel page tables, map/unmap/translate) | `src/vmm.c/h` |
 | Interrupts (IDT/PIC/ISR) | `src/idt.c/h`, `src/pic.c/h`, `src/isr.s`, `src/io.h` |
-| Syscalls (entry path, dispatcher, ABI) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/exo_syscall.h`, `src/msr.h` |
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
+| Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h` |
+| Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer) |
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
 | Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h` |
 | Vendored Doom engine (not yet linked) | `src/doom/` |
@@ -148,34 +147,40 @@ below).
   range user-accessible (`#ifdef TESTING`), because `vmm_init()` runs before
   `run_tests()` and the ring-3 probe executes against the kernel map. Change one
   and change the other, or a test build triple-faults.
-- **Two allocators coexist, with different lifetimes.** `kmalloc`
-  (`src/memory.c`) is the one-way bump allocator; `alloc_page`/`free_page`
-  (`src/page_alloc.c`, SCRUM-7) is a bitmap PMM whose bitmap is itself
-  `kmalloc`ed at init. It manages **only the first usable region above 1 MB**
-  (`page_alloc.h` says so), reserves the kernel/heap range and every multiboot
-  module, and reports errors — including double frees — by returning quietly
-  after a `serial_print`, never by faulting. It has no `tests/kernel/` suite
-  yet, so changes to it are only covered by whatever boots.
 - **SCRUM-135 (error-code IDT vectors) resolved on `feat/x64`:** `default_stub`
   in `src/isr.s` used to do a bare `iretq` without popping the hardware error
   code that vectors 8, 10–14, 17, 21, 29, 30 push, which triple-faulted the
   machine on any page fault or GPF. A dedicated `error_stub` is now installed
   on those vectors in `idt_init()` and correctly discards the error code
   before `iretq`. See `docs/drivers/idt.md` §5/§7 for details.
-- **`kmalloc` is a one-way bump allocator** (`memory_init`/`kmalloc` in
-  `src/memory.c`) — no `free`, always 4K-aligned, for permanent early-boot
-  structures only (IDT, the PMM bitmap). It is not a general heap; the
-  first-fit `kmalloc`/`kfree`/`krealloc` in the roadmap replaces it.
+- **Two allocators coexist, with different lifetimes.** `kmalloc`
+  (`src/memory.c`) is the one-way bump allocator — no `free`, always 4K-aligned,
+  for permanent early-boot structures (the PMM bitmap and owner table);
+  `alloc_page`/`free_page` (`src/page_alloc.c`, SCRUM-7) is a bitmap PMM whose
+  bitmap is itself `kmalloc`ed at init. The PMM manages **only the first usable
+  region above 1 MB**, reserves the kernel/heap range and every multiboot
+  module, and reports errors — double frees included — by returning quietly
+  after a `serial_print`, never by faulting.
+- **`kmalloc` is finished once `page_alloc_init` has run.** It reserves the
+  bump pool as it stood at that moment and never hears about a later `kmalloc`,
+  so a bump allocation made afterwards can alias a page `alloc_page()` has
+  already handed out — page tables included. `kmalloc` warns on serial if you
+  do it; take permanent allocations from `alloc_page()` instead, as `vmm.c`
+  does.
 - **COM1 serial is the only diagnostic/test output channel** right now
   (`src/serial.c`, mapped to QEMU stdio via `-serial mon:stdio`). Test framework
   output and all kernel diagnostics go through it; `serial_flush()` must be
   called before `qemu_exit()` or buffered bytes are lost.
-- **Syscall entry works; no handler is bound yet.** The `syscall`/`sysret`
+- **Syscall entry works; three handlers are bound.** The `syscall`/`sysret`
   path is implemented (SCRUM-32): `syscall_init()` in `src/syscall.c` programs
   `EFER.SCE`/`STAR`/`LSTAR`/`FMASK`, `src/syscall_entry.s` is the entry stub,
-  and `exo_syscall_dispatch` routes on the number. But the handler table is
-  empty, so **every syscall number returns `-EXO_ENOSYS` until SCRUM-33** —
-  binding one is `exo_syscall_register(EXO_SYS_*, handler)`.
+  and `exo_syscall_dispatch` routes on the number. Bound today:
+  `exo_page_alloc` (#0) and `exo_page_free` (#1) in `src/syscall_mem.c`
+  (SCRUM-34), and `exo_fb_acquire` (#4) in `src/syscall_fb.c` (SCRUM-154).
+  **Every other number still returns `-EXO_ENOSYS`**; binding one is
+  `exo_syscall_register(EXO_SYS_*, handler)` from an `*_init()` called in
+  `kernel_main` ahead of the `TESTING` branch, so the handler exists for both a
+  normal boot and the test run.
   `docs/syscall_spec.md` §3 and its C expression `src/exo_syscall.h` are the
   source of truth for what each syscall must do and which doomgeneric/libc call
   sites need it; change one and change the other. The convention is
@@ -184,6 +189,19 @@ below).
   itself overwrites `RCX` with the return RIP and `R11` with RFLAGS. The kernel
   preserves every other register, argument registers included — the stubs
   depend on it, and `tests/kernel/test_syscall_k.c` proves it from ring 3.
+- **Resources are owned, and the owner is enforced.** Every managed physical
+  page carries a `page_owner_t` tag (`FREE`/`KERNEL`/a LibOS id) in
+  `src/page_alloc.c`, and the framebuffer has its own binding table in
+  `src/fb_binding.c` — it needs one because MMIO lies outside the RAM the page
+  allocator manages, so `page_owner()` cannot speak for it. `exo_page_free`
+  returns `-EXO_EPERM` for a page the caller does not own (SCRUM-152) and
+  `exo_fb_acquire` binds the framebuffer to one context, `-EXO_EBUSY` to
+  anyone else (SCRUM-154). **When you implement `exo_page_map` (SCRUM-35/-153),
+  it must ask `fb_binding_check_map()` first and only fall through to
+  `page_owner()` when that answers `FB_MAP_NOT_FB`** — see
+  `docs/syscall_spec.md` §3.3/§3.5. `fb_binding_release()` is the hook
+  SCRUM-155's `exo_exit` reclamation calls; nothing calls it yet, so a LibOS
+  that exits keeps the framebuffer for the rest of the boot.
 - **The GDT in `src/boot.s` has a layout `sysret` forces, not one we chose** —
   kernel code/data at `0x08`/`0x10`, then user code32 (`0x18`, a placeholder
   long mode never loads), user data (`0x20`), user code64 (`0x28`). `sysretq`
@@ -199,9 +217,9 @@ below).
 - **The vendored Doom engine is present but not built.** `src/doom/` holds
   doomgeneric's core (SCRUM-63) and is excluded from the normal build on
   purpose — many files still need libc gaps filled. `make docker-build-doom`
-  runs `docker/scripts/build-doom.sh` as a best-effort compile pass to see how
-  far it gets; it is not part of `docker-build` or CI, and nothing in
-  `src/doom/` links into `build/exodoom` yet.
+  runs `docker/scripts/build-doom.sh` as a best-effort compile pass; it is not
+  part of `docker-build` or CI, and nothing in `src/doom/` links into
+  `build/exodoom` yet.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - Sprint status/roadmap and current in-flight Jira stories are tracked in

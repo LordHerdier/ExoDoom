@@ -69,6 +69,13 @@ void free_page(void* addr);
 // wrapper around this.
 int free_page_checked(void* addr);
 
+// Whether page_alloc_init() has run.  Past that point the bump allocator and
+// the PMM would hand out the same physical pages -- page_alloc_init reserves
+// [managed_base, memory_base_address()) once, and never learns about a later
+// kmalloc -- so kmalloc() uses this to complain loudly instead of silently
+// aliasing an allocated page.
+int page_alloc_is_live(void);
+
 // One past the last address the allocator manages (managed_base +
 // total_pages * PAGE_SIZE), or 0 if page_alloc_init() hasn't run yet. Lets
 // callers (tests included) derive a genuinely out-of-range address instead of

@@ -438,7 +438,7 @@ void kernel_main(void *mb2_info_ptr) {
 
     // ── Kernel page tables (SCRUM-15) ───────────────────────────────────
     log_prefix(&con, 0);
-    if (vmm_kernel_pml4() != 0) {
+    if (vmm_is_active()) {
         fbcon_write(&con, "Kernel page tables: PML4 @ 0x");
         fbcon_set_color(&con, 100, 180, 255, 0, 0, 0);
         fbcon_write_hex64(&con, vmm_kernel_pml4());

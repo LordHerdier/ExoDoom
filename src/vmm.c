@@ -58,11 +58,20 @@ extern uint8_t _load_start[];
 #define KERNEL_MAP_USER 0
 #endif
 
-/* Links are permissive; the leaf decides.  The U/S and R/W bits are ANDed
- * across the walk, so a restrictive link would silently override a leaf. */
-#define LINK_FLAGS  (VMM_PRESENT | VMM_WRITE | KERNEL_MAP_USER)
 /* Kernel data/code leaves: present, writable, and user only in test builds. */
 #define KERNEL_LEAF (VMM_PRESENT | VMM_WRITE | KERNEL_MAP_USER)
+
+/*
+ * Links are permissive, but not blindly so: the U/S bit is ANDed across the
+ * whole walk, so a link without it silently overrides a leaf that has it.  A
+ * link therefore carries USER exactly when the leaf being installed under it
+ * asks for it — otherwise vmm_map_page(..., VMM_USER) would return VMM_OK and
+ * still fault at CPL 3, which is the shape of bug SCRUM-153 would inherit.
+ * R/W is always set at the link level and left for the leaf to restrict.
+ */
+static uint64_t link_flags_for(uint64_t leaf_flags) {
+    return VMM_PRESENT | VMM_WRITE | (leaf_flags & VMM_USER);
+}
 
 static uint64_t *kernel_pml4 = NULL;
 static uint32_t table_pages = 0;
@@ -124,19 +133,31 @@ static void flush_all(void) {
 }
 
 /*
- * Fetch the next level down, optionally creating it.  Returns NULL when the
- * entry is absent and `create` is 0, when allocation fails, or when the entry
- * is a leaf rather than a link — callers that can meet a leaf (2 MB pages)
- * check for it themselves before calling.
+ * Fetch the next level down, creating it when `leaf_flags` is non-zero (the
+ * flags of the leaf that will eventually sit under this link).  Returns NULL
+ * when the entry is absent and we are not creating, when allocation fails, or
+ * when the entry is a leaf rather than a link — callers that can meet a leaf
+ * (2 MB pages) check for it themselves before calling.
+ *
+ * An existing link is *upgraded* to user-accessible if the new leaf needs it:
+ * a link created for a supervisor mapping would otherwise veto a user leaf
+ * mapped later under the same PDPT/PD.
  */
-static uint64_t *next_level(uint64_t *table, unsigned index, int create) {
+static uint64_t *next_level(uint64_t *table, unsigned index, uint64_t leaf_flags) {
     uint64_t entry = table[index];
 
     if (entry & VMM_PRESENT) {
-        return (entry & VMM_HUGE) ? NULL : entry_table(entry);
+        if (entry & VMM_HUGE) {
+            return NULL;
+        }
+        if ((leaf_flags & VMM_USER) && !(entry & VMM_USER)) {
+            table[index] = entry | VMM_USER;
+            flush_all();
+        }
+        return entry_table(entry);
     }
-    if (!create) {
-        return NULL;
+    if (leaf_flags == 0) {
+        return NULL;            /* walk only: do not create */
     }
 
     uint64_t *child = alloc_table();
@@ -144,7 +165,7 @@ static uint64_t *next_level(uint64_t *table, unsigned index, int create) {
         return NULL;
     }
 
-    table[index] = (uint64_t)(uintptr_t)child | LINK_FLAGS;
+    table[index] = (uint64_t)(uintptr_t)child | link_flags_for(leaf_flags);
     return child;
 }
 
@@ -168,7 +189,17 @@ static int split_large_page(uint64_t *pd, unsigned index) {
         pt[i] = (base + (uint64_t)i * VMM_PAGE_SIZE) | flags;
     }
 
-    pd[index] = (uint64_t)(uintptr_t)pt | LINK_FLAGS;
+    /*
+     * Break before make.  Changing the page size of a live translation in one
+     * store lets the TLB hold a 2 MB and a 4 KiB entry for the same linear
+     * address at once, which the SDM (Vol. 3 §4.10.4.4) leaves undefined.
+     * QEMU never notices; real hardware may.  So: drop the leaf, flush, then
+     * install the table.
+     */
+    pd[index] = 0;
+    flush_all();
+
+    pd[index] = (uint64_t)(uintptr_t)pt | link_flags_for(flags);
     flush_all();
     return VMM_OK;
 }
@@ -184,7 +215,10 @@ int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
         return VMM_EINVAL;
     }
 
-    uint64_t *pdpt = next_level(kernel_pml4, PML4_IDX(vaddr), 1);
+    /* Sanitised once, then used for both the leaf and the links below. */
+    uint64_t leaf = (flags & ENTRY_FLAG_MASK) | VMM_PRESENT;
+
+    uint64_t *pdpt = next_level(kernel_pml4, PML4_IDX(vaddr), leaf);
     if (pdpt == NULL) {
         return VMM_ENOMEM;
     }
@@ -195,20 +229,28 @@ int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
         return VMM_EEXIST;
     }
 
-    uint64_t *pd = next_level(pdpt, PDPT_IDX(vaddr), 1);
+    uint64_t *pd = next_level(pdpt, PDPT_IDX(vaddr), leaf);
     if (pd == NULL) {
         return VMM_ENOMEM;
     }
 
     uint64_t pde = pd[PD_IDX(vaddr)];
     if ((pde & VMM_PRESENT) && (pde & VMM_HUGE)) {
+        /* Decide before splitting: a 2 MB leaf pointing somewhere else is the
+         * same conflict as a 4 KiB one, and splitting first would spend a page
+         * table on a request that is about to be refused. */
+        uint64_t covered = (pde & ENTRY_ADDR_MASK) + (vaddr & (VMM_LARGE_PAGE_SIZE - 1));
+        if (covered != paddr) {
+            return VMM_EEXIST;
+        }
+
         int rc = split_large_page(pd, PD_IDX(vaddr));
         if (rc != VMM_OK) {
             return rc;
         }
     }
 
-    uint64_t *pt = next_level(pd, PD_IDX(vaddr), 1);
+    uint64_t *pt = next_level(pd, PD_IDX(vaddr), leaf);
     if (pt == NULL) {
         return VMM_ENOMEM;
     }
@@ -220,7 +262,7 @@ int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
         return VMM_EEXIST;
     }
 
-    pt[PT_IDX(vaddr)] = paddr | (flags & ENTRY_FLAG_MASK) | VMM_PRESENT;
+    pt[PT_IDX(vaddr)] = paddr | leaf;
     flush_page(vaddr);
     return VMM_OK;
 }
@@ -231,7 +273,9 @@ int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
  * vmm_map_range() treats as "fall back to 4 KiB pages" rather than an error.
  */
 static int map_large_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
-    uint64_t *pdpt = next_level(kernel_pml4, PML4_IDX(vaddr), 1);
+    uint64_t leaf = (flags & ENTRY_FLAG_MASK) | VMM_PRESENT;
+
+    uint64_t *pdpt = next_level(kernel_pml4, PML4_IDX(vaddr), leaf);
     if (pdpt == NULL) {
         return VMM_ENOMEM;
     }
@@ -239,7 +283,7 @@ static int map_large_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
         return VMM_EEXIST;
     }
 
-    uint64_t *pd = next_level(pdpt, PDPT_IDX(vaddr), 1);
+    uint64_t *pd = next_level(pdpt, PDPT_IDX(vaddr), leaf);
     if (pd == NULL) {
         return VMM_ENOMEM;
     }
@@ -251,13 +295,21 @@ static int map_large_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
         }
     }
 
-    pd[PD_IDX(vaddr)] = paddr | (flags & ENTRY_FLAG_MASK) | VMM_PRESENT | VMM_HUGE;
+    pd[PD_IDX(vaddr)] = paddr | leaf | VMM_HUGE;
     flush_all();
     return VMM_OK;
 }
 
 int vmm_map_range(uint64_t vaddr, uint64_t paddr, uint64_t size, uint64_t flags) {
-    if ((vaddr % VMM_PAGE_SIZE) != 0 || (paddr % VMM_PAGE_SIZE) != 0) {
+    /* The same three checks vmm_map_page makes, up front: the 2 MB path below
+     * bypasses it entirely, and would otherwise walk a NULL PML4 (a fault with
+     * no handler behind it) or silently truncate a non-canonical address into
+     * an unrelated one. */
+    if (kernel_pml4 == NULL) {
+        return VMM_EINVAL;
+    }
+    if ((vaddr % VMM_PAGE_SIZE) != 0 || (paddr % VMM_PAGE_SIZE) != 0 ||
+        !is_canonical(vaddr) || !is_canonical(vaddr + size - 1)) {
         return VMM_EINVAL;
     }
 
@@ -304,6 +356,7 @@ int vmm_unmap_page(uint64_t vaddr) {
         return VMM_EINVAL;
     }
 
+    /* 0 = walk only, never create: unmapping must not allocate. */
     uint64_t *pdpt = next_level(kernel_pml4, PML4_IDX(vaddr), 0);
     if (pdpt == NULL) {
         return VMM_ENOENT;
@@ -389,6 +442,10 @@ uint64_t vmm_kernel_pml4(void) {
     return (uint64_t)(uintptr_t)kernel_pml4;
 }
 
+int vmm_is_active(void) {
+    return map_active;
+}
+
 uint32_t vmm_table_pages(void) {
     return table_pages;
 }
@@ -445,7 +502,7 @@ int vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb) {
      * beats corrupted BIOS structures far from it.)
      */
     rc = map_identity(VMM_PAGE_SIZE, 0x100000, KERNEL_LEAF);
-    if (rc != VMM_OK) return rc;
+    if (rc != VMM_OK) goto fail;
 
     /*
      * 2. Kernel image and the bump-allocator pool behind it, also at 4 KiB
@@ -454,7 +511,7 @@ int vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb) {
      */
     rc = map_identity((uint64_t)(uintptr_t)_load_start,
                       (uint64_t)memory_base_address(), KERNEL_LEAF);
-    if (rc != VMM_OK) return rc;
+    if (rc != VMM_OK) goto fail;
 
     /*
      * 3. Every usable RAM region.  This is what covers the PMM's pool (page
@@ -482,7 +539,7 @@ int vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb) {
         rc = map_identity(start, end, KERNEL_LEAF);
         if (rc != VMM_OK) {
             serial_print("vmm: failed to map a usable RAM region\n");
-            return rc;
+            goto fail;
         }
     }
 
@@ -495,7 +552,7 @@ int vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb) {
     if (mb != NULL) {
         rc = map_identity((uint64_t)(uintptr_t)mb,
                           (uint64_t)(uintptr_t)mb + mb->total_size, KERNEL_LEAF);
-        if (rc != VMM_OK) return rc;
+        if (rc != VMM_OK) goto fail;
     }
 
     /*
@@ -511,7 +568,7 @@ int vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb) {
         rc = map_identity(fb->addr, fb->addr + fb_size, KERNEL_LEAF);
         if (rc != VMM_OK) {
             serial_print("vmm: failed to map the framebuffer\n");
-            return rc;
+            goto fail;
         }
     }
 
@@ -530,8 +587,8 @@ int vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb) {
     }
 
     if (!ok) {
-        kernel_pml4 = NULL;     /* leave the boot map in CR3 */
-        return VMM_ENOENT;
+        rc = VMM_ENOENT;
+        goto fail;
     }
 
     __asm__ volatile ("mov %0, %%cr3" :: "r"((uint64_t)(uintptr_t)kernel_pml4)
@@ -545,4 +602,18 @@ int vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb) {
     serial_print(" table pages)\n");
 
     return VMM_OK;
+
+fail:
+    /*
+     * CR3 still holds the boot map, so the kernel keeps running -- but the
+     * half-built tree must not stay reachable.  Leaving kernel_pml4 set would
+     * make vmm_map_page/vmm_translate edit and report on a tree the CPU is not
+     * using, and skip TLB flushes while doing it: wrong answers, no error.
+     * The tables allocated so far stay allocated (kernel-owned, never handed
+     * out again); a failure here means the machine is out of memory at boot
+     * and reclaiming eight pages changes nothing.
+     */
+    kernel_pml4 = NULL;
+    table_pages = 0;
+    return rc;
 }

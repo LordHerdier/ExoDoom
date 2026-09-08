@@ -69,6 +69,11 @@ int vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb);
 /* Physical address of the kernel PML4, or 0 before vmm_init(). */
 uint64_t vmm_kernel_pml4(void);
 
+/* Whether the kernel map is the one in CR3.  False before vmm_init() and
+ * after a failed one — in which case the boot map is still live and this
+ * module's mappings describe nothing. */
+int vmm_is_active(void);
+
 /* How many 4 KiB pages the map's tables occupy — the PMM cost of the address
  * space, reported at boot and asserted against in the tests. */
 uint32_t vmm_table_pages(void);
@@ -82,7 +87,12 @@ int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags);
 
 /* Map `size` bytes, using 2 MB leaves wherever the addresses and the
  * remaining length allow and 4 KiB pages elsewhere.  `size` is rounded up to
- * a page; the addresses must be page-aligned. */
+ * a page; the addresses must be page-aligned.
+ *
+ * Not atomic: on failure part of the range may already be mapped, and the
+ * caller is responsible for unmapping what it asked for.  Fine for boot-time
+ * construction (CR3 is not loaded yet, and a failure there is fatal anyway);
+ * a runtime caller that cares should map page by page. */
 int vmm_map_range(uint64_t vaddr, uint64_t paddr, uint64_t size, uint64_t flags);
 
 /* Unmap one 4 KiB page and flush its TLB entry.  Splits a covering 2 MB leaf

@@ -204,6 +204,13 @@ static void test_large_page_split_preserves_neighbours(void)
     CU_ASSERT_EQUAL(phys_2m % VMM_LARGE_PAGE_SIZE, 0);
     if (phys_2m % VMM_LARGE_PAGE_SIZE != 0) return;
 
+    /* Taken before the alias exists: bailing out between the map and the
+     * teardown loop would leave a writable second view of the kernel image
+     * mapped for the rest of the boot. */
+    void *page = alloc_page();
+    CU_ASSERT_PTR_NOT_NULL(page);
+    if (page == NULL) return;
+
     CU_ASSERT_EQUAL(vmm_map_range(SCRATCH_VA_2M, phys_2m, VMM_LARGE_PAGE_SIZE,
                                   VMM_PRESENT | VMM_WRITE), VMM_OK);
 
@@ -215,9 +222,6 @@ static void test_large_page_split_preserves_neighbours(void)
     CU_ASSERT_EQUAL(resolved, phys_2m + 0x1F0000);
 
     /* Now repoint a single page in the middle of it. */
-    void *page = alloc_page();
-    CU_ASSERT_PTR_NOT_NULL(page);
-    if (page == NULL) return;
     uint64_t odd_va = SCRATCH_VA_2M + 0x8000;
 
     CU_ASSERT_EQUAL(vmm_unmap_page(odd_va), VMM_OK);   /* splits the leaf */
@@ -248,6 +252,48 @@ static void test_large_page_split_preserves_neighbours(void)
     free_page(page);
 }
 
+/* vmm_map_range validates the same way vmm_map_page does — it has its own
+ * 2 MiB path that never reaches those checks. */
+static void test_map_range_validates(void)
+{
+    uint64_t phys = (uint64_t)(uintptr_t)_load_start;
+
+    CU_ASSERT_EQUAL(vmm_map_range(SCRATCH_VA + 1, phys, VMM_PAGE_SIZE,
+                                  VMM_PRESENT), VMM_EINVAL);
+    CU_ASSERT_EQUAL(vmm_map_range(SCRATCH_VA, phys + 1, VMM_PAGE_SIZE,
+                                  VMM_PRESENT), VMM_EINVAL);
+    /* Non-canonical, and 2 MiB-aligned so it would take the large-page path. */
+    CU_ASSERT_EQUAL(vmm_map_range(0x0001000040000000ULL, phys,
+                                  VMM_LARGE_PAGE_SIZE, VMM_PRESENT),
+                    VMM_EINVAL);
+}
+
+/* A conflicting 4 KiB map inside a 2 MiB leaf is refused *before* the leaf is
+ * split, so a rejected request costs no page table. */
+static void test_conflicting_map_does_not_split(void)
+{
+    uint64_t phys_2m = (uint64_t)(uintptr_t)_load_start;
+
+    CU_ASSERT_EQUAL(vmm_map_range(SCRATCH_VA_2M, phys_2m, VMM_LARGE_PAGE_SIZE,
+                                  VMM_PRESENT | VMM_WRITE), VMM_OK);
+
+    uint32_t before = vmm_table_pages();
+    /* Points somewhere else than the leaf says: conflict. */
+    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_VA_2M + 0x8000, phys_2m,
+                                 VMM_PRESENT | VMM_WRITE), VMM_EEXIST);
+    CU_ASSERT_EQUAL(vmm_table_pages(), before);
+
+    /* Still a single leaf: the neighbours are untouched. */
+    uint64_t resolved = 0;
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_VA_2M + 0x8000, &resolved, NULL),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(resolved, phys_2m + 0x8000);
+
+    for (uint64_t off = 0; off < VMM_LARGE_PAGE_SIZE; off += VMM_PAGE_SIZE) {
+        CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_VA_2M + off), VMM_OK);
+    }
+}
+
 void suite_vmm_tests(CU_pSuite s)
 {
     CU_add_test(s, "kernel map is live in CR3", test_kernel_map_is_live);
@@ -262,6 +308,9 @@ void suite_vmm_tests(CU_pSuite s)
     CU_add_test(s, "remap rules", test_remap_rules);
     CU_add_test(s, "alignment and canonical checks",
                 test_alignment_and_canonical_checks);
+    CU_add_test(s, "map_range validates its arguments", test_map_range_validates);
+    CU_add_test(s, "conflicting map does not split",
+                test_conflicting_map_does_not_split);
     CU_add_test(s, "2 MiB split preserves neighbours",
                 test_large_page_split_preserves_neighbours);
 }
