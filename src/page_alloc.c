@@ -125,29 +125,41 @@ void* alloc_page(void) {
     return NULL;
 }
 
-void free_page(void* addr) {
+int free_page_checked(void* addr) {
     if (bitmap == NULL || total_pages == 0) {
         serial_print("free_page: allocator not initialized\n");
-        return;
+        return -1;
     }
     uintptr_t page = (uintptr_t)addr;
 
     if (page < managed_base || ((page - managed_base) % PAGE_SIZE) != 0) {
         serial_print("free_page: invalid page address\n");
-        return;
+        return -1;
     }
 
     uint32_t index = (uint32_t)((page - managed_base) / PAGE_SIZE);
 
     if (index >= total_pages) {
         serial_print("free_page: page out of range\n");
-        return;
+        return -1;
     }
 
     if (!bitmap_test(index)) {
         serial_print("free_page: double free detected\n");
-        return;
+        return -1;
     }
 
     bitmap_clear(index);
+    return 0;
+}
+
+void free_page(void* addr) {
+    (void)free_page_checked(addr);
+}
+
+uintptr_t page_alloc_pool_end(void) {
+    if (bitmap == NULL) {
+        return 0;
+    }
+    return managed_base + (uintptr_t)total_pages * PAGE_SIZE;
 }
