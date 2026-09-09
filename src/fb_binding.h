@@ -48,6 +48,12 @@ typedef struct {
 #define FB_BIND_EBUSY  (-1)   /* a different context holds it                */
 #define FB_BIND_ENODEV (-2)   /* this machine has no usable framebuffer      */
 
+/* Status codes from the revocation entry points (SCRUM-156).  ENOENT is not a
+ * failure of the protocol: it is how the kernel learns the context already let
+ * the framebuffer go. */
+#define FB_REVOKE_OK      0   /* marked / cleared / reclaimed                */
+#define FB_REVOKE_ENOENT (-1) /* `who` does not hold the framebuffer         */
+
 /* Verdicts from fb_binding_check_map().  Deliberately three-valued: a caller
  * must not be able to read "not framebuffer memory" as "permitted". */
 #define FB_MAP_NOT_FB    0    /* paddr is not framebuffer memory — the caller
@@ -89,13 +95,45 @@ int fb_binding_acquire(page_owner_t who);
 /*
  * Release the binding if `who` holds it; a no-op otherwise, so reclamation can
  * call it unconditionally for a context that may never have acquired.  This is
- * the hook SCRUM-155's exo_exit reclamation calls when tearing a context down,
- * and the mechanism half of the revocation model (SCRUM-156).
+ * the voluntary return in the revocation protocol (SCRUM-156,
+ * docs/syscall_spec.md §3.6) and clears any pending mark along with the
+ * binding.  Kernel-driven reclamation goes through revoke_all() in
+ * src/revoke.h, which is what SCRUM-155's exo_exit calls.
  */
 void fb_binding_release(page_owner_t who);
 
 /* Current owner, or PAGE_OWNER_FREE when the framebuffer is unheld. */
 page_owner_t fb_binding_owner(void);
+
+/* ---- Revocation / repossession (SCRUM-156) ------------------------------
+ *
+ * The framebuffer half of the protocol in docs/syscall_spec.md §3.6, mirroring
+ * page_revoke_mark / page_reclaim in src/page_alloc.h.  src/revoke.c sequences
+ * them; this module only knows how to mark the binding and how to take it back.
+ */
+
+/* Phase 1 — record that the kernel wants the framebuffer back from `who`.  The
+ * binding is untouched: a marked owner still owns the screen and
+ * fb_binding_check_map() still answers FB_MAP_ALLOW for it, because the mark is
+ * an ask, not a seizure.  Idempotent.  FB_REVOKE_ENOENT if `who` does not hold
+ * it. */
+int fb_binding_revoke_mark(page_owner_t who);
+
+/* Withdraw a mark set by fb_binding_revoke_mark().  FB_REVOKE_ENOENT if `who`
+ * does not hold the framebuffer; clearing an unmarked binding it does hold is
+ * FB_REVOKE_OK. */
+int fb_binding_revoke_clear(page_owner_t who);
+
+/* Whether the current binding is marked for revocation.  0 when the
+ * framebuffer is unheld or unmarked. */
+int fb_binding_revoke_pending(void);
+
+/* Phase 2 — take the framebuffer back from `who`, marked or not.  Returns
+ * FB_REVOKE_OK if it was taken, FB_REVOKE_ENOENT if `who` did not hold it (it
+ * complied, or another context has since acquired — in which case the reclaim
+ * must leave that context's binding alone).  fb_binding_release() is the
+ * voluntary form of the same operation and discards the status. */
+int fb_binding_reclaim(page_owner_t who);
 
 /* Whether `paddr` falls inside the framebuffer's physical range, page-granular:
  * the range is widened to whole 4 KiB pages, because mapping permission is

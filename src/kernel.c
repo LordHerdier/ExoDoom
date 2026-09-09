@@ -16,6 +16,7 @@
 #include "syscall_mem.h"
 #include "syscall_fb.h"
 #include "fb_binding.h"
+#include "revoke.h"
 #include "exo_syscall.h"
 
 extern void irq0_stub();
@@ -247,6 +248,90 @@ static int run_fb_binding_demo(fb_console_t *con) {
     return all;
 }
 
+// ── Resource revocation self-check (SCRUM-156) ────────────────────────────
+//
+// The third leg of the model: what the kernel granted, the kernel can take
+// back.  Walks the protocol in docs/syscall_spec.md §3.6 — request, comply,
+// force, sweep — on a real page and on the framebuffer, and leaves nothing
+// bound and nothing allocated, so the console below keeps the screen.
+
+static int run_revocation_demo(fb_console_t *con) {
+    int all = 1;
+
+    klog(con, 0, "Resource revocation self-check (SCRUM-156):");
+
+    // 1. The request is an ask, not a seizure: the page stays the owner's and
+    //    stays usable.  Side effects are sequenced before the assertion so a
+    //    failing step cannot short-circuit the ones that clean up after it.
+    void *p = alloc_page_owned(DEMO_OTHER_LIBOS);
+    revoke_res_t res = revoke_res_page((uint64_t)(uintptr_t)p);
+    int marked = (p != NULL) && revoke_request(DEMO_OTHER_LIBOS, res) == REVOKE_OK;
+    all &= ownership_check(con, "  request marks, owner keeps the page     ",
+                           marked && revoke_pending(res) &&
+                           page_owner(p) == DEMO_OTHER_LIBOS);
+
+    // 2. Compliance: the owner returns a marked page through the ordinary free
+    //    path, and the mark goes with it.
+    int complied = free_page_owned(p, DEMO_OTHER_LIBOS) == PAGE_FREE_OK;
+    all &= ownership_check(con, "  owner returns it, mark clears           ",
+                           complied && !revoke_pending(res));
+    all &= ownership_check(con, "  force then finds nothing to take        ",
+                           revoke_force(DEMO_OTHER_LIBOS, res) == REVOKE_RETURNED);
+
+    // 3. A LibOS that ignores the ask loses the page anyway.
+    void *kept = alloc_page_owned(DEMO_OTHER_LIBOS);
+    revoke_res_t kres = revoke_res_page((uint64_t)(uintptr_t)kept);
+    int forced = (kept != NULL) &&
+                 revoke_force(DEMO_OTHER_LIBOS, kres) == REVOKE_OK;
+    all &= ownership_check(con, "  ignored request is forced              ",
+                           forced && page_owner(kept) == PAGE_OWNER_FREE);
+
+    // 4. Revocation is scoped to the context it names: reclaiming for one
+    //    LibOS must never free a page another one holds.
+    void *peer = alloc_page_owned(syscall_current_context());
+    revoke_res_t pres = revoke_res_page((uint64_t)(uintptr_t)peer);
+    int spared = (peer != NULL) &&
+                 revoke_force(DEMO_OTHER_LIBOS, pres) == REVOKE_RETURNED &&
+                 page_owner(peer) == syscall_current_context();
+    all &= ownership_check(con, "  peer's page left alone                  ", spared);
+    (void)free_page_owned(peer, syscall_current_context());
+
+    // 5. The v1 policy: exo_exit's sweep (SCRUM-155) takes every page the
+    //    context holds plus the framebuffer, in one call.
+    (void)alloc_page_owned(DEMO_OTHER_LIBOS);
+    (void)alloc_page_owned(DEMO_OTHER_LIBOS);
+    fb_binding_acquire(DEMO_OTHER_LIBOS);
+    uint32_t swept = revoke_all(DEMO_OTHER_LIBOS);
+    all &= ownership_check(con, "  exit sweep reclaims pages + screen      ",
+                           swept == 3 &&
+                           page_count_owned(DEMO_OTHER_LIBOS) == 0 &&
+                           fb_binding_owner() == PAGE_OWNER_FREE);
+
+    // 6. And the kernel's own pages are not sweepable by anyone.
+    uint32_t kernel_pages = page_count_owned(PAGE_OWNER_KERNEL);
+    all &= ownership_check(con, "  kernel pages are not revocable          ",
+                           revoke_all(PAGE_OWNER_KERNEL) == 0 &&
+                           page_count_owned(PAGE_OWNER_KERNEL) == kernel_pages);
+
+    const revoke_record_t *rec = revoke_record();
+    log_prefix(con, 0);
+    fbcon_write(con, "  repossession record: ");
+    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
+    fbcon_write_u32(con, rec->requested);
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, " asked, ");
+    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
+    fbcon_write_u32(con, rec->returned);
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, " returned, ");
+    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
+    fbcon_write_u32(con, rec->forced);
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, " taken\n");
+
+    return all;
+}
+
 static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
     klog(con, 0, "Page ownership self-check (SCRUM-152):");
     int all = 1;
@@ -280,6 +365,7 @@ static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
                            r_dbl == -EXO_EINVAL);
 
     all &= run_fb_binding_demo(con);
+    all &= run_revocation_demo(con);
 
     // Visible status swatch, top-right corner: green = enforced, red = broken.
     const uint32_t sw = 24;

@@ -511,6 +511,17 @@ not lock the display for the rest of the boot. Full mechanism in
 `docs/syscall_spec.md` §3.5; the enforcement point inside `exo_page_map` itself
 lands with SCRUM-153.
 
+**Taking the screen back.** The binding is revocable (SCRUM-156,
+`docs/syscall_spec.md` §3.6). `fb_binding_revoke_mark(who)` records that the
+kernel wants the framebuffer back without disturbing the binding — a marked
+owner still passes `fb_binding_check_map()`, so it can finish the frame it is
+drawing before handing over — and `fb_binding_reclaim(who)` takes it, reporting
+whether there was anything to take. Both are scoped to the named holder: a
+reclaim on behalf of one context never drops another's binding.
+`fb_binding_release()` is the voluntary form of the same operation, and
+`revoke_all(context)` in `src/revoke.h` takes the framebuffer alongside the
+context's pages.
+
 Framebuffer memory needs this separate table rather than the PMM's per-page
 owner tags (SCRUM-152) for a concrete reason: the framebuffer is MMIO, outside
 the usable-RAM region `page_alloc_init()` manages, so `page_owner()` reports
@@ -519,5 +530,7 @@ the usable-RAM region `page_alloc_init()` manages, so `page_owner()` reports
 **The kernel console still owns the screen.** Nothing yet stops `fb_console`
 from drawing after a LibOS has acquired the framebuffer — the kernel reaches it
 through the identity map, not through `exo_page_map`, so the binding does not
-see those writes. Handing the screen over (and taking it back) is the
-revocation story, SCRUM-156.
+see those writes. The mechanism for handing the screen over and taking it back
+now exists (SCRUM-156, above); what is missing is the *policy* that makes
+`fb_console` stand down while a LibOS holds the binding, and the upcall that
+would let the kernel ask for it back mid-frame (SCRUM-147).
