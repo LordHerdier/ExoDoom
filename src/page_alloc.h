@@ -111,6 +111,12 @@ int free_page_checked(void* addr);
 // keeps its owner and stays fully usable; only the mark changes.  Idempotent.
 // Returns PAGE_REVOKE_OK, PAGE_REVOKE_EINVAL for a bad address, or
 // PAGE_REVOKE_ENOENT when `owner` does not hold the page.
+//
+// `owner` must name a revocable context: PAGE_OWNER_FREE and
+// PAGE_OWNER_KERNEL are refused with PAGE_REVOKE_ENOENT here and in every
+// entry point below, the same two ids page_reclaim_all() refuses.  Neither is
+// a context that can be asked for anything, and both would otherwise match
+// real pages — see the note in owned_page_index().
 int page_revoke_mark(void* addr, page_owner_t owner);
 
 // Withdraw a mark set by page_revoke_mark().  Same return values; clearing an
@@ -122,12 +128,13 @@ int page_revoke_clear(void* addr, page_owner_t owner);
 // from "no such page", because neither is pending.
 int page_revoke_pending(void* addr);
 
-// Phase 2 — take the page back from `owner` whether or not it consents, and
-// whether or not it was marked first.  Returns PAGE_REVOKE_OK when the page
-// was reclaimed, PAGE_REVOKE_ENOENT when `owner` no longer holds it (it
-// complied, or the page has since been handed to another context — either way
-// there is nothing to take and the reclaim must not touch it), or
-// PAGE_REVOKE_EINVAL for a bad address.
+// Phase 3 — take the page back from `owner` whether or not it consents, and
+// whether or not it was marked first.  (Phase 2 is the owner complying through
+// free_page_owned(); nothing here is involved in that.)  Returns
+// PAGE_REVOKE_OK when the page was reclaimed, PAGE_REVOKE_ENOENT when `owner`
+// no longer holds it (it complied, or the page has since been handed to another
+// context — either way there is nothing to take and the reclaim must not touch
+// it), or PAGE_REVOKE_EINVAL for a bad address.
 int page_reclaim(void* addr, page_owner_t owner);
 
 // Reclaim every page `owner` holds; returns how many were taken.  This is the

@@ -128,7 +128,8 @@ int fb_binding_revoke_clear(page_owner_t who);
  * framebuffer is unheld or unmarked. */
 int fb_binding_revoke_pending(void);
 
-/* Phase 2 — take the framebuffer back from `who`, marked or not.  Returns
+/* Phase 3 — take the framebuffer back from `who`, marked or not.  (Phase 2 is
+ * `who` complying, via fb_binding_release().)  Returns
  * FB_REVOKE_OK if it was taken, FB_REVOKE_ENOENT if `who` did not hold it (it
  * complied, or another context has since acquired — in which case the reclaim
  * must leave that context's binding alone).  fb_binding_release() is the

@@ -529,11 +529,19 @@ res)` and `revoke_all(who)` take a resource only if `who` still holds it. When
 the context no longer does — it complied, or the resource has since been
 granted to somebody else — the call returns `REVOKE_RETURNED` and touches
 nothing. Without that scoping, "revoke" would be a syscall-free way to free a
-peer's memory, which is the exact hole §3.3 exists to close. `revoke_all` also
-refuses `PAGE_OWNER_KERNEL` and `PAGE_OWNER_FREE` outright: neither names a
-revocable context, and a sweep of the kernel would free the page bitmap, the
-owner table, the kernel image and the WAD module out from under the running
-system.
+peer's memory, which is the exact hole §3.3 exists to close.
+
+**Neither sentinel id is a revocable context.** `PAGE_OWNER_KERNEL` and
+`PAGE_OWNER_FREE` are refused by *every* page entry point — `page_revoke_mark`,
+`page_revoke_clear` and `page_reclaim` through their shared
+`owned_page_index()`, and `page_reclaim_all` through its own guard. The refusal
+has to come *before* the ownership compare, because each id would otherwise
+pass it: `FREE` matches the tag of every free page, and `KERNEL` matches every
+reserved one. A single-resource path that skipped this would let
+`page_reclaim(kp, PAGE_OWNER_KERNEL)` hand the page bitmap, the owner table or
+the kernel image back to the pool and leave the kernel's own `free_page()` to
+double-free it — a sweep guard alone is not enough when the force path can name
+the same id one page at a time.
 
 **The repossession record.** `revoke_record()` returns the running counts —
 asked, withdrawn, forced, returned, pages reclaimed, framebuffers reclaimed.
@@ -541,6 +549,15 @@ It is Aegis's repossession vector reduced to what a single-LibOS kernel can act
 on: the evidence for whether asking is working, which is the input a real
 revocation *policy* needs. Machine-wide today because there is one LibOS;
 SCRUM-147 makes it a field of the context structure.
+
+`returned` is the count to read with care. It means "the force step found
+nothing to take", which under the protocol is the LibOS having complied — but
+it also counts a force whose target had since moved to another context, or one
+that named a context which never held the resource. After the fact those are
+indistinguishable from the ownership table alone, because a satisfied request
+leaves no trace by design (§ the mark clearing with the tag). Good enough as
+evidence that asking is working; a policy that acted on the number would first
+need per-request state to tell the cases apart.
 
 **What exists today, and what does not.** The mechanism is complete; the policy
 is trivial on purpose:

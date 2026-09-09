@@ -386,9 +386,16 @@ uint32_t page_count_owned(page_owner_t owner);                // accounting
 
 `page_reclaim` returns `PAGE_REVOKE_ENOENT` — not success — when `owner` no
 longer holds the page, so a reclaim can never free a frame that has since been
-handed to another context. `page_reclaim_all` refuses `PAGE_OWNER_KERNEL` and
-`PAGE_OWNER_FREE`: sweeping the kernel would free the bitmap, this owner table,
-the kernel image and the WAD module out from under the running system.
+handed to another context.
+
+`PAGE_OWNER_KERNEL` and `PAGE_OWNER_FREE` are refused as the *holder* argument
+by all four: `page_reclaim_all` guards them directly, and the other three
+through the shared `owned_page_index()`. The check must precede the ownership
+compare, since each id would otherwise pass it — `FREE` matches every free
+page's tag and `KERNEL` every reserved page's. Miss it on the single-page path
+and `page_reclaim(kp, PAGE_OWNER_KERNEL)` returns the bitmap, this owner table
+or the kernel image to the pool, and the kernel's own `free_page()` then
+double-frees it.
 
 The protocol that sequences these — and the framebuffer's equivalent — lives in
 `src/revoke.c`; `docs/syscall_spec.md` §3.6 is the design note.

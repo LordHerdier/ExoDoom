@@ -149,7 +149,13 @@ typedef struct {
     uint32_t requested;        /* revoke_request calls that marked something  */
     uint32_t withdrawn;        /* requests taken back before the force step   */
     uint32_t forced;           /* resources the kernel had to take            */
-    uint32_t returned;         /* forces that found the resource already back */
+    /* Forces that found nothing to take.  Under the protocol this is the
+     * LibOS having complied — but it also counts a force whose target had
+     * moved to another context, or that named a context which never held the
+     * resource at all, because after the fact those are indistinguishable from
+     * the ownership table alone.  Fine as evidence that asking is working;
+     * per-request state would be needed before this could drive policy. */
+    uint32_t returned;
     uint32_t pages_reclaimed;  /* pages taken, revoke_all sweeps included     */
     uint32_t fb_reclaimed;     /* framebuffer bindings taken                  */
 } revoke_record_t;

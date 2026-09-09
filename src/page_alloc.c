@@ -238,11 +238,21 @@ static int owned_page_index(void* addr, page_owner_t owner, uint32_t* index) {
         return PAGE_REVOKE_EINVAL;
     }
 
-    /* Free, or allocated to a different context: `owner` does not hold it.
-     * PAGE_OWNER_FREE is refused explicitly — it is the "nobody" sentinel, and
-     * without this it would match the tag of every free page. */
-    if (!bitmap_test(i) || owner_id(owner) == PAGE_OWNER_FREE ||
-        owner_id(owners[i]) != owner_id(owner)) {
+    /* Neither sentinel names a revocable context, and both are refused before
+     * the ownership compare rather than after it — each would otherwise *pass*
+     * that compare against real pages.  PAGE_OWNER_FREE matches the tag of
+     * every free page; PAGE_OWNER_KERNEL matches every reserved one, so
+     * page_reclaim(kp, PAGE_OWNER_KERNEL) would hand the page bitmap, the owner
+     * table or the kernel image back to the pool and leave the kernel's own
+     * free_page() to double-free it.  page_reclaim_all() refuses the same two
+     * ids; the single-resource path must not be the weaker of the pair. */
+    if (owner_id(owner) == PAGE_OWNER_FREE ||
+        owner_id(owner) == PAGE_OWNER_KERNEL) {
+        return PAGE_REVOKE_ENOENT;
+    }
+
+    /* Free, or allocated to a different context: `owner` does not hold it. */
+    if (!bitmap_test(i) || owner_id(owners[i]) != owner_id(owner)) {
         return PAGE_REVOKE_ENOENT;
     }
 

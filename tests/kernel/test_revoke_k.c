@@ -297,8 +297,13 @@ static void test_force_is_scoped_to_the_named_context(void)
     CU_ASSERT_EQUAL(revoke_force(OTHER_LIBOS, res), REVOKE_OK);
 }
 
-/* Kernel memory is not revocable by a LibOS context: the bitmap, the owner
- * table, the kernel image and the WAD module all carry PAGE_OWNER_KERNEL. */
+/* Kernel memory is not revocable: the bitmap, the owner table, the kernel image
+ * and the WAD module all carry PAGE_OWNER_KERNEL.  Two distinct cases, and the
+ * second is the one that bites — a LibOS naming a kernel page is refused by the
+ * ordinary owner check, but naming PAGE_OWNER_KERNEL *as the holder* would
+ * satisfy that check, so the single-resource path has to refuse the id the way
+ * the sweep does.  Without it the page lands back in the pool and the kernel's
+ * own free_page() double-frees it. */
 static void test_force_cannot_take_a_kernel_page(void)
 {
     void *kp = alloc_page();               /* PAGE_OWNER_KERNEL */
@@ -306,11 +311,22 @@ static void test_force_cannot_take_a_kernel_page(void)
 
     revoke_res_t res = revoke_res_page((uint64_t)(uintptr_t)kp);
 
+    /* A LibOS asking for it: refused because it does not hold the page. */
     CU_ASSERT_EQUAL(revoke_request(OTHER_LIBOS, res), REVOKE_ENOENT);
     CU_ASSERT_EQUAL(revoke_force(OTHER_LIBOS, res), REVOKE_RETURNED);
     CU_ASSERT_EQUAL(page_owner(kp), PAGE_OWNER_KERNEL);
 
-    free_page(kp);
+    /* Naming the kernel itself as the holder: refused because PAGE_OWNER_KERNEL
+     * is not a revocable context, mirroring revoke_all()/page_reclaim_all(). */
+    CU_ASSERT_EQUAL(revoke_request(PAGE_OWNER_KERNEL, res), REVOKE_ENOENT);
+    CU_ASSERT_EQUAL(revoke_withdraw(PAGE_OWNER_KERNEL, res), REVOKE_ENOENT);
+    CU_ASSERT_EQUAL(revoke_force(PAGE_OWNER_KERNEL, res), REVOKE_RETURNED);
+    CU_ASSERT_EQUAL(page_owner(kp), PAGE_OWNER_KERNEL);
+    CU_ASSERT_FALSE(revoke_pending(res));
+
+    /* Still the kernel's, so its own free path still works exactly once. */
+    CU_ASSERT_EQUAL(free_page_checked(kp), 0);
+    CU_ASSERT_EQUAL(page_owner(kp), PAGE_OWNER_FREE);
 }
 
 /* ── revoke_all: the v1 policy ────────────────────────────────────────────── */
