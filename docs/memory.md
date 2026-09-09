@@ -262,6 +262,12 @@ void   free_page(void* phys_addr);    // free a KERNEL page; detect + log double
 void*        alloc_page_owned(page_owner_t owner);        // stamp owner on the page
 int          free_page_owned(void* phys_addr, page_owner_t owner); // owner-checked free
 page_owner_t page_owner(void* phys_addr);                 // query a page's owner
+
+// Revocation API (SCRUM-156) — see "Revocation mark" below.
+int          page_revoke_mark(void* phys_addr, page_owner_t owner);  // ask for it back
+int          page_revoke_pending(void* phys_addr);        // is it marked?
+int          page_reclaim(void* phys_addr, page_owner_t owner);      // take it back
+uint32_t     page_reclaim_all(page_owner_t owner);        // sweep a whole context
 ```
 
 (`alloc_page` / `free_page_checked` are thin `PAGE_OWNER_KERNEL` wrappers over
@@ -311,6 +317,9 @@ static page_owner_t* owners;        // owners[i] tags page i
 #define PAGE_OWNER_FREE    0        // not allocated
 #define PAGE_OWNER_KERNEL  1        // reserved kernel memory / kernel-internal alloc
 #define PAGE_OWNER_LIBOS   2        // a LibOS context id (v1 uses this single id)
+
+#define PAGE_OWNER_REVOKED 0x8000   // revocation mark (SCRUM-156), see below
+#define PAGE_OWNER_ID_MASK 0x7FFF   // the owner id is the low 15 bits
 ```
 
 - The table is `kmalloc`'d right after the bitmap in `page_alloc_init` and
@@ -338,6 +347,58 @@ in v1 and is the hook the SCRUM-147 scheduler will make context-aware. Enforcing
 the same tag in `exo_page_map`/`exo_page_unmap` is SCRUM-153; framebuffer
 binding is SCRUM-154; reclaiming a terminating context's pages on `exo_exit` is
 SCRUM-155.
+
+### Revocation mark (SCRUM-156)
+
+The ownership table answers *who holds this page*. Revocation adds one more
+state to it: **the kernel has asked for this page back**. The mark is the top
+bit of the tag, so it costs no extra memory and no second array:
+
+```c
+owners[i] = PAGE_OWNER_LIBOS | PAGE_OWNER_REVOKED;   // asked for, still owned
+```
+
+The low 15 bits still name the owner, which is the whole point — a page under
+revocation is *still that context's page* until the kernel takes it, so it stays
+readable, writable, freeable by its owner and (SCRUM-153) mappable. Two
+consequences for anyone editing `page_alloc.c`:
+
+- **Every ownership comparison masks the bit off first** (the file's
+  `owner_id()` helper). A raw tag compare would read a marked page as owned by
+  a context nobody can name, and `free_page_owned()` would answer `-EPERM` to
+  the page's own owner — making it impossible for a LibOS to comply with the
+  request it was just handed.
+- **Compliance is free.** `free_page_owned()` resets the tag to
+  `PAGE_OWNER_FREE`, which clears owner and mark in one store, so a returned
+  page leaves no revocation state to reconcile.
+
+The entry points, all of which resolve the address and check ownership through
+one shared helper so a reclaim can never apply a looser rule than the mark did:
+
+```c
+int      page_revoke_mark(void* addr, page_owner_t owner);    // phase 1: ask
+int      page_revoke_clear(void* addr, page_owner_t owner);   // withdraw the ask
+int      page_revoke_pending(void* addr);                     // is it marked?
+int      page_reclaim(void* addr, page_owner_t owner);        // phase 3: take it
+uint32_t page_reclaim_all(page_owner_t owner);                // sweep one context
+uint32_t page_count_owned(page_owner_t owner);                // accounting
+```
+
+`page_reclaim` returns `PAGE_REVOKE_ENOENT` — not success — when `owner` no
+longer holds the page, so a reclaim can never free a frame that has since been
+handed to another context.
+
+`PAGE_OWNER_KERNEL` and `PAGE_OWNER_FREE` are refused as the *holder* argument
+by all four: `page_reclaim_all` guards them directly, and the other three
+through the shared `owned_page_index()`. The check must precede the ownership
+compare, since each id would otherwise pass it — `FREE` matches every free
+page's tag and `KERNEL` every reserved page's. Miss it on the single-page path
+and `page_reclaim(kp, PAGE_OWNER_KERNEL)` returns the bitmap, this owner table
+or the kernel image to the pool, and the kernel's own `free_page()` then
+double-frees it.
+
+The protocol that sequences these — and the framebuffer's equivalent — lives in
+`src/revoke.c`; `docs/syscall_spec.md` §3.6 is the design note.
 
 ### Page accounting (QEMU `-m 256M`)
 
