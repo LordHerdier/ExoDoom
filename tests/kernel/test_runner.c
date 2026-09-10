@@ -23,6 +23,8 @@ void suite_syscall_mem_tests(CU_pSuite s);
 void suite_ownership_tests(CU_pSuite s);
 void suite_fb_binding_tests(CU_pSuite s);
 void suite_revoke_tests(CU_pSuite s);
+void suite_vmm_tests(CU_pSuite s);
+void suite_page_map_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -33,6 +35,10 @@ int fb_binding_suite_cleanup(void);
  * pages under a second context id, and must leave neither behind (SCRUM-156). */
 int revoke_suite_init(void);
 int revoke_suite_cleanup(void);
+
+/* The page-map suite borrows the framebuffer binding and a second context id
+ * to prove what they refuse; it must leave neither behind (SCRUM-35). */
+int page_map_suite_cleanup(void);
 
 int run_tests(void)
 {
@@ -79,6 +85,12 @@ int run_tests(void)
 
     s = CU_add_suite("revoke", revoke_suite_init, revoke_suite_cleanup);
     suite_revoke_tests(s);
+
+    s = CU_add_suite("vmm", NULL, NULL);
+    suite_vmm_tests(s);
+
+    s = CU_add_suite("page_map", NULL, page_map_suite_cleanup);
+    suite_page_map_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

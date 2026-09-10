@@ -30,7 +30,7 @@ progressively builds up the infrastructure needed to hand Doom a working
 Phase 1  mmap_init()       Parse multiboot memory map → usable/reserved regions
 Phase 2  memory_init()     Bump allocator from &_bss_end → used for early boot allocs
 Phase 3  page_alloc_init()        Bitmap page allocator (alloc_page / free_page) [Sprint 1]
-Phase 4  vmm_init()        Enable paging, build page tables, exo_page_* syscalls [Sprint 2]
+Phase 4  vmm_map_page()    Paging on (boot.s), 4K mapping + exo_page_* syscalls [SCRUM-15/-35]
 Phase 5  LibOS heap        first-fit allocator backed by exo_page_alloc [Sprint 3]
 ```
 
@@ -416,8 +416,9 @@ Available to alloc: ~62,064  (~242 MiB)
 
 ## 7. Phase 4 — Virtual memory and paging
 
-**Files:** `src/vmm.c`, `src/vmm.h` _(planned — SCRUM-15, SCRUM-16, SCRUM-17)_
-**Status:** ⬜ Sprint 2
+**Files:** `src/vmm.c`, `src/vmm.h` (SCRUM-35); page fault handler still
+planned (SCRUM-17)
+**Status:** 🔄 boot map done (SCRUM-15), 4 KiB mapping done (SCRUM-35)
 
 ### Overview
 
@@ -478,6 +479,42 @@ the refinement below closes, and it is gated to test builds so a shipped kernel
 never carries it. SCRUM-48 gives each LibOS its own page directory; SCRUM-55
 and SCRUM-56 then assert that a LibOS faults on kernel memory and on port I/O.
 
+### The page table walker (SCRUM-35)
+
+`src/vmm.c` is the first code after the trampoline to touch a page table. It
+installs and removes **4 KiB** mappings in the address space `CR3` names, and
+it is pure mechanism: no ownership, no LibOS contexts, no `-EXO_E*` codes —
+that policy lives in `src/syscall_mem.c` behind `exo_page_map`
+(`docs/syscall_spec.md` §3.7).
+
+```c
+int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint32_t attrs);  // VMM_MAP_*
+int vmm_unmap_page(uint64_t vaddr);
+int vmm_translate(uint64_t vaddr, uint64_t *paddr_out);
+uint64_t vmm_current_pml4(void);
+```
+
+Three things about it are worth knowing before editing:
+
+1. **Tables are reached through the identity map.** A page table's physical
+   address doubles as a pointer to it, which is true only while everything
+   lives below 4 GiB. `table_ptr()` in `vmm.c` is the single place that has to
+   learn about an offset when the kernel moves to a higher-half map (SCRUM-48).
+2. **2 MiB pages get split on demand.** The boot map has no PT level, so
+   mapping one 4 KiB page inside it first replaces the covering 2 MiB PDE with
+   a 512-entry PT that reproduces it exactly. The other 511 mappings survive —
+   this is what lets the kernel keep executing while its own identity map is
+   edited underneath it. Splitting allocates a page table, so even *unmapping*
+   can fail with `VMM_ENOMEM`.
+3. **TLB maintenance follows the granularity.** `invlpg` for an ordinary
+   change; a full `CR3` reload after a split, because the stale entry there
+   covers 2 MiB rather than the one page `invlpg` names.
+
+Intermediate tables come from `alloc_page()` and are therefore
+`PAGE_OWNER_KERNEL`: no LibOS can free the page tables that describe its own
+address space. Empty tables are never reclaimed (see §3.7 of the syscall spec
+for why that trade is deliberate).
+
 ### Future refinement (Sprint 2+)
 
 `vmm_init()` will build proper 4K page tables with correct permissions:
@@ -498,9 +535,9 @@ page management to the LibOS:
 // Allocate one 4K physical page; returns physical address or -ENOMEM
 int64_t exo_page_alloc(void);
 
-// Map a physical page at a virtual address in the caller's PML4
-// flags: PAGE_PRESENT | PAGE_WRITE | PAGE_USER
-int64_t exo_page_map(uint64_t vaddr, uint64_t paddr, uint64_t flags);
+// Map a physical page at a virtual address in the caller's address space
+// flags: EXO_PAGE_READ | EXO_PAGE_WRITE | EXO_PAGE_USER | EXO_PAGE_EXEC
+int64_t exo_page_map(uint64_t vaddr, uint64_t paddr, uint32_t flags);
 
 // Unmap a virtual page (does not free the physical page)
 int64_t exo_page_unmap(uint64_t vaddr);
@@ -508,6 +545,13 @@ int64_t exo_page_unmap(uint64_t vaddr);
 
 `exo_page_free` frees the physical page back to the PMM without unmapping it —
 the LibOS is expected to call `exo_page_unmap` first.
+
+Both mapping calls are ownership-checked (SCRUM-153) and both confine `vaddr`
+to the **LibOS window**, `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[4 GiB,
+128 TiB)`. Everything in this document lives below 4 GiB, which is the point:
+while there is one address space shared with the kernel, a LibOS that owns a
+page must still be unable to install it over kernel text. Anything outside the
+window is `-EXO_EPERM`.
 
 ### LibOS address space
 

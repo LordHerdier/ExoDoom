@@ -17,6 +17,7 @@
 #include "syscall_fb.h"
 #include "fb_binding.h"
 #include "revoke.h"
+#include "vmm.h"
 #include "exo_syscall.h"
 
 extern void irq0_stub();
@@ -332,6 +333,78 @@ static int run_revocation_demo(fb_console_t *con) {
     return all;
 }
 
+// ── Address-space mapping self-check (SCRUM-35 / -153) ────────────────────
+//
+// The fourth resource operation: a LibOS builds its own address space, one
+// page at a time, out of pages it owns — and cannot build it out of anything
+// else.  Runs on the real exo_page_map / exo_page_unmap dispatch path and
+// leaves the address space exactly as it found it.
+
+static int run_page_map_demo(fb_console_t *con) {
+    int all = 1;
+
+    klog(con, 0, "Address-space mapping self-check (SCRUM-35):");
+
+    // A scratch virtual address in the LibOS window, well clear of the
+    // kernel's identity map.
+    const uint64_t scratch = EXO_USER_VA_BASE + 0x30000000ULL;
+
+    // 1. A page the caller owns can be mapped where the caller asks, and the
+    //    mapping is real: a write through the virtual address lands in the
+    //    physical page, seen here through the identity map.
+    int64_t p = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
+    int64_t r_map = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, scratch, (uint64_t)p,
+                                         EXO_PAGE_READ | EXO_PAGE_WRITE, 0, 0, 0);
+    log_prefix(con, 0);
+    fbcon_write(con, "  exo_page_map 0x");
+    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
+    fbcon_write_hex64(con, (uint64_t)p);
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, " -> 0x");
+    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
+    fbcon_write_hex64(con, scratch);
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, "\n");
+
+    if (p > 0 && r_map == 0)
+        *(volatile uint64_t *)(uintptr_t)scratch = 0x5CA1AB1E5CA1AB1EULL;
+
+    all &= ownership_check(con, "  owned page mapped and writable         ",
+                           p > 0 && r_map == 0 &&
+                           *(volatile uint64_t *)(uintptr_t)p
+                               == 0x5CA1AB1E5CA1AB1EULL);
+
+    // 2. Another context's page is not mappable — the hole SCRUM-153 closes.
+    void *theirs = alloc_page_owned(DEMO_OTHER_LIBOS);
+    int64_t r_foreign = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, scratch,
+                                             (uint64_t)(uintptr_t)theirs,
+                                             EXO_PAGE_WRITE, 0, 0, 0);
+    all &= ownership_check(con, "  foreign page not mappable (EPERM)      ",
+                           r_foreign == -EXO_EPERM);
+    (void)free_page_owned(theirs, DEMO_OTHER_LIBOS);
+
+    // 3. Nor is the kernel's own memory, however the caller came by the
+    //    address: the LibOS window starts above the identity map.
+    int64_t r_low = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, 0x200000ULL,
+                                         (uint64_t)p, EXO_PAGE_WRITE, 0, 0, 0);
+    all &= ownership_check(con, "  kernel address refused (EPERM)         ",
+                           r_low == -EXO_EPERM);
+
+    // 4. Unmapping removes the mapping and leaves the page allocated, which is
+    //    what makes exo_page_free a separate call.
+    int64_t r_unmap = exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, scratch,
+                                           0, 0, 0, 0, 0);
+    uint64_t gone = 0;
+    all &= ownership_check(con, "  unmap removes only the mapping         ",
+                           r_unmap == 0 &&
+                           vmm_translate(scratch, &gone) == VMM_ENOENT &&
+                           page_owner((void *)(uintptr_t)p)
+                               == syscall_current_context());
+
+    (void)exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)p, 0, 0, 0, 0, 0);
+    return all;
+}
+
 static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
     klog(con, 0, "Page ownership self-check (SCRUM-152):");
     int all = 1;
@@ -365,6 +438,7 @@ static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
                            r_dbl == -EXO_EINVAL);
 
     all &= run_fb_binding_demo(con);
+    all &= run_page_map_demo(con);
     all &= run_revocation_demo(con);
 
     // Visible status swatch, top-right corner: green = enforced, red = broken.

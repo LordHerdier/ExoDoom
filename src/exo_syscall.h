@@ -116,6 +116,25 @@
 #define EXO_PAGE_USER   (1u << 2)
 #define EXO_PAGE_EXEC   (1u << 3)
 
+/*
+ * The virtual address window a LibOS may map into (docs/syscall_spec.md §3.7).
+ *
+ * exo_page_map / exo_page_unmap accept a `vaddr` in [BASE, END) and answer
+ * -EXO_EPERM anywhere else.  The window starts at 4 GiB because everything
+ * below it is the kernel's boot identity map — kernel image, page tables, PMM
+ * pool and MMIO all live there, and until each LibOS has an address space of
+ * its own (SCRUM-48) a mapping call is editing the same page tables the kernel
+ * runs on.  Confining LibOS mappings to a region the kernel keeps nothing in
+ * is what makes that safe: ownership of the *physical* page is checked
+ * separately, but without this a LibOS could own a page perfectly legitimately
+ * and still install it over kernel text.
+ *
+ * END is the top of the lower canonical half.  The window is 128 TiB wide, so
+ * nothing about it constrains a LibOS in practice.
+ */
+#define EXO_USER_VA_BASE  0x0000000100000000ULL
+#define EXO_USER_VA_END   0x0000800000000000ULL
+
 /* exo_file_open modes (docs/syscall_spec.md §3.2 #9) */
 #define EXO_O_RDONLY    0
 #define EXO_O_WRONLY    1
@@ -310,15 +329,21 @@ static inline int64_t exo_page_free(uint64_t paddr)
 }
 
 /* #2 — map paddr at vaddr in the caller's address space.  flags is a mask of
- * EXO_PAGE_*.  0, -EXO_EINVAL or -EXO_EFAULT. */
+ * EXO_PAGE_*.  Ownership-checked (docs/syscall_spec.md §3.3): paddr must be a
+ * page the caller owns, or framebuffer memory it has acquired.  Returns 0,
+ * -EXO_EINVAL (misaligned address or unknown flag bit), -EXO_EPERM (vaddr
+ * outside [EXO_USER_VA_BASE, EXO_USER_VA_END), or a paddr the caller does not
+ * own) or -EXO_ENOMEM (no page left for an intermediate page table). */
 static inline int64_t exo_page_map(uint64_t vaddr, uint64_t paddr,
                                    uint32_t flags)
 {
     return exo_syscall3(EXO_SYS_PAGE_MAP, vaddr, paddr, (uint64_t)flags);
 }
 
-/* #3 — remove the mapping at vaddr.  0 or -EXO_EINVAL.  Does not free the
- * underlying page; call exo_page_free for that. */
+/* #3 — remove the mapping at vaddr.  Does not free the underlying page; call
+ * exo_page_free for that.  Returns 0, -EXO_EINVAL (misaligned vaddr, or
+ * nothing mapped there), -EXO_EPERM (vaddr outside the window, or the mapping
+ * is of a page belonging to the kernel or another LibOS) or -EXO_ENOMEM. */
 static inline int64_t exo_page_unmap(uint64_t vaddr)
 {
     return exo_syscall1(EXO_SYS_PAGE_UNMAP, vaddr);

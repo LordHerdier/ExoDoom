@@ -93,9 +93,16 @@ request. Forced reclamation is scoped to the context it names, so it can never
 free a peer's page, and `revoke_all(context)` sweeps everything one context
 holds. The policy on top is deliberately trivial for the single-app demo:
 nothing asks for a resource back on the boot path, and `revoke_all()` is the
-hook `exo_exit` reclamation (SCRUM-155) will call. Page-map/unmap enforcement
-(SCRUM-153) extends the same model; the full protocol, and what multi-LibOS
+hook `exo_exit` reclamation (SCRUM-155) will call. The full protocol, and what multi-LibOS
 scheduling still has to add to it, is `docs/syscall_spec.md` §3.6.
+
+The fourth piece closes the hole the model was written for. `exo_page_map`
+(SCRUM-35, `src/vmm.c` + `src/syscall_mem.c`) lets a LibOS build its own
+address space a page at a time — and refuses any `paddr` it does not own or
+hold the framebuffer binding for, `-EPERM` (SCRUM-153). It also confines the
+`vaddr` to a window above 4 GiB, because until each LibOS has its own page
+tables (SCRUM-48) a mapping call edits the kernel's, and owning a page must not
+become a licence to install it over kernel text. `docs/syscall_spec.md` §3.7.
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -256,11 +263,15 @@ bump-allocated region. Double-free detection is required.
 must mark pages occupied by the kernel image (`_load_start`→`_bss_end`) and the
 WAD module as unavailable, so they are never handed out.
 
-**Note:** Paging is already enabled at boot — the trampoline in `boot.s` sets up
-4-level page tables (PML4 → PDPT → PD) identity-mapping the first 4 GB with
-2 MB pages before entering long mode. Future work will refine this with proper
-page-granularity mappings and `exo_page_alloc` / `exo_page_map` /
-`exo_page_unmap` syscalls exposed to LibOS (SCRUM-15, -16, -17).
+**Phase 5 — Virtual memory** ✅ Done (SCRUM-15, SCRUM-35): paging is enabled by
+the trampoline in `boot.s`, which builds 4-level page tables (PML4 → PDPT → PD)
+identity-mapping the first 4 GB with 2 MB pages before entering long mode.
+`src/vmm.c` then adds 4 KiB granularity on top: it walks the live tables,
+allocates missing levels from the PMM, and splits a 2 MB page into a 512-entry
+PT — reproducing it exactly — when a single page inside it has to be remapped.
+That is the mechanism under the `exo_page_map` / `exo_page_unmap` syscalls
+(§6, `docs/syscall_spec.md` §3.7). Still open: the page fault handler
+(SCRUM-17) and a per-LibOS address space (SCRUM-48).
 
 **Memory map (QEMU, at boot, pre-paging):**
 
@@ -444,10 +455,10 @@ values are error codes.
 
 The 21 syscalls grouped by category:
 
-| Category    | Syscalls                                                            | Sprint     |
+| Category    | Syscalls                                                            | Status     |
 | ----------- | ------------------------------------------------------------------- | ---------- |
-| Memory      | `exo_page_alloc`, `exo_page_free`, `exo_page_map`, `exo_page_unmap` | Sprint 2–3 |
-| Framebuffer | `exo_fb_acquire`                                                    | Sprint 2   |
+| Memory      | `exo_page_alloc`, `exo_page_free`, `exo_page_map`, `exo_page_unmap` | ✅ done     |
+| Framebuffer | `exo_fb_acquire`                                                    | ✅ done     |
 | Timer       | `exo_get_ticks`                                                     | Sprint 3   |
 | Input       | `exo_kbd_poll`, `exo_mouse_poll`                                    | Sprint 3   |
 | Debug       | `exo_serial_write`                                                  | Sprint 3   |
@@ -476,9 +487,12 @@ preserves **every** register except `RAX`/`RCX`/`R11` before calling
 `exo_syscall_dispatch`. That is stronger than the SysV callee-saved set; see
 `docs/syscall_spec.md` §3.4 for why, and for the entry path in full.
 
-Handlers register into the dispatch table with `exo_syscall_register()`. As of
-SCRUM-32 none are bound, so every number returns `-EXO_ENOSYS` until SCRUM-33
-lands `exo_get_ticks`.
+Handlers register into the dispatch table with `exo_syscall_register()` from an
+`*_init()` that `kernel_main` calls ahead of the `TESTING` branch. Bound today:
+`exo_page_alloc` / `exo_page_free` (#0, #1, SCRUM-34), `exo_page_map` /
+`exo_page_unmap` (#2, #3, SCRUM-35) in `src/syscall_mem.c`, and
+`exo_fb_acquire` (#4, SCRUM-154) in `src/syscall_fb.c`. Every other number
+returns `-EXO_ENOSYS`.
 
 ---
 
