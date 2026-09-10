@@ -4,6 +4,8 @@
 #include "page_alloc.h"
 #include "fb_binding.h"
 #include "vmm.h"
+#include "mmap.h"
+#include "serial.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -219,8 +221,40 @@ static int64_t sys_page_unmap(uint64_t vaddr, uint64_t a2, uint64_t a3,
     return vmm_status_to_errno(vmm_unmap_page(vaddr));
 }
 
+/*
+ * The window's premise, checked rather than assumed: the kernel map is an
+ * identity map, so every mapping it holds sits at a virtual address equal to a
+ * physical one, and the LibOS window is only free real estate while it starts
+ * above the highest such address.  It does, by a factor of thousands — but the
+ * cost of being wrong is a LibOS unmapping kernel RAM, and the check is a
+ * dozen instructions once at boot.
+ *
+ * Reported rather than fatal: a machine this large is a machine nobody has,
+ * and halting the boot over it would trade a hypothetical for a certainty.
+ */
+static void check_window_is_clear(void)
+{
+    uint32_t count = 0;
+    const mmap_region_t *regions = mmap_get_regions(&count);
+    uint64_t top = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t end = regions[i].base + regions[i].length;
+        if (end > top)
+            top = end;
+    }
+
+    if (top > EXO_USER_VA_BASE) {
+        serial_print("syscall_mem: WARNING - physical memory reaches into the "
+                     "LibOS mapping window; exo_page_map/-unmap can collide "
+                     "with kernel mappings\n");
+    }
+}
+
 void syscall_mem_init(void)
 {
+    check_window_is_clear();
+
     exo_syscall_register(EXO_SYS_PAGE_ALLOC, sys_page_alloc);
     exo_syscall_register(EXO_SYS_PAGE_FREE,  sys_page_free);
     exo_syscall_register(EXO_SYS_PAGE_MAP,   sys_page_map);

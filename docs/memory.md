@@ -610,11 +610,15 @@ the LibOS is expected to call `exo_page_unmap` first.
 
 Both mapping calls are ownership-checked (SCRUM-153) — `exo_page_map` refuses
 any `paddr` the caller neither owns nor holds the framebuffer binding for — and both confine `vaddr`
-to the **LibOS window**, `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[4 GiB,
-128 TiB)`. Everything in this document lives below 4 GiB, which is the point:
-while there is one address space shared with the kernel, a LibOS that owns a
-page must still be unable to install it over kernel text. Anything outside the
-window is `-EXO_EPERM`.
+to the **LibOS window**, `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[64 TiB,
+128 TiB)`. While there is one address space shared with the kernel, a LibOS
+that owns a page must still be unable to install it over kernel text; anything
+outside the window is `-EXO_EPERM`.
+
+The base is 64 TiB rather than something closer because §7's map is an
+*identity* map — every usable RAM region is mapped at `vaddr == paddr`, so any
+window starting below the top of physical memory overlaps kernel mappings. See
+`docs/syscall_spec.md` §3.7.
 
 ### LibOS address space
 

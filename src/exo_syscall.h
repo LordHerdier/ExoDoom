@@ -120,19 +120,25 @@
  * The virtual address window a LibOS may map into (docs/syscall_spec.md §3.7).
  *
  * exo_page_map / exo_page_unmap accept a `vaddr` in [BASE, END) and answer
- * -EXO_EPERM anywhere else.  The window starts at 4 GiB because everything
- * below it is the kernel's boot identity map — kernel image, page tables, PMM
- * pool and MMIO all live there, and until each LibOS has an address space of
- * its own (SCRUM-48) a mapping call is editing the same page tables the kernel
- * runs on.  Confining LibOS mappings to a region the kernel keeps nothing in
- * is what makes that safe: ownership of the *physical* page is checked
- * separately, but without this a LibOS could own a page perfectly legitimately
- * and still install it over kernel text.
+ * -EXO_EPERM anywhere else.  The window exists because the kernel and the
+ * LibOS share one address space until SCRUM-48: a mapping syscall edits the
+ * page tables the kernel runs on, so ownership of a *physical* page must not
+ * become a licence to install it over kernel text.
  *
- * END is the top of the lower canonical half.  The window is 128 TiB wide, so
- * nothing about it constrains a LibOS in practice.
+ * The base is 64 TiB, and the reason it is not lower is worth stating plainly,
+ * because the obvious choice is wrong: the kernel map is an *identity* map
+ * (vmm_init, SCRUM-15), so every byte of usable RAM is mapped at a virtual
+ * address equal to its physical one.  A window that starts below the top of
+ * physical memory therefore overlaps real kernel mappings — on a machine with
+ * 8 GiB of RAM, a window at 4 GiB lands squarely inside mapped memory, where
+ * exo_page_map can map nothing (the address is already taken) and, worse,
+ * exo_page_unmap would happily unmap the kernel's own RAM.  64 TiB is chosen
+ * to be unreachable by physical memory on any machine this kernel will ever
+ * see, and syscall_mem_init() asserts that at boot rather than trusting it.
+ *
+ * END is the top of the lower canonical half, leaving a 64 TiB window.
  */
-#define EXO_USER_VA_BASE  0x0000000100000000ULL
+#define EXO_USER_VA_BASE  0x0000400000000000ULL
 #define EXO_USER_VA_END   0x0000800000000000ULL
 
 /* exo_file_open modes (docs/syscall_spec.md §3.2 #9) */
