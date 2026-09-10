@@ -30,13 +30,14 @@ progressively builds up the infrastructure needed to hand Doom a working
 Phase 1  mmap_init()       Parse multiboot memory map → usable/reserved regions
 Phase 2  memory_init()     Bump allocator from &_bss_end → used for early boot allocs
 Phase 3  page_alloc_init()        Bitmap page allocator (alloc_page / free_page) [Sprint 1]
-Phase 4  vmm_map_page()    Paging on (boot.s), 4K mapping + exo_page_* syscalls [SCRUM-15/-35]
+Phase 4  vmm_init()        Kernel page tables from PMM pages + exo_page_map/-unmap [SCRUM-15/-35]
 Phase 5  LibOS heap        first-fit allocator backed by exo_page_alloc [Sprint 3]
 ```
 
 At no point does the kernel use a general-purpose heap for itself. Internal
-kernel structures (IDT, bitmap, page directory) are allocated from the bump
-allocator during boot and never freed.
+kernel structures (IDT, PMM bitmap, owner table) are allocated from the bump
+allocator during boot and never freed; page tables come from the PMM itself
+once it is up.
 
 ---
 
@@ -222,10 +223,11 @@ void* kmalloc(size_t size) {
 | ------------------------ | -------------------------------------- | ------------ |
 | PMM bitmap (Phase 3)     | `total_pages / 8` bytes, rounded to 4K | `page_alloc_init()` |
 | Page owner table (SCRUM-152) | `total_pages * 2` bytes, rounded to 4K | `page_alloc_init()` |
-| Page tables (Phase 4)    | 4K per table (512 × 8-byte entries)    | `vmm_init()` |
 
-After Phase 4 (paging enabled), `kmalloc` is retired. All further kernel
-allocations go through `alloc_page` directly.
+After Phase 3, `kmalloc` is effectively retired. All further kernel
+allocations go through `alloc_page` directly — the page tables `vmm_init()`
+builds are `alloc_page()` pages (4K each, `PAGE_OWNER_KERNEL`), not bump
+allocations.
 
 ---
 
@@ -416,9 +418,10 @@ Available to alloc: ~62,064  (~242 MiB)
 
 ## 7. Phase 4 — Virtual memory and paging
 
-**Files:** `src/vmm.c`, `src/vmm.h` (SCRUM-35); page fault handler still
-planned (SCRUM-17)
-**Status:** 🔄 boot map done (SCRUM-15), 4 KiB mapping done (SCRUM-35)
+**Files:** `src/vmm.c`, `src/vmm.h` **Status:** ✅ Done (SCRUM-15 — kernel page
+tables; SCRUM-35 — `exo_page_map`/`exo_page_unmap` on top of them); SCRUM-16
+(per-region permissions, WAD read-only) and SCRUM-17 (page fault handler) still
+to do
 
 ### Overview
 
@@ -440,7 +443,18 @@ offset is 21 bits, giving 512 × 2 MB = 1 GB per PD.
 
 `CR3` holds the physical address of the PML4. Writing `CR3` flushes the TLB.
 
-### Current boot-time mapping (done in boot.s trampoline)
+### Two maps, in order
+
+There are two identity maps in the boot, and it matters which one is live:
+
+1. **The boot map** (`boot.s`, described next) — a static 4 GB map in `.bss`
+   that exists only to get long mode running.
+2. **The kernel map** (`vmm_init()`, SCRUM-15) — built from PMM pages once the
+   allocator is up, and loaded into `CR3` in `kernel_main` before the `TESTING`
+   branch. From that point on it is the map everything runs against, the ring-3
+   probe included.
+
+### Boot-time mapping (done in boot.s trampoline)
 
 The trampoline builds a 4 GB identity map before entering long mode:
 
@@ -474,62 +488,110 @@ unexplained CI timeout. Do not delete those symbols; the check depends on them.
 
 The consequence is blunt: in a test build, all 4 GB of the identity map is
 readable and writable from CPL 3, including kernel text and the page tables
-themselves. There is no isolation to speak of yet. That is precisely the hole
-the refinement below closes, and it is gated to test builds so a shipped kernel
-never carries it. SCRUM-48 gives each LibOS its own page directory; SCRUM-55
+themselves. There is no isolation to speak of yet — and the kernel map below
+deliberately mirrors the same gate, since it is the map the ring-3 probe
+actually runs against. It is gated to test builds so a shipped kernel never
+carries it. SCRUM-48 gives each LibOS its own page directory; SCRUM-55
 and SCRUM-56 then assert that a LibOS faults on kernel memory and on port I/O.
 
-### The page table walker (SCRUM-35)
+### The kernel map (`vmm_init`, SCRUM-15)
 
-`src/vmm.c` is the first code after the trampoline to touch a page table. It
-installs and removes **4 KiB** mappings in the address space `CR3` names, and
-it is pure mechanism: no ownership, no LibOS contexts, no `-EXO_E*` codes —
-that policy lives in `src/syscall_mem.c` behind `exo_page_map`
-(`docs/syscall_spec.md` §3.7).
+The boot map is a scaffold, not an address space. It is static (its tables are
+`.bss`, not pages the PMM knows about, so nothing can be mapped or unmapped at
+runtime), blanket (4 GB of address space, most of which does not exist), and
+uniform (one permission for everything). `vmm_init(mb, fb)` replaces it with
+tables built from `alloc_page()` pages and loads `CR3` with the result.
+
+What it maps, all identity (virtual == physical), in this order:
+
+| Region | Granularity | Why |
+| --- | --- | --- |
+| `0x1000`–`0x100000` | 4 KiB | low memory; BIOS/VGA structures |
+| `_load_start` → `memory_base_address()` | 4 KiB | kernel image + bump pool (the PMM bitmap and owner table live here) |
+| every `MB2_MMAP_AVAILABLE` region | 2 MiB where aligned, else 4 KiB | the PMM pool — page tables included — the WAD module, and normally the multiboot info |
+| the multiboot info struct | 4 KiB | firmware may place it outside a usable region, and the kernel reads it after the switch |
+| `fb->addr` → `+ pitch × height` | 2 MiB / 4 KiB | the framebuffer sits in the PCI MMIO hole above RAM, so no mmap region covers it — without this the console dies the instant `CR3` is loaded |
+
+Two deliberate omissions:
+
+- **Page 0 is left unmapped.** A NULL dereference faults instead of silently
+  reading the interrupt vector table. Until SCRUM-17 lands a page-fault handler
+  that fault is fatal, which is still better than corrupting BIOS structures
+  far from the bug.
+- **No `NX`.** Bit 63 is reserved while `EFER.NXE` is clear and faults the
+  walk. Enabling NXE and marking non-text mappings NX belongs with the
+  per-section permissions in SCRUM-16.
+
+On QEMU `-m 256M` with a 1024×768 framebuffer the whole map costs **8 pages
+(32 KiB)** of PMM memory — one PML4, one PDPT, two PDs, and four page tables
+for the 4 KiB regions; the 254 MB of RAM above 2 MB is 2 MiB leaves. The count
+is printed to serial and to the boot console (`vmm_table_pages()`).
+
+Tables are allocated with `alloc_page()`, i.e. `PAGE_OWNER_KERNEL`, so a LibOS
+calling `exo_page_free` on one gets `-EXO_EPERM` (SCRUM-152). That is not
+incidental: page tables are the one resource where a stray free is
+unrecoverable.
+
+#### U/S again: the kernel map mirrors boot.s
+
+`vmm.c` sets the `USER` bit on its leaves and links under `-DTESTING` and
+nowhere else — the same gate `build.sh` gives `boot.s` via
+`--defsym RING3_PROBE=1`, for the same reason. `vmm_init()` runs *before*
+`run_tests()`, so the ring-3 probe executes against the kernel map; if the two
+disagreed, a test build would map ring-3 code supervisor-only and triple-fault.
+`tests/kernel/test_vmm_k.c` asserts the `USER` bit is present in a test build,
+the C-side mirror of `build.sh`'s step 1b.
+
+#### API
 
 ```c
-int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint32_t attrs);  // VMM_MAP_*
-int vmm_unmap_page(uint64_t vaddr);
-int vmm_translate(uint64_t vaddr, uint64_t *paddr_out);
-uint64_t vmm_current_pml4(void);
+int  vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb);
+int  vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags);
+int  vmm_map_range(uint64_t vaddr, uint64_t paddr, uint64_t size, uint64_t flags);
+int  vmm_unmap_page(uint64_t vaddr);
+int  vmm_translate(uint64_t vaddr, uint64_t *paddr_out, uint64_t *flags_out);
+uint64_t vmm_kernel_pml4(void);
+uint32_t vmm_table_pages(void);
 ```
 
-Three things about it are worth knowing before editing:
+Status codes are ABI-agnostic like the PMM's (`VMM_OK`, `VMM_ENOMEM`,
+`VMM_EINVAL`, `VMM_EEXIST`, `VMM_ENOENT`); the syscall layer maps them to
+`EXO_E*` when SCRUM-153 exposes mapping to a LibOS.
 
-1. **Tables are reached through the identity map.** A page table's physical
-   address doubles as a pointer to it, which is true only while everything
-   lives below 4 GiB. `table_ptr()` in `vmm.c` is the single place that has to
-   learn about an offset when the kernel moves to a higher-half map (SCRUM-48).
-2. **2 MiB pages get split on demand.** The boot map has no PT level, so
-   mapping one 4 KiB page inside it first replaces the covering 2 MiB PDE with
-   a 512-entry PT that reproduces it exactly. The other 511 mappings survive —
-   this is what lets the kernel keep executing while its own identity map is
-   edited underneath it. Splitting allocates a page table, so even *unmapping*
-   can fail with `VMM_ENOMEM`.
-3. **TLB maintenance follows the granularity.** `invlpg` for an ordinary
-   change; a full `CR3` reload after a split, because the stale entry there
-   covers 2 MiB rather than the one page `invlpg` names.
+Three behaviours worth knowing before building on this:
 
-Intermediate tables come from `alloc_page()` and are therefore
-`PAGE_OWNER_KERNEL`: no LibOS can free the page tables that describe its own
-address space. Empty tables are never reclaimed (see §3.7 of the syscall spec
-for why that trade is deliberate).
+- **`vmm_map_page` splits 2 MiB leaves on demand.** Mapping a single 4 KiB page
+  inside a bulk-mapped region replaces the leaf with a page table describing
+  the same 512 pages, then edits the one entry — the neighbours keep their
+  mappings. This is what lets `exo_page_map` (SCRUM-153) hand a LibOS one page
+  out of a region the kernel mapped in bulk.
+- **Remapping is idempotent, repointing is refused.** Mapping an address that
+  already resolves to the same physical page succeeds (and updates flags);
+  pointing it somewhere else returns `VMM_EEXIST`. Unmap first if that is what
+  you meant.
+- **Empty page tables are not reclaimed** on unmap. Proving all 512 entries are
+  clear on every unmap costs more than the page is worth for a map that is
+  built once; per-LibOS address spaces tear down whole trees instead
+  (SCRUM-155).
 
-### Future refinement (Sprint 2+)
+`vmm_init` verifies that the kernel text, the current stack, the PML4, the
+multiboot info and the framebuffer all translate correctly **before** writing
+`CR3`, and on failure leaves the boot map live and returns an error, so a
+missing mapping surfaces as a serial diagnostic rather than a triple fault with
+nothing on the wire.
 
-`vmm_init()` will build proper 4K page tables with correct permissions:
+### Still to come (SCRUM-16, SCRUM-17, SCRUM-48)
 
-1. **Identity map the kernel** with read/write, not user-accessible
-2. **Map the framebuffer** as present + read/write
-3. **Map the WAD module** as read-only
-4. Remove the blanket 4 GB identity map and map only what is needed
-
-After this, the MMU will enforce page permissions per region.
+1. Per-section kernel permissions: `.text` read-execute, `.rodata` read-only,
+   everything else NX (needs `EFER.NXE`).
+2. The WAD module mapped read-only.
+3. A page-fault handler (below).
+4. Per-LibOS address spaces: a second PML4 with the kernel half shared.
 
 ### Exokernel syscalls
 
-Once paging is refined and a LibOS address space exists, three syscalls expose
-page management to the LibOS:
+Three syscalls expose page management to the LibOS, implemented in
+`src/syscall_mem.c` on top of the primitives above (SCRUM-34, SCRUM-35):
 
 ```c
 // Allocate one 4K physical page; returns physical address or -ENOMEM
@@ -546,7 +608,8 @@ int64_t exo_page_unmap(uint64_t vaddr);
 `exo_page_free` frees the physical page back to the PMM without unmapping it —
 the LibOS is expected to call `exo_page_unmap` first.
 
-Both mapping calls are ownership-checked (SCRUM-153) and both confine `vaddr`
+Both mapping calls are ownership-checked (SCRUM-153) — `exo_page_map` refuses
+any `paddr` the caller neither owns nor holds the framebuffer binding for — and both confine `vaddr`
 to the **LibOS window**, `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[4 GiB,
 128 TiB)`. Everything in this document lives below 4 GiB, which is the point:
 while there is one address space shared with the kernel, a LibOS that owns a

@@ -1,95 +1,110 @@
-#pragma once
+#ifndef VMM_H
+#define VMM_H
+
 #include <stdint.h>
 
-/*
- * vmm.h — 4-level page table walker (SCRUM-35).
- *
- * boot.s builds a static 4 GiB identity map out of 2 MiB pages and enables
- * paging (SCRUM-15); nothing after that ever touched a page table again.  This
- * module is the first code that does: it installs and removes 4 KiB mappings
- * in the live address space (the one CR3 names), allocating the intermediate
- * PDPT/PD/PT pages it needs from the physical page allocator.
- *
- * It is the mechanism under exo_page_map / exo_page_unmap (src/syscall_mem.c)
- * and it is deliberately *only* the mechanism: it enforces no ownership and
- * knows nothing about LibOS contexts or -EXO_E* codes.  The protection rule
- * (docs/syscall_spec.md §3.3 — the caller must own the physical page, or hold
- * the framebuffer binding for it) lives in the syscall handler, in the same
- * layering as page_alloc.c / syscall_mem.c and fb_binding.c / syscall_fb.c.
- *
- * Reaching a page table: every table is a physical page below 4 GiB and the
- * identity map is still in force, so a table's physical address doubles as a
- * pointer to it.  That stops being true the day the kernel moves to a
- * higher-half map (SCRUM-48), at which point table_ptr() in vmm.c is the one
- * place that has to learn about an offset.
- */
-
-#define VMM_PAGE_SIZE 4096u
+#include "multiboot2.h"
 
 /*
- * Mapping attributes.  A mapping is always present — that is what mapping
- * means — so PRESENT is not expressible here; unmap is how a mapping stops
- * being present.  These are the module's own bits, not x86 PTE bits: the
- * translation to hardware flags is vmm.c's business.
+ * vmm — the kernel's own 4-level page tables (SCRUM-15).
  *
- * VMM_MAP_EXEC is accepted and ignored, because EFER.NXE is not enabled: with
- * NX off every mapping is executable and asking for a non-executable one is a
- * request the hardware is not currently configured to honour.  It is part of
- * the interface now so that callers can express intent (and so the ABI flag
- * EXO_PAGE_EXEC has somewhere to land) without a rename when NXE is turned on.
+ * boot.s builds a throwaway identity map in .bss (4 GB of 2 MB pages) purely
+ * to get long mode running.  That map is static, blanket, and unowned: it
+ * cannot describe per-region permissions, it maps 4 GB of address space that
+ * mostly does not exist, and its tables are not pages the PMM knows about, so
+ * nothing can ever be mapped or unmapped at runtime.
+ *
+ * vmm_init() replaces it with tables built from PMM pages (PAGE_OWNER_KERNEL,
+ * so no LibOS can ever free one — docs/memory.md §6) that map only what the
+ * kernel actually has: low memory, the kernel image and bump pool, usable RAM
+ * (which covers the WAD module and the multiboot info), and the framebuffer
+ * aperture.  Everything is identity-mapped, so virtual == physical still holds
+ * and nothing downstream has to think about translation yet.
+ *
+ * What this buys, beyond being able to say the kernel owns its own map:
+ * vmm_map_page()/vmm_unmap_page() are the primitive SCRUM-16 (framebuffer/WAD
+ * mapping), SCRUM-48 (per-LibOS address spaces) and exo_page_map/-unmap
+ * (SCRUM-153) are built on.
+ *
+ * There is no page-fault handler yet (SCRUM-17), so a fault is still fatal.
  */
-#define VMM_MAP_WRITE  (1u << 0)   /* writable; otherwise read-only          */
-#define VMM_MAP_USER   (1u << 1)   /* reachable from CPL 3                   */
-#define VMM_MAP_EXEC   (1u << 2)   /* accepted, ignored until EFER.NXE       */
 
-/* Status codes.  ABI-agnostic on purpose (see page_alloc.h for the same
- * pattern): the syscall layer maps these onto -EXO_E* codes. */
-#define VMM_OK       0
-#define VMM_EINVAL (-1)   /* unaligned, non-canonical, or out-of-range addr  */
-#define VMM_ENOMEM (-2)   /* no physical page left for an intermediate table */
-#define VMM_ENOENT (-3)   /* nothing mapped at that virtual address          */
+#define VMM_PAGE_SIZE       0x1000ULL
+#define VMM_LARGE_PAGE_SIZE 0x200000ULL
+
+/* Page-table entry flags.  These are the architectural bits, used both for
+ * leaves and (the first three) for the links between levels.
+ *
+ * Note the absence of NX: bit 63 is reserved unless EFER.NXE is set, and
+ * setting it without enabling NXE first faults on the walk.  Enabling NXE and
+ * marking the non-text mappings NX belongs with the per-section permission
+ * work in SCRUM-16, not here. */
+#define VMM_PRESENT (1ULL << 0)
+#define VMM_WRITE   (1ULL << 1)
+#define VMM_USER    (1ULL << 2)
+#define VMM_PWT     (1ULL << 3)
+#define VMM_PCD     (1ULL << 4)
+#define VMM_HUGE    (1ULL << 7)   /* PS: 2 MB leaf at the PD level */
+
+/* Status codes.  ABI-agnostic like the PMM's (page_alloc.h): the syscall layer
+ * maps them to EXO_E* codes when SCRUM-153 exposes mapping to a LibOS. */
+#define VMM_OK      0
+#define VMM_ENOMEM  (-1)   /* out of pages for a new table                  */
+#define VMM_EINVAL  (-2)   /* unaligned or non-canonical address            */
+#define VMM_EEXIST  (-3)   /* already mapped to a different physical page   */
+#define VMM_ENOENT  (-4)   /* not mapped                                    */
 
 /*
- * Map the 4 KiB physical page `paddr` at `vaddr` with `attrs` (a mask of
- * VMM_MAP_*), replacing whatever was mapped there.  Both addresses must be
- * 4 KiB-aligned and `vaddr` must be canonical, or VMM_EINVAL.
+ * Build the kernel address space and load CR3 with it.  `mb` supplies the
+ * multiboot info (mapped explicitly, since firmware may place it outside a
+ * usable-RAM region) and `fb` the framebuffer geometry, or NULL if GRUB gave
+ * us no framebuffer tag.
  *
- * Missing PDPT/PD/PT levels are allocated from the PMM as PAGE_OWNER_KERNEL
- * pages — so no LibOS can free the page tables that describe its own address
- * space — and zeroed before use.  VMM_ENOMEM if the pool is exhausted;
- * partially built levels are left in place, which is harmless: they are empty
- * tables that the next map through the same region reuses.
- *
- * If `vaddr` falls inside a 2 MiB page (as all of the boot identity map does),
- * that page is first split into a 512-entry PT that reproduces it exactly,
- * so the other 511 4 KiB mappings it covered survive the operation.
+ * Returns VMM_OK, or a negative status if a table allocation failed or a
+ * required region could not be mapped — in which case CR3 is left alone and
+ * the boot map stays active, so the caller can still report the failure.
  */
-int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint32_t attrs);
+int vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb);
 
-/*
- * Remove the mapping at `vaddr`.  The physical page is untouched — freeing it
- * is exo_page_free's job.  VMM_ENOENT if nothing is mapped there, VMM_EINVAL
- * for an unaligned or non-canonical address.
+/* Physical address of the kernel PML4, or 0 before vmm_init(). */
+uint64_t vmm_kernel_pml4(void);
+
+/* Whether the kernel map is the one in CR3.  False before vmm_init() and
+ * after a failed one — in which case the boot map is still live and this
+ * module's mappings describe nothing. */
+int vmm_is_active(void);
+
+/* How many 4 KiB pages the map's tables occupy — the PMM cost of the address
+ * space, reported at boot and asserted against in the tests. */
+uint32_t vmm_table_pages(void);
+
+/* Map one 4 KiB page.  Both addresses must be page-aligned.  Mapping an
+ * address that already resolves to `paddr` succeeds (and updates the flags);
+ * mapping one that resolves elsewhere returns VMM_EEXIST rather than silently
+ * repointing it.  A 2 MB leaf covering `vaddr` is split into a page table
+ * first, preserving the mappings around it. */
+int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags);
+
+/* Map `size` bytes, using 2 MB leaves wherever the addresses and the
+ * remaining length allow and 4 KiB pages elsewhere.  `size` is rounded up to
+ * a page; the addresses must be page-aligned.
  *
- * A 2 MiB page is split first, exactly as in vmm_map_page, so unmapping one
- * 4 KiB page out of the identity map does not blow a 2 MiB hole in it.
- * Intermediate tables that become empty are not freed; a LibOS that maps and
- * unmaps across a wide address range can therefore retain a bounded number of
- * empty tables, which is a deliberate trade (walking a table to discover it is
- * empty on every unmap costs more than the pages are worth at v1 scale).
- */
+ * Not atomic: on failure part of the range may already be mapped, and the
+ * caller is responsible for unmapping what it asked for.  Fine for boot-time
+ * construction (CR3 is not loaded yet, and a failure there is fatal anyway);
+ * a runtime caller that cares should map page by page. */
+int vmm_map_range(uint64_t vaddr, uint64_t paddr, uint64_t size, uint64_t flags);
+
+/* Unmap one 4 KiB page and flush its TLB entry.  Splits a covering 2 MB leaf
+ * so the neighbouring pages stay mapped.  Returns VMM_ENOENT if it was not
+ * mapped.  Does not free the physical page — that is the caller's (and, for a
+ * LibOS, exo_page_free's) business. */
 int vmm_unmap_page(uint64_t vaddr);
 
-/*
- * Resolve `vaddr` to a physical address through the live page tables, honouring
- * 2 MiB pages.  Any `vaddr` is accepted, aligned or not; the offset within the
- * page is carried into *paddr_out.  VMM_ENOENT if the walk hits a
- * non-present entry.  For the syscall layer (exo_page_unmap has to know which
- * physical page it is about to unmap before it can check who owns it) and for
- * tests.
- */
-int vmm_translate(uint64_t vaddr, uint64_t *paddr_out);
+/* Resolve `vaddr` through the live tables.  On VMM_OK, *paddr_out (if
+ * non-NULL) gets the physical address including the offset within the page,
+ * and *flags_out (if non-NULL) the leaf entry's flag bits.  Returns
+ * VMM_ENOENT if any level along the walk is not present. */
+int vmm_translate(uint64_t vaddr, uint64_t *paddr_out, uint64_t *flags_out);
 
-/* Physical address of the PML4 currently in CR3.  Exposed for tests and
- * diagnostics; the mapping calls read it themselves. */
-uint64_t vmm_current_pml4(void);
+#endif

@@ -67,11 +67,11 @@ static void test_map_own_page_round_trip(void)
     CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p, MAP_RW), 0);
 
     uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH, &resolved), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH, &resolved, NULL), VMM_OK);
     CU_ASSERT_EQUAL(resolved, (uint64_t)p);
 
     CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH, &resolved), VMM_ENOENT);
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH, &resolved, NULL), VMM_ENOENT);
 
     CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
 }
@@ -92,7 +92,7 @@ static void test_foreign_page_rejected(void)
                     -EXO_EPERM);
 
     uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH, &resolved), VMM_ENOENT);
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH, &resolved, NULL), VMM_ENOENT);
 
     free_page_owned(theirs, OTHER_LIBOS);
 }
@@ -124,9 +124,12 @@ static void test_unowned_page_rejected(void)
 }
 
 /*
- * Mapping over an existing mapping is allowed, but it is not a way around the
- * ownership check: the page being displaced has to be one the caller could
- * have unmapped itself.
+ * "Map over it" must not be a way around exo_page_unmap's ownership check.
+ * Two independent rules close that: the walker refuses to repoint a live
+ * mapping at a different physical page at all (VMM_EEXIST -> -EXO_EINVAL), and
+ * unmapping it first is refused because the page is another context's
+ * (-EXO_EPERM).  A LibOS moving a window over its *own* pages unmaps and
+ * re-maps; a LibOS reaching for a peer's mapping gets nowhere either way.
  */
 static void test_remap_over_foreign_mapping_rejected(void)
 {
@@ -140,14 +143,14 @@ static void test_remap_over_foreign_mapping_rejected(void)
     /* Put the other context's page there behind the syscall's back — the
      * syscall would (rightly) not have let the caller do it. */
     CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_2, (uint64_t)(uintptr_t)theirs,
-                                 VMM_MAP_WRITE | VMM_MAP_USER), VMM_OK);
+                                 VMM_WRITE | VMM_USER), VMM_OK);
 
-    CU_ASSERT_EQUAL(do_map(SCRATCH_2, (uint64_t)mine, MAP_RW), -EXO_EPERM);
+    CU_ASSERT_EQUAL(do_map(SCRATCH_2, (uint64_t)mine, MAP_RW), -EXO_EINVAL);
     CU_ASSERT_EQUAL(do_unmap(SCRATCH_2), -EXO_EPERM);
 
     /* The foreign mapping is still intact — a refused call changes nothing. */
     uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_2, &resolved), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_2, &resolved, NULL), VMM_OK);
     CU_ASSERT_EQUAL(resolved, (uint64_t)(uintptr_t)theirs);
 
     CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_2), VMM_OK);
@@ -173,7 +176,7 @@ static void test_vaddr_outside_window_rejected(void)
 
     /* Nothing about the kernel's mapping of itself moved. */
     uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(0x200000ULL, &resolved), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_translate(0x200000ULL, &resolved, NULL), VMM_OK);
     CU_ASSERT_EQUAL(resolved, 0x200000ULL);
 
     CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
@@ -227,7 +230,7 @@ static void test_framebuffer_follows_the_binding(void)
     CU_ASSERT_EQUAL(do_map(SCRATCH, fb_page, MAP_RW), 0);
 
     uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH, &resolved), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH, &resolved, NULL), VMM_OK);
     CU_ASSERT_EQUAL(resolved, fb_page);
 
     CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
@@ -265,7 +268,7 @@ static void test_fb_mapping_removable_after_reclaim(void)
     CU_ASSERT_EQUAL(do_unmap(SCRATCH_2), 0);
 
     uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_2, &resolved), VMM_ENOENT);
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_2, &resolved, NULL), VMM_ENOENT);
 }
 
 /* The suite borrows the framebuffer binding and allocates under a second

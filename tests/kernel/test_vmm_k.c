@@ -1,242 +1,316 @@
 /*
- * test_vmm_k.c — the page table walker (SCRUM-35).
+ * test_vmm_k.c — kernel page tables (SCRUM-15).
  *
- * Tests the mechanism directly, below the syscall: installing and removing
- * 4 KiB mappings in the live address space, resolving virtual addresses
- * through the real page tables, and splitting one of the boot identity map's
- * 2 MiB pages without disturbing its other 511 4 KiB neighbours.  The
- * ownership rule layered on top of this is test_page_map_k.c's job.
- *
- * These run against the address space the kernel is executing in — there is no
- * spare one to experiment in — so every test that changes a mapping restores
- * it, and every scratch virtual address is taken from the LibOS window above
- * 4 GiB, where the kernel keeps nothing.
+ * These run *on* the map under test: vmm_init() has already loaded CR3 by the
+ * time run_tests() is called, so every assertion here is about the live
+ * address space, not a simulation of one.  That cuts both ways — a test that
+ * unmaps the wrong page takes the machine down rather than failing — so the
+ * mapping tests work in a scratch virtual window far above anything the
+ * identity map uses, and put back what they borrow.
  */
 
 #include "kunit.h"
 #include "vmm.h"
 #include "page_alloc.h"
-#include "exo_syscall.h"
+#include "memory.h"
 
-/* Scratch virtual addresses, spaced far enough apart that no two tests share
- * a page table and an escaped mapping cannot be mistaken for a live one. */
-#define SCRATCH_A (EXO_USER_VA_BASE + 0x0000000ULL)
-#define SCRATCH_B (EXO_USER_VA_BASE + 0x4000000ULL)
-#define SCRATCH_C (EXO_USER_VA_BASE + 0x8000000ULL)
+#include <stdint.h>
 
-/* A value no page of freshly allocated memory is likely to hold by accident. */
-#define PATTERN_A 0x5CA1AB1E5CA1AB1EULL
-#define PATTERN_B 0xD00DFEEDDEADBEEFULL
+/*
+ * A virtual window nothing else touches: 64 GiB up, above the 4 GiB the
+ * identity map can reach even in principle (QEMU gives us 256 MiB of RAM and a
+ * framebuffer just under 4 GiB).  Canonical, and guaranteed unmapped.
+ */
+#define SCRATCH_VA   0x0000001000000000ULL
+/* Second window, 2 MiB-aligned, for the large-page and split tests. */
+#define SCRATCH_VA_2M 0x0000001040000000ULL
 
-static volatile uint64_t *as_ptr(uint64_t vaddr)
+extern uint8_t _load_start[];
+
+/* The map exists, CR3 points at it, and its tables belong to the kernel. */
+static void test_kernel_map_is_live(void)
 {
-    return (volatile uint64_t *)(uintptr_t)vaddr;
+    uint64_t pml4 = vmm_kernel_pml4();
+
+    CU_ASSERT_NOT_EQUAL(pml4, 0);
+    CU_ASSERT_EQUAL(pml4 % VMM_PAGE_SIZE, 0);
+
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    /* CR3's low 12 bits are PCD/PWT, not part of the address. */
+    CU_ASSERT_EQUAL(cr3 & ~0xFFFULL, pml4);
+
+    /* Table pages come from alloc_page(), so a LibOS cannot free one
+     * (SCRUM-152).  This is the map's half of the secure-binding guarantee. */
+    CU_ASSERT_EQUAL(page_owner((void *)(uintptr_t)pml4), PAGE_OWNER_KERNEL);
+    CU_ASSERT_TRUE(vmm_table_pages() > 0);
 }
 
-/* CR3 must name a page table that is actually reachable; every other test here
- * depends on the walk starting somewhere real. */
-static void test_current_pml4_is_sane(void)
+/* The kernel image, its stack and the bump pool are identity-mapped. */
+static void test_kernel_image_identity_mapped(void)
 {
-    uint64_t root = vmm_current_pml4();
+    uint64_t paddr = 0, flags = 0;
+    uint64_t text = (uint64_t)(uintptr_t)&test_kernel_image_identity_mapped;
 
-    CU_ASSERT_NOT_EQUAL(root, 0);
-    CU_ASSERT_EQUAL(root % VMM_PAGE_SIZE, 0);
-}
+    CU_ASSERT_EQUAL(vmm_translate(text, &paddr, &flags), VMM_OK);
+    CU_ASSERT_EQUAL(paddr, text);
+    CU_ASSERT_TRUE((flags & VMM_PRESENT) != 0);
 
-/* Below 4 GiB the boot map is an identity map, so translation is the identity
- * function — including for an address in the middle of a page, whose offset
- * has to survive the 2 MiB leaf's 21-bit offset arithmetic. */
-static void test_translate_is_identity_below_4g(void)
-{
-    uint64_t here = (uint64_t)(uintptr_t)&test_translate_is_identity_below_4g;
-    uint64_t phys = 0;
+    uint64_t local = (uint64_t)(uintptr_t)&paddr;         /* on the stack */
+    CU_ASSERT_EQUAL(vmm_translate(local, &paddr, NULL), VMM_OK);
+    CU_ASSERT_EQUAL(paddr, local);
 
-    CU_ASSERT_EQUAL(vmm_translate(here, &phys), VMM_OK);
-    CU_ASSERT_EQUAL(phys, here);
+    uint64_t load = (uint64_t)(uintptr_t)_load_start;
+    CU_ASSERT_EQUAL(vmm_translate(load, &paddr, NULL), VMM_OK);
+    CU_ASSERT_EQUAL(paddr, load);
 
-    CU_ASSERT_EQUAL(vmm_translate(here + 0x123, &phys), VMM_OK);
-    CU_ASSERT_EQUAL(phys, here + 0x123);
-}
-
-/* Nothing is mapped in the LibOS window until something maps it. */
-static void test_translate_unmapped_is_enoent(void)
-{
-    uint64_t phys = 0;
-
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_A, &phys), VMM_ENOENT);
+    /* One page below the bump pointer: the PMM bitmap and owner table live
+     * here, and the map has to cover them or the allocator's own metadata
+     * would fault. */
+    uint64_t heap = (uint64_t)memory_base_address() - VMM_PAGE_SIZE;
+    CU_ASSERT_EQUAL(vmm_translate(heap, &paddr, NULL), VMM_OK);
+    CU_ASSERT_EQUAL(paddr, heap);
 }
 
 /*
- * The round trip the whole story exists for: a physical page becomes reachable
- * at a virtual address of the caller's choosing, and a write through that
- * address lands in that physical page — checked through the identity map,
- * which is an independent view of the same memory.
+ * Test builds map the identity range user-accessible, matching the
+ * --defsym RING3_PROBE=1 gate boot.s gets from build.sh: the ring-3 probe in
+ * test_syscall_k.c runs against *these* tables, and the U/S bit is only
+ * honoured when set at every level.  The C-side mirror of build.sh's step 1b.
+ * (A shipped kernel sets no USER bit; this file only ever builds with
+ * -DTESTING, so that direction is build.sh's to assert.)
  */
-static void test_map_makes_page_reachable(void)
+static void test_testing_build_maps_user_accessible(void)
+{
+    uint64_t flags = 0;
+    uint64_t text = (uint64_t)(uintptr_t)&test_testing_build_maps_user_accessible;
+
+    CU_ASSERT_EQUAL(vmm_translate(text, NULL, &flags), VMM_OK);
+    CU_ASSERT_TRUE((flags & VMM_USER) != 0);
+}
+
+/* Page 0 is left unmapped so a NULL dereference faults instead of quietly
+ * reading the interrupt vector table. */
+static void test_null_page_unmapped(void)
+{
+    CU_ASSERT_EQUAL(vmm_translate(0, NULL, NULL), VMM_ENOENT);
+    /* ...but the rest of low memory is mapped. */
+    uint64_t paddr = 0;
+    CU_ASSERT_EQUAL(vmm_translate(0x1000, &paddr, NULL), VMM_OK);
+    CU_ASSERT_EQUAL(paddr, 0x1000);
+}
+
+/* Nothing is mapped in the scratch window before the tests below use it. */
+static void test_unmapped_address_translates_to_enoent(void)
+{
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_VA, NULL, NULL), VMM_ENOENT);
+    CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_VA), VMM_ENOENT);
+}
+
+/* Map a real page at a scratch address, prove the mapping carries data, then
+ * unmap it.  The round trip through two virtual addresses is what proves the
+ * MMU is actually consulting the new tables. */
+static void test_map_write_unmap_roundtrip(void)
 {
     void *page = alloc_page();
     CU_ASSERT_PTR_NOT_NULL(page);
-    if (page == NULL)
-        return;
+    if (page == NULL) return;
+    uint64_t phys = (uint64_t)(uintptr_t)page;
 
-    uint64_t paddr = (uint64_t)(uintptr_t)page;
-
-    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_A, paddr, VMM_MAP_WRITE), VMM_OK);
-
-    uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_A, &resolved), VMM_OK);
-    CU_ASSERT_EQUAL(resolved, paddr);
-
-    *as_ptr(SCRATCH_A) = PATTERN_A;
-    CU_ASSERT_EQUAL(*as_ptr(paddr), PATTERN_A);
-
-    /* And the mapping goes away again, leaving the page itself untouched. */
-    CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_A), VMM_OK);
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_A, &resolved), VMM_ENOENT);
-    CU_ASSERT_EQUAL(*as_ptr(paddr), PATTERN_A);
-
-    free_page(page);
-}
-
-/* Remapping the same virtual address is how a LibOS moves a window over
- * physical memory; the second mapping must win outright. */
-static void test_remap_replaces_previous(void)
-{
-    void *first  = alloc_page();
-    void *second = alloc_page();
-    CU_ASSERT_PTR_NOT_NULL(first);
-    CU_ASSERT_PTR_NOT_NULL(second);
-    if (first == NULL || second == NULL)
-        return;
-
-    *(volatile uint64_t *)first  = PATTERN_A;
-    *(volatile uint64_t *)second = PATTERN_B;
-
-    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_B, (uint64_t)(uintptr_t)first,
-                                 VMM_MAP_WRITE), VMM_OK);
-    CU_ASSERT_EQUAL(*as_ptr(SCRATCH_B), PATTERN_A);
-
-    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_B, (uint64_t)(uintptr_t)second,
-                                 VMM_MAP_WRITE), VMM_OK);
-    CU_ASSERT_EQUAL(*as_ptr(SCRATCH_B), PATTERN_B);
-
-    CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_B), VMM_OK);
-    free_page(first);
-    free_page(second);
-}
-
-/*
- * Splitting a 2 MiB page: mapping something else over one 4 KiB slice of the
- * identity map must leave the rest of that 2 MiB region exactly as it was.
- *
- * The victim is a page this test owns, and its 2 MiB neighbourhood contains
- * live kernel memory — which is the point.  If the split reproduced the large
- * page incorrectly, the neighbour check below would read garbage, and a kernel
- * whose own identity map has holes in it would not survive to report it.
- */
-static void test_split_preserves_neighbours(void)
-{
-    void *victim    = alloc_page();
-    void *elsewhere = alloc_page();
-    CU_ASSERT_PTR_NOT_NULL(victim);
-    CU_ASSERT_PTR_NOT_NULL(elsewhere);
-    if (victim == NULL || elsewhere == NULL)
-        return;
-
-    uint64_t vaddr = (uint64_t)(uintptr_t)victim;
-
-    /* A witness page in the same 2 MiB region as the victim but not the same
-     * 4 KiB page: the first page of the region, or the second if the victim
-     * happens to be the first.  The split has to reproduce its mapping. */
-    uint64_t region = vaddr & ~0x1FFFFFULL;
-    uint64_t witness = (region == vaddr) ? region + VMM_PAGE_SIZE : region;
-
-    *(volatile uint64_t *)victim    = PATTERN_A;
-    *(volatile uint64_t *)elsewhere = PATTERN_B;
-
-    /* Map `elsewhere` over the victim's own virtual address.  This is only
-     * possible if the 2 MiB page covering both is split first. */
-    CU_ASSERT_EQUAL(vmm_map_page(vaddr, (uint64_t)(uintptr_t)elsewhere,
-                                 VMM_MAP_WRITE), VMM_OK);
-    CU_ASSERT_EQUAL(*as_ptr(vaddr), PATTERN_B);
-
-    /* The witness came out of the same split and must still resolve to
-     * itself; so must every other page of the region, of which it stands in
-     * for 510. */
-    uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(witness, &resolved), VMM_OK);
-    CU_ASSERT_EQUAL(resolved, witness);
-
-    /* Put the identity mapping back before anything else runs — with U/S,
-     * which is what the split reproduced: this file only exists in a TESTING
-     * build, and there boot.s assembles the identity map with RING3_PROBE
-     * (PT_LEAF 0x87).  Restoring without it would hand a supervisor-only page
-     * back to the pool for a later ring-3 allocation to fault on. */
-    CU_ASSERT_EQUAL(vmm_map_page(vaddr, vaddr, VMM_MAP_WRITE | VMM_MAP_USER),
+    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_VA, phys, VMM_PRESENT | VMM_WRITE),
                     VMM_OK);
-    CU_ASSERT_EQUAL(*as_ptr(vaddr), PATTERN_A);
-    CU_ASSERT_EQUAL(*(volatile uint64_t *)elsewhere, PATTERN_B);
 
-    free_page(victim);
-    free_page(elsewhere);
+    uint64_t resolved = 0;
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_VA, &resolved, NULL), VMM_OK);
+    CU_ASSERT_EQUAL(resolved, phys);
+
+    /* Offsets within the page survive translation. */
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_VA + 0x2A0, &resolved, NULL), VMM_OK);
+    CU_ASSERT_EQUAL(resolved, phys + 0x2A0);
+
+    /* Write through the new mapping, read back through the identity one. */
+    volatile uint64_t *via_scratch = (volatile uint64_t *)(uintptr_t)SCRATCH_VA;
+    volatile uint64_t *via_identity = (volatile uint64_t *)(uintptr_t)phys;
+
+    *via_scratch = 0xC0FFEE0DDF00DULL;
+    CU_ASSERT_EQUAL(*via_identity, 0xC0FFEE0DDF00DULL);
+
+    CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_VA), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_VA, NULL, NULL), VMM_ENOENT);
+
+    /* Unmapping does not free the page — the PMM still has it. */
+    CU_ASSERT_EQUAL(page_owner(page), PAGE_OWNER_KERNEL);
+    free_page(page);
 }
 
-/* Both addresses are page numbers, not byte addresses; a caller that means
- * something else has made a mistake the kernel can catch. */
-static void test_map_rejects_unaligned(void)
+/* Remapping the same physical page is idempotent; repointing a live mapping
+ * somewhere else is refused rather than silently honoured. */
+static void test_remap_rules(void)
+{
+    void *a = alloc_page();
+    void *b = alloc_page();
+    CU_ASSERT_PTR_NOT_NULL(a);
+    CU_ASSERT_PTR_NOT_NULL(b);
+    if (a == NULL || b == NULL) return;
+
+    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_VA, (uint64_t)(uintptr_t)a,
+                                 VMM_PRESENT | VMM_WRITE), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_VA, (uint64_t)(uintptr_t)a,
+                                 VMM_PRESENT | VMM_WRITE), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_VA, (uint64_t)(uintptr_t)b,
+                                 VMM_PRESENT | VMM_WRITE), VMM_EEXIST);
+
+    /* After an unmap the address is free to point elsewhere. */
+    CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_VA), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_VA, (uint64_t)(uintptr_t)b,
+                                 VMM_PRESENT | VMM_WRITE), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_VA), VMM_OK);
+
+    free_page(a);
+    free_page(b);
+}
+
+/* Unaligned and non-canonical addresses are rejected, not truncated. */
+static void test_alignment_and_canonical_checks(void)
 {
     void *page = alloc_page();
     CU_ASSERT_PTR_NOT_NULL(page);
-    if (page == NULL)
-        return;
+    if (page == NULL) return;
+    uint64_t phys = (uint64_t)(uintptr_t)page;
 
-    uint64_t paddr = (uint64_t)(uintptr_t)page;
-
-    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_C + 1, paddr, VMM_MAP_WRITE),
+    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_VA + 1, phys, VMM_PRESENT), VMM_EINVAL);
+    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_VA, phys + 8, VMM_PRESENT), VMM_EINVAL);
+    /* Bits 63:48 do not repeat bit 47 — the CPU would fault on this address
+     * before the walk even started. */
+    CU_ASSERT_EQUAL(vmm_map_page(0x0001000000000000ULL, phys, VMM_PRESENT),
                     VMM_EINVAL);
-    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_C, paddr + 1, VMM_MAP_WRITE),
-                    VMM_EINVAL);
-    CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_C + 8), VMM_EINVAL);
-
-    /* Rejected calls must not have built any of the walk on the way down. */
-    uint64_t phys = 0;
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_C, &phys), VMM_ENOENT);
+    CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_VA + 1), VMM_EINVAL);
 
     free_page(page);
 }
 
-/* A non-canonical address has no page table entry to describe it — the first
- * address above the lower canonical half is the boundary case. */
-static void test_map_rejects_noncanonical(void)
+/*
+ * A 2 MiB leaf, then a 4 KiB map inside it.  The split has to preserve the 511
+ * pages it does not touch, which is the property that lets exo_page_map
+ * (SCRUM-153) hand out single pages inside bulk-mapped regions.
+ *
+ * The alias maps kernel physical memory (2 MiB at _load_start, which is
+ * 2 MiB-aligned by the linker script) at a scratch virtual address; nothing
+ * writes through it, and it is torn down page by page at the end.
+ */
+static void test_large_page_split_preserves_neighbours(void)
 {
+    uint64_t phys_2m = (uint64_t)(uintptr_t)_load_start;
+    CU_ASSERT_EQUAL(phys_2m % VMM_LARGE_PAGE_SIZE, 0);
+    if (phys_2m % VMM_LARGE_PAGE_SIZE != 0) return;
+
+    /* Taken before the alias exists: bailing out between the map and the
+     * teardown loop would leave a writable second view of the kernel image
+     * mapped for the rest of the boot. */
     void *page = alloc_page();
     CU_ASSERT_PTR_NOT_NULL(page);
-    if (page == NULL)
-        return;
+    if (page == NULL) return;
 
-    CU_ASSERT_EQUAL(vmm_map_page(EXO_USER_VA_END, (uint64_t)(uintptr_t)page,
-                                 VMM_MAP_WRITE), VMM_EINVAL);
-    CU_ASSERT_EQUAL(vmm_unmap_page(EXO_USER_VA_END), VMM_EINVAL);
+    CU_ASSERT_EQUAL(vmm_map_range(SCRATCH_VA_2M, phys_2m, VMM_LARGE_PAGE_SIZE,
+                                  VMM_PRESENT | VMM_WRITE), VMM_OK);
+
+    /* One PDE covers the whole block: the map cost a table page for the PDPT
+     * and PD, but no page table. */
+    uint64_t resolved = 0;
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_VA_2M + 0x1F0000, &resolved, NULL),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(resolved, phys_2m + 0x1F0000);
+
+    /* Now repoint a single page in the middle of it. */
+    uint64_t odd_va = SCRATCH_VA_2M + 0x8000;
+
+    CU_ASSERT_EQUAL(vmm_unmap_page(odd_va), VMM_OK);   /* splits the leaf */
+    CU_ASSERT_EQUAL(vmm_map_page(odd_va, (uint64_t)(uintptr_t)page,
+                                 VMM_PRESENT | VMM_WRITE), VMM_OK);
+
+    CU_ASSERT_EQUAL(vmm_translate(odd_va, &resolved, NULL), VMM_OK);
+    CU_ASSERT_EQUAL(resolved, (uint64_t)(uintptr_t)page);
+
+    /* Its neighbours still point where the 2 MiB leaf put them. */
+    CU_ASSERT_EQUAL(vmm_translate(odd_va - VMM_PAGE_SIZE, &resolved, NULL),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(resolved, phys_2m + 0x8000 - VMM_PAGE_SIZE);
+    CU_ASSERT_EQUAL(vmm_translate(odd_va + VMM_PAGE_SIZE, &resolved, NULL),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(resolved, phys_2m + 0x8000 + VMM_PAGE_SIZE);
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_VA_2M + 0x1F0000, &resolved, NULL),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(resolved, phys_2m + 0x1F0000);
+
+    /* Tear the alias down again so no test leaves a second view of kernel
+     * memory behind. */
+    for (uint64_t off = 0; off < VMM_LARGE_PAGE_SIZE; off += VMM_PAGE_SIZE) {
+        CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_VA_2M + off), VMM_OK);
+    }
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_VA_2M, NULL, NULL), VMM_ENOENT);
 
     free_page(page);
 }
 
-/* Unmapping what was never mapped is a distinct answer from unmapping
- * something successfully — the syscall layer turns it into -EXO_EINVAL. */
-static void test_unmap_unmapped_is_enoent(void)
+/* vmm_map_range validates the same way vmm_map_page does — it has its own
+ * 2 MiB path that never reaches those checks. */
+static void test_map_range_validates(void)
 {
-    CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_C), VMM_ENOENT);
+    uint64_t phys = (uint64_t)(uintptr_t)_load_start;
+
+    CU_ASSERT_EQUAL(vmm_map_range(SCRATCH_VA + 1, phys, VMM_PAGE_SIZE,
+                                  VMM_PRESENT), VMM_EINVAL);
+    CU_ASSERT_EQUAL(vmm_map_range(SCRATCH_VA, phys + 1, VMM_PAGE_SIZE,
+                                  VMM_PRESENT), VMM_EINVAL);
+    /* Non-canonical, and 2 MiB-aligned so it would take the large-page path. */
+    CU_ASSERT_EQUAL(vmm_map_range(0x0001000040000000ULL, phys,
+                                  VMM_LARGE_PAGE_SIZE, VMM_PRESENT),
+                    VMM_EINVAL);
+}
+
+/* A conflicting 4 KiB map inside a 2 MiB leaf is refused *before* the leaf is
+ * split, so a rejected request costs no page table. */
+static void test_conflicting_map_does_not_split(void)
+{
+    uint64_t phys_2m = (uint64_t)(uintptr_t)_load_start;
+
+    CU_ASSERT_EQUAL(vmm_map_range(SCRATCH_VA_2M, phys_2m, VMM_LARGE_PAGE_SIZE,
+                                  VMM_PRESENT | VMM_WRITE), VMM_OK);
+
+    uint32_t before = vmm_table_pages();
+    /* Points somewhere else than the leaf says: conflict. */
+    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_VA_2M + 0x8000, phys_2m,
+                                 VMM_PRESENT | VMM_WRITE), VMM_EEXIST);
+    CU_ASSERT_EQUAL(vmm_table_pages(), before);
+
+    /* Still a single leaf: the neighbours are untouched. */
+    uint64_t resolved = 0;
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_VA_2M + 0x8000, &resolved, NULL),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(resolved, phys_2m + 0x8000);
+
+    for (uint64_t off = 0; off < VMM_LARGE_PAGE_SIZE; off += VMM_PAGE_SIZE) {
+        CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_VA_2M + off), VMM_OK);
+    }
 }
 
 void suite_vmm_tests(CU_pSuite s)
 {
-    CU_add_test(s, "current_pml4_is_sane",         test_current_pml4_is_sane);
-    CU_add_test(s, "translate_identity_below_4g",  test_translate_is_identity_below_4g);
-    CU_add_test(s, "translate_unmapped_enoent",    test_translate_unmapped_is_enoent);
-    CU_add_test(s, "map_makes_page_reachable",     test_map_makes_page_reachable);
-    CU_add_test(s, "remap_replaces_previous",      test_remap_replaces_previous);
-    CU_add_test(s, "split_preserves_neighbours",   test_split_preserves_neighbours);
-    CU_add_test(s, "map_rejects_unaligned",        test_map_rejects_unaligned);
-    CU_add_test(s, "map_rejects_noncanonical",     test_map_rejects_noncanonical);
-    CU_add_test(s, "unmap_unmapped_enoent",        test_unmap_unmapped_is_enoent);
+    CU_add_test(s, "kernel map is live in CR3", test_kernel_map_is_live);
+    CU_add_test(s, "kernel image is identity mapped",
+                test_kernel_image_identity_mapped);
+    CU_add_test(s, "test build maps user-accessible",
+                test_testing_build_maps_user_accessible);
+    CU_add_test(s, "page 0 is unmapped", test_null_page_unmapped);
+    CU_add_test(s, "unmapped address reports ENOENT",
+                test_unmapped_address_translates_to_enoent);
+    CU_add_test(s, "map/write/unmap round trip", test_map_write_unmap_roundtrip);
+    CU_add_test(s, "remap rules", test_remap_rules);
+    CU_add_test(s, "alignment and canonical checks",
+                test_alignment_and_canonical_checks);
+    CU_add_test(s, "map_range validates its arguments", test_map_range_validates);
+    CU_add_test(s, "conflicting map does not split",
+                test_conflicting_map_does_not_split);
+    CU_add_test(s, "2 MiB split preserves neighbours",
+                test_large_page_split_preserves_neighbours);
 }

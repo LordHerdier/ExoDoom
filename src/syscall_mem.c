@@ -126,9 +126,11 @@ static int in_user_window(uint64_t vaddr)
     return vaddr >= EXO_USER_VA_BASE && vaddr < EXO_USER_VA_END;
 }
 
-/* vmm.c's status codes in the ABI's terms.  VMM_ENOENT ("nothing mapped
- * there") is a bad argument from the caller's point of view, which is what
- * §3.2 #3 promises for it. */
+/* vmm.c's status codes in the ABI's terms (src/vmm.h).  Two of them are
+ * "bad argument" from the caller's point of view rather than kernel failures:
+ * VMM_ENOENT ("nothing mapped there") is what §3.2 #3 promises -EINVAL for,
+ * and VMM_EEXIST is the walker refusing to silently repoint a live mapping —
+ * see sys_page_map for why that is the caller's problem to fix. */
 static int64_t vmm_status_to_errno(int rc)
 {
     switch (rc) {
@@ -140,13 +142,22 @@ static int64_t vmm_status_to_errno(int rc)
 
 /* #2 — map physical page `paddr` at `vaddr` in the caller's address space.
  *   0             mapped
- *   -EXO_EINVAL   vaddr or paddr misaligned, or flags has an unknown bit
- *   -EXO_EPERM    vaddr outside the LibOS window, or the caller owns neither
- *                 the page it is mapping nor the one it would replace
+ *   -EXO_EINVAL   vaddr or paddr misaligned, flags has an unknown bit, or
+ *                 vaddr already resolves to a *different* page (see below)
+ *   -EXO_EPERM    vaddr outside the LibOS window, or the caller does not own
+ *                 the page it is mapping
  *   -EXO_ENOMEM   no physical page left for an intermediate page table
  *
  * Permission is decided before anything is written, so a rejected call leaves
- * the address space exactly as it found it. */
+ * the address space exactly as it found it.
+ *
+ * Note what the walker does *not* allow: repointing a live mapping at a
+ * different physical page in one call is VMM_EEXIST, not a silent replace
+ * (src/vmm.h).  A LibOS moving a window over physical memory therefore has to
+ * exo_page_unmap first — which is the ownership-checked operation, so "map
+ * over it" cannot be used to drop a mapping the caller would not have been
+ * allowed to unmap.  Re-mapping the same page is permitted and updates the
+ * flags. */
 static int64_t sys_page_map(uint64_t vaddr, uint64_t paddr, uint64_t flags,
                             uint64_t a4, uint64_t a5, uint64_t a6)
 {
@@ -163,25 +174,17 @@ static int64_t sys_page_map(uint64_t vaddr, uint64_t paddr, uint64_t flags,
     if (!in_user_window(vaddr))
         return -EXO_EPERM;
 
-    page_owner_t who = syscall_current_context();
-
-    if (!may_map_phys(paddr, who))
-        return -EXO_EPERM;
-
-    /* Replacing an existing mapping is allowed, but only of a page the caller
-     * could have unmapped itself — otherwise "map over it" would be a way
-     * around exo_page_unmap's ownership check. */
-    uint64_t existing;
-    if (vmm_translate(vaddr, &existing) == VMM_OK &&
-        !may_unmap_phys(existing & ~(uint64_t)(VMM_PAGE_SIZE - 1), who))
+    if (!may_map_phys(paddr, syscall_current_context()))
         return -EXO_EPERM;
 
     /* EXO_PAGE_READ is accepted and dropped: a present page is readable on
-     * x86, so there is no bit to set and no way to honour its absence. */
-    uint32_t attrs = 0;
-    if (flags & EXO_PAGE_WRITE) attrs |= VMM_MAP_WRITE;
-    if (flags & EXO_PAGE_USER)  attrs |= VMM_MAP_USER;
-    if (flags & EXO_PAGE_EXEC)  attrs |= VMM_MAP_EXEC;
+     * x86, so there is no bit to set and no way to honour its absence.  So is
+     * EXO_PAGE_EXEC, until EFER.NXE is enabled — see src/vmm.h on why setting
+     * bit 63 before that faults on the walk.  VMM_PRESENT is added by the
+     * walker itself. */
+    uint64_t attrs = 0;
+    if (flags & EXO_PAGE_WRITE) attrs |= VMM_WRITE;
+    if (flags & EXO_PAGE_USER)  attrs |= VMM_USER;
 
     return vmm_status_to_errno(vmm_map_page(vaddr, paddr, attrs));
 }
@@ -206,7 +209,7 @@ static int64_t sys_page_unmap(uint64_t vaddr, uint64_t a2, uint64_t a3,
         return -EXO_EPERM;
 
     uint64_t paddr;
-    if (vmm_translate(vaddr, &paddr) != VMM_OK)
+    if (vmm_translate(vaddr, &paddr, NULL) != VMM_OK)
         return -EXO_EINVAL;
 
     if (!may_unmap_phys(paddr & ~(uint64_t)(VMM_PAGE_SIZE - 1),
