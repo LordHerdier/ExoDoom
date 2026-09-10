@@ -208,11 +208,14 @@ Per-address-space paging is still ahead (see below).
   `docs/syscall_spec.md` §3.3/§3.5 and `may_map_phys()` in
   `src/syscall_mem.c`.
 - **`exo_page_map` restricts the *virtual* address as well as the physical
-  one.** `vaddr` must lie in `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[4 GiB,
+  one.** `vaddr` must lie in `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[64 TiB,
   128 TiB)`, else `-EXO_EPERM`. With one address space, a mapping syscall edits
-  the same page tables the kernel runs on, and everything the kernel needs
-  (image, page tables, PMM pool, MMIO) sits below 4 GiB — so owning a page must
-  not become a licence to install it over kernel text. Mapping over an existing
+  the same page tables the kernel runs on, so owning a page must not become a
+  licence to install it over kernel text. **The base must stay above every
+  physical address the kernel identity-maps** — the map is an identity map, so
+  a window overlapping physical memory lets `exo_page_unmap` unmap kernel RAM;
+  a 4 GiB base did exactly that on an 8 GiB machine. `syscall_mem_init()`
+  checks it at boot. Mapping over an existing
   mapping is allowed only if the caller could have unmapped it, and that check
   refuses only a page that currently belongs to somebody else — a page owned by
   *nobody*, or framebuffer memory the caller has since lost, may still be

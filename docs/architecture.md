@@ -100,9 +100,11 @@ The fourth piece closes the hole the model was written for. `exo_page_map`
 (SCRUM-35, `src/vmm.c` + `src/syscall_mem.c`) lets a LibOS build its own
 address space a page at a time — and refuses any `paddr` it does not own or
 hold the framebuffer binding for, `-EPERM` (SCRUM-153). It also confines the
-`vaddr` to a window above 4 GiB, because until each LibOS has its own page
+`vaddr` to a window above 64 TiB, because until each LibOS has its own page
 tables (SCRUM-48) a mapping call edits the kernel's, and owning a page must not
-become a licence to install it over kernel text. `docs/syscall_spec.md` §3.7.
+become a licence to install it over kernel text. The base is that high because
+the kernel map is an *identity* map: a window below the top of physical memory
+would overlap real kernel mappings. `docs/syscall_spec.md` §3.7.
 
 ```
 ┌──────────────────────────────────────────────────────┐

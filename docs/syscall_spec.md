@@ -604,13 +604,24 @@ own PML4 (SCRUM-48), `exo_page_map` edits the kernel's page tables. Two rules
 make that safe:
 
 - **The LibOS window.** `vaddr` must lie in
-  `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[4 GiB, 128 TiB)`, and anything else
-  is `-EPERM`. Everything the kernel needs — its image, its page tables, the
-  PMM pool, MMIO — is below 4 GiB, so confining LibOS mappings above it means a
-  LibOS cannot install even a page it legitimately owns over kernel text.
-  Ownership answers *which physical page*; the window answers *where*, and both
-  questions have to be asked. The window is 128 TiB wide, so it constrains
-  nothing in practice.
+  `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[64 TiB, 128 TiB)`, and anything
+  else is `-EPERM`. Ownership answers *which physical page*; the window answers
+  *where*, and both questions have to be asked — a LibOS must not be able to
+  install a page it legitimately owns over kernel text.
+
+  **Why the base is 64 TiB and not 4 GiB.** The kernel map is an *identity* map
+  (`vmm_init`, SCRUM-15): every byte of usable RAM is mapped at a virtual
+  address equal to its physical one. A window that begins below the top of
+  physical memory therefore overlaps live kernel mappings. A 4 GiB base looked
+  correct against `boot.s`'s 4 GiB map and was wrong the moment SCRUM-15 began
+  mapping all usable RAM: on an 8 GiB machine, `exo_page_map` in the window hit
+  `VMM_EEXIST` (the address was already taken) and `exo_page_unmap` cheerfully
+  unmapped the kernel's own RAM, because that page is unallocated and so
+  `PAGE_OWNER_FREE`. The base has to be an address physical memory cannot
+  reach; `syscall_mem_init()` checks that against the multiboot map at boot and
+  warns rather than assuming it, and
+  `tests/kernel/test_page_map_k.c:test_window_is_clear_of_kernel_mappings`
+  asserts both the invariant and its observable consequence.
 - **Page tables are kernel-owned.** Intermediate PDPT/PD/PT pages come from
   `alloc_page()`, i.e. `PAGE_OWNER_KERNEL`, so a LibOS cannot hand the page
   describing its own address space back to the PMM with `exo_page_free` and

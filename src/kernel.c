@@ -452,6 +452,15 @@ static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
         else     fb_fill_rect(fb, fb->width - sw - 8, 8, sw, sw, 230, 50, 50);
     }
 
+    /* Say it on serial as well as on screen.  The self-checks are the only
+     * thing that exercises these syscalls on a *normal* boot -- the KUnit suite
+     * runs in a TESTING build with different page tables -- and a verdict that
+     * exists only as pixels cannot be checked by CI, by a script, or by anyone
+     * who is not looking at the screen at the time. */
+    serial_print(all ? "ownership self-check: ENFORCED\n"
+                     : "ownership self-check: BROKEN\n");
+    serial_flush();
+
     log_prefix(con, 0);
     fbcon_write(con, "Resource ownership enforcement: ");
     if (all) {

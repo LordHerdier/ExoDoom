@@ -17,6 +17,7 @@
 #include "page_alloc.h"
 #include "fb_binding.h"
 #include "vmm.h"
+#include "mmap.h"
 
 /* The "another LibOS" whose pages the caller must not be able to reach. */
 #define OTHER_LIBOS ((page_owner_t)(PAGE_OWNER_LIBOS + 1))
@@ -47,6 +48,37 @@ static int64_t do_free(uint64_t paddr)
 }
 
 #define MAP_RW (EXO_PAGE_READ | EXO_PAGE_WRITE | EXO_PAGE_USER)
+
+/*
+ * The window has to be *empty* to be a window.  The kernel map is an identity
+ * map, so a window starting below the top of physical memory overlaps real
+ * kernel mappings: exo_page_map then answers -EXO_EINVAL (the address is
+ * already taken) and exo_page_unmap would unmap the kernel's own RAM.  That is
+ * exactly what a 4 GiB base did on an 8 GiB machine.
+ *
+ * Two assertions, because either alone is weak: no usable RAM region may reach
+ * into the window (the invariant), and nothing may already be mapped at its
+ * base (the observable consequence, which also catches a collision this test
+ * did not think of).
+ */
+static void test_window_is_clear_of_kernel_mappings(void)
+{
+    uint32_t count = 0;
+    const mmap_region_t *regions = mmap_get_regions(&count);
+    uint64_t top = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t end = regions[i].base + regions[i].length;
+        if (end > top)
+            top = end;
+    }
+
+    CU_ASSERT(top <= EXO_USER_VA_BASE);
+
+    uint64_t resolved = 0;
+    CU_ASSERT_EQUAL(vmm_translate(EXO_USER_VA_BASE, &resolved, NULL),
+                    VMM_ENOENT);
+}
 
 /* Without this the rest of the suite would only be re-proving the
  * dispatcher's -EXO_ENOSYS fallback. */
@@ -284,6 +316,8 @@ int page_map_suite_cleanup(void)
 void suite_page_map_tests(CU_pSuite s)
 {
     CU_add_test(s, "handlers are bound",         test_handlers_are_bound);
+    CU_add_test(s, "window is clear of kernel mappings",
+                test_window_is_clear_of_kernel_mappings);
     CU_add_test(s, "map own page round trip",    test_map_own_page_round_trip);
     CU_add_test(s, "foreign page rejected",      test_foreign_page_rejected);
     CU_add_test(s, "kernel page rejected",       test_kernel_page_rejected);
