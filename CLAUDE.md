@@ -176,9 +176,11 @@ paging note below before changing it.
   the same page tables the kernel runs on, and everything the kernel needs
   (image, page tables, PMM pool, MMIO) sits below 4 GiB — so owning a page must
   not become a licence to install it over kernel text. Mapping over an existing
-  mapping is allowed only if the caller could have unmapped it; a page owned by
-  *nobody* may be displaced or unmapped, because dropping a mapping changes an
-  address space rather than a page. `docs/syscall_spec.md` §3.7.
+  mapping is allowed only if the caller could have unmapped it, and that check
+  refuses only a page that currently belongs to somebody else — a page owned by
+  *nobody*, or framebuffer memory the caller has since lost, may still be
+  dropped, because dropping a mapping changes an address space rather than a
+  page. `docs/syscall_spec.md` §3.7.
 - **What the kernel grants, it can take back — and the mark is an ask, not a
   seizure.** `src/revoke.c` is the revocation protocol (SCRUM-156): phase 1
   `revoke_request()` marks the resource in the ownership table, phase 2 is the

@@ -234,6 +234,40 @@ static void test_framebuffer_follows_the_binding(void)
     fb_binding_release(me);
 }
 
+/*
+ * Losing the framebuffer must not leave the LibOS holding an address it can
+ * never clean up.  The kernel repossessing the screen (§3.6) does not walk the
+ * page tables, so the mapping outlives the binding; if unmapping it then
+ * required the binding, that virtual address would be dead space for the rest
+ * of the context's life.
+ */
+static void test_fb_mapping_removable_after_reclaim(void)
+{
+    const fb_geometry_t *geom = fb_binding_geometry();
+    CU_ASSERT_PTR_NOT_NULL(geom);
+    if (geom == NULL)
+        return;
+
+    page_owner_t me = syscall_current_context();
+    uint64_t fb_page = geom->phys_addr & ~(uint64_t)(VMM_PAGE_SIZE - 1);
+
+    CU_ASSERT_EQUAL(fb_binding_acquire(me), FB_BIND_OK);
+    CU_ASSERT_EQUAL(do_map(SCRATCH_2, fb_page, MAP_RW), 0);
+
+    /* The kernel takes the screen back; the mapping is untouched by that. */
+    CU_ASSERT_EQUAL(fb_binding_reclaim(me), FB_REVOKE_OK);
+    CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
+
+    /* Mapping it again is refused — the binding is gone... */
+    CU_ASSERT_EQUAL(do_map(SCRATCH_2, fb_page, MAP_RW), -EXO_EPERM);
+
+    /* ...but letting go of it is not. */
+    CU_ASSERT_EQUAL(do_unmap(SCRATCH_2), 0);
+
+    uint64_t resolved = 0;
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_2, &resolved), VMM_ENOENT);
+}
+
 /* The suite borrows the framebuffer binding and allocates under a second
  * context id; neither may outlive it, or the boot console downstream loses the
  * screen and the revocation demo's page accounting shifts under it. */
@@ -255,4 +289,6 @@ void suite_page_map_tests(CU_pSuite s)
     CU_add_test(s, "vaddr outside window",       test_vaddr_outside_window_rejected);
     CU_add_test(s, "bad arguments rejected",     test_bad_arguments_rejected);
     CU_add_test(s, "framebuffer follows binding", test_framebuffer_follows_the_binding);
+    CU_add_test(s, "fb mapping removable after reclaim",
+                test_fb_mapping_removable_after_reclaim);
 }

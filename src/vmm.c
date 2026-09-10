@@ -27,6 +27,14 @@
  * carried across unexamined. */
 #define PTE_ADDR_MASK  0x000FFFFFFFFFF000ULL
 
+/* A 2 MiB leaf's frame is bits 51:21 — *not* PTE_ADDR_MASK, which reaches down
+ * to bit 12 and would fold the leaf's PAT bit into the address.  The two masks
+ * differ by exactly that bit, which is why splitting one needs both: this for
+ * the frame, PDE_2M_PAT for the cache type. */
+#define PDE_2M_ADDR_MASK 0x000FFFFFFFE00000ULL
+#define PDE_2M_PAT     (1ULL << 12)  /* PAT in a 2 MiB leaf   */
+#define PTE_4K_PAT     (1ULL << 7)   /* PAT in a 4 KiB PTE    */
+
 /* Extent of the boot identity map (boot.s: 4 PDs × 1 GiB).  A page table has
  * to be *reachable* to be edited, and until the kernel maps physical memory
  * somewhere of its own choosing, reachable means "identity-mapped". */
@@ -142,6 +150,16 @@ static uint64_t *alloc_table(uint64_t *phys_out)
     if (page == NULL)
         return NULL;
 
+    /* The same guard table_ptr() applies to an existing table, applied to a
+     * new one before it is written through: a page above the identity map is
+     * not addressable here, and zeroing it would fault instead of failing.
+     * The PMM does not hand out pages that high on the machines this kernel
+     * targets, so this is a bound on a future -m, not a case to handle. */
+    if ((uintptr_t)page >= IDENTITY_LIMIT) {
+        free_page(page);
+        return NULL;
+    }
+
     uint64_t *table = (uint64_t *)page;
     for (int i = 0; i < 512; i++)
         table[i] = 0;
@@ -165,8 +183,16 @@ static int split_2m(uint64_t *pde)
     if (pt == NULL)
         return VMM_ENOMEM;
 
-    uint64_t base  = *pde & PTE_ADDR_MASK;
-    uint64_t flags = *pde & ~(PTE_ADDR_MASK | PTE_PS);
+    uint64_t base  = *pde & PDE_2M_ADDR_MASK;
+    uint64_t flags = *pde & ~(PDE_2M_ADDR_MASK | PDE_2M_PAT | PTE_PS);
+
+    /* PAT moves between bit 12 and bit 7 as the granularity changes, so it is
+     * the one flag that cannot be copied across verbatim.  Dropping it instead
+     * would silently change the cache type of the whole 2 MiB region — which is
+     * how a split of an MMIO mapping would turn uncacheable memory into
+     * write-back and corrupt a device. */
+    if (*pde & PDE_2M_PAT)
+        flags |= PTE_4K_PAT;
 
     for (uint64_t i = 0; i < 512; i++)
         pt[i] = (base + i * VMM_PAGE_SIZE) | flags;
@@ -200,6 +226,15 @@ static int walk_to_pt(uint64_t vaddr, int create, uint32_t attrs,
 
     for (int level = 0; level < 3; level++) {
         uint64_t *entry = &table[index[level]];
+
+        /* A PS entry one level up is a 1 GiB page.  Nothing builds one today —
+         * boot.s maps in 2 MiB pages and this module never sets PS — but the
+         * cost of assuming so is that the walk would take a 1 GiB *data* page
+         * for a page table and write a PTE into the middle of it.  Splitting
+         * one is a feature nobody has asked for; refusing to corrupt memory is
+         * not optional. */
+        if (level == 1 && (*entry & PTE_PRESENT) && (*entry & PTE_PS))
+            return VMM_EINVAL;
 
         /* A 2 MiB page lives at the PD level (level 2 of this loop). */
         if (level == 2 && (*entry & PTE_PRESENT) && (*entry & PTE_PS)) {
@@ -295,9 +330,16 @@ int vmm_translate(uint64_t vaddr, uint64_t *paddr_out)
         if (!(entry & PTE_PRESENT))
             return VMM_ENOENT;
 
-        /* A 2 MiB leaf ends the walk early; the offset is the low 21 bits. */
+        /* A large leaf ends the walk early, with the offset widening to match:
+         * 21 bits for a 2 MiB page at the PD level, 30 for a 1 GiB page one
+         * level up.  Reading one costs two lines; walking into one would be a
+         * wrong answer. */
         if (level == 2 && (entry & PTE_PS)) {
-            *paddr_out = (entry & PTE_ADDR_MASK) | (vaddr & 0x1FFFFF);
+            *paddr_out = (entry & PDE_2M_ADDR_MASK) | (vaddr & 0x1FFFFF);
+            return VMM_OK;
+        }
+        if (level == 1 && (entry & PTE_PS)) {
+            *paddr_out = (entry & 0x000FFFFFC0000000ULL) | (vaddr & 0x3FFFFFFF);
             return VMM_OK;
         }
 

@@ -90,21 +90,33 @@ static int may_map_phys(uint64_t paddr, page_owner_t who)
  * May `who` remove a mapping of physical page `paddr` — either by unmapping it
  * or by mapping something else over it?
  *
- * Looser than may_map_phys() in one case: a page owned by *nobody* may be
- * dropped.  Removing a mapping cannot harm the page's owner (it changes an
- * address space, not a page), and the case is real — a LibOS that frees a page
- * while it is still mapped, which §3.2 #3 permits, would otherwise be unable
- * to clean up the mapping it left behind.  A page that belongs to the kernel
- * or to another context is still refused, because in v1 there is one address
- * space and dropping such a mapping would unmap it out from under its owner.
+ * Deliberately looser than may_map_phys(): what it refuses is a page that
+ * currently belongs to somebody else, not every page the caller may not map.
+ * Removing a mapping changes an address space, not a page, so it cannot harm
+ * whoever owns the page — and two cases make the looser rule necessary rather
+ * than merely defensible:
+ *
+ *   - A page owned by **nobody**.  §3.2 #3 lets a LibOS free a page that is
+ *     still mapped, and it must then be able to clean up the mapping it left
+ *     behind.
+ *   - **Framebuffer memory the caller no longer holds.**  A LibOS that
+ *     acquires the framebuffer, maps it, and then loses the binding — to
+ *     revocation (§3.6) or to its own release — would otherwise be stuck with
+ *     an address it can neither unmap nor reuse, forever.
+ *
+ * Both are the same argument, and both are bounded by the same v1 caveat as
+ * everything else here: with one address space (SCRUM-48) a LibOS that drops a
+ * mapping it did not create is clobbering a peer's window rather than its own.
+ * What it cannot do is take a page away from the kernel or from another
+ * context, which is the guarantee §3.3 actually makes.
  */
 static int may_unmap_phys(uint64_t paddr, page_owner_t who)
 {
-    if (may_map_phys(paddr, who))
+    if (fb_binding_contains(paddr))
         return 1;
 
-    return !fb_binding_contains(paddr) &&
-           page_owner((void *)(uintptr_t)paddr) == PAGE_OWNER_FREE;
+    page_owner_t owner = page_owner((void *)(uintptr_t)paddr);
+    return owner == who || owner == PAGE_OWNER_FREE;
 }
 
 /* Is `vaddr` inside the window a LibOS is allowed to map into?  See

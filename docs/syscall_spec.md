@@ -631,12 +631,19 @@ names.
 allowed — it is how a LibOS moves a window over physical memory — but the page
 being displaced must be one the caller could have unmapped itself, or "map over
 it" would be a way around `exo_page_unmap`'s check. That check is deliberately
-one notch looser than the check on the page being *installed*: a page owned by
-**nobody** may be unmapped or displaced. Dropping a mapping changes an address
-space, not a page, so it cannot hurt the page's owner, and the case is real —
-§3.2 #3 lets a LibOS free a page that is still mapped, and it must then be able
-to clean up the mapping it left behind. A page belonging to the kernel or to
-another context is still refused.
+one notch looser than the check on the page being *installed*: what it refuses
+is a page that currently belongs to somebody else, not every page the caller
+could not map. Dropping a mapping changes an address space, not a page, so it
+cannot hurt the page's owner, and two cases make the looser rule necessary:
+
+- A page owned by **nobody** — §3.2 #3 lets a LibOS free a page that is still
+  mapped, and it must then be able to clean up the mapping it left behind.
+- **Framebuffer memory the caller no longer holds** — a LibOS that acquires the
+  framebuffer, maps it, and then loses the binding (to revocation, §3.6, or to
+  its own release) would otherwise be stuck with an address it can neither
+  unmap nor reuse for the rest of its life.
+
+A page belonging to the kernel or to another context is still refused.
 
 **What is deliberately not done yet.**
 
@@ -652,6 +659,18 @@ another context is still refused.
   they would share the window and could unmap each other's mappings of unowned
   pages. SCRUM-48 makes `vmm.c`'s implicit "current PML4" a parameter, at which
   point the window becomes a per-context policy rather than a global one.
+- **The kernel does not know where a context mapped anything.** Nothing records
+  a context's mappings, so nothing can tear them down: `exo_page_free` leaves a
+  live PTE pointing at a page the PMM may hand to somebody else, and
+  repossessing the framebuffer (§3.6) clears the binding while the old holder's
+  mapping keeps writing to the screen. Both need per-context address-space
+  tracking, which arrives with SCRUM-48; neither is reachable before a LibOS
+  runs in ring 3 (SCRUM-47).
+- **No quota on page tables.** Every level `vmm.c` allocates is a
+  `PAGE_OWNER_KERNEL` page that no sweep reclaims, and a caller can walk the
+  128 TiB window installing one mapping per 2 MiB to consume them without
+  bound. Harmless while the only caller is the kernel itself; a per-context
+  quota is required before ring 3 can reach it.
 - **No page fault handler.** A LibOS that touches an address it never mapped
   faults into the `error_stub` from SCRUM-135 rather than into a diagnostic.
   SCRUM-17 is what turns "unmapped access faults cleanly" from true-by-halt

@@ -379,8 +379,11 @@ static int run_page_map_demo(fb_console_t *con) {
     int64_t r_foreign = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, scratch,
                                              (uint64_t)(uintptr_t)theirs,
                                              EXO_PAGE_WRITE, 0, 0, 0);
+    // The NULL check is what makes this a test of foreign-page rejection: on
+    // an exhausted pool `theirs` is 0, page_owner(0) answers PAGE_OWNER_FREE,
+    // and the -EPERM below would be earned by an unowned address instead.
     all &= ownership_check(con, "  foreign page not mappable (EPERM)      ",
-                           r_foreign == -EXO_EPERM);
+                           theirs != NULL && r_foreign == -EXO_EPERM);
     (void)free_page_owned(theirs, DEMO_OTHER_LIBOS);
 
     // 3. Nor is the kernel's own memory, however the caller came by the

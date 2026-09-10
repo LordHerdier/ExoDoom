@@ -167,8 +167,13 @@ static void test_split_preserves_neighbours(void)
     CU_ASSERT_EQUAL(vmm_translate(witness, &resolved), VMM_OK);
     CU_ASSERT_EQUAL(resolved, witness);
 
-    /* Put the identity mapping back before anything else runs. */
-    CU_ASSERT_EQUAL(vmm_map_page(vaddr, vaddr, VMM_MAP_WRITE), VMM_OK);
+    /* Put the identity mapping back before anything else runs — with U/S,
+     * which is what the split reproduced: this file only exists in a TESTING
+     * build, and there boot.s assembles the identity map with RING3_PROBE
+     * (PT_LEAF 0x87).  Restoring without it would hand a supervisor-only page
+     * back to the pool for a later ring-3 allocation to fault on. */
+    CU_ASSERT_EQUAL(vmm_map_page(vaddr, vaddr, VMM_MAP_WRITE | VMM_MAP_USER),
+                    VMM_OK);
     CU_ASSERT_EQUAL(*as_ptr(vaddr), PATTERN_A);
     CU_ASSERT_EQUAL(*(volatile uint64_t *)elsewhere, PATTERN_B);
 
