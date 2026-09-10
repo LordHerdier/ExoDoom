@@ -24,6 +24,7 @@ Derived from static analysis of
    - [3.4 Entry path](#34-entry-path-scrum-32)
    - [3.5 Framebuffer binding](#35-framebuffer-binding-scrum-154)
    - [3.6 Revocation & repossession](#36-revocation--repossession-scrum-156)
+   - [3.7 Address-space mapping](#37-address-space-mapping-scrum-35)
 4. [Architectural decision: file I/O strategy](#4-architectural-decision-file-io-strategy)
 5. [Memory allocation pattern](#5-memory-allocation-pattern)
 6. [Sound architecture](#6-sound-architecture)
@@ -258,8 +259,8 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | -- | ----------------------------------- | ----------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 0  | `exo_page_alloc()`                  | Memory      | ✅     | Allocate one 4K physical page. Returns physical address, or `-ENOMEM`. Bound to the dispatcher (SCRUM-34).                                                                        |
 | 1  | `exo_page_free(paddr)`              | Memory      | ✅     | Free a physical page. Bound to the dispatcher (SCRUM-34); currently `0` or `-EINVAL`. **Ownership-checked (§3.3)** — will return `-EPERM` unless the caller owns `paddr` once the page ownership table (SCRUM-152) lands.                  |
-| 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ⬜     | Map physical page at virtual address in caller's page directory. `flags`: `EXO_PAGE_READ`/`WRITE`/`USER`/`EXEC`. `EXEC` is defined now, while the flag word is still unpublished, so that non-executable data mappings are expressible once `EFER.NXE` is enabled — adding it later would mean renumbering. `READ` is not representable on x86 (present implies readable) and is accepted but ignored. **Ownership-checked (§3.3):** `paddr` must be owned by the caller (or be the framebuffer the caller has acquired); mapping kernel-owned or another LibOS's pages returns `-EPERM`. Returns `0` or `-EINVAL`/`-EFAULT`/`-EPERM`. Sprint 2 (SCRUM-15, -16), enforcement SCRUM-153.                                                                                                                       |
-| 3  | `exo_page_unmap(vaddr)`             | Memory      | ⬜     | Unmap a virtual page. Only unmaps a mapping the caller owns. Returns `0` or `-EINVAL`/`-EPERM`. Sprint 2 (enforcement SCRUM-153).                                                                                                                                              |
+| 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ✅     | Map physical page at virtual address in caller's address space. `flags`: `EXO_PAGE_READ`/`WRITE`/`USER`/`EXEC`. `EXEC` is accepted and ignored until `EFER.NXE` is enabled; `READ` is not representable on x86 (present implies readable) and is accepted and ignored. **Ownership-checked (§3.3):** `paddr` must be owned by the caller (or be the framebuffer the caller has acquired), and `vaddr` must lie in the LibOS window `[EXO_USER_VA_BASE, EXO_USER_VA_END)` — §3.7. Returns `0`, `-EINVAL` (misaligned address, unknown flag bit), `-EPERM` (window or ownership) or `-ENOMEM` (no page for an intermediate page table). Implemented in SCRUM-35 (`src/syscall_mem.c`, `src/vmm.c`), enforcement SCRUM-153. |
+| 3  | `exo_page_unmap(vaddr)`             | Memory      | ✅     | Unmap a virtual page; the physical page stays allocated (`exo_page_free` returns it). Only unmaps a mapping of a page the caller owns, holds the FB binding for, or that belongs to nobody — §3.7. Returns `0`, `-EINVAL` (misaligned, or nothing mapped there), `-EPERM` or `-ENOMEM`. Implemented in SCRUM-35, enforcement SCRUM-153. |
 | 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ✅     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct and **record the caller as the framebuffer owner (secure binding, §3.3, §3.5)**. LibOS then calls `exo_page_map` to map it — that map requires FB ownership. Released on `exo_exit`. Used by `DG_Init`. Returns `0` (including a re-acquire by the current owner), `-EBUSY` if another LibOS holds the FB, `-EFAULT` for an unusable `info_out`, or `-ENODEV` on a machine the bootloader gave no framebuffer. Implemented in SCRUM-154 (`src/syscall_fb.c`, `src/fb_binding.c`); the LibOS-side mapping of the returned range still waits on SCRUM-16/-35. |
 | 5  | `exo_get_ticks()`                   | Timer       | ✅     | Return `uint32_t` milliseconds since boot. Zero arguments. Used by `DG_GetTicksMs` and `DG_SleepMs`. Kernel-side PIT + `kernel_get_ticks_ms()` done (SCRUM-9, -10).                                                                                                            |
 | 6  | `exo_kbd_poll(event_out)`           | Input       | 🔄     | Dequeue next keyboard event into `event_out` struct `{uint8_t pressed; uint8_t key; uint8_t modifiers; uint8_t reserved}`. `key` is a decoded `ps2_key_t` index (`KEY_A`, `KEY_ESC`, …), not a raw PS/2 scancode — the kernel's scancode decoder runs before the event is queued. `modifiers` is the `EXO_MOD_*` shift/ctrl/alt mask sampled when the event was queued, so a chord decodes correctly even if the modifier is released before the LibOS polls — Doom binds shift (run), ctrl (fire) and alt (strafe). Returns `1` if event available, `0` if empty. Prerequisite: IRQ1 handler (SCRUM-13, In Progress) + scancode table (SCRUM-14, In Progress). Ring buffer planned Sprint 2 (SCRUM-18). |
@@ -586,6 +587,94 @@ is trivial on purpose:
 **No locking**, for the same reason as §3.5, and with a sharper caveat: under
 preemption the lock has to span the whole mark-then-reclaim sequence, not each
 half, or a resource can change hands between the two.
+
+---
+
+### 3.7 Address-space mapping (SCRUM-35)
+
+§3.3 says a LibOS may only map pages it owns. This section is how the mapping
+itself works — the half of `exo_page_map` that is mechanism rather than policy.
+Implemented in `src/vmm.c` (the walker) and `src/syscall_mem.c` (the rule),
+tested in `tests/kernel/test_vmm_k.c` and `tests/kernel/test_page_map_k.c`.
+
+**What the LibOS is actually editing.** `boot.s` builds one 4 GiB identity map
+out of 2 MiB pages and enables paging (SCRUM-15). There is exactly one address
+space, and it is the one the kernel is running in: until each LibOS gets its
+own PML4 (SCRUM-48), `exo_page_map` edits the kernel's page tables. Two rules
+make that safe:
+
+- **The LibOS window.** `vaddr` must lie in
+  `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[4 GiB, 128 TiB)`, and anything else
+  is `-EPERM`. Everything the kernel needs — its image, its page tables, the
+  PMM pool, MMIO — is below 4 GiB, so confining LibOS mappings above it means a
+  LibOS cannot install even a page it legitimately owns over kernel text.
+  Ownership answers *which physical page*; the window answers *where*, and both
+  questions have to be asked. The window is 128 TiB wide, so it constrains
+  nothing in practice.
+- **Page tables are kernel-owned.** Intermediate PDPT/PD/PT pages come from
+  `alloc_page()`, i.e. `PAGE_OWNER_KERNEL`, so a LibOS cannot hand the page
+  describing its own address space back to the PMM with `exo_page_free` and
+  then watch the kernel write into a page somebody else now owns.
+
+**Splitting 2 MiB pages.** A mapping request is 4 KiB granular and the boot map
+is not, so a `vaddr` covered by a 2 MiB page is handled by first replacing that
+page with a 512-entry PT reproducing it exactly — same physical range, same
+flags — and only then editing the one entry. The other 511 mappings survive
+untouched, which is what lets the kernel keep running while its own identity
+map is being edited under it. A split allocates, which is why even
+`exo_page_unmap` can answer `-ENOMEM`. TLB maintenance follows the same shape:
+`invlpg` for an ordinary change, a full CR3 reload after a split, because the
+stale entry there is a 2 MiB translation rather than the single page `invlpg`
+names.
+
+**Replacing and removing a mapping.** Mapping over an existing mapping is
+allowed — it is how a LibOS moves a window over physical memory — but the page
+being displaced must be one the caller could have unmapped itself, or "map over
+it" would be a way around `exo_page_unmap`'s check. That check is deliberately
+one notch looser than the check on the page being *installed*: what it refuses
+is a page that currently belongs to somebody else, not every page the caller
+could not map. Dropping a mapping changes an address space, not a page, so it
+cannot hurt the page's owner, and two cases make the looser rule necessary:
+
+- A page owned by **nobody** — §3.2 #3 lets a LibOS free a page that is still
+  mapped, and it must then be able to clean up the mapping it left behind.
+- **Framebuffer memory the caller no longer holds** — a LibOS that acquires the
+  framebuffer, maps it, and then loses the binding (to revocation, §3.6, or to
+  its own release) would otherwise be stuck with an address it can neither
+  unmap nor reuse for the rest of its life.
+
+A page belonging to the kernel or to another context is still refused.
+
+**What is deliberately not done yet.**
+
+- **No NX.** `EFER.NXE` is not enabled, so every mapping is executable and
+  `EXO_PAGE_EXEC` is accepted and ignored. The flag exists in the ABI now so
+  that enabling NXE later is a kernel change rather than a renumbering.
+- **No page-table reclamation.** An intermediate table that becomes empty is
+  kept. Walking a table on every unmap to discover it is empty costs more than
+  the page is worth at v1 scale; the bound is one PT per 2 MiB of address space
+  a LibOS has ever touched.
+- **No per-LibOS address space.** With one PML4, the window is what separates a
+  LibOS from the kernel, and nothing separates two LibOSes from each other:
+  they would share the window and could unmap each other's mappings of unowned
+  pages. SCRUM-48 makes `vmm.c`'s implicit "current PML4" a parameter, at which
+  point the window becomes a per-context policy rather than a global one.
+- **The kernel does not know where a context mapped anything.** Nothing records
+  a context's mappings, so nothing can tear them down: `exo_page_free` leaves a
+  live PTE pointing at a page the PMM may hand to somebody else, and
+  repossessing the framebuffer (§3.6) clears the binding while the old holder's
+  mapping keeps writing to the screen. Both need per-context address-space
+  tracking, which arrives with SCRUM-48; neither is reachable before a LibOS
+  runs in ring 3 (SCRUM-47).
+- **No quota on page tables.** Every level `vmm.c` allocates is a
+  `PAGE_OWNER_KERNEL` page that no sweep reclaims, and a caller can walk the
+  128 TiB window installing one mapping per 2 MiB to consume them without
+  bound. Harmless while the only caller is the kernel itself; a per-context
+  quota is required before ring 3 can reach it.
+- **No page fault handler.** A LibOS that touches an address it never mapped
+  faults into the `error_stub` from SCRUM-135 rather than into a diagnostic.
+  SCRUM-17 is what turns "unmapped access faults cleanly" from true-by-halt
+  into true-by-report.
 
 ---
 

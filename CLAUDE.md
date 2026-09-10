@@ -139,11 +139,12 @@ Per-address-space paging is still ahead (see below).
   usable RAM, the multiboot info and the framebuffer aperture. Virtual ==
   physical everywhere, so no translation is ever surprising, but **page 0 is
   deliberately unmapped** as a NULL guard. `vmm_map_page`/`vmm_unmap_page`/
-  `vmm_translate` are the primitives SCRUM-16/-48/-153 build on; a 4 KiB map
-  inside a 2 MB leaf splits it automatically. What does *not* exist yet: a
-  page-fault handler (so any fault is still fatal), per-LibOS address spaces,
-  and the `exo_page_map`/`exo_page_unmap` syscalls. Read `docs/memory.md` §7
-  and `docs/architecture.md` §5.1/§6 before implementing anything in that space.
+  `vmm_translate` are the primitives SCRUM-16/-48 build on and what
+  `exo_page_map`/`exo_page_unmap` (SCRUM-35) are implemented in terms of; a
+  4 KiB map inside a 2 MB leaf splits it automatically. What does *not* exist
+  yet: a page-fault handler (so any fault is still fatal) and per-LibOS address
+  spaces. Read `docs/memory.md` §7, `docs/syscall_spec.md` §3.7 and
+  `docs/architecture.md` §5.1/§6 before implementing anything in that space.
 - **`vmm.c` mirrors boot.s's ring-3 U/S gate.** Test builds map the identity
   range user-accessible (`#ifdef TESTING`), because `vmm_init()` runs before
   `run_tests()` and the ring-3 probe executes against the kernel map. Change one
@@ -172,12 +173,13 @@ Per-address-space paging is still ahead (see below).
   (`src/serial.c`, mapped to QEMU stdio via `-serial mon:stdio`). Test framework
   output and all kernel diagnostics go through it; `serial_flush()` must be
   called before `qemu_exit()` or buffered bytes are lost.
-- **Syscall entry works; three handlers are bound.** The `syscall`/`sysret`
+- **Syscall entry works; five handlers are bound.** The `syscall`/`sysret`
   path is implemented (SCRUM-32): `syscall_init()` in `src/syscall.c` programs
   `EFER.SCE`/`STAR`/`LSTAR`/`FMASK`, `src/syscall_entry.s` is the entry stub,
   and `exo_syscall_dispatch` routes on the number. Bound today:
-  `exo_page_alloc` (#0) and `exo_page_free` (#1) in `src/syscall_mem.c`
-  (SCRUM-34), and `exo_fb_acquire` (#4) in `src/syscall_fb.c` (SCRUM-154).
+  `exo_page_alloc` (#0), `exo_page_free` (#1), `exo_page_map` (#2) and
+  `exo_page_unmap` (#3) in `src/syscall_mem.c` (SCRUM-34, SCRUM-35), and
+  `exo_fb_acquire` (#4) in `src/syscall_fb.c` (SCRUM-154).
   **Every other number still returns `-EXO_ENOSYS`**; binding one is
   `exo_syscall_register(EXO_SYS_*, handler)` from an `*_init()` called in
   `kernel_main` ahead of the `TESTING` branch, so the handler exists for both a
@@ -195,12 +197,27 @@ Per-address-space paging is still ahead (see below).
   `src/page_alloc.c`, and the framebuffer has its own binding table in
   `src/fb_binding.c` — it needs one because MMIO lies outside the RAM the page
   allocator manages, so `page_owner()` cannot speak for it. `exo_page_free`
-  returns `-EXO_EPERM` for a page the caller does not own (SCRUM-152) and
+  returns `-EXO_EPERM` for a page the caller does not own (SCRUM-152),
   `exo_fb_acquire` binds the framebuffer to one context, `-EXO_EBUSY` to
-  anyone else (SCRUM-154). **When you implement `exo_page_map` (SCRUM-35/-153),
-  it must ask `fb_binding_check_map()` first and only fall through to
-  `page_owner()` when that answers `FB_MAP_NOT_FB`** — see
-  `docs/syscall_spec.md` §3.3/§3.5.
+  anyone else (SCRUM-154), and `exo_page_map`/`exo_page_unmap` refuse any
+  `paddr` the caller neither owns nor holds the framebuffer binding for
+  (SCRUM-153). **Any check on a physical page must ask `fb_binding_check_map()`
+  first and only fall through to `page_owner()` when that answers
+  `FB_MAP_NOT_FB`** — MMIO is invisible to the PMM, so the generic check alone
+  would wave through exactly the memory the binding protects. See
+  `docs/syscall_spec.md` §3.3/§3.5 and `may_map_phys()` in
+  `src/syscall_mem.c`.
+- **`exo_page_map` restricts the *virtual* address as well as the physical
+  one.** `vaddr` must lie in `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[4 GiB,
+  128 TiB)`, else `-EXO_EPERM`. With one address space, a mapping syscall edits
+  the same page tables the kernel runs on, and everything the kernel needs
+  (image, page tables, PMM pool, MMIO) sits below 4 GiB — so owning a page must
+  not become a licence to install it over kernel text. Mapping over an existing
+  mapping is allowed only if the caller could have unmapped it, and that check
+  refuses only a page that currently belongs to somebody else — a page owned by
+  *nobody*, or framebuffer memory the caller has since lost, may still be
+  dropped, because dropping a mapping changes an address space rather than a
+  page. `docs/syscall_spec.md` §3.7.
 - **What the kernel grants, it can take back — and the mark is an ask, not a
   seizure.** `src/revoke.c` is the revocation protocol (SCRUM-156): phase 1
   `revoke_request()` marks the resource in the ownership table, phase 2 is the
