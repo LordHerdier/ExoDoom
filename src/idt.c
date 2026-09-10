@@ -24,6 +24,7 @@ static struct idt_ptr idtp;
 extern void idt_load(struct idt_ptr *);
 extern void default_stub(void);
 extern void error_stub(void);
+extern void pf_stub(void);
 
 /* Vectors that push a hardware error code (SCRUM-135). default_stub's bare
  * iretq cannot handle these safely — error_stub must be installed instead. */
@@ -38,6 +39,12 @@ void idt_init() {
 
     for (unsigned i = 0; i < sizeof(error_code_vectors) / sizeof(error_code_vectors[0]); i++)
         idt_set_gate(error_code_vectors[i], (uintptr_t)error_stub);
+
+    /* Vector 14 gets a real handler rather than the absorb-and-return stub
+     * (SCRUM-17).  error_stub returns to the faulting instruction, which
+     * faults again immediately -- fine as a "don't triple-fault" measure, no
+     * use as a diagnostic.  Installed after the loop above so it wins. */
+    idt_set_gate(14, (uintptr_t)pf_stub);
 
     idt_load(&idtp);
 }

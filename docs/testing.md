@@ -145,8 +145,14 @@ TESTS FAILED: 1 test(s) failed
 
 | Setting | Value |
 |---------|-------|
-| `KUNIT_MAX_SUITES` | 16 |
+| `KUNIT_MAX_SUITES` | 32 |
 | `KUNIT_MAX_TESTS_PER_SUITE` | 64 |
 | `KUNIT_NAME_LEN` | 64 bytes |
 
 These can be increased in `src/kunit.h` if needed.
+
+⚠️ **Exceeding them fails silently.** `CU_add_suite` returns `NULL` at the
+ceiling, `CU_add_test(NULL, ...)` quietly does nothing, and the run still ends
+in `ALL TESTS PASSED` — with an entire suite missing from the output. If a
+suite you registered does not appear in the serial log, check the count here
+before debugging anything else.

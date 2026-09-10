@@ -132,3 +132,81 @@ error_stub:
     POP_REGS
     add  $8, %rsp        // discard the CPU-pushed error code
     iretq
+
+/*
+ * ── PUSH_ALL_REGS / POP_ALL_REGS ───────────────────────────────────────────
+ *
+ * PUSH_REGS above saves only the caller-saved registers, which is all an IRQ
+ * handler needs.  A fault diagnostic wants the whole register file, and it
+ * wants it laid out as a struct the C handler can read: the push order here
+ * is the reverse of exception_frame_t's field order in src/fault.h, so that
+ * after the pushes %rsp points at the `r15` field and the fields ascend from
+ * there into the CPU-pushed error code and iretq frame.
+ *
+ * Change one and change the other.
+ */
+.macro PUSH_ALL_REGS
+    push %rax
+    push %rbx
+    push %rcx
+    push %rdx
+    push %rsi
+    push %rdi
+    push %rbp
+    push %r8
+    push %r9
+    push %r10
+    push %r11
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+.endm
+
+.macro POP_ALL_REGS
+    pop  %r15
+    pop  %r14
+    pop  %r13
+    pop  %r12
+    pop  %r11
+    pop  %r10
+    pop  %r9
+    pop  %r8
+    pop  %rbp
+    pop  %rdi
+    pop  %rsi
+    pop  %rdx
+    pop  %rcx
+    pop  %rbx
+    pop  %rax
+.endm
+
+/*
+ * ── pf_stub — page fault, vector 14 (SCRUM-17) ─────────────────────────────
+ *
+ * Installed on vector 14 by idt_init(), overriding the error_stub that
+ * idt_init() puts on the other nine error-code vectors.  error_stub discards
+ * the error code and returns to the faulting instruction, which faults again
+ * immediately; this one hands the frame to C, which reports and halts.
+ *
+ * `mov %rsp, %rdi` must come *before* ALIGN_CALL_STACK: that macro pushes
+ * %rbp, which would otherwise sit between %rsp and the frame we are passing.
+ * It does not touch %rdi, so the pointer stays valid across the alignment.
+ *
+ * The POP_ALL_REGS / `add $8, %rsp` / iretq tail is only reached when a
+ * TESTING hook asks the handler to resume (see fault.h); on a real fault the
+ * handler never returns.  It is still written correctly so that the resume
+ * path restores the exact interrupted context.
+ */
+.global pf_stub
+.extern page_fault_handler
+
+pf_stub:
+    PUSH_ALL_REGS
+    mov  %rsp, %rdi
+    ALIGN_CALL_STACK
+    call page_fault_handler
+    RESTORE_CALL_STACK
+    POP_ALL_REGS
+    add  $8, %rsp        // discard the CPU-pushed error code
+    iretq

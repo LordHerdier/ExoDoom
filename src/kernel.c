@@ -504,6 +504,18 @@ void kernel_main(void *mb2_info_ptr) {
 
     // ── Memory subsystem ────────────────────────────────────────────────
     memory_init();
+
+    // ── IDT (SCRUM-17) ──────────────────────────────────────────────────
+    // As early as serial allows, and well ahead of the TESTING branch.  The
+    // point is the vector-14 handler: everything below this line -- the PMM,
+    // the page tables, the syscall init, the test suite itself -- gets a
+    // serial diagnostic on a page fault instead of a silent loop back into
+    // the faulting instruction.
+    //
+    // Safe this early: interrupt gates clear IF, the PIC is still masked as
+    // the BIOS left it, and nothing calls `sti` until after pic_remap() far
+    // below, so no hardware IRQ can arrive on a not-yet-remapped vector.
+    idt_init();
     // ── Page allocator (SCRUM-7) ───────────────────────────────────────
     page_alloc_init(mb);
 
@@ -630,7 +642,9 @@ void kernel_main(void *mb2_info_ptr) {
     fbcon_write(&con, "\n");
 
     // ── IDT / PIC / PIT / PS2 ─────────────────────────────────────���────
-    idt_init();
+    // The IDT is already loaded -- idt_init() runs far above, ahead of the
+    // TESTING branch, so a fault anywhere in early boot lands in the page
+    // fault handler rather than looping (SCRUM-17).
     klog(&con, 0, "IDT initialized (256 entries)");
 
     pic_remap();

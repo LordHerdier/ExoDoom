@@ -25,6 +25,7 @@ void suite_fb_binding_tests(CU_pSuite s);
 void suite_vmm_tests(CU_pSuite s);
 void suite_revoke_tests(CU_pSuite s);
 void suite_page_map_tests(CU_pSuite s);
+void suite_fault_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -39,6 +40,11 @@ int revoke_suite_cleanup(void);
 /* The page-map suite borrows the framebuffer binding and a second context id
  * to prove what they refuse; it must leave neither behind (SCRUM-35). */
 int page_map_suite_cleanup(void);
+
+/* The fault suite installs a TESTING-only page-fault hook; leaving one
+ * installed would make a later genuine fault resume into a stale label
+ * instead of reporting (SCRUM-17). */
+int fault_suite_cleanup(void);
 
 int run_tests(void)
 {
@@ -91,6 +97,9 @@ int run_tests(void)
 
     s = CU_add_suite("page_map", NULL, page_map_suite_cleanup);
     suite_page_map_tests(s);
+
+    s = CU_add_suite("fault", NULL, fault_suite_cleanup);
+    suite_fault_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

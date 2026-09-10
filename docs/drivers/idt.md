@@ -1,8 +1,8 @@
 # Driver: IDT, ISR, and Interrupt Handling
 
 **Files:** `src/idt.c`, `src/idt.h`, `src/isr.s`, `src/io.h` **Status:** ✅
-Partial — basic IDT wired, dedicated handlers in progress **Last updated:** 20
-Apr 2026
+Partial — basic IDT wired, page fault handled, other exceptions absorbed
+**Last updated:** 10 Sep 2026
 
 ---
 
@@ -103,8 +103,13 @@ bytes total.
 
 ## 4. Initialisation
 
-`idt_init()` is called from `kernel_main` after `memory_init()` and before
-`pic_remap()`:
+`idt_init()` is called from `kernel_main` immediately after `memory_init()` —
+early, and **above the `TESTING` branch** (SCRUM-17). Everything below that
+line, the PMM and page-table construction and the test suite included, then
+gets a serial diagnostic on a page fault instead of a silent loop. It is safe
+this early: interrupt gates clear `IF`, the PIC is still masked as the BIOS
+left it, and nothing calls `sti` until long after `pic_remap()`, so no hardware
+IRQ can arrive on a not-yet-remapped vector.
 
 ```c
 void idt_init(void) {
@@ -114,6 +119,12 @@ void idt_init(void) {
     // Fill all 256 entries with default_stub
     for (int i = 0; i < IDT_ENTRIES; i++)
         idt_set_gate(i, (uintptr_t)default_stub);
+
+    // ...then the error-code vectors, and finally vector 14, which wins
+    for (unsigned i = 0; i < N_ERROR_CODE_VECTORS; i++)
+        idt_set_gate(error_code_vectors[i], (uintptr_t)error_stub);
+
+    idt_set_gate(14, (uintptr_t)pf_stub);
 
     idt_load(&idtp);
 }
@@ -161,8 +172,9 @@ default_stub:
 
 Installed on all 256 IDT entries during `idt_init`. Silently returns from any
 unhandled interrupt or exception — correct for non-error-code vectors. The 10
-error-code vectors (see §7) are overridden with `error_stub` after the fill
-loop, so `default_stub` never actually runs on those.
+error-code vectors (see §7) are overridden after the fill loop — nine with
+`error_stub`, vector 14 with `pf_stub` — so `default_stub` never actually runs
+on those.
 
 ### Register save/restore macros
 
@@ -266,13 +278,64 @@ error_stub:
     iretq
 ```
 
-Installed on the 10 error-code vectors (8, 10, 11, 12, 13, 14, 17, 21, 29, 30
-— see §7) by `idt_init`. There is no dedicated C fault handler yet, so the
-stub does not call into C; it just discards the CPU-pushed error code so
-`iretq` doesn't misread it as the return `RIP`, and returns. This closes
-SCRUM-135: previously `default_stub` was installed on these vectors and any
-one of them firing (most likely vector 13/GPF or 14/page fault) triple-faulted
-the machine with no diagnostic.
+Installed on nine of the ten error-code vectors (8, 10, 11, 12, 13, 17, 21,
+29, 30 — see §7) by `idt_init`; vector 14 gets `pf_stub` instead (below). It
+discards the CPU-pushed error code so `iretq` doesn't misread it as the return
+`RIP`, and returns. This closes SCRUM-135: previously `default_stub` was
+installed on these vectors and any one of them firing (most likely vector
+13/GPF or 14/page fault) triple-faulted the machine with no diagnostic.
+
+Note what "returns" means here: `error_stub` resumes **at the faulting
+instruction**, which for a fault (rather than a trap) faults again
+immediately. That is a silent infinite loop, not a recovery — acceptable as a
+"don't triple-fault" measure for vectors that should never fire, and precisely
+why vector 14 needed a real handler (SCRUM-17).
+
+### `PUSH_ALL_REGS` / `POP_ALL_REGS`
+
+`PUSH_REGS` saves only the caller-saved registers, which is all an IRQ handler
+needs. A fault diagnostic wants the whole register file, laid out so a C
+handler can read it as a struct. `PUSH_ALL_REGS` pushes all 15 GPRs in the
+reverse of `exception_frame_t`'s field order (`src/fault.h`), so after the
+pushes `%rsp` points at the `r15` field and the fields ascend from there into
+the CPU-pushed error code and the `iretq` frame:
+
+```c
+typedef struct {
+    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
+    uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
+    uint64_t error_code;                    // pushed by the CPU
+    uint64_t rip, cs, rflags, rsp, ss;      // the iretq frame
+} exception_frame_t;
+```
+
+Change one and change the other — see §10.
+
+### `pf_stub`
+
+```asm
+.global pf_stub
+.extern page_fault_handler
+
+pf_stub:
+    PUSH_ALL_REGS
+    mov  %rsp, %rdi        // frame pointer — before ALIGN_CALL_STACK
+    ALIGN_CALL_STACK
+    call page_fault_handler
+    RESTORE_CALL_STACK
+    POP_ALL_REGS
+    add  $8, %rsp          // discard the CPU-pushed error code
+    iretq
+```
+
+Installed on vector 14 by `idt_init`, after the `error_stub` fill loop so it
+wins (SCRUM-17). `mov %rsp, %rdi` must precede `ALIGN_CALL_STACK`: that macro
+pushes `%rbp`, which would otherwise sit between `%rsp` and the frame being
+passed. It leaves `%rdi` alone, so the pointer survives the alignment.
+
+The tail after `call` is only reached when a `TESTING` hook asks the handler to
+resume (see §9 and `src/fault.h`); on a real fault `page_fault_handler` halts
+and never returns.
 
 ---
 
@@ -365,27 +428,30 @@ misalign the stack, and triple-fault.
 > ✅ **Resolved (SCRUM-135):** `default_stub` used to be installed on all of
 > these vectors, so any one of them firing — most likely vector 13 (GPF) or
 > vector 14 (page fault) — would immediately triple-fault the machine.
-> `error_stub` is now installed on vectors 8, 10, 11, 12, 13, 14, 17, 21, 29,
-> and 30 in `idt_init` and safely discards the error code before `iretq` (see
-> §5). It is still a minimal absorb-and-return stub — no diagnostic output —
-> since there is no dedicated C fault handler yet; that's tracked separately
-> as Sprint 2 paging work.
+> `error_stub` is now installed on vectors 8, 10, 11, 12, 13, 17, 21, 29 and 30
+> in `idt_init` and safely discards the error code before `iretq` (see §5).
 
-More useful eventually would be a handler that prints diagnostic information
-before halting, particularly for vectors 13 and 14:
+> ✅ **Resolved (SCRUM-17):** vector 14 no longer absorbs its fault silently.
+> `pf_stub` → `page_fault_handler` (`src/fault.c`) prints CR2, the decoded
+> error code, the faulting `RIP`, `CS:RSP`, `RFLAGS` and what the live page
+> tables say about the address, then halts. Sample output:
+>
+> ```
+> === PAGE FAULT (#PF, vector 14) ===
+>   cr2:       0x0000400000005000
+>   error:     0x0000000000000002  (not-present write supervisor)
+>   rip:       0x0000000000202BC1
+>   cs:rsp:    0x0000000000000008:0x0000000000222F10
+>   rflags:    0x0000000000010087
+>   mapping:   none (no present entry along the walk)
+>   context:   ring 0 (kernel) -- fatal
+> === halted ===
+> ```
 
-```asm
-.global gpf_stub
-.extern gpf_handler
-
-gpf_stub:
-    PUSH_REGS
-    mov %rsp, %rdi          // pass stack frame pointer as first arg
-    call gpf_handler
-    POP_REGS
-    add $8, %rsp            // pop error code
-    iretq
-```
+Vector 13 (GPF) still uses `error_stub` and would benefit from the same
+treatment — `exception_frame_t`, `ALIGN_CALL_STACK` and the decode helpers all
+generalise; only the error-code decoding differs (a GPF pushes a segment
+selector index, not the `P/W/U/RSVD/I-D` bitfield). See §9.
 
 ---
 
@@ -423,16 +489,60 @@ Assembly function. Loads the IDT register from the 10-byte struct at `ptr`
 
 | Vector                    | Exception                | Handler status                                       |
 | ------------------------- | ------------------------- | ---------------------------------------------------- |
-| 8, 10–14, 17, 21, 29, 30  | Error-code exceptions     | ✅ `error_stub` (absorb + discard; SCRUM-135)         |
+| 8, 10–13, 17, 21, 29, 30  | Error-code exceptions     | ✅ `error_stub` (absorb + discard; SCRUM-135)         |
 | 13                        | General Protection Fault | Planned: serial diagnostic + halt                    |
-| 14                        | Page Fault               | Planned: print CR2, error code, faulting RIP; halt   |
+| 14                        | Page Fault               | ✅ `pf_stub` → `page_fault_handler` (SCRUM-17)        |
 | 32                        | IRQ0 / Timer             | ✅ `irq0_stub` → `irq0_handler`                      |
 | 33                        | IRQ1 / Keyboard          | ✅ `irq1_stub` → `irq1_handler`                      |
 | 44                        | IRQ12 / Mouse            | ⬜ Sprint 2 (SCRUM-19)                                |
 
 ---
 
+### The `TESTING` resume hook
+
+`src/fault.h` exposes, under `-DTESTING` only:
+
+```c
+typedef int (*fault_hook_t)(exception_frame_t *f, uint64_t cr2);
+void fault_set_hook(fault_hook_t h);
+```
+
+The handler calls the hook before printing anything; a nonzero return makes it
+return instead of halting, so a test can fault deliberately and resume by
+pointing `f->rip` somewhere safe. That is how `tests/kernel/test_fault_k.c`
+proves the frame layout and the error-code bits from a real fault rather than a
+simulation. A shipped kernel has no such hook, and no policy for resuming from
+a page fault — that arrives with per-LibOS address spaces (SCRUM-47/48), where
+a ring-3 fault terminates the LibOS instead of the machine.
+
+---
+
 ## 10. Design decisions and gotchas
+
+**`exception_frame_t` and `PUSH_ALL_REGS` are one definition in two places.**
+The C struct in `src/fault.h` describes the exact bytes `pf_stub` pushes; the
+assembler cannot check that for you. Reorder either without the other and the
+handler reads registers from the wrong offsets — a wrong `rip` and a wrong
+error code, with no compile-time complaint. `tests/kernel/test_fault_k.c`
+asserts the saved `RIP` equals the known address of the faulting instruction,
+which is what catches this.
+
+**A fault fixup label cannot be a C label.** The first version of the fault
+test took `&&label` and had the handler resume there. At `-O2` GCC only anchors
+a label whose address is taken if a computed `goto` *in the same function*
+targets it; with the jump living in the handler, GCC folded the label onto the
+function prologue, so every "resume" restarted the test function and faulted
+again — 24 bytes of stack leaked per iteration until `iretq` took a #GP and the
+machine triple-faulted. The faulting accesses and their resume points now live
+in `tests/kernel/fault_probe.s`, where both addresses are fixed at assembly
+time.
+
+**No IST stack for vector 14.** The handler runs on whatever stack was live at
+the fault. If that stack is itself corrupt or unmapped, the handler faults and
+the machine double-faults into `error_stub`. A dedicated IST stack needs a TSS,
+which is SCRUM-46; until then the recursion guard in `page_fault_handler`
+covers the common case (a fault raised while reporting a fault) but not a bad
+stack pointer.
 
 **Hardcoded selector `0x08` instead of reading `%cs`.** The previous i386
 version read `%cs` at runtime because GRUB's GDT was used directly. In the

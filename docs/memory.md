@@ -418,10 +418,10 @@ Available to alloc: ~62,064  (~242 MiB)
 
 ## 7. Phase 4 — Virtual memory and paging
 
-**Files:** `src/vmm.c`, `src/vmm.h` **Status:** ✅ Done (SCRUM-15 — kernel page
-tables; SCRUM-35 — `exo_page_map`/`exo_page_unmap` on top of them); SCRUM-16
-(per-region permissions, WAD read-only) and SCRUM-17 (page fault handler) still
-to do
+**Files:** `src/vmm.c`, `src/vmm.h`, `src/fault.c`, `src/fault.h`
+**Status:** ✅ Done (SCRUM-15 — kernel page tables; SCRUM-35 —
+`exo_page_map`/`exo_page_unmap` on top of them; SCRUM-17 — page fault handler);
+SCRUM-16 (per-region permissions, WAD read-only) still to do
 
 ### Overview
 
@@ -515,9 +515,10 @@ What it maps, all identity (virtual == physical), in this order:
 Two deliberate omissions:
 
 - **Page 0 is left unmapped.** A NULL dereference faults instead of silently
-  reading the interrupt vector table. Until SCRUM-17 lands a page-fault handler
-  that fault is fatal, which is still better than corrupting BIOS structures
-  far from the bug.
+  reading the interrupt vector table. That fault is still fatal — SCRUM-17
+  turned it into a reported halt (CR2, error code, faulting RIP) rather than a
+  silent loop, but there is nothing to recover *to* until a LibOS exists to
+  terminate.
 - **No `NX`.** Bit 63 is reserved while `EFER.NXE` is clear and faults the
   walk. Enabling NXE and marking non-text mappings NX belongs with the
   per-section permissions in SCRUM-16.
@@ -580,13 +581,12 @@ multiboot info and the framebuffer all translate correctly **before** writing
 missing mapping surfaces as a serial diagnostic rather than a triple fault with
 nothing on the wire.
 
-### Still to come (SCRUM-16, SCRUM-17, SCRUM-48)
+### Still to come (SCRUM-16, SCRUM-48)
 
 1. Per-section kernel permissions: `.text` read-execute, `.rodata` read-only,
    everything else NX (needs `EFER.NXE`).
 2. The WAD module mapped read-only.
-3. A page-fault handler (below).
-4. Per-LibOS address spaces: a second PML4 with the kernel half shared.
+3. Per-LibOS address spaces: a second PML4 with the kernel half shared.
 
 ### Exokernel syscalls
 
@@ -628,19 +628,43 @@ user-accessible) so that syscall entry doesn't require a separate PML4 switch.
 The LibOS's own code, heap, and stack live in the lower virtual address range.
 The full 64-bit virtual address space provides ample room for separation.
 
-### Page fault handler (SCRUM-17)
+### Page fault handler (SCRUM-17) ✅
 
-Vector 14 (page fault) must be handled before paging refinement begins. On a
-fault, the CPU pushes an error code and the faulting address is in `CR2`. The
-handler should:
+Vector 14 is handled by `pf_stub` (`src/isr.s`) → `page_fault_handler()`
+(`src/fault.c`). The stub saves all 15 GPRs in the layout `exception_frame_t`
+describes, hands the frame to C, and the handler reports to COM1 and halts:
 
-1. Print the faulting virtual address (`CR2`), error code, and `RIP` to serial.
-2. Determine if it is a kernel fault (fatal — halt) or a LibOS fault (terminate
-   the LibOS, log the fault).
+```
+=== PAGE FAULT (#PF, vector 14) ===
+  cr2:       0x0000400000005000
+  error:     0x0000000000000002  (not-present write supervisor)
+  rip:       0x0000000000202BC1
+  cs:rsp:    0x0000000000000008:0x0000000000222F10
+  rflags:    0x0000000000010087
+  mapping:   none (no present entry along the walk)
+  context:   ring 0 (kernel) -- fatal
+=== halted ===
+```
 
-> ⚠️ **Open issue:** The current `default_stub` in `isr.s` does a bare `iretq`
-> and cannot handle error-code-pushing exceptions (SCRUM-135). A dedicated
-> `error_stub` must be installed on vector 14 before paging refinement begins.
+Three things are worth knowing about it:
+
+- **The `mapping:` line walks the live tables** via `vmm_translate()`. That is
+  what separates "faulted at X" from "faulted at X, which is unmapped" and from
+  "…which is mapped, but supervisor-only" — the distinction that decides
+  whether a future ring-3 fault is a missing mapping or a protection failure
+  (SCRUM-48/55/56).
+- **`idt_init()` now runs early**, right after `memory_init()` and above the
+  `TESTING` branch, so a fault during `page_alloc_init()`, `vmm_init()` or the
+  test suite is reported rather than looped on.
+- **Both rings halt today.** The handler classifies the fault by the saved
+  `CS`'s CPL and says which, but there is no LibOS to terminate yet
+  (SCRUM-47). When there is, the ring-3 arm terminates it and reclaims its
+  resources through `revoke_all()` instead of taking the machine down.
+
+Not covered: there is no IST stack for vector 14 (that needs the TSS, SCRUM-46),
+so a fault taken on a corrupt stack still double-faults. The handler's
+recursion guard catches the ordinary case — a fault raised while reporting a
+fault — but cannot rescue a bad `RSP`.
 
 ---
 
