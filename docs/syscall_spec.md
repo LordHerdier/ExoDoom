@@ -23,6 +23,7 @@ Derived from static analysis of
    - [3.3 Secure binding & resource ownership](#33-secure-binding--resource-ownership)
    - [3.4 Entry path](#34-entry-path-scrum-32)
    - [3.5 Framebuffer binding](#35-framebuffer-binding-scrum-154)
+   - [3.6 Revocation & repossession](#36-revocation--repossession-scrum-156)
 4. [Architectural decision: file I/O strategy](#4-architectural-decision-file-io-strategy)
 5. [Memory allocation pattern](#5-memory-allocation-pattern)
 6. [Sound architecture](#6-sound-architecture)
@@ -313,10 +314,14 @@ resource:
   its pages, releases the framebuffer, closes its files (SCRUM-155).
 
 **Revocation.** The kernel additionally reserves the right to *revoke* a
-granted resource (the exokernel "repossession" model). For the single-app v1
-demo the policy is trivial (revocation happens only via `exo_exit`), but the
-mechanism and its ownership-table bookkeeping exist so multi-LibOS scheduling
-(§7 / epic SCRUM-147) can reclaim resources from a running LibOS (SCRUM-156).
+granted resource — the exokernel "repossession" model, and the half of the
+bargain that makes generous grants safe: the kernel never has to refuse a
+request out of fear that it can never get the resource back. The mechanism and
+its ownership-table bookkeeping are in place (SCRUM-156, `src/revoke.c`); for
+the single-app v1 demo the *policy* is trivial — nothing asks for a resource
+back on the boot path, and reclamation happens only when a context exits. §3.6
+is the design note: the full protocol, what exists today, and what SCRUM-147
+adds.
 
 **Testing.** `tests/kernel/test_ownership_k.c` asserts a context cannot
 map/free a page it does not own and that framebuffer acquisition is mutually
@@ -446,15 +451,141 @@ through `exo_page_map`.
 
 **Reclaim.** `fb_binding_release(who)` drops the binding if `who` holds it and
 is a no-op otherwise, so reclamation can call it unconditionally for a context
-that may never have acquired. This is the hook SCRUM-155's `exo_exit` calls
-when tearing a context down, and the mechanism half of the revocation model
-(SCRUM-156). Until SCRUM-155 binds `#20`, nothing calls it on the boot path: a
-LibOS that exits without releasing keeps the binding for the rest of the boot.
+that may never have acquired. It is the *voluntary* return in §3.6's protocol;
+the kernel-driven form is `fb_binding_reclaim(who)`, which does the same thing
+and reports whether there was anything to take. `revoke_all()` (`src/revoke.h`)
+is what SCRUM-155's `exo_exit` calls to reclaim the framebuffer alongside the
+context's pages. Until SCRUM-155 binds `#20`, nothing calls it on the boot
+path: a LibOS that exits without releasing keeps the binding for the rest of
+the boot.
 
 **No locking.** Syscalls run with `IF` cleared by `IA32_FMASK` (§3.4) and the
 entry path is single-threaded, so the read-modify-write in
 `fb_binding_acquire()` cannot be interleaved. Preemptive multi-LibOS
 scheduling (SCRUM-147) invalidates that assumption and will need a lock here.
+
+### 3.6 Revocation & repossession (SCRUM-156)
+
+§3.3 states that the kernel may take a granted resource back. This section is
+the design note for how — the protocol in full, what of it exists today, and
+what the multi-LibOS work still has to add. Implemented in `src/revoke.c` (the
+protocol), `src/page_alloc.c` and `src/fb_binding.c` (the per-resource
+mechanisms), and tested in `tests/kernel/test_revoke_k.c`.
+
+**Why an exokernel needs this.** Secure binding answers "may this LibOS touch
+this resource?". Revocation answers the question that makes binding *safe to
+be generous with*: having granted a resource, can the kernel get it back? Aegis
+calls this **repossession**, and without it every grant is permanent, so the
+kernel has to hedge — hand out less than it could, or refuse a request it
+cannot later undo. With it, the kernel can give a LibOS everything that is idle
+and take back what it needs later. That is the property SCRUM-147's scheduler
+depends on: two LibOSes cannot share one framebuffer and one pool of pages
+unless the kernel can move a resource from one to the other.
+
+**The protocol.** Three phases, deliberately in this order — the kernel asks
+before it takes, because a LibOS that gets to choose *when* it gives a page
+back can flush the state it holds there first:
+
+| Phase | Call | What it does |
+| --- | --- | --- |
+| 1. Request | `revoke_request(who, res)` | Marks the resource in the ownership table. Nothing else changes: the owner keeps it and keeps using it. |
+| 2. Comply | the LibOS's own `exo_page_free`, or releasing the framebuffer | The ordinary return path. The mark disappears with the binding. |
+| 3. Force | `revoke_force(who, res)`, or `revoke_all(who)` | The kernel takes what was not returned. |
+
+A request can also be taken back — `revoke_withdraw(who, res)` — for the case
+where the demand that prompted it is satisfied elsewhere. A mark that outlives
+its reason turns the next sweep into a seizure nobody asked for.
+
+**The mark is an ask, not a seizure.** This is the property everything else
+rests on, and both mechanisms enforce it:
+
+- A marked page keeps its owner. `page_owner()` still names the context,
+  `free_page_owned()` still lets that context (and only that context) free it,
+  and SCRUM-153's `exo_page_map` will still map it.
+- A marked framebuffer binding is still held. `fb_binding_check_map()` still
+  answers `FB_MAP_ALLOW` for its owner, so a LibOS asked for the screen can
+  finish the frame it is drawing before handing it over.
+
+If the mark revoked permission the moment it landed, phase 2 would be
+unimplementable — there would be nothing left for the LibOS to return.
+
+**Where the mark lives.** In the ownership table, per §3.3's rule that the
+table is the single source of truth about who holds what:
+
+- **Pages** — the top bit of the 16-bit owner tag (`PAGE_OWNER_REVOKED`,
+  `0x8000`); the low 15 bits still name the owner, leaving 32,766 context ids
+  for SCRUM-147. Keeping it *in* the tag is what makes compliance free:
+  `free_page_owned()` resets the tag to `PAGE_OWNER_FREE`, clearing owner and
+  mark in one store, so a LibOS that returns a marked page leaves nothing to
+  reconcile. Every ownership comparison in `page_alloc.c` masks the bit off
+  first — a raw tag compare would read a page under revocation as belonging to
+  nobody, and answer `-EPERM` to its own owner.
+- **Framebuffer** — a flag beside the single binding in `src/fb_binding.c`,
+  cleared by release, reclaim and re-publication. There is one binding to
+  describe, so a flag reads better than a masked id at every comparison.
+
+**Forced reclamation is scoped to the context it names.** `revoke_force(who,
+res)` and `revoke_all(who)` take a resource only if `who` still holds it. When
+the context no longer does — it complied, or the resource has since been
+granted to somebody else — the call returns `REVOKE_RETURNED` and touches
+nothing. Without that scoping, "revoke" would be a syscall-free way to free a
+peer's memory, which is the exact hole §3.3 exists to close.
+
+**Neither sentinel id is a revocable context.** `PAGE_OWNER_KERNEL` and
+`PAGE_OWNER_FREE` are refused by *every* page entry point — `page_revoke_mark`,
+`page_revoke_clear` and `page_reclaim` through their shared
+`owned_page_index()`, and `page_reclaim_all` through its own guard. The refusal
+has to come *before* the ownership compare, because each id would otherwise
+pass it: `FREE` matches the tag of every free page, and `KERNEL` matches every
+reserved one. A single-resource path that skipped this would let
+`page_reclaim(kp, PAGE_OWNER_KERNEL)` hand the page bitmap, the owner table or
+the kernel image back to the pool and leave the kernel's own `free_page()` to
+double-free it — a sweep guard alone is not enough when the force path can name
+the same id one page at a time.
+
+**The repossession record.** `revoke_record()` returns the running counts —
+asked, withdrawn, forced, returned, pages reclaimed, framebuffers reclaimed.
+It is Aegis's repossession vector reduced to what a single-LibOS kernel can act
+on: the evidence for whether asking is working, which is the input a real
+revocation *policy* needs. Machine-wide today because there is one LibOS;
+SCRUM-147 makes it a field of the context structure.
+
+`returned` is the count to read with care. It means "the force step found
+nothing to take", which under the protocol is the LibOS having complied — but
+it also counts a force whose target had since moved to another context, or one
+that named a context which never held the resource. After the fact those are
+indistinguishable from the ownership table alone, because a satisfied request
+leaves no trace by design (§ the mark clearing with the tag). Good enough as
+evidence that asking is working; a policy that acted on the number would first
+need per-request state to tell the cases apart.
+
+**What exists today, and what does not.** The mechanism is complete; the policy
+is trivial on purpose:
+
+- Nothing on the boot path asks for a resource back. The self-check in
+  `kernel_main` walks the whole protocol on a scratch page and the framebuffer,
+  which is why it appears in the boot log at all.
+- `exo_exit` (`#20`) is not bound yet — that is SCRUM-155, and `revoke_all()`
+  is the hook it calls. Until then a LibOS that exits keeps its pages and the
+  screen for the rest of the boot.
+- **There is no upcall.** Phase 1 marks the resource but cannot *tell* the
+  LibOS, because there is no path from the kernel into LibOS code yet. That is
+  where Aegis posts to the LibOS's repossession handler, and it is the piece
+  SCRUM-147 must add before phase 2 can happen for any reason other than a
+  LibOS coincidentally freeing the page. Until then, request-then-force is a
+  well-defined sequence with a zero-length wait in the middle.
+- **No deadline.** A real protocol gives the LibOS a bounded time to comply
+  before the kernel forces the issue. With no upcall there is nothing to time,
+  so the deadline arrives with the upcall.
+- **One ABA window.** A context that returns a marked page and immediately
+  allocates the same frame again gets a fresh, unmarked tag — but a
+  `revoke_force` still in flight for that address would find the context
+  holding it and take it. Harmless in v1, where force only runs from a context
+  that is exiting; SCRUM-147 closes it by generation-stamping the tag.
+
+**No locking**, for the same reason as §3.5, and with a sharper caveat: under
+preemption the lock has to span the whole mark-then-reclaim sequence, not each
+half, or a resource can change hands between the two.
 
 ---
 

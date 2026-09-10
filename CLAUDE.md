@@ -124,6 +124,7 @@ Per-address-space paging is still ahead (see below).
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
 | Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h` |
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer) |
+| Resource revocation (repossession) | `src/revoke.c/h` (protocol), the `page_revoke_*`/`fb_binding_revoke_*` primitives |
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
 | Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h` |
 | Vendored Doom engine (not yet linked) | `src/doom/` |
@@ -199,9 +200,24 @@ Per-address-space paging is still ahead (see below).
   anyone else (SCRUM-154). **When you implement `exo_page_map` (SCRUM-35/-153),
   it must ask `fb_binding_check_map()` first and only fall through to
   `page_owner()` when that answers `FB_MAP_NOT_FB`** — see
-  `docs/syscall_spec.md` §3.3/§3.5. `fb_binding_release()` is the hook
-  SCRUM-155's `exo_exit` reclamation calls; nothing calls it yet, so a LibOS
-  that exits keeps the framebuffer for the rest of the boot.
+  `docs/syscall_spec.md` §3.3/§3.5.
+- **What the kernel grants, it can take back — and the mark is an ask, not a
+  seizure.** `src/revoke.c` is the revocation protocol (SCRUM-156): phase 1
+  `revoke_request()` marks the resource in the ownership table, phase 2 is the
+  LibOS returning it the ordinary way, phase 3 `revoke_force()`/`revoke_all()`
+  takes what was not returned. A marked page **keeps its owner and stays fully
+  usable** — the mark is the top bit of the `page_owner_t` tag
+  (`PAGE_OWNER_REVOKED`), so **every ownership comparison in `page_alloc.c`
+  must mask it off** (`owner_id()`); a raw tag compare answers `-EPERM` to the
+  page's own owner and makes compliance impossible. Forced reclamation is
+  scoped to the context it names — it returns `REVOKE_RETURNED`, never taking
+  anything, if that context no longer holds the resource — and `revoke_all()`
+  refuses `PAGE_OWNER_KERNEL`/`PAGE_OWNER_FREE` outright. `revoke_all()` is the
+  hook SCRUM-155's `exo_exit` calls; nothing calls it on the boot path yet, so
+  a LibOS that exits keeps its pages and the framebuffer for the rest of the
+  boot. There is **no upcall to the LibOS** and no compliance deadline — phase
+  1 cannot yet tell anyone it happened, which is SCRUM-147's job. Full design
+  note: `docs/syscall_spec.md` §3.6.
 - **The GDT in `src/boot.s` has a layout `sysret` forces, not one we chose** —
   kernel code/data at `0x08`/`0x10`, then user code32 (`0x18`, a placeholder
   long mode never loads), user data (`0x20`), user code64 (`0x28`). `sysretq`

@@ -69,9 +69,10 @@ syscalls establish, enforce, and reclaim those bindings, rejecting any
 cross-owner access with `-EPERM`. This is the exokernel's "secure binding"
 mechanism: the kernel protects a resource without managing how the LibOS uses
 it. The kernel also reserves the right to *revoke* a granted resource
-(repossession), which matters once more than one LibOS runs. The full rule set
-lives in `docs/syscall_spec.md` §3.3; the work is tracked under epic SCRUM-151
-(Resource Protection & Secure Binding).
+(repossession) — the half of the bargain that makes generous grants safe, since
+the kernel never has to refuse a request it could not later undo. The full rule
+set lives in `docs/syscall_spec.md` §3.3, the revocation protocol in §3.6; the
+work is tracked under epic SCRUM-151 (Resource Protection & Secure Binding).
 
 Two pieces of this mechanism have landed. The PMM carries a per-page owner tag
 (`page_owner_t` in `src/page_alloc.c`), `exo_page_alloc` stamps the calling
@@ -81,9 +82,20 @@ does not own (SCRUM-152). The framebuffer is bound the same way
 time (`-EBUSY` to anyone else), and `fb_binding_check_map` is the gate that
 makes mapping its physical pages require that binding. Framebuffer pages need
 their own table because MMIO lies outside the RAM the page allocator manages,
-so the per-page tags cannot speak for them. Page-map/unmap enforcement
-(SCRUM-153) and ownership-driven reclamation on `exo_exit` (SCRUM-155) — which
-calls `fb_binding_release()` — extend the same model.
+so the per-page tags cannot speak for them.
+
+Revocation is the third piece (`src/revoke.c`, SCRUM-156): a kernel-internal
+`revoke(context, resource)` path that marks a resource in the ownership table
+("I want this back"), lets the owner return it the ordinary way, and takes it
+if the owner does not. The mark changes nothing else — a marked page keeps its
+owner and stays mappable — because a request the LibOS cannot answer is not a
+request. Forced reclamation is scoped to the context it names, so it can never
+free a peer's page, and `revoke_all(context)` sweeps everything one context
+holds. The policy on top is deliberately trivial for the single-app demo:
+nothing asks for a resource back on the boot path, and `revoke_all()` is the
+hook `exo_exit` reclamation (SCRUM-155) will call. Page-map/unmap enforcement
+(SCRUM-153) extends the same model; the full protocol, and what multi-LibOS
+scheduling still has to add to it, is `docs/syscall_spec.md` §3.6.
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -406,8 +418,10 @@ returned range into its own address space via `exo_page_map`, which consults
 (SCRUM-153). `DG_DrawFrame` will blit the 640×400 RGBA8888 `DG_ScreenBuffer`
 into this region (with format conversion, since Doom produces RGBA and the
 hardware is BGRX). One consequence still to handle: while a LibOS holds the
-framebuffer, the kernel's own `fb_console` must stop drawing to it — that is
-the revocation story (SCRUM-156). **Sprint 12:** Framebuffer multiplexing so
+framebuffer, the kernel's own `fb_console` must stop drawing to it. The
+revocation mechanism that makes handing the screen back and forth possible
+landed with SCRUM-156 (`fb_binding_reclaim`, `revoke_all`, spec §3.6); what is
+left is the policy that decides when the console yields. **Sprint 12:** Framebuffer multiplexing so
 multiple LibOS apps each get a virtual framebuffer and the kernel manages which
 is displayed.
 
