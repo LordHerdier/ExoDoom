@@ -13,6 +13,9 @@ static uint32_t total_pages = 0;
 static uint8_t* bitmap = NULL;
 /* Parallel to `bitmap`, same indexing: owners[i] tags page i (SCRUM-152). */
 static page_owner_t* owners = NULL;
+/* Set once page_alloc_init() has finished — including its own kmalloc calls,
+ * which is why this is not simply `bitmap != NULL`. */
+static int pmm_live = 0;
 
 
 static void bitmap_set(uint32_t index) {
@@ -122,6 +125,7 @@ void page_alloc_init(const struct mb2_info* mb) {
                 serial_print("page_alloc: modules reserved\n");
             }
             serial_print("page_alloc: initialized\n");
+            pmm_live = 1;
             return;
         }
     }
@@ -218,6 +222,10 @@ int free_page_checked(void* addr) {
 
 void free_page(void* addr) {
     (void)free_page_checked(addr);
+}
+
+int page_alloc_is_live(void) {
+    return pmm_live;
 }
 
 /* ---- Revocation / repossession (SCRUM-156) -------------------------------

@@ -28,15 +28,26 @@ make docker-run                # Build, then boot the ISO in QEMU (GRUB menu)
 make docker-run-kernel         # Build, then boot the kernel directly (no GRUB) -- preferred for dev iteration
 make docker-test               # Build with TESTING=1, boot, stream serial test output
 make docker-ci                 # Same as docker-test; what CI runs
+make docker-build-doom         # Best-effort compile pass over vendored src/doom/ (NOT part of CI)
 make docker-build DEBUG=1      # Unoptimized build (-g -O0) for GDB
 make docker-run-debug DEBUG=1  # Boot QEMU frozen at start, GDB stub on port 1234
 make clean                     # rm -rf build
 ```
 
 - `docker/scripts/build.sh` runs inside the build container: assembles
-  `boot.s`, compiles every `src/*.c`, assembles `isr.s`, links via
-  `src/linker.ld` (`-nostdlib -lgcc`), validates the multiboot2 header with
+  `boot.s` (with its own flags), **verifies the identity map's U/S protection
+  matches the build type** (step 1b — see the RING3_PROBE note below), compiles
+  every `src/*.c` with `-DEXO_KERNEL`, assembles every other `src/*.s`, links
+  via `src/linker.ld` (`-nostdlib -lgcc`), validates the multiboot2 header with
   `grub-file`, then builds `build/exodoom.iso` with `grub-mkrescue`.
+- Adding a `src/*.c` or `src/*.s` needs **no build-script change** — both are
+  globbed. `src/doom/` is deliberately *not* globbed; see the vendoring note
+  below.
+- `-DEXO_KERNEL` is passed on the command line, not per-file, so it is
+  guaranteed to precede every transitive include of `src/exo_syscall.h`. It
+  selects the kernel view (numbers, shared structs, error codes) over the LibOS
+  view (user-side `syscall` stubs). Test TUs get it too; the one that needs the
+  LibOS view (`tests/kernel/test_exo_syscall_k.c`) `#undef`s it first.
 - Test sources in `tests/kernel/*.c` are picked up **automatically** by
   `build.sh` when `TESTING=1` — no Makefile/build-script changes needed to add
   a test file.
@@ -79,22 +90,34 @@ framebuffer) → `_start` in `src/boot.s` (sets up a 16 KiB stack, pushes
 `mb_info_addr`) → `kernel_main` in `src/kernel.c`:
 
 ```
-serial_init() -> mmap_init(mb) -> memory_init()
-  [if -DTESTING]  run_tests() -> qemu_exit(pass/fail)
-  [normal boot]   idt_init() -> pic_remap() -> wire IRQ0/IRQ1 gates
-                  -> pit_init(1000) -> sti -> (fb/console init, WIP)
+serial_init() -> framebuffer tag discovery (serial diagnostics only)
+  -> mmap_init(mb) -> memory_init() -> page_alloc_init(mb) -> vmm_init(mb, fb)
+  -> syscall_init() -> syscall_mem_init() -> syscall_fb_init(fb)
+  [if -DTESTING]  serial_flush() -> qemu_exit(run_tests())
+  [normal boot]   fb_init_bgrx8888() + fbcon_init()  (halts if absent)
+                  -> banner/mmap dump -> ownership self-check -> idt_init()
+                  -> pic_remap() -> idt_set_gate(32, irq0_stub) -> pit_init(1000)
+                  -> idt_set_gate(33, irq1_stub) -> kbd_init()
+                  -> sti -> `sti; hlt` idle loop
 ```
 
-The kernel links at virtual/physical `2M` (`src/linker.ld`), so pre-paging
-there is no virtual/physical distinction — this simplifies everything until
-Sprint 2 paging work lands.
+**Anything the ring-3 tests need must be initialised before the `TESTING`
+branch** — that branch exits QEMU and never returns, so `page_alloc_init`,
+`vmm_init` and the syscall `*_init()`s sit above it deliberately (the ring-3
+probe runs against the page tables `vmm_init` installs). The framebuffer, IDT,
+PIC, PIT and keyboard are all below it and do **not** exist during tests.
+
+The kernel links at virtual/physical `2M` (`src/linker.ld`) and both the boot
+map and the kernel map are identity maps, so virtual == physical throughout.
+Per-address-space paging is still ahead (see below).
 
 ### Subsystem map
 
 | Concern | Files |
 |---|---|
-| Boot / entry | `src/boot.s`, `src/linker.ld`, `src/multiboot.h`, `src/grub.cfg` |
-| Memory (mmap parse, bump allocator) | `src/mmap.c/h`, `src/memory.c/h` |
+| Boot / entry | `src/boot.s`, `src/linker.ld`, `src/multiboot2.h`, `src/grub.cfg` |
+| Memory (mmap parse, bump allocator, bitmap PMM) | `src/mmap.c/h`, `src/memory.c/h`, `src/page_alloc.c/h` |
+| Virtual memory (kernel page tables, map/unmap/translate) | `src/vmm.c/h` |
 | Interrupts (IDT/PIC/ISR) | `src/idt.c/h`, `src/pic.c/h`, `src/isr.s`, `src/io.h` |
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
@@ -102,25 +125,49 @@ Sprint 2 paging work lands.
 | Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h` |
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer) |
 | Resource revocation (repossession) | `src/revoke.c/h` (protocol), the `page_revoke_*`/`fb_binding_revoke_*` primitives |
-| Keyboard (PS/2) | `src/ps2.c/h` |
-| Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h` |
-| Test framework | `src/kunit.h`, `tests/kernel/*.c` |
+| Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
+| Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h` |
+| Vendored Doom engine (not yet linked) | `src/doom/` |
+| Test framework | `src/kunit.h`, `tests/kernel/*.c`, `tests/kernel/kunit.c`, `tests/kernel/ring3_probe.s` |
 
 ### Key architectural facts worth knowing before editing
 
-- **No paging yet.** All physical == virtual. `alloc_page`/`vmm_init`/syscall
-  gate are Sprint 2+ work — see `docs/memory.md` and `docs/architecture.md`
-  §5.1/§6 for the planned design before implementing anything in that space.
+- **Paging is on, but there is only one address space.** `src/boot.s` builds a
+  static 4 GB identity map to reach long mode; `vmm_init()` (`src/vmm.c`,
+  SCRUM-15) then builds the real kernel map from PMM pages and loads CR3 with
+  it, identity-mapping only what exists — low memory, kernel image + bump pool,
+  usable RAM, the multiboot info and the framebuffer aperture. Virtual ==
+  physical everywhere, so no translation is ever surprising, but **page 0 is
+  deliberately unmapped** as a NULL guard. `vmm_map_page`/`vmm_unmap_page`/
+  `vmm_translate` are the primitives SCRUM-16/-48/-153 build on; a 4 KiB map
+  inside a 2 MB leaf splits it automatically. What does *not* exist yet: a
+  page-fault handler (so any fault is still fatal), per-LibOS address spaces,
+  and the `exo_page_map`/`exo_page_unmap` syscalls. Read `docs/memory.md` §7
+  and `docs/architecture.md` §5.1/§6 before implementing anything in that space.
+- **`vmm.c` mirrors boot.s's ring-3 U/S gate.** Test builds map the identity
+  range user-accessible (`#ifdef TESTING`), because `vmm_init()` runs before
+  `run_tests()` and the ring-3 probe executes against the kernel map. Change one
+  and change the other, or a test build triple-faults.
 - **SCRUM-135 (error-code IDT vectors) resolved on `feat/x64`:** `default_stub`
   in `src/isr.s` used to do a bare `iretq` without popping the hardware error
   code that vectors 8, 10–14, 17, 21, 29, 30 push, which triple-faulted the
   machine on any page fault or GPF. A dedicated `error_stub` is now installed
   on those vectors in `idt_init()` and correctly discards the error code
   before `iretq`. See `docs/drivers/idt.md` §5/§7 for details.
-- **Allocator today is a one-way bump allocator** (`memory_init`/`kmalloc` in
-  `src/memory.c`) — no `free`, always 4K-aligned, used only for permanent
-  early-boot kernel structures (IDT, future PMM bitmap, page tables). It is
-  intentionally retired once the page allocator/paging exist.
+- **Two allocators coexist, with different lifetimes.** `kmalloc`
+  (`src/memory.c`) is the one-way bump allocator — no `free`, always 4K-aligned,
+  for permanent early-boot structures (the PMM bitmap and owner table);
+  `alloc_page`/`free_page` (`src/page_alloc.c`, SCRUM-7) is a bitmap PMM whose
+  bitmap is itself `kmalloc`ed at init. The PMM manages **only the first usable
+  region above 1 MB**, reserves the kernel/heap range and every multiboot
+  module, and reports errors — double frees included — by returning quietly
+  after a `serial_print`, never by faulting.
+- **`kmalloc` is finished once `page_alloc_init` has run.** It reserves the
+  bump pool as it stood at that moment and never hears about a later `kmalloc`,
+  so a bump allocation made afterwards can alias a page `alloc_page()` has
+  already handed out — page tables included. `kmalloc` warns on serial if you
+  do it; take permanent allocations from `alloc_page()` instead, as `vmm.c`
+  does.
 - **COM1 serial is the only diagnostic/test output channel** right now
   (`src/serial.c`, mapped to QEMU stdio via `-serial mon:stdio`). Test framework
   output and all kernel diagnostics go through it; `serial_flush()` must be
@@ -183,6 +230,12 @@ Sprint 2 paging work lands.
   syscall probe can run. All of physical memory is then reachable from CPL 3 —
   test builds only; a normal build keeps supervisor-only pages. SCRUM-48/-55/-56
   close this properly.
+- **The vendored Doom engine is present but not built.** `src/doom/` holds
+  doomgeneric's core (SCRUM-63) and is excluded from the normal build on
+  purpose — many files still need libc gaps filled. `make docker-build-doom`
+  runs `docker/scripts/build-doom.sh` as a best-effort compile pass; it is not
+  part of `docker-build` or CI, and nothing in `src/doom/` links into
+  `build/exodoom` yet.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - Sprint status/roadmap and current in-flight Jira stories are tracked in
