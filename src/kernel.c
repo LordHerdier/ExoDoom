@@ -512,9 +512,14 @@ void kernel_main(void *mb2_info_ptr) {
     // serial diagnostic on a page fault instead of a silent loop back into
     // the faulting instruction.
     //
-    // Safe this early: interrupt gates clear IF, the PIC is still masked as
-    // the BIOS left it, and nothing calls `sti` until after pic_remap() far
-    // below, so no hardware IRQ can arrive on a not-yet-remapped vector.
+    // Safe this early for exactly one reason: IF is clear.  The CPU comes out
+    // of boot.s with interrupts disabled and nothing calls `sti` until after
+    // pic_remap() far below, so no hardware IRQ can arrive in between.  Do
+    // NOT rely on the PIC being masked here -- the BIOS typically leaves
+    // IRQ0/IRQ1 unmasked, and until pic_remap() they still land on vectors
+    // 8-15, where vector 8's error_stub would pop an error code the PIC never
+    // pushed.  Anything added between here and pic_remap() must leave IF
+    // alone.
     idt_init();
     // ── Page allocator (SCRUM-7) ───────────────────────────────────────
     page_alloc_init(mb);

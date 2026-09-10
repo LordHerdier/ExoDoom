@@ -11,9 +11,14 @@
  * once per-LibOS page directories (SCRUM-48) exist.  Two things make the
  * shortcut safe here and nowhere else:
  *
- *   - run_tests() executes before idt_init()/sti in kernel_main, so the probe
- *     cannot be interrupted.  That is why no TSS is needed: `syscall` never
- *     consults TSS.RSP0, and only an interrupt taken *in* ring 3 would.
+ *   - The probe cannot be interrupted: USER_RFLAGS below is 0x002, so IF is
+ *     clear the whole time it is at CPL 3, and kernel_main does not `sti`
+ *     until long after run_tests().  That is why no TSS is needed: `syscall`
+ *     never consults TSS.RSP0, and only an interrupt or exception taken *in*
+ *     ring 3 would.  The IF bit in USER_RFLAGS is therefore load-bearing --
+ *     setting it here would take IRQ0 at CPL 3 with a null TR and triple-fault
+ *     the machine.  (idt_init() itself now runs before run_tests(), since
+ *     SCRUM-17; that is fine, an installed IDT is not an interrupt.)
  *   - docker/scripts/build.sh assembles boot.s with --defsym RING3_PROBE=1
  *     for TESTING builds, which sets the U/S bit through the identity map.
  *     Ring-3 code cannot execute at all without it.

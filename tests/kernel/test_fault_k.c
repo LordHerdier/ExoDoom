@@ -118,8 +118,10 @@ static int recording_hook(exception_frame_t *f, uint64_t cr2)
     seen_rip = f->rip;
 
     /* Resume at the probe's own resume label and tell the handler not to
-     * halt.  A stale or zero resume_rip would fault immediately at the new
-     * RIP, so a mistake here fails loudly rather than silently passing. */
+     * halt.  A stale or zero resume_rip faults again at the new RIP; the
+     * handler notices that the fault arrived at the address it just resumed
+     * to, declines to resume a second time, and prints the diagnostic -- so a
+     * mistake here ends in a reported halt rather than a silent QEMU hang. */
     f->rip = resume_rip;
     return 1;
 }

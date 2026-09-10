@@ -53,12 +53,24 @@ static void halt_forever(void)
         __asm__ volatile ("cli; hlt");
 }
 
+/* Set for as long as a fault is being handled, so a fault raised while
+ * reporting one is caught rather than recursing until the stack runs out.
+ * The hook path clears it again on the way out (see page_fault_handler). */
+static int in_fault = 0;
+
 #ifdef TESTING
 static fault_hook_t test_hook = 0;
+
+/* The RIP the last hook-driven resume aimed at.  If the next fault arrives
+ * *at* that address, resuming made no progress -- the resume target itself
+ * faults -- and resuming again would loop forever with nothing on the wire.
+ * Recording it lets that case fall through to the full diagnostic instead. */
+static uint64_t last_resume_rip = 0;
 
 void fault_set_hook(fault_hook_t h)
 {
     test_hook = h;
+    last_resume_rip = 0;
 }
 #endif
 
@@ -95,19 +107,24 @@ void page_fault_handler(exception_frame_t *f)
 {
     uint64_t cr2 = read_cr2();
 
-#ifdef TESTING
-    if (test_hook && test_hook(f, cr2))
-        return;
-#endif
-
-    /* A fault raised while reporting a fault would recurse until the stack
-     * ran out.  Say so once, with no further table walks, and stop. */
-    static int in_fault = 0;
+    /* Guard first, so it covers the hook below as well as the reporting
+     * path.  Say so once, with no further table walks, and stop. */
     if (in_fault) {
         serial_print("\n#PF while handling #PF -- halting\n");
         halt_forever();
     }
     in_fault = 1;
+
+#ifdef TESTING
+    if (test_hook && f->rip != last_resume_rip && test_hook(f, cr2)) {
+        /* The hook has rewritten f->rip; remember where it is sending us so
+         * a resume target that faults in turn is reported rather than
+         * resumed again. */
+        last_resume_rip = f->rip;
+        in_fault = 0;
+        return;
+    }
+#endif
 
     char desc[64];
 
@@ -139,10 +156,19 @@ void page_fault_handler(exception_frame_t *f)
 
     print_mapping(cr2);
 
-    /* CPL comes from the low two bits of the saved CS.  Ring 3 is
-     * unreachable today -- no LibOS runs yet (SCRUM-47) -- so both arms halt;
-     * when one does, this is where it gets terminated and its resources
-     * reclaimed via revoke_all() instead of taking the machine down. */
+    /* CPL comes from the low two bits of the saved CS.
+     *
+     * The ring-3 arm cannot actually be reached yet, and not merely because
+     * no LibOS runs (SCRUM-47): no TSS is loaded anywhere in the kernel
+     * (SCRUM-46) and idt_set_gate leaves IST at 0, so a fault taken at CPL 3
+     * has no RSP0 to switch to.  The CPU raises #GP, then #DF -- which needs
+     * the same stack switch -- and the machine triple-faults before this stub
+     * is entered.  Gating vector 14 on an IST once the TSS exists is what
+     * makes this branch live; until then it is written, not exercised.
+     *
+     * When it is live, this is where a faulting LibOS gets terminated and its
+     * resources reclaimed via revoke_all(), rather than taking the machine
+     * down with it. */
     serial_print("  context:   ");
     if ((f->cs & 3) != 0) {
         serial_print("ring 3 (LibOS) -- no per-context teardown yet, halting\n");

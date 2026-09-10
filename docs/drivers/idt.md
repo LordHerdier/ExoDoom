@@ -537,12 +537,16 @@ machine triple-faulted. The faulting accesses and their resume points now live
 in `tests/kernel/fault_probe.s`, where both addresses are fixed at assembly
 time.
 
-**No IST stack for vector 14.** The handler runs on whatever stack was live at
-the fault. If that stack is itself corrupt or unmapped, the handler faults and
-the machine double-faults into `error_stub`. A dedicated IST stack needs a TSS,
-which is SCRUM-46; until then the recursion guard in `page_fault_handler`
-covers the common case (a fault raised while reporting a fault) but not a bad
-stack pointer.
+**No IST stack for vector 14 — which also makes the ring-3 arm dead code.**
+The handler runs on whatever stack was live at the fault, so a corrupt or
+unmapped stack double-faults instead of reporting. Worse, no TSS is loaded
+anywhere in the kernel yet (SCRUM-46) and `idt_set_gate` leaves `ist = 0`: a
+fault taken at CPL 3 has no `RSP0` to switch to, so the CPU raises `#GP`, then
+`#DF` — which needs the same stack switch — and triple-faults before `pf_stub`
+is entered. `page_fault_handler`'s ring-3 branch is therefore written but
+unreachable until vector 14 gets an IST. The recursion guard covers the
+ordinary case (a fault raised while reporting a fault, hook path included) but
+not a bad stack pointer.
 
 **Hardcoded selector `0x08` instead of reading `%cs`.** The previous i386
 version read `%cs` at runtime because GRUB's GDT was used directly. In the

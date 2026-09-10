@@ -656,13 +656,18 @@ Three things are worth knowing about it:
 - **`idt_init()` now runs early**, right after `memory_init()` and above the
   `TESTING` branch, so a fault during `page_alloc_init()`, `vmm_init()` or the
   test suite is reported rather than looped on.
-- **Both rings halt today.** The handler classifies the fault by the saved
-  `CS`'s CPL and says which, but there is no LibOS to terminate yet
-  (SCRUM-47). When there is, the ring-3 arm terminates it and reclaims its
-  resources through `revoke_all()` instead of taking the machine down.
+- **Only ring 0 faults actually reach it.** The handler classifies by the
+  saved `CS`'s CPL and prints which ring faulted, but the ring-3 arm is
+  written, not exercised: **no TSS is loaded anywhere in the kernel yet**
+  (SCRUM-46) and `idt_set_gate` leaves `IST` at 0, so a fault taken at CPL 3
+  has no `RSP0` to switch to — the CPU raises `#GP`, then `#DF`, which needs
+  the same stack switch, and the machine triple-faults before `pf_stub` runs.
+  Gating vector 14 on an IST once the TSS exists is what makes that arm live;
+  terminating the faulting LibOS through `revoke_all()` then needs SCRUM-47/48
+  on top.
 
-Not covered: there is no IST stack for vector 14 (that needs the TSS, SCRUM-46),
-so a fault taken on a corrupt stack still double-faults. The handler's
+Not covered, for the same reason: a fault taken on a corrupt or unmapped stack
+still double-faults, because the handler runs on whatever stack was live. The
 recursion guard catches the ordinary case — a fault raised while reporting a
 fault — but cannot rescue a bad `RSP`.
 

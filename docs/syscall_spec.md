@@ -682,13 +682,15 @@ A page belonging to the kernel or to another context is still refused.
   128 TiB window installing one mapping per 2 MiB to consume them without
   bound. Harmless while the only caller is the kernel itself; a per-context
   quota is required before ring 3 can reach it.
-- **A page fault reports, but nothing recovers.** SCRUM-17 put a real handler
-  on vector 14: a LibOS touching an address it never mapped now gets CR2, the
-  decoded error code, the faulting RIP and the live mapping state on COM1
-  instead of a silent loop in `error_stub`. The handler classifies the fault by
-  CPL and says whether it was ring 0 or ring 3, but both arms halt — terminating
-  a faulting LibOS and reclaiming its resources needs a LibOS to terminate
-  (SCRUM-47) and per-context address spaces (SCRUM-48).
+- **A page fault reports, but only from ring 0, and nothing recovers.**
+  SCRUM-17 put a real handler on vector 14: a kernel-side access to an unmapped
+  address now yields CR2, the decoded error code, the faulting RIP and the live
+  mapping state on COM1 instead of a silent loop in `error_stub`. A *ring-3*
+  fault still takes the machine down without a word — a CPL 3 → CPL 0 exception
+  needs `TSS.RSP0`, and no TSS is loaded yet (SCRUM-46), so it triple-faults
+  before the handler runs. Vector 14 needs an IST before the LibOS side of this
+  is real; terminating a faulting LibOS and reclaiming its resources then needs
+  SCRUM-47/48 on top.
 
 ---
 
