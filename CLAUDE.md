@@ -109,7 +109,8 @@ PIC, PIT and keyboard are all below it and do **not** exist during tests.
 
 The kernel links at virtual/physical `2M` (`src/linker.ld`) and both the boot
 map and the kernel map are identity maps, so virtual == physical throughout.
-Per-address-space paging is still ahead (see below).
+Per-LibOS address spaces can now be built (SCRUM-48, see below); a LibOS
+actually running in one of its own, rather than the kernel's, is SCRUM-47.
 
 ### Subsystem map
 
@@ -132,19 +133,30 @@ Per-address-space paging is still ahead (see below).
 
 ### Key architectural facts worth knowing before editing
 
-- **Paging is on, but there is only one address space.** `src/boot.s` builds a
-  static 4 GB identity map to reach long mode; `vmm_init()` (`src/vmm.c`,
-  SCRUM-15) then builds the real kernel map from PMM pages and loads CR3 with
-  it, identity-mapping only what exists — low memory, kernel image + bump pool,
-  usable RAM, the multiboot info and the framebuffer aperture. Virtual ==
-  physical everywhere, so no translation is ever surprising, but **page 0 is
-  deliberately unmapped** as a NULL guard. `vmm_map_page`/`vmm_unmap_page`/
-  `vmm_translate` are the primitives SCRUM-16/-48 build on and what
-  `exo_page_map`/`exo_page_unmap` (SCRUM-35) are implemented in terms of; a
-  4 KiB map inside a 2 MB leaf splits it automatically. What does *not* exist
-  yet: a page-fault handler (so any fault is still fatal) and per-LibOS address
-  spaces. Read `docs/memory.md` §7, `docs/syscall_spec.md` §3.7 and
-  `docs/architecture.md` §5.1/§6 before implementing anything in that space.
+- **Paging is on, and a LibOS can now get its own address space — but v1's one
+  LibOS doesn't run in one yet.** `src/boot.s` builds a static 4 GB identity
+  map to reach long mode; `vmm_init()` (`src/vmm.c`, SCRUM-15) then builds the
+  real kernel map from PMM pages and loads CR3 with it, identity-mapping only
+  what exists — low memory, kernel image + bump pool, usable RAM, the
+  multiboot info and the framebuffer aperture. Virtual == physical everywhere,
+  so no translation is ever surprising, but **page 0 is deliberately
+  unmapped** as a NULL guard. `vmm_map_page`/`vmm_unmap_page`/`vmm_translate`
+  are the primitives SCRUM-16 builds on and what `exo_page_map`/`exo_page_unmap`
+  (SCRUM-35) are implemented in terms of; a 4 KiB map inside a 2 MB leaf splits
+  it automatically. `vmm_create_address_space`/`vmm_destroy_address_space`/
+  `vmm_switch_address_space` (SCRUM-48) build a real per-LibOS PML4 — sharing
+  the kernel's own PML4[0] link so kernel memory needs no synchronization
+  between address spaces — and a `page_owner_t`-keyed registry
+  (`vmm_bind_address_space`/`vmm_address_space_for`) tracks which context runs
+  on which root; `syscall_mem.c`'s `exo_page_map`/`exo_page_unmap` already
+  resolve the caller's root through it. What is still missing is SCRUM-47:
+  `kernel_main` binds the one v1 LibOS to `vmm_kernel_pml4()` itself, a
+  placeholder that keeps it running on the kernel's own map until something
+  actually calls `vmm_create_address_space()` and rebinds it, and switches CR3
+  before a real ring-3 entry. There is also no page-fault handler yet, so any
+  fault is still fatal. Read `docs/memory.md` §7, `docs/syscall_spec.md` §3.7
+  and `docs/architecture.md` §5.1/§6 before implementing anything in that
+  space.
 - **`vmm.c` mirrors boot.s's ring-3 U/S gate.** Test builds map the identity
   range user-accessible (`#ifdef TESTING`), because `vmm_init()` runs before
   `run_tests()` and the ring-3 probe executes against the kernel map. Change one

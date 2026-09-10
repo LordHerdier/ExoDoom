@@ -128,6 +128,24 @@ static int in_user_window(uint64_t vaddr)
     return vaddr >= EXO_USER_VA_BASE && vaddr < EXO_USER_VA_END;
 }
 
+/*
+ * The PML4 map/unmap edit for the currently executing syscall (SCRUM-48).
+ * kernel_main binds the one v1 LibOS to vmm_kernel_pml4() itself — there is
+ * no per-LibOS address space yet (SCRUM-47) — so this returns that same
+ * root today; the day a real one exists, nothing in this file needs to
+ * change for the switch to take effect.
+ *
+ * NULL only if kernel_main's boot-time bind was skipped or failed — vmm_init
+ * itself failing, most likely — which vmm_map_page_in/vmm_translate_in/
+ * vmm_unmap_page_in already refuse with VMM_EINVAL, but checked here too so
+ * the caller sees -EXO_EINVAL rather than relying on that fallthrough.
+ */
+static uint64_t *caller_pml4(void)
+{
+    uint64_t root_phys = vmm_address_space_for(syscall_current_context());
+    return (uint64_t *)(uintptr_t)root_phys;
+}
+
 /* vmm.c's status codes in the ABI's terms (src/vmm.h).  Two of them are
  * "bad argument" from the caller's point of view rather than kernel failures:
  * VMM_ENOENT ("nothing mapped there") is what §3.2 #3 promises -EINVAL for,
@@ -179,6 +197,10 @@ static int64_t sys_page_map(uint64_t vaddr, uint64_t paddr, uint64_t flags,
     if (!may_map_phys(paddr, syscall_current_context()))
         return -EXO_EPERM;
 
+    uint64_t *root = caller_pml4();
+    if (root == NULL)
+        return -EXO_EINVAL;
+
     /* EXO_PAGE_READ is accepted and dropped: a present page is readable on
      * x86, so there is no bit to set and no way to honour its absence.  So is
      * EXO_PAGE_EXEC, until EFER.NXE is enabled — see src/vmm.h on why setting
@@ -188,7 +210,7 @@ static int64_t sys_page_map(uint64_t vaddr, uint64_t paddr, uint64_t flags,
     if (flags & EXO_PAGE_WRITE) attrs |= VMM_WRITE;
     if (flags & EXO_PAGE_USER)  attrs |= VMM_USER;
 
-    return vmm_status_to_errno(vmm_map_page(vaddr, paddr, attrs));
+    return vmm_status_to_errno(vmm_map_page_in(root, vaddr, paddr, attrs));
 }
 
 /* #3 — remove the mapping at `vaddr`.  The physical page is left allocated;
@@ -210,15 +232,19 @@ static int64_t sys_page_unmap(uint64_t vaddr, uint64_t a2, uint64_t a3,
     if (!in_user_window(vaddr))
         return -EXO_EPERM;
 
+    uint64_t *root = caller_pml4();
+    if (root == NULL)
+        return -EXO_EINVAL;
+
     uint64_t paddr;
-    if (vmm_translate(vaddr, &paddr, NULL) != VMM_OK)
+    if (vmm_translate_in(root, vaddr, &paddr, NULL) != VMM_OK)
         return -EXO_EINVAL;
 
     if (!may_unmap_phys(paddr & ~(uint64_t)(VMM_PAGE_SIZE - 1),
                         syscall_current_context()))
         return -EXO_EPERM;
 
-    return vmm_status_to_errno(vmm_unmap_page(vaddr));
+    return vmm_status_to_errno(vmm_unmap_page_in(root, vaddr));
 }
 
 /*

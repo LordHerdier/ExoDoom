@@ -350,9 +350,20 @@ static int run_page_map_demo(fb_console_t *con) {
     // kernel's identity map.
     const uint64_t scratch = EXO_USER_VA_BASE + 0x30000000ULL;
 
+    // exo_page_map installs `scratch` in the caller's *registered* address
+    // space (src/syscall_mem.c's caller_pml4(), SCRUM-48) — today that is
+    // vmm_kernel_pml4() itself (kernel_main binds it that way until SCRUM-47
+    // gives the LibOS a real one), but this demo runs at ring 0 without ever
+    // switching CR3, so it must resolve the same root the syscall used
+    // rather than assume it is whichever tree happens to be loaded.
+    uint64_t root_phys = vmm_address_space_for(syscall_current_context());
+    uint64_t *root = (uint64_t *)(uintptr_t)root_phys;
+
     // 1. A page the caller owns can be mapped where the caller asks, and the
-    //    mapping is real: a write through the virtual address lands in the
-    //    physical page, seen here through the identity map.
+    //    mapping is real: it resolves to the right physical frame, and a
+    //    write through that frame's identity-mapped address (always safe —
+    //    the kernel's own map covers every page it owns, regardless of which
+    //    root exo_page_map used) is visible there afterwards.
     int64_t p = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
     int64_t r_map = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, scratch, (uint64_t)p,
                                          EXO_PAGE_READ | EXO_PAGE_WRITE, 0, 0, 0);
@@ -368,10 +379,13 @@ static int run_page_map_demo(fb_console_t *con) {
     fbcon_write(con, "\n");
 
     if (p > 0 && r_map == 0)
-        *(volatile uint64_t *)(uintptr_t)scratch = 0x5CA1AB1E5CA1AB1EULL;
+        *(volatile uint64_t *)(uintptr_t)p = 0x5CA1AB1E5CA1AB1EULL;
 
+    uint64_t resolved = 0;
     all &= ownership_check(con, "  owned page mapped and writable         ",
-                           p > 0 && r_map == 0 &&
+                           p > 0 && r_map == 0 && root != NULL &&
+                           vmm_translate_in(root, scratch, &resolved, NULL) == VMM_OK &&
+                           resolved == (uint64_t)p &&
                            *(volatile uint64_t *)(uintptr_t)p
                                == 0x5CA1AB1E5CA1AB1EULL);
 
@@ -400,8 +414,8 @@ static int run_page_map_demo(fb_console_t *con) {
                                            0, 0, 0, 0, 0);
     uint64_t gone = 0;
     all &= ownership_check(con, "  unmap removes only the mapping         ",
-                           r_unmap == 0 &&
-                           vmm_translate(scratch, &gone, NULL) == VMM_ENOENT &&
+                           r_unmap == 0 && root != NULL &&
+                           vmm_translate_in(root, scratch, &gone, NULL) == VMM_ENOENT &&
                            page_owner((void *)(uintptr_t)p)
                                == syscall_current_context());
 
@@ -519,6 +533,21 @@ void kernel_main(void *mb2_info_ptr) {
     // keeps running (degraded, still on the boot map) and says so.
     if (vmm_init(mb, (const struct mb2_tag_framebuffer *)fb_tag) != VMM_OK) {
         serial_print("WARN: vmm_init failed; continuing on the boot map\n");
+    } else {
+        // ── LibOS address-space registry (SCRUM-48) ─────────────────────
+        // v1 has one LibOS and no ring-3 entry yet (SCRUM-47), so it still
+        // runs on the kernel's own map rather than a private one from
+        // vmm_create_address_space(). Binding it here is what lets
+        // syscall_mem.c's exo_page_map/-unmap resolve "the caller's address
+        // space" through the registry unconditionally, instead of a
+        // fallback path that only SCRUM-47 would ever exercise. Once a real
+        // LibOS address space exists, replacing this bind with
+        // vmm_create_address_space() + vmm_bind_address_space() is the whole
+        // of the change needed here.
+        if (vmm_bind_address_space(PAGE_OWNER_LIBOS, vmm_kernel_pml4()) != VMM_OK) {
+            serial_print("WARN: vmm_bind_address_space failed; "
+                         "exo_page_map/-unmap will report -EXO_EINVAL\n");
+        }
     }
 
     // ── Syscall entry (SCRUM-32) ────────────────────────────────────────
