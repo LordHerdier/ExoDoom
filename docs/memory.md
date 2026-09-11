@@ -12,6 +12,7 @@
 4. [Phase 1 — Multiboot mmap parsing](#4-phase-1--multiboot-mmap-parsing)
 5. [Phase 2 — Bump allocator](#5-phase-2--bump-allocator)
 6. [Phase 3 — Bitmap page allocator](#6-phase-3--bitmap-page-allocator)
+6b. [Kernel heap](#6b-kernel-heap-scrum-25)
 7. [Phase 4 — Virtual memory and paging](#7-phase-4--virtual-memory-and-paging)
 8. [Phase 5 — LibOS heap](#8-phase-5--libos-heap)
 9. [Doom memory requirements](#9-doom-memory-requirements)
@@ -30,14 +31,16 @@ progressively builds up the infrastructure needed to hand Doom a working
 Phase 1  mmap_init()       Parse multiboot memory map → usable/reserved regions
 Phase 2  memory_init()     Bump allocator from &_bss_end → used for early boot allocs
 Phase 3  page_alloc_init()        Bitmap page allocator (alloc_page / free_page) [Sprint 1]
+Phase 3b kmalloc/heap_alloc()     Kernel heap, first-fit, backed by alloc_page [SCRUM-25]
 Phase 4  vmm_init()        Kernel page tables from PMM pages + exo_page_map/-unmap [SCRUM-15/-35]
 Phase 5  LibOS heap        first-fit allocator backed by exo_page_alloc [Sprint 3]
 ```
 
-At no point does the kernel use a general-purpose heap for itself. Internal
-kernel structures (IDT, PMM bitmap, owner table) are allocated from the bump
-allocator during boot and never freed; page tables come from the PMM itself
-once it is up.
+The two structures that bootstrap the PMM itself (the bitmap, the owner
+table) are allocated from the bump allocator during boot and never freed;
+page tables come from the PMM directly once it is up. Every other kernel
+allocation past that point goes through the kernel heap (§6b) — `kmalloc()`
+routes to it automatically once the PMM is live.
 
 ---
 
@@ -224,10 +227,12 @@ void* kmalloc(size_t size) {
 | PMM bitmap (Phase 3)     | `total_pages / 8` bytes, rounded to 4K | `page_alloc_init()` |
 | Page owner table (SCRUM-152) | `total_pages * 2` bytes, rounded to 4K | `page_alloc_init()` |
 
-After Phase 3, `kmalloc` is effectively retired. All further kernel
-allocations go through `alloc_page` directly — the page tables `vmm_init()`
-builds are `alloc_page()` pages (4K each, `PAGE_OWNER_KERNEL`), not bump
-allocations.
+After Phase 3, this bump path is retired for everything except the two
+allocations above — `page_alloc_init()` needs it to bootstrap the PMM before
+`alloc_page()` exists to serve anyone else. Every later `kmalloc()` call
+routes to the kernel heap instead (§6b, SCRUM-25); page tables `vmm_init()`
+builds still come from `alloc_page()` directly (4K each, `PAGE_OWNER_KERNEL`),
+bypassing the heap the same way they always have.
 
 ---
 
@@ -413,6 +418,71 @@ WAD module:         ~3,072   (~12 MB for Freedoom2)
 ──────────────────────────
 Available to alloc: ~62,064  (~242 MiB)
 ```
+
+---
+
+## 6b. Kernel heap (SCRUM-25)
+
+**Files:** `src/heap.c`, `src/heap.h`, `src/memory.c` **Status:** ✅ Done
+**Called from:** `kmalloc`/`kfree`/`krealloc` (`src/memory.c`), once the PMM is
+live
+
+### What it does
+
+A first-fit, segmented free-list allocator backed by `alloc_page()`. This is
+the kernel-internal heap (Sprint 3) — distinct from the LibOS-side heap in
+§8 below, which is Sprint 4 and backed by the `exo_page_alloc` syscall instead
+of a direct PMM call.
+
+`kmalloc()`'s original bump-pointer behavior (§5) is still used for the two
+allocations `page_alloc_init()` makes to bootstrap the PMM itself (the bitmap
+and the owner table) — the heap can't serve those because it depends on
+`alloc_page()`, which isn't usable until that bootstrap finishes. Once
+`page_alloc_is_live()` is true, `kmalloc()` hands off to `heap_alloc()`
+instead, and `kfree()`/`krealloc()` become available. A pointer into the bump
+region is permanent kernel infrastructure and is refused by `kfree`/`krealloc`
+rather than freed.
+
+### Segments
+
+A "segment" is one run of physically contiguous pages. `alloc_page()` scans
+its bitmap forward from index 0, so pages come back adjacent as long as
+nothing lower has since been freed — true for a heap that only ever grows,
+but not guaranteed once page-freeing lands elsewhere, so segment growth
+checks contiguity explicitly: a non-adjacent page starts a new segment
+instead of assuming one. First-fit search walks every block in every
+segment; a block's `size` never spans a segment boundary, and coalescing
+only ever merges blocks within the same segment (its `next`/`prev` pointers
+never cross one). A segment's own bookkeeping lives in the first bytes of its
+first page, immediately followed by that page's first block header — no
+separate metadata allocator is needed to bootstrap it.
+
+### Properties
+
+- Allocations are 16-byte aligned; the acceptance criterion ("aligned
+  pointers") this ticket was written against.
+- `heap_alloc` grows the heap one page at a time via `alloc_page()` and
+  retries the first-fit search, so a multi-page allocation triggers several
+  growth-and-retry passes rather than one bulk reservation — simple and
+  correct, not throughput-optimized; revisit if profiling later shows it
+  matters.
+- `heap_free` coalesces with both neighbours in the same segment.
+- Freed pages are never returned to the PMM (no segment ever shrinks) — out
+  of scope for SCRUM-25's acceptance criteria; a future ticket if heap
+  fragmentation or memory pressure makes it worth the complexity of partial-
+  segment frees.
+- A single-page segment can get stranded: its first block is only
+  `4096 - 32 - 32 = 4032` bytes, so a request above that can never be served
+  from a segment created to satisfy it. This happens when `alloc_page()`
+  hands back a page that isn't contiguous with `heap_growth_cursor`, which
+  becomes routine once `exo_page_free`/revoke start returning low pages to
+  the PMM. Since segments are never freed (see above), a stranded segment
+  stays stranded — self-limiting (growth just keeps retrying until it finds
+  a contiguous run) rather than a hang, but a slow waste of memory.
+- Not thread/interrupt-safe — no locking, consistent with the rest of the
+  allocator stack (`page_alloc.c` has none either); fine while allocation
+  only ever happens from kernel code running with a single execution
+  context.
 
 ---
 

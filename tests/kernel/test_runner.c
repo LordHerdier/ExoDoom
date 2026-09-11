@@ -26,6 +26,7 @@ void suite_vmm_tests(CU_pSuite s);
 void suite_revoke_tests(CU_pSuite s);
 void suite_page_map_tests(CU_pSuite s);
 void suite_fault_tests(CU_pSuite s);
+void suite_heap_tests(CU_pSuite s);
 void suite_tss_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
@@ -105,6 +106,9 @@ int run_tests(void)
 
     s = CU_add_suite("fault", NULL, fault_suite_cleanup);
     suite_fault_tests(s);
+
+    s = CU_add_suite("heap", NULL, NULL);
+    suite_heap_tests(s);
 
     s = CU_add_suite("tss", NULL, tss_suite_cleanup);
     suite_tss_tests(s);
