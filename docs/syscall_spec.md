@@ -98,21 +98,50 @@ analysis. This determines what the freestanding libc shim must provide.
 > config parsing, string handling, and the screen buffer allocation. The libc
 > `malloc` must work but does not need to be high-performance.
 
-| Function  | Calls    | Notes                                                                                         |
-| --------- | -------- | --------------------------------------------------------------------------------------------- |
-| `free`    | 153      | Most calls are `Z_Free` (internal zone). ~20 are direct libc `free()`.                        |
-| `exit`    | 31       | Called on fatal errors. Implement as halt loop.                                               |
-| `malloc`  | 21       | One 6 MiB zone alloc + ~20 small allocs (strings, paths, structs).                            |
-| `abs`     | 30       | Integer absolute value. Trivial macro.                                                        |
-| `atoi`    | 14       | String to integer. Used for config/command-line parsing.                                      |
-| `atof`    | 2        | String to float. Used only for mouse acceleration config. Can return `1.0` as stub.           |
-| `atexit`  | 4        | Register cleanup functions. Implement as linked list (Doom already does this via `I_AtExit`). |
-| `getenv`  | 3        | Returns `DOOMWADPATH`/`DOOMWADDIR`. Return `NULL` — WAD is a multiboot module.                |
-| `system`  | 13       | All behind `#ifdef` guards (Zenity error boxes). Stub as `return -1`.                         |
-| `realloc` | 3        | Resize allocation. Implement as `malloc` + `memcpy` + `free`.                                 |
-| `calloc`  | 2        | `malloc` + `memset(0)`. Trivial wrapper.                                                      |
-| `abort`   | 2        | Abnormal termination. Implement as halt loop.                                                 |
-| `qsort`   | 0 direct | Not called directly but may be pulled in. Implement a simple quicksort.                       |
+> ✅ **Sprint 3 (SCRUM-30):** `malloc`, `free`, `realloc`, `atoi`, `abs`,
+> `rand`/`srand` and `qsort` are implemented in `src/stdlib.c` and merged.
+> `malloc`/`free`/`realloc` are the kernel heap under its libc name — they
+> forward to `kmalloc`/`kfree`/`krealloc` (`src/memory.c` → `src/heap.c`,
+> SCRUM-25) and allocate no pool of their own. Remaining: `exit`, `abort`,
+> `atexit`, `getenv`, `system`, `calloc`, `atof`.
+
+| Function  | Calls    | Status  | Notes                                                                                         |
+| --------- | -------- | ------- | --------------------------------------------------------------------------------------------- |
+| `free`    | 153      | ✅ Done | Most calls are `Z_Free` (internal zone). ~20 are direct libc `free()`.                        |
+| `exit`    | 31       | ⬜ Todo | Called on fatal errors. Implement as halt loop. Pairs with `exo_exit` (#20).                  |
+| `malloc`  | 21       | ✅ Done | One 6 MiB zone alloc + ~20 small allocs (strings, paths, structs).                            |
+| `abs`     | 30       | ✅ Done | Integer absolute value. `abs(INT_MIN)` negates in unsigned arithmetic rather than being UB.   |
+| `atoi`    | 14       | ✅ Done | String to integer. Used for config/command-line parsing. Saturates instead of wrapping.       |
+| `atof`    | 2        | ⬜ Todo | String to float. Used only for mouse acceleration config. Can return `1.0` as stub.           |
+| `atexit`  | 4        | ⬜ Todo | Register cleanup functions. Implement as linked list (Doom already does this via `I_AtExit`). |
+| `getenv`  | 3        | ⬜ Todo | Returns `DOOMWADPATH`/`DOOMWADDIR`. Return `NULL` — WAD is a multiboot module.                |
+| `system`  | 13       | ⬜ Todo | All behind `#ifdef` guards (Zenity error boxes). Stub as `return -1`.                         |
+| `realloc` | 3        | ✅ Done | Resize allocation. `heap_realloc` grows in place when the next block is free.                 |
+| `calloc`  | 2        | ⬜ Todo | `malloc` + `memset(0)`. Trivial wrapper.                                                      |
+| `abort`   | 2        | ⬜ Todo | Abnormal termination. Implement as halt loop.                                                 |
+| `qsort`   | 0 direct | ✅ Done | Not called directly but may be pulled in. Median-of-three quicksort.                          |
+| `rand`    | 0 direct | ✅ Done | Not in the vendored core either, but part of the same header. C-standard reference LCG.       |
+| `srand`   | 0 direct | ✅ Done | Seeds `rand`; the sequence for a given seed is fixed and asserted in the test suite.          |
+
+Call counts above are from the original 82-file doomgeneric analysis. For
+reference, the same grep over the vendored subset in `src/doom/` (175 files)
+finds `abs` 30, `malloc` 18, `free` 15, `atoi` 9, `realloc` 1, `calloc` 1, and
+no direct `rand`/`srand`/`qsort` at all.
+
+**Implementation notes (SCRUM-30).** Three choices in `src/stdlib.c` are worth
+knowing before changing it:
+
+- **`qsort` cannot copy its pivot.** Element size is a runtime value and there
+  is no scratch buffer, so the pivot is compared in place: median-of-three
+  parks it at `lo` and only `[lo+1, hi]` is partitioned, which means no swap
+  can move it out from under the comparisons.
+- **`qsort` recurses into the smaller partition only** and loops on the larger,
+  bounding stack depth at O(log n). The kernel stack is 16 KiB; a quicksort
+  recursing on both sides would overrun it on a sorted input long before
+  finishing.
+- **`rand` is pinned to `uint32_t`.** The C standard's reference LCG is
+  specified over a 32-bit accumulator; a 64-bit one silently produces a
+  different sequence. Seed 1 must yield 16838, 5758, 10113, …
 
 ### 2.3 `stdio.h` — the hardest category
 

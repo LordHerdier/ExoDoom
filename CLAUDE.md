@@ -127,7 +127,7 @@ actually running in one of its own, rather than the kernel's, is SCRUM-47.
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer) |
 | Resource revocation (repossession) | `src/revoke.c/h` (protocol), the `page_revoke_*`/`fb_binding_revoke_*` primitives |
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
-| Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h` |
+| Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h` |
 | Vendored Doom engine (not yet linked) | `src/doom/` |
 | Test framework | `src/kunit.h`, `tests/kernel/*.c`, `tests/kernel/kunit.c`, `tests/kernel/ring3_probe.s` |
 
@@ -175,6 +175,15 @@ actually running in one of its own, rather than the kernel's, is SCRUM-47.
   region above 1 MB**, reserves the kernel/heap range and every multiboot
   module, and reports errors — double frees included — by returning quietly
   after a `serial_print`, never by faulting.
+- **`malloc`/`free`/`realloc` are `kmalloc`/`kfree`/`krealloc` under libc
+  names** (`src/stdlib.c`, SCRUM-30) — no second pool, no policy of their own.
+  The rest of `<stdlib.h>`'s implemented subset (`atoi`, `abs`, `rand`/`srand`,
+  `qsort`) lives in the same file; `calloc`, `exit`, `abort`, `atexit`,
+  `getenv` and `atof` are still unimplemented. `qsort` recurses only into the
+  smaller partition (the kernel stack is 16 KiB, and a both-sides recursion
+  overruns it on sorted input), and `rand` is the C-standard LCG pinned to
+  `uint32_t` — widen the accumulator and the seeded sequence silently changes.
+  See `docs/syscall_spec.md` §2.2.
 - **`kmalloc` is finished once `page_alloc_init` has run.** It reserves the
   bump pool as it stood at that moment and never hears about a later `kmalloc`,
   so a bump allocation made afterwards can alias a page `alloc_page()` has

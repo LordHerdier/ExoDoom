@@ -14,6 +14,7 @@ void suite_smoke_tests   (CU_pSuite s);
 void suite_string_tests  (CU_pSuite s);
 void suite_ctype_tests   (CU_pSuite s);
 void suite_stdio_tests   (CU_pSuite s);
+void suite_stdlib_tests  (CU_pSuite s);
 void suite_kbd_ring_tests(CU_pSuite s);
 void suite_ps2_decode_tests(CU_pSuite s);
 void suite_exo_syscall_tests(CU_pSuite s);
@@ -69,6 +70,9 @@ int run_tests(void)
 
     s = CU_add_suite("stdio",  NULL, NULL);
     suite_stdio_tests(s);
+
+    s = CU_add_suite("stdlib", NULL, NULL);
+    suite_stdlib_tests(s);
 
     s = CU_add_suite("kbd_ring", NULL, NULL);
     suite_kbd_ring_tests(s);

@@ -484,6 +484,27 @@ separate metadata allocator is needed to bootstrap it.
   only ever happens from kernel code running with a single execution
   context.
 
+### The libc face: `malloc`/`free`/`realloc` (SCRUM-30)
+
+`src/stdlib.c` gives this heap its standard-library names. `malloc` is
+`kmalloc`, `free` is `kfree`, `realloc` is `krealloc` — thin forwarding
+functions with no pool, no bookkeeping and no policy of their own, so
+everything above about alignment, coalescing and growth applies unchanged to
+code that calls `malloc`.
+
+Two consequences worth keeping in mind:
+
+- **`malloc` before `page_alloc_init()` returns permanent memory.** `kmalloc`
+  bump-allocates until the PMM is live, and `kfree` refuses a pointer into
+  that bump region with a serial warning rather than corrupting the PMM
+  bitmap or owner table (see §5). Nothing on the boot path does this today —
+  Doom's allocations all happen long after the PMM comes up — but it is the
+  one ordering rule the wrappers inherit.
+- **There is exactly one heap right now, shared by kernel and LibOS.** The
+  v1 LibOS still runs on the kernel's own address space (SCRUM-47), so its
+  `malloc` and the kernel's `kmalloc` hand out from the same free lists. §8
+  is where that stops being true.
+
 ---
 
 ## 7. Phase 4 — Virtual memory and paging
@@ -753,6 +774,11 @@ fault — but cannot rescue a bad `RSP`.
 The LibOS heap is a **first-fit free-list allocator** that grows by requesting
 pages from the kernel via `exo_page_alloc`. It lives entirely in user space —
 the kernel has no knowledge of it beyond handing out physical pages.
+
+> **Not what `malloc` does today.** `src/stdlib.c`'s `malloc` forwards to the
+> *kernel* heap (§6b), which is correct while the LibOS shares the kernel's
+> address space. Re-pointing `malloc` at this allocator is the work of
+> SCRUM-37/-38, not a change to the wrapper's signature.
 
 ```
 LibOS malloc(size):
