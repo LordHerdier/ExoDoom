@@ -1,5 +1,6 @@
 #include "tss.h"
 #include "string.h"
+#include "serial.h"
 
 /*
  * tss.c — TSS setup (SCRUM-46).  See tss.h for why RSP0 is the only field
@@ -40,6 +41,26 @@ static uint8_t tss_kernel_stack[TSS_KERNEL_STACK_SIZE] __attribute__((aligned(16
 
 static struct tss64 tss;
 
+/* TSS_SELECTOR is hand-synced with the placeholder pair boot.s reserves in
+ * gdt64 (see the comment there). Nothing ties the two together at compile
+ * time -- boot.s is assembled separately and gdt64 is a linker symbol, so a
+ * _Static_assert can't reach across that boundary. Instead, check at boot
+ * that the slot we are about to patch still holds boot.s's zeroed
+ * placeholder quads. If a future change reorders or inserts a descriptor
+ * ahead of the TSS slot without updating TSS_SELECTOR to match, this catches
+ * it here with a clear message instead of silently corrupting whatever
+ * descriptor now lives at that offset. */
+static void verify_tss_slot(void) {
+    if (gdt64[TSS_SELECTOR / 8] != 0 || gdt64[TSS_SELECTOR / 8 + 1] != 0) {
+        serial_print("tss: FATAL: gdt64[TSS_SELECTOR] is not boot.s's zeroed "
+                      "placeholder -- TSS_SELECTOR no longer matches the "
+                      "GDT layout in boot.s\n");
+        for (;;) {
+            __asm__ volatile ("cli; hlt");
+        }
+    }
+}
+
 /* Encode a 64-bit TSS system descriptor into the two gdt64 quads reserved
  * for it (Intel SDM 3A §7.2.3) and patch them in place. */
 static void install_tss_descriptor(uint64_t base, uint32_t limit) {
@@ -73,6 +94,7 @@ void tss_init(void) {
      * ticket's tests. */
     tss.iomap_base = sizeof(struct tss64);
 
+    verify_tss_slot();
     install_tss_descriptor((uint64_t)(uintptr_t)&tss, sizeof(struct tss64) - 1);
 
     tss_load(TSS_SELECTOR);
