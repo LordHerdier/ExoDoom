@@ -26,6 +26,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # type=gha cache import/export needs ACTIONS_CACHE_URL/ACTIONS_RUNTIME_TOKEN
+      # exposed as env vars -- setup-buildx-action alone doesn't do this for a
+      # plain `run:` step, so cache-from/cache-to silently no-op without it.
+      - name: Expose GitHub Actions runtime for buildx cache
+        uses: crazy-max/ghaction-github-runtime@v3
+
       - name: Build + test (QEMU)
         run: |
           set -euo pipefail
