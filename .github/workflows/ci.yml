@@ -7,7 +7,7 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repo
@@ -15,6 +15,13 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # Makes plain `docker build` (what the Makefile's docker-ci/
+          # docker-build/docker-test targets call) delegate to this buildx
+          # builder instead of the legacy builder, so it actually shares the
+          # cache populated below. Without this, `make docker-ci` recompiles
+          # the cross-toolchain a second time from scratch.
+          install: true
 
       - name: Cache cross-compiler builder image layers
         uses: actions/cache@v4
