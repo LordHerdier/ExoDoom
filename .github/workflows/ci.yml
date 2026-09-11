@@ -9,47 +9,39 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    permissions:
+      contents: read
+      packages: write
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          # Makes plain `docker build` (what the Makefile's docker-ci/
-          # docker-build/docker-test targets call) delegate to this buildx
-          # builder instead of the legacy builder, so it actually shares the
-          # cache populated below. Without this, `make docker-ci` recompiles
-          # the cross-toolchain a second time from scratch.
-          install: true
-
-      - name: Cache cross-compiler builder image layers
-        uses: actions/cache@v4
-        with:
-          path: /tmp/.buildx-cache
-          key: exodoom-build-${{ hashFiles('docker/Dockerfile.build') }}
-          restore-keys: |
-            exodoom-build-
-
-      # Pre-builds and loads the exodoom-build image (the one that compiles
-      # binutils+gcc from source) using the cache above, so the plain
-      # `docker build` inside `make docker-ci` hits BuildKit cache instead of
-      # recompiling the cross-toolchain on every run. Only invalidates when
-      # docker/Dockerfile.build actually changes.
-      - name: Build cross-compiler image (cached)
+      - name: Compute cross-compiler image tag
+        id: cross-tag
         run: |
-          docker buildx build \
-            --cache-from type=local,src=/tmp/.buildx-cache \
-            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
-            -t exodoom-build \
-            -f docker/Dockerfile.build \
-            --load \
-            docker
+          echo "hash=$(sha256sum docker/Dockerfile.build | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/exodoom-build-cache" >> "$GITHUB_OUTPUT"
 
-      - name: Move cache
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The exodoom-build image compiles a full binutils+gcc cross-toolchain
+      # from source, which dominates CI time. Pull-and-tag a previous build of
+      # it (keyed on the Dockerfile's own hash) as `exodoom-build:latest`
+      # before `make docker-ci` runs its own `docker build` -- Docker's normal
+      # layer cache then matches against those layers and skips recompiling.
+      # Best-effort: a cold cache (first run, or Dockerfile.build changed)
+      # just means this pull misses and the toolchain builds from scratch.
+      - name: Restore cross-compiler image from GHCR
         run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          docker pull "${{ steps.cross-tag.outputs.image }}:${{ steps.cross-tag.outputs.hash }}" \
+            && docker tag "${{ steps.cross-tag.outputs.image }}:${{ steps.cross-tag.outputs.hash }}" exodoom-build:latest \
+            || echo "No cached cross-compiler image found; will build from scratch."
 
       - name: Build + test (QEMU)
         run: |
@@ -67,6 +59,13 @@ jobs:
             echo "Test completion signal not found in serial output!"
             exit 1
           fi
+
+      - name: Push cross-compiler image to GHCR
+        if: always()
+        run: |
+          docker tag exodoom-build:latest "${{ steps.cross-tag.outputs.image }}:${{ steps.cross-tag.outputs.hash }}" \
+            && docker push "${{ steps.cross-tag.outputs.image }}:${{ steps.cross-tag.outputs.hash }}" \
+            || echo "Skipping push (image missing or no registry access)."
 
       - name: Success
         run: echo "All kernel tests passed."
