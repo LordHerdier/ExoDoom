@@ -119,7 +119,7 @@ actually running in one of its own, rather than the kernel's, is SCRUM-47.
 | Boot / entry | `src/boot.s`, `src/linker.ld`, `src/multiboot2.h`, `src/grub.cfg` |
 | Memory (mmap parse, bump allocator, bitmap PMM) | `src/mmap.c/h`, `src/memory.c/h`, `src/page_alloc.c/h` |
 | Virtual memory (kernel page tables, map/unmap/translate) | `src/vmm.c/h` |
-| Interrupts (IDT/PIC/ISR) | `src/idt.c/h`, `src/pic.c/h`, `src/isr.s`, `src/io.h` |
+| Interrupts (IDT/PIC/ISR, TSS, page-fault diagnostics) | `src/idt.c/h`, `src/pic.c/h`, `src/isr.s`, `src/io.h`, `src/tss.c/h`, `src/fault.c/h` |
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
@@ -256,6 +256,19 @@ actually running in one of its own, rather than the kernel's, is SCRUM-47.
   derives its selectors as `STAR[63:48] + 8` and `+ 16`, so reordering these or
   closing the `0x18` gap breaks every syscall return. See
   `docs/syscall_spec.md` §3.4.
+- **A TSS is loaded, but `syscall` never touches it.** `src/tss.c`'s
+  `tss_init()` (SCRUM-46, called from `kernel_main` right after `idt_init()`)
+  installs a TSS descriptor at GDT selector `0x30` (patched into the two
+  placeholder quads `boot.s` reserves there) and `ltr`s it with `RSP0`
+  pointing at a dedicated 16 KiB kernel stack. This has nothing to do with the
+  `syscall`/`sysretq` path — that stack swap is `syscall_entry.s`'s own doing,
+  by hand, because `syscall` never consults `TSS.RSP0`. What the TSS actually
+  gates is every IDT vector: `idt_set_gate` leaves `IST = 0`, so a CPL 3 → CPL
+  0 exception (a page fault taken in ring 3, for instance) loads its stack
+  from `TSS.RSP0` — without a TSS loaded, TR is null and that load itself
+  faults, escalating through `#GP`/`#DF` to a triple fault before any handler
+  runs. `tests/kernel/test_tss_k.c` drives a real ring-3 page fault to prove
+  it now survives. See `docs/syscall_spec.md` §3.4/§3.7.
 - **Test builds make the identity map ring-3 accessible.**
   `docker/scripts/build.sh` assembles `boot.s` with `--defsym RING3_PROBE=1`
   when `TESTING=1`, setting the U/S bit at every paging level so the ring-3

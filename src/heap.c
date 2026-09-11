@@ -175,6 +175,9 @@ void *heap_alloc(size_t size) {
     if (size == 0) {
         size = 1;
     }
+    if (size > SIZE_MAX - HEAP_ALIGN) {
+        return NULL;
+    }
     size = align_up(size, HEAP_ALIGN);
 
     block_t *b = find_first_fit(size);
@@ -217,6 +220,9 @@ void *heap_realloc(void *ptr, size_t size) {
         return NULL;
     }
 
+    if (size > SIZE_MAX - HEAP_ALIGN) {
+        return NULL;
+    }
     size = align_up(size, HEAP_ALIGN);
     block_t *b = (block_t *)((uintptr_t)ptr - sizeof(block_t));
 
