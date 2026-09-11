@@ -55,15 +55,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          output="$(make docker-ci 2>&1 || true)"
-          echo "$output"
+          make docker-ci 2>&1 | tee build.log || true
 
-          if grep -q "TESTS FAILED" <<<"$output"; then
+          if grep -q "TESTS FAILED" build.log; then
             echo "One or more tests failed!"
             exit 1
           fi
 
-          if ! grep -q "ALL TESTS PASSED" <<<"$output"; then
+          if ! grep -q "ALL TESTS PASSED" build.log; then
             echo "Test completion signal not found in serial output!"
             exit 1
           fi
