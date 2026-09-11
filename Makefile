@@ -2,8 +2,12 @@
 
 DEBUG ?= 0
 
+# Extra flags for the exodoom-build image's buildx invocation, e.g.
+# "--cache-from type=gha --cache-to type=gha,mode=max" in CI. Empty locally.
+BUILDX_CACHE_ARGS ?=
+
 docker-build:
-	docker build -t exodoom-build -f docker/Dockerfile.build docker
+	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
 	docker run --rm -e DEBUG=$(DEBUG) -v "$(PWD):/work" exodoom-build
 
 docker-run: docker-build
@@ -17,7 +21,7 @@ docker-run-kernel: docker-build
 	  'qemu-system-x86_64 -kernel build/exodoom -m 256M -no-reboot -display curses -serial mon:stdio'
 
 docker-test:
-	docker build -t exodoom-build -f docker/Dockerfile.build docker
+	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
 	docker run --rm -e DEBUG=$(DEBUG) -e TESTING=1 -v "$(PWD):/work" exodoom-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
@@ -36,7 +40,7 @@ docker-test:
 	  '
 
 docker-ci:
-	docker build -t exodoom-build -f docker/Dockerfile.build docker
+	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
 	docker run --rm -e DEBUG=$(DEBUG) -e TESTING=1 -v "$(PWD):/work" exodoom-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
@@ -57,7 +61,7 @@ docker-ci:
 # Best-effort compile pass over vendored src/doom/*.c (SCRUM-63/SCRUM-72).
 # Not part of docker-build/docker-ci -- many files still need libc gaps filled.
 docker-build-doom:
-	docker build -t exodoom-build -f docker/Dockerfile.build docker
+	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-build /work/docker/scripts/build-doom.sh
 
 docker-run-debug: docker-build

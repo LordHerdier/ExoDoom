@@ -9,35 +9,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    env:
+      # The exodoom-build image compiles a full binutils+gcc cross-toolchain
+      # from source (~13 min), which dominates CI time. This tells the
+      # Makefile's `docker buildx build` (see BUILDX_CACHE_ARGS there) to
+      # import/export its layers via the GitHub Actions cache, so unchanged
+      # Dockerfile.build steps are skipped on later runs instead of
+      # recompiling from scratch. Requires the docker-container driver set up
+      # below -- it's the only driver that supports cache export.
+      BUILDX_CACHE_ARGS: --cache-from type=gha --cache-to type=gha,mode=max
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          # The "docker" driver runs in the same dockerd as plain `docker
-          # build` (what the Makefile's docker-ci/docker-build/docker-test
-          # targets call), so building here and letting `make docker-ci`
-          # rebuild afterwards hits the same daemon-local BuildKit cache
-          # instead of recompiling. The default docker-container driver runs
-          # an isolated BuildKit instance that plain `docker build` can't see.
-          driver: docker
-
-      # The exodoom-build image compiles a full binutils+gcc cross-toolchain
-      # from source (~13 min), which dominates CI time. Pre-build it here with
-      # a GitHub Actions cache export/import so unchanged Dockerfile steps are
-      # skipped entirely, then let `make docker-ci` proceed as normal -- its
-      # own `docker build` for this same image will hit the daemon's cache
-      # from this step (same driver, see above) and finish in seconds.
-      - name: Build cross-compiler image (cached)
-        run: |
-          docker buildx build \
-            --cache-from type=gha \
-            --cache-to type=gha,mode=max \
-            -t exodoom-build \
-            -f docker/Dockerfile.build \
-            docker
 
       - name: Build + test (QEMU)
         run: |
