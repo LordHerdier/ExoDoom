@@ -13,6 +13,37 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache cross-compiler builder image layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: exodoom-build-${{ hashFiles('docker/Dockerfile.build') }}
+          restore-keys: |
+            exodoom-build-
+
+      # Pre-builds and loads the exodoom-build image (the one that compiles
+      # binutils+gcc from source) using the cache above, so the plain
+      # `docker build` inside `make docker-ci` hits BuildKit cache instead of
+      # recompiling the cross-toolchain on every run. Only invalidates when
+      # docker/Dockerfile.build actually changes.
+      - name: Build cross-compiler image (cached)
+        run: |
+          docker buildx build \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            -t exodoom-build \
+            -f docker/Dockerfile.build \
+            --load \
+            docker
+
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
       - name: Build + test (QEMU)
         run: |
           set -euo pipefail
