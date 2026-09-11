@@ -26,6 +26,7 @@ void suite_vmm_tests(CU_pSuite s);
 void suite_revoke_tests(CU_pSuite s);
 void suite_page_map_tests(CU_pSuite s);
 void suite_fault_tests(CU_pSuite s);
+void suite_heap_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -100,6 +101,9 @@ int run_tests(void)
 
     s = CU_add_suite("fault", NULL, fault_suite_cleanup);
     suite_fault_tests(s);
+
+    s = CU_add_suite("heap", NULL, NULL);
+    suite_heap_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 
