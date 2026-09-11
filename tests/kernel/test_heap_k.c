@@ -1,15 +1,23 @@
 /*
- * test_heap_k.c -- kernel heap allocator (SCRUM-25).
+ * test_heap_k.c -- kernel heap allocator (SCRUM-25) and on-demand growth
+ * (SCRUM-26).
  *
  * Drives src/heap.c directly (heap_alloc/heap_free/heap_realloc), plus a
  * couple of sanity checks that kmalloc/kfree/krealloc (src/memory.c) route
  * to it once the PMM is live -- which it always is by the time tests run
  * (see kernel_main's boot order in CLAUDE.md).
+ *
+ * The growth tests use page_count_owned(PAGE_OWNER_KERNEL) as an outside
+ * witness that a given allocation did (or did not) reach past the heap into
+ * the PMM -- alloc_page() always stamps PAGE_OWNER_KERNEL, so the count is a
+ * proxy for "how many pages has the heap taken from the PMM so far" that
+ * doesn't require the heap to expose its own internals.
  */
 
 #include "kunit.h"
 #include "heap.h"
 #include "memory.h"
+#include "page_alloc.h"
 
 #include <stdint.h>
 
@@ -85,6 +93,38 @@ static void test_realloc_null_and_zero(void) {
     CU_ASSERT_PTR_NULL(q);
 }
 
+/* SCRUM-26: an allocation bigger than any capacity the heap could plausibly
+ * already have free (prior tests free at most a few KB) must reach into the
+ * PMM for more pages -- proven directly, not just by the alloc succeeding. */
+static void test_alloc_beyond_capacity_requests_pmm_pages(void) {
+    uint32_t before = page_count_owned(PAGE_OWNER_KERNEL);
+
+    void *p = heap_alloc(4096 * 20);
+    CU_ASSERT_PTR_NOT_NULL(p);
+
+    uint32_t after = page_count_owned(PAGE_OWNER_KERNEL);
+    CU_ASSERT_TRUE(after > before);
+
+    heap_free(p);
+}
+
+/* SCRUM-26's other half: growth only happens on demand -- an allocation that
+ * fits inside capacity the heap already freed must be served without asking
+ * the PMM for anything new. */
+static void test_alloc_within_freed_capacity_skips_growth(void) {
+    void *a = heap_alloc(2048);
+    CU_ASSERT_PTR_NOT_NULL(a);
+    heap_free(a);
+
+    uint32_t before = page_count_owned(PAGE_OWNER_KERNEL);
+    void *b = heap_alloc(2048);
+    CU_ASSERT_PTR_NOT_NULL(b);
+    uint32_t after = page_count_owned(PAGE_OWNER_KERNEL);
+
+    CU_ASSERT_EQUAL(before, after);
+    heap_free(b);
+}
+
 static void test_kmalloc_kfree_roundtrip(void) {
     void *p = kmalloc(100);
     CU_ASSERT_PTR_NOT_NULL(p);
@@ -101,6 +141,10 @@ void suite_heap_tests(CU_pSuite s) {
     CU_add_test(s, "free and realloc preserve data",  test_free_and_realloc_preserve_data);
     CU_add_test(s, "free then realloc reuses block",  test_free_then_realloc_reuses_block);
     CU_add_test(s, "large alloc forces growth",       test_large_alloc_forces_growth);
+    CU_add_test(s, "alloc beyond capacity requests PMM pages",
+                test_alloc_beyond_capacity_requests_pmm_pages);
+    CU_add_test(s, "alloc within freed capacity skips growth",
+                test_alloc_within_freed_capacity_skips_growth);
     CU_add_test(s, "realloc NULL and zero",           test_realloc_null_and_zero);
     CU_add_test(s, "kmalloc/kfree roundtrip",         test_kmalloc_kfree_roundtrip);
 }
