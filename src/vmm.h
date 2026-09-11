@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "multiboot2.h"
+#include "page_alloc.h"   /* page_owner_t — address-space registry keys on it */
 
 /*
  * vmm — the kernel's own 4-level page tables (SCRUM-15).
@@ -106,5 +107,115 @@ int vmm_unmap_page(uint64_t vaddr);
  * and *flags_out (if non-NULL) the leaf entry's flag bits.  Returns
  * VMM_ENOENT if any level along the walk is not present. */
 int vmm_translate(uint64_t vaddr, uint64_t *paddr_out, uint64_t *flags_out);
+
+/*
+ * ── Address spaces beyond the kernel's own (SCRUM-48) ───────────────────
+ *
+ * vmm_map_page/-unmap/-translate above always edit or read kernel_pml4 — the
+ * one address space vmm_init() builds. The *_in variants below take an
+ * explicit root instead, so the same walker can build and edit a LibOS's
+ * private address space without a second copy of next_level()/
+ * split_large_page().  vmm_map_page(...) is exactly vmm_map_page_in
+ * (vmm_kernel_pml4-backed root, ...); nothing about the plain names changes.
+ */
+
+int vmm_map_page_in(uint64_t *pml4, uint64_t vaddr, uint64_t paddr,
+                    uint64_t flags);
+int vmm_map_range_in(uint64_t *pml4, uint64_t vaddr, uint64_t paddr,
+                     uint64_t size, uint64_t flags);
+int vmm_unmap_page_in(uint64_t *pml4, uint64_t vaddr);
+int vmm_translate_in(uint64_t *pml4, uint64_t vaddr, uint64_t *paddr_out,
+                     uint64_t *flags_out);
+
+/*
+ * Allocate a new PML4 and give it the kernel's own PML4[0] link verbatim —
+ * not a copy of the tables it points to, the same physical PDPT kernel_pml4
+ * uses.  That is what makes the two address spaces agree about kernel memory
+ * for free: no synchronization is needed when the kernel's own map changes,
+ * because there is only one PDPT to change.  The LibOS mapping window's PML4
+ * range (VMM_LIBOS_PML4_START..END in vmm.c, derived from EXO_USER_VA_BASE/
+ * END in src/exo_syscall.h) is left zero for the caller to map into with
+ * vmm_map_page_in().
+ *
+ * Fails with VMM_EINVAL if vmm_init() has not run (nothing to share yet), or
+ * VMM_ENOMEM if the PMM is out of pages.
+ */
+int vmm_create_address_space(uint64_t *pml4_phys_out);
+
+/*
+ * Tear down `owner`'s bound address space in one call: free every private
+ * table (the LibOS window's PML4 range, and the PML4 itself), then remove
+ * `owner` from the registry. Index 0 — the shared kernel subtree — is left
+ * alone unconditionally; freeing it would take down every address space at
+ * once, this one included.
+ *
+ * Deliberately keyed on `owner` rather than a raw `pml4_phys`: a caller that
+ * could pass the physical address directly could also replay it after this
+ * call already freed it, or after a later vmm_create_address_space() reused
+ * the same physical page for an unrelated address space. Going through the
+ * registry means a repeat call finds `owner` already unbound and safely
+ * does nothing (VMM_ENOENT) instead of freeing memory that is no longer —
+ * or is no longer *only* — this address space's.
+ *
+ * Does not free the physical pages the LibOS window pointed at — unmapping
+ * never does (see vmm_unmap_page); that is exo_page_free's/revoke's job, not
+ * this one's.
+ *
+ * Returns VMM_OK, or VMM_ENOENT if `owner` has nothing bound (including a
+ * second call after the first already tore it down).
+ */
+int vmm_destroy_address_space(page_owner_t owner);
+
+/*
+ * Load `pml4_phys` into CR3.  The mechanical half of switching to a LibOS's
+ * address space; SCRUM-47 is what decides *when* to call it (immediately
+ * before the iret into ring 3, and — once there is more than one LibOS —
+ * on every context switch). Safe to call from ring 0 against any address
+ * space this module built, which is what this ticket's own tests do to prove
+ * the kernel survives running on a foreign CR3 before anything depends on
+ * it.
+ *
+ * Returns VMM_EINVAL for a 0 argument rather than loading it — 0 is
+ * vmm_address_space_for()'s "no binding" sentinel, and CR3=0 points at the
+ * page vmm_init() deliberately leaves unmapped as a NULL guard, which would
+ * triple-fault the machine on the very next memory access.
+ */
+int vmm_switch_address_space(uint64_t pml4_phys);
+
+/*
+ * ── Per-context address-space registry ───────────────────────────────────
+ *
+ * Which PML4 a context (page_owner_t, the same id page_alloc.c/fb_binding.c/
+ * revoke.c already use) runs on.  A flat table because v1 has exactly one
+ * LibOS; SCRUM-147 is expected to grow VMM_MAX_ADDRESS_SPACES (or replace the
+ * lookup with a field on its context struct) once there is more than one
+ * entry worth optimizing for — nothing above this layer should assume the
+ * lookup is O(1) or unbounded.
+ */
+#define VMM_MAX_ADDRESS_SPACES 4
+
+/*
+ * Bind `owner`'s address space to `pml4_phys` (from
+ * vmm_create_address_space, or vmm_kernel_pml4() while a LibOS still shares
+ * the kernel's own map).  Rebinding an already-bound owner overwrites the
+ * old entry — nothing today calls this to rebind a live context, but nothing
+ * stops it either, since there is no teardown-then-rebind ordering to get
+ * wrong yet.
+ *
+ * PAGE_OWNER_FREE and PAGE_OWNER_KERNEL are refused with VMM_EINVAL, same
+ * refusal src/revoke.c gives those two ids: neither names a schedulable
+ * context. VMM_ENOMEM if the table is full and `owner` is not already in it.
+ */
+int vmm_bind_address_space(page_owner_t owner, uint64_t pml4_phys);
+
+/* Physical PML4 bound to `owner`, or 0 if none. 0 is safe as a sentinel: page
+ * 0 is vmm_init()'s deliberate NULL guard, so it can never be a real PML4's
+ * address. */
+uint64_t vmm_address_space_for(page_owner_t owner);
+
+/* Clear `owner`'s binding. Does not free the PML4 — call
+ * vmm_destroy_address_space() first if that is what is wanted. For a
+ * context's exit path once one exists. */
+void vmm_unbind_address_space(page_owner_t owner);
 
 #endif

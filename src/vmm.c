@@ -18,6 +18,8 @@
 #include <stdint.h>
 
 #include "vmm.h"
+#include "exo_syscall.h"  /* EXO_USER_VA_BASE/END — the LibOS window this file
+                           * carves out of every address space it builds */
 #include "memory.h"
 #include "mmap.h"
 #include "multiboot2.h"
@@ -35,6 +37,21 @@
 #define PDPT_IDX(v) (((v) >> 30) & 0x1FF)
 #define PD_IDX(v)   (((v) >> 21) & 0x1FF)
 #define PT_IDX(v)   (((v) >> 12) & 0x1FF)
+
+/*
+ * The LibOS window's PML4 index range, derived from the same constants
+ * exo_syscall.h defines rather than restated as literals — the two must
+ * never drift apart (see docs/syscall_spec.md's account of the 4 GiB window
+ * base that "looked correct" until SCRUM-15 mapped more RAM under it).
+ * EXO_USER_VA_BASE/END both land exactly on a 512 GiB (PML4 slot) boundary,
+ * so no rounding is needed: START is inclusive, END is exclusive.
+ */
+#define VMM_LIBOS_PML4_START ((unsigned)PML4_IDX(EXO_USER_VA_BASE))
+#define VMM_LIBOS_PML4_END   ((unsigned)PML4_IDX(EXO_USER_VA_END))
+
+_Static_assert(VMM_LIBOS_PML4_START > 0,
+               "the LibOS window must not reach into PML4[0], the slot every "
+               "address space shares with the kernel's own map");
 
 extern uint8_t _load_start[];
 
@@ -116,16 +133,30 @@ static uint64_t *entry_table(uint64_t entry) {
     return (uint64_t *)(uintptr_t)(entry & ENTRY_ADDR_MASK);
 }
 
-static void flush_page(uint64_t vaddr) {
-    if (map_active) {
+/* True when `pml4` is the tree currently loaded in CR3.  The TLB only ever
+ * caches translations sourced from the active CR3, so editing a *different*
+ * tree — a LibOS address space while the kernel's own map is still active,
+ * or vice versa — leaves nothing stale to flush there; flushing anyway would
+ * invalidate the wrong tree's entries instead. */
+static int is_active_tree(uint64_t *pml4) {
+    if (!map_active) {
+        return 0;
+    }
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    return (cr3 & ~0xFFFULL) == (uint64_t)(uintptr_t)pml4;
+}
+
+static void flush_page(uint64_t *pml4, uint64_t vaddr) {
+    if (is_active_tree(pml4)) {
         __asm__ volatile ("invlpg (%0)" :: "r"(vaddr) : "memory");
     }
 }
 
 /* Reload CR3 — the cheap way to drop every TLB entry for a 2 MB block after a
  * split, instead of 512 invlpg. */
-static void flush_all(void) {
-    if (map_active) {
+static void flush_all(uint64_t *pml4) {
+    if (is_active_tree(pml4)) {
         uint64_t cr3;
         __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
         __asm__ volatile ("mov %0, %%cr3" :: "r"(cr3) : "memory");
@@ -143,7 +174,7 @@ static void flush_all(void) {
  * a link created for a supervisor mapping would otherwise veto a user leaf
  * mapped later under the same PDPT/PD.
  */
-static uint64_t *next_level(uint64_t *table, unsigned index, uint64_t leaf_flags) {
+static uint64_t *next_level(uint64_t *pml4, uint64_t *table, unsigned index, uint64_t leaf_flags) {
     uint64_t entry = table[index];
 
     if (entry & VMM_PRESENT) {
@@ -152,7 +183,7 @@ static uint64_t *next_level(uint64_t *table, unsigned index, uint64_t leaf_flags
         }
         if ((leaf_flags & VMM_USER) && !(entry & VMM_USER)) {
             table[index] = entry | VMM_USER;
-            flush_all();
+            flush_all(pml4);
         }
         return entry_table(entry);
     }
@@ -175,7 +206,7 @@ static uint64_t *next_level(uint64_t *table, unsigned index, uint64_t leaf_flags
  * neighbours.  The leaf's flags carry over verbatim (minus PS), which is what
  * makes the split invisible to everything except the page being changed.
  */
-static int split_large_page(uint64_t *pd, unsigned index) {
+static int split_large_page(uint64_t *pml4, uint64_t *pd, unsigned index) {
     uint64_t entry = pd[index];
     uint64_t base  = entry & ENTRY_ADDR_MASK;
     uint64_t flags = (entry & ENTRY_FLAG_MASK) & ~VMM_HUGE;
@@ -197,17 +228,17 @@ static int split_large_page(uint64_t *pd, unsigned index) {
      * install the table.
      */
     pd[index] = 0;
-    flush_all();
+    flush_all(pml4);
 
     pd[index] = (uint64_t)(uintptr_t)pt | link_flags_for(flags);
-    flush_all();
+    flush_all(pml4);
     return VMM_OK;
 }
 
 /* ── Mapping ──────────────────────────────────────────────────────────── */
 
-int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
-    if (kernel_pml4 == NULL) {
+int vmm_map_page_in(uint64_t *pml4, uint64_t vaddr, uint64_t paddr, uint64_t flags) {
+    if (pml4 == NULL) {
         return VMM_EINVAL;
     }
     if ((vaddr % VMM_PAGE_SIZE) != 0 || (paddr % VMM_PAGE_SIZE) != 0 ||
@@ -218,7 +249,7 @@ int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
     /* Sanitised once, then used for both the leaf and the links below. */
     uint64_t leaf = (flags & ENTRY_FLAG_MASK) | VMM_PRESENT;
 
-    uint64_t *pdpt = next_level(kernel_pml4, PML4_IDX(vaddr), leaf);
+    uint64_t *pdpt = next_level(pml4, pml4, PML4_IDX(vaddr), leaf);
     if (pdpt == NULL) {
         return VMM_ENOMEM;
     }
@@ -229,7 +260,7 @@ int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
         return VMM_EEXIST;
     }
 
-    uint64_t *pd = next_level(pdpt, PDPT_IDX(vaddr), leaf);
+    uint64_t *pd = next_level(pml4, pdpt, PDPT_IDX(vaddr), leaf);
     if (pd == NULL) {
         return VMM_ENOMEM;
     }
@@ -244,13 +275,13 @@ int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
             return VMM_EEXIST;
         }
 
-        int rc = split_large_page(pd, PD_IDX(vaddr));
+        int rc = split_large_page(pml4, pd, PD_IDX(vaddr));
         if (rc != VMM_OK) {
             return rc;
         }
     }
 
-    uint64_t *pt = next_level(pd, PD_IDX(vaddr), leaf);
+    uint64_t *pt = next_level(pml4, pd, PD_IDX(vaddr), leaf);
     if (pt == NULL) {
         return VMM_ENOMEM;
     }
@@ -263,19 +294,23 @@ int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
     }
 
     pt[PT_IDX(vaddr)] = paddr | leaf;
-    flush_page(vaddr);
+    flush_page(pml4, vaddr);
     return VMM_OK;
+}
+
+int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
+    return vmm_map_page_in(kernel_pml4, vaddr, paddr, flags);
 }
 
 /*
  * Map a 2 MB-aligned block as a single leaf.  Returns VMM_EEXIST when the
  * block is already described at 4 KiB granularity (or points elsewhere), which
- * vmm_map_range() treats as "fall back to 4 KiB pages" rather than an error.
+ * vmm_map_range_in() treats as "fall back to 4 KiB pages" rather than an error.
  */
-static int map_large_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
+static int map_large_page(uint64_t *pml4, uint64_t vaddr, uint64_t paddr, uint64_t flags) {
     uint64_t leaf = (flags & ENTRY_FLAG_MASK) | VMM_PRESENT;
 
-    uint64_t *pdpt = next_level(kernel_pml4, PML4_IDX(vaddr), leaf);
+    uint64_t *pdpt = next_level(pml4, pml4, PML4_IDX(vaddr), leaf);
     if (pdpt == NULL) {
         return VMM_ENOMEM;
     }
@@ -283,7 +318,7 @@ static int map_large_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
         return VMM_EEXIST;
     }
 
-    uint64_t *pd = next_level(pdpt, PDPT_IDX(vaddr), leaf);
+    uint64_t *pd = next_level(pml4, pdpt, PDPT_IDX(vaddr), leaf);
     if (pd == NULL) {
         return VMM_ENOMEM;
     }
@@ -296,16 +331,16 @@ static int map_large_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
     }
 
     pd[PD_IDX(vaddr)] = paddr | leaf | VMM_HUGE;
-    flush_all();
+    flush_all(pml4);
     return VMM_OK;
 }
 
-int vmm_map_range(uint64_t vaddr, uint64_t paddr, uint64_t size, uint64_t flags) {
-    /* The same three checks vmm_map_page makes, up front: the 2 MB path below
-     * bypasses it entirely, and would otherwise walk a NULL PML4 (a fault with
-     * no handler behind it) or silently truncate a non-canonical address into
-     * an unrelated one. */
-    if (kernel_pml4 == NULL) {
+int vmm_map_range_in(uint64_t *pml4, uint64_t vaddr, uint64_t paddr, uint64_t size, uint64_t flags) {
+    /* The same three checks vmm_map_page_in makes, up front: the 2 MB path
+     * below bypasses it entirely, and would otherwise walk a NULL PML4 (a
+     * fault with no handler behind it) or silently truncate a non-canonical
+     * address into an unrelated one. */
+    if (pml4 == NULL) {
         return VMM_EINVAL;
     }
     if ((vaddr % VMM_PAGE_SIZE) != 0 || (paddr % VMM_PAGE_SIZE) != 0 ||
@@ -325,7 +360,7 @@ int vmm_map_range(uint64_t vaddr, uint64_t paddr, uint64_t size, uint64_t flags)
         if ((va % VMM_LARGE_PAGE_SIZE) == 0 && (pa % VMM_LARGE_PAGE_SIZE) == 0 &&
             remaining >= VMM_LARGE_PAGE_SIZE) {
 
-            int rc = map_large_page(va, pa, flags);
+            int rc = map_large_page(pml4, va, pa, flags);
             if (rc == VMM_OK) {
                 off += VMM_LARGE_PAGE_SIZE;
                 continue;
@@ -338,7 +373,7 @@ int vmm_map_range(uint64_t vaddr, uint64_t paddr, uint64_t size, uint64_t flags)
              * already matches. */
         }
 
-        int rc = vmm_map_page(va, pa, flags);
+        int rc = vmm_map_page_in(pml4, va, pa, flags);
         if (rc != VMM_OK) {
             return rc;
         }
@@ -348,8 +383,12 @@ int vmm_map_range(uint64_t vaddr, uint64_t paddr, uint64_t size, uint64_t flags)
     return VMM_OK;
 }
 
-int vmm_unmap_page(uint64_t vaddr) {
-    if (kernel_pml4 == NULL) {
+int vmm_map_range(uint64_t vaddr, uint64_t paddr, uint64_t size, uint64_t flags) {
+    return vmm_map_range_in(kernel_pml4, vaddr, paddr, size, flags);
+}
+
+int vmm_unmap_page_in(uint64_t *pml4, uint64_t vaddr) {
+    if (pml4 == NULL) {
         return VMM_EINVAL;
     }
     if ((vaddr % VMM_PAGE_SIZE) != 0 || !is_canonical(vaddr)) {
@@ -357,7 +396,7 @@ int vmm_unmap_page(uint64_t vaddr) {
     }
 
     /* 0 = walk only, never create: unmapping must not allocate. */
-    uint64_t *pdpt = next_level(kernel_pml4, PML4_IDX(vaddr), 0);
+    uint64_t *pdpt = next_level(pml4, pml4, PML4_IDX(vaddr), 0);
     if (pdpt == NULL) {
         return VMM_ENOENT;
     }
@@ -365,20 +404,20 @@ int vmm_unmap_page(uint64_t vaddr) {
         return VMM_EINVAL;      /* 1 GB leaf: splitting is not implemented */
     }
 
-    uint64_t *pd = next_level(pdpt, PDPT_IDX(vaddr), 0);
+    uint64_t *pd = next_level(pml4, pdpt, PDPT_IDX(vaddr), 0);
     if (pd == NULL) {
         return VMM_ENOENT;
     }
 
     uint64_t pde = pd[PD_IDX(vaddr)];
     if ((pde & VMM_PRESENT) && (pde & VMM_HUGE)) {
-        int rc = split_large_page(pd, PD_IDX(vaddr));
+        int rc = split_large_page(pml4, pd, PD_IDX(vaddr));
         if (rc != VMM_OK) {
             return rc;
         }
     }
 
-    uint64_t *pt = next_level(pd, PD_IDX(vaddr), 0);
+    uint64_t *pt = next_level(pml4, pd, PD_IDX(vaddr), 0);
     if (pt == NULL) {
         return VMM_ENOENT;
     }
@@ -389,18 +428,22 @@ int vmm_unmap_page(uint64_t vaddr) {
     /* The now-empty page table is left in place: reclaiming it means proving
      * all 512 entries are clear on every unmap, and the kernel map is built
      * once and barely edited.  Per-LibOS address spaces tear down whole trees
-     * at once instead (SCRUM-155). */
+     * at once instead (vmm_destroy_address_space, SCRUM-48). */
     pt[PT_IDX(vaddr)] = 0;
-    flush_page(vaddr);
+    flush_page(pml4, vaddr);
     return VMM_OK;
 }
 
-int vmm_translate(uint64_t vaddr, uint64_t *paddr_out, uint64_t *flags_out) {
-    if (kernel_pml4 == NULL || !is_canonical(vaddr)) {
+int vmm_unmap_page(uint64_t vaddr) {
+    return vmm_unmap_page_in(kernel_pml4, vaddr);
+}
+
+int vmm_translate_in(uint64_t *pml4, uint64_t vaddr, uint64_t *paddr_out, uint64_t *flags_out) {
+    if (pml4 == NULL || !is_canonical(vaddr)) {
         return VMM_EINVAL;
     }
 
-    uint64_t entry = kernel_pml4[PML4_IDX(vaddr)];
+    uint64_t entry = pml4[PML4_IDX(vaddr)];
     if (!(entry & VMM_PRESENT)) {
         return VMM_ENOENT;
     }
@@ -436,6 +479,10 @@ int vmm_translate(uint64_t vaddr, uint64_t *paddr_out, uint64_t *flags_out) {
     if (paddr_out) *paddr_out = (entry & ENTRY_ADDR_MASK) | (vaddr & 0xFFF);
     if (flags_out) *flags_out = entry & ENTRY_FLAG_MASK;
     return VMM_OK;
+}
+
+int vmm_translate(uint64_t vaddr, uint64_t *paddr_out, uint64_t *flags_out) {
+    return vmm_translate_in(kernel_pml4, vaddr, paddr_out, flags_out);
 }
 
 uint64_t vmm_kernel_pml4(void) {
@@ -616,4 +663,186 @@ fail:
     kernel_pml4 = NULL;
     table_pages = 0;
     return rc;
+}
+
+/* ── Address spaces beyond the kernel's own (SCRUM-48) ───────────────────
+ *
+ * A LibOS's PML4 shares kernel_pml4[0] — the same physical PDPT, not a copy
+ * of what it points to — so kernel memory needs no synchronization between
+ * address spaces, and PML4 indices [VMM_LIBOS_PML4_START, VMM_LIBOS_PML4_END)
+ * (the LibOS window, EXO_USER_VA_BASE..END in src/exo_syscall.h) start zero
+ * for the caller to map into. That split falls out of the addresses involved
+ * rather than anything this file enforces: the window sits at 64 TiB+, which
+ * PML4_IDX() puts at index 128, while everything vmm_init() maps — low
+ * memory, the kernel image, usable RAM, the framebuffer aperture — lives
+ * under index 0. The two ranges have never once needed the same top-level
+ * slot.
+ */
+
+int vmm_create_address_space(uint64_t *pml4_phys_out) {
+    if (kernel_pml4 == NULL) {
+        return VMM_EINVAL;      /* nothing to share yet */
+    }
+
+    uint64_t *pml4 = alloc_table();     /* PAGE_OWNER_KERNEL, same as kernel_pml4 */
+    if (pml4 == NULL) {
+        return VMM_ENOMEM;
+    }
+
+    pml4[0] = kernel_pml4[0];
+    *pml4_phys_out = (uint64_t)(uintptr_t)pml4;
+    return VMM_OK;
+}
+
+/* Free every present entry under a PT — leaves only, so nothing below them
+ * to recurse into.  Does not free the physical pages the leaves point at;
+ * see vmm_destroy_address_space()'s header comment for why. */
+static void free_pt(uint64_t *pt) {
+    free_page(pt);
+    table_pages--;
+}
+
+static void free_pd(uint64_t *pd) {
+    for (unsigned i = 0; i < 512; i++) {
+        uint64_t entry = pd[i];
+        if (!(entry & VMM_PRESENT) || (entry & VMM_HUGE)) {
+            continue;           /* empty, or a 2 MiB leaf — nothing below it */
+        }
+        free_pt(entry_table(entry));
+    }
+    free_page(pd);
+    table_pages--;
+}
+
+static void free_pdpt(uint64_t *pdpt) {
+    for (unsigned i = 0; i < 512; i++) {
+        uint64_t entry = pdpt[i];
+        if (!(entry & VMM_PRESENT) || (entry & VMM_HUGE)) {
+            continue;           /* empty, or a 1 GiB leaf — never created here */
+        }
+        free_pd(entry_table(entry));
+    }
+    free_page(pdpt);
+    table_pages--;
+}
+
+static void free_private_subtree(uint64_t *pml4) {
+    /* Indices below VMM_LIBOS_PML4_START are never this address space's own
+     * tables — index 0 is the shared kernel subtree, and nothing between it
+     * and the window is ever populated — so only the window's own range is
+     * ever this address space's to free. */
+    for (unsigned i = VMM_LIBOS_PML4_START; i < VMM_LIBOS_PML4_END; i++) {
+        uint64_t entry = pml4[i];
+        if (entry & VMM_PRESENT) {
+            free_pdpt(entry_table(entry));
+        }
+        pml4[i] = 0;
+    }
+}
+
+/*
+ * Tear down `owner`'s address space and remove it from the registry in one
+ * call — the two used to be separate (vmm_unbind_address_space +
+ * a raw-pml4_phys destroy), which let a caller free the tables while
+ * leaving the registry pointing at what is now free memory, or free the
+ * same tables twice if it (or anything else) still held the physical
+ * address around. Routing destruction through the registry closes both: a
+ * second call finds `owner` already unbound and does nothing, and nothing
+ * outside this file ever sees a raw PML4 physical address it could replay.
+ *
+ * Returns VMM_OK, or VMM_ENOENT if `owner` has no address space bound
+ * (including a second call after the first already tore it down).
+ */
+int vmm_destroy_address_space(page_owner_t owner) {
+    uint64_t pml4_phys = vmm_address_space_for(owner);
+    if (pml4_phys == 0) {
+        return VMM_ENOENT;
+    }
+
+    /* Unbind first: if anything below faults or is interrupted, the registry
+     * still ends up pointing at nothing rather than at memory this function
+     * is in the middle of freeing. */
+    vmm_unbind_address_space(owner);
+
+    uint64_t *pml4 = (uint64_t *)(uintptr_t)pml4_phys;
+    free_private_subtree(pml4);
+    free_page(pml4);
+    table_pages--;
+    return VMM_OK;
+}
+
+int vmm_switch_address_space(uint64_t pml4_phys) {
+    if (pml4_phys == 0) {
+        return VMM_EINVAL;
+    }
+    __asm__ volatile ("mov %0, %%cr3" :: "r"(pml4_phys) : "memory");
+    return VMM_OK;
+}
+
+/* ── Per-context address-space registry ──────────────────────────────────
+ *
+ * See vmm.h: keyed on page_owner_t, same id every other ownership table in
+ * the kernel already uses, and deliberately a flat linear-scan table rather
+ * than anything smarter — SCRUM-147 is expected to replace this once there
+ * is more than one entry worth optimizing for.
+ */
+
+typedef struct {
+    page_owner_t owner;         /* PAGE_OWNER_FREE marks an empty slot */
+    uint64_t     pml4_phys;
+} addrspace_binding_t;
+
+static addrspace_binding_t address_spaces[VMM_MAX_ADDRESS_SPACES];
+
+/* Mirrors page_alloc.c's owner_id(): mask off the revocation bit (SCRUM-156)
+ * so a context under revocation still resolves to its own address space —
+ * revocation marks a resource pending, it does not stop the owner running. */
+static page_owner_t owner_id(page_owner_t owner) {
+    return owner & PAGE_OWNER_ID_MASK;
+}
+
+int vmm_bind_address_space(page_owner_t owner, uint64_t pml4_phys) {
+    page_owner_t id = owner_id(owner);
+    if (id == PAGE_OWNER_FREE || id == PAGE_OWNER_KERNEL) {
+        return VMM_EINVAL;
+    }
+
+    int free_slot = -1;
+    for (int i = 0; i < VMM_MAX_ADDRESS_SPACES; i++) {
+        if (owner_id(address_spaces[i].owner) == id) {
+            address_spaces[i].pml4_phys = pml4_phys;
+            return VMM_OK;
+        }
+        if (address_spaces[i].owner == PAGE_OWNER_FREE && free_slot < 0) {
+            free_slot = i;
+        }
+    }
+    if (free_slot < 0) {
+        return VMM_ENOMEM;
+    }
+
+    address_spaces[free_slot].owner = owner;
+    address_spaces[free_slot].pml4_phys = pml4_phys;
+    return VMM_OK;
+}
+
+uint64_t vmm_address_space_for(page_owner_t owner) {
+    page_owner_t id = owner_id(owner);
+    for (int i = 0; i < VMM_MAX_ADDRESS_SPACES; i++) {
+        if (owner_id(address_spaces[i].owner) == id) {
+            return address_spaces[i].pml4_phys;
+        }
+    }
+    return 0;
+}
+
+void vmm_unbind_address_space(page_owner_t owner) {
+    page_owner_t id = owner_id(owner);
+    for (int i = 0; i < VMM_MAX_ADDRESS_SPACES; i++) {
+        if (owner_id(address_spaces[i].owner) == id) {
+            address_spaces[i].owner = PAGE_OWNER_FREE;
+            address_spaces[i].pml4_phys = 0;
+            return;
+        }
+    }
 }

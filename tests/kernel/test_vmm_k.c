@@ -13,6 +13,8 @@
 #include "vmm.h"
 #include "page_alloc.h"
 #include "memory.h"
+#include "serial.h"
+#include "exo_syscall.h"
 
 #include <stdint.h>
 
@@ -294,6 +296,188 @@ static void test_conflicting_map_does_not_split(void)
     }
 }
 
+/*
+ * ── Per-LibOS address spaces (SCRUM-48) ──────────────────────────────────
+ *
+ * A window in the LibOS mapping range, apart from every other suite's
+ * scratch addresses (test_page_map_k.c uses EXO_USER_VA_BASE + 0x20000000/
+ * 0x24000000). These tests build and tear down real address spaces of their
+ * own rather than borrowing the kernel's, and none of them touch CR3 for
+ * longer than a single test — vmm_switch_address_space() is proven to work
+ * and then immediately reverted.
+ */
+#define ADDRSPACE_SCRATCH_VA (EXO_USER_VA_BASE + 0x10000000ULL)
+
+/* A context id these tests own for their own create/bind/destroy lifecycle,
+ * distinct from OTHER_LIBOS (test_page_map_k.c, +1) and
+ * REGISTRY_SCRATCH_OWNER (below, +3) so none of the suites' registry state
+ * collides. */
+#define ADDRSPACE_TEST_OWNER ((page_owner_t)(PAGE_OWNER_LIBOS + 4))
+
+/* kernel_main binds the one v1 LibOS to the kernel's own map (SCRUM-47 has
+ * not landed a private one yet) — this is the observable proof that the
+ * boot-time wiring in kernel.c actually ran. */
+static void test_libos_bound_to_kernel_map_by_default(void)
+{
+    CU_ASSERT_EQUAL(vmm_address_space_for(PAGE_OWNER_LIBOS), vmm_kernel_pml4());
+}
+
+/* A new address space's PML4[0] is the kernel's own PDPT link, not a copy of
+ * what it points to — the property that makes kernel memory agree between
+ * address spaces without synchronizing anything. */
+static void test_create_address_space_shares_kernel_subtree(void)
+{
+    uint64_t new_phys = 0;
+    CU_ASSERT_EQUAL(vmm_create_address_space(&new_phys), VMM_OK);
+    CU_ASSERT_NOT_EQUAL(new_phys, 0);
+    CU_ASSERT_EQUAL(new_phys % VMM_PAGE_SIZE, 0);
+
+    uint64_t *new_pml4 = (uint64_t *)(uintptr_t)new_phys;
+    uint64_t *kernel_pml4_ptr = (uint64_t *)(uintptr_t)vmm_kernel_pml4();
+    CU_ASSERT_EQUAL(new_pml4[0], kernel_pml4_ptr[0]);
+
+    uint64_t text =
+        (uint64_t)(uintptr_t)&test_create_address_space_shares_kernel_subtree;
+    uint64_t resolved_new = 0, resolved_kernel = 0;
+    CU_ASSERT_EQUAL(vmm_translate_in(new_pml4, text, &resolved_new, NULL),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(vmm_translate(text, &resolved_kernel, NULL), VMM_OK);
+    CU_ASSERT_EQUAL(resolved_new, resolved_kernel);
+
+    CU_ASSERT_EQUAL(vmm_bind_address_space(ADDRSPACE_TEST_OWNER, new_phys),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(vmm_destroy_address_space(ADDRSPACE_TEST_OWNER), VMM_OK);
+}
+
+/* The LibOS window starts empty in a new address space, and a mapping made
+ * inside it is invisible to the kernel's own map — the actual isolation this
+ * ticket exists for, not just presence of a second PML4. */
+static void test_new_address_space_window_is_empty_and_isolated(void)
+{
+    uint64_t new_phys = 0;
+    CU_ASSERT_EQUAL(vmm_create_address_space(&new_phys), VMM_OK);
+    uint64_t *new_pml4 = (uint64_t *)(uintptr_t)new_phys;
+
+    CU_ASSERT_EQUAL(vmm_translate_in(new_pml4, ADDRSPACE_SCRATCH_VA, NULL, NULL),
+                    VMM_ENOENT);
+
+    void *page = alloc_page();
+    CU_ASSERT_PTR_NOT_NULL(page);
+    if (page != NULL) {
+        uint64_t phys = (uint64_t)(uintptr_t)page;
+
+        CU_ASSERT_EQUAL(vmm_map_page_in(new_pml4, ADDRSPACE_SCRATCH_VA, phys,
+                                        VMM_PRESENT | VMM_WRITE), VMM_OK);
+
+        uint64_t resolved = 0;
+        CU_ASSERT_EQUAL(vmm_translate_in(new_pml4, ADDRSPACE_SCRATCH_VA,
+                                         &resolved, NULL), VMM_OK);
+        CU_ASSERT_EQUAL(resolved, phys);
+
+        /* The kernel's own map never learns about this mapping. */
+        CU_ASSERT_EQUAL(vmm_translate(ADDRSPACE_SCRATCH_VA, NULL, NULL),
+                        VMM_ENOENT);
+
+        free_page(page);
+    }
+
+    CU_ASSERT_EQUAL(vmm_bind_address_space(ADDRSPACE_TEST_OWNER, new_phys),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(vmm_destroy_address_space(ADDRSPACE_TEST_OWNER), VMM_OK);
+}
+
+/* vmm_switch_address_space actually loads CR3, and the kernel keeps running
+ * (serial output survives) on a foreign address space — the precondition
+ * SCRUM-47 needs before it can risk an iret into ring 3 against one. */
+static void test_switch_address_space_round_trip(void)
+{
+    uint64_t new_phys = 0;
+    CU_ASSERT_EQUAL(vmm_create_address_space(&new_phys), VMM_OK);
+
+    uint64_t original_cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(original_cr3));
+
+    CU_ASSERT_EQUAL(vmm_switch_address_space(new_phys), VMM_OK);
+
+    uint64_t cr3_after_switch;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3_after_switch));
+    CU_ASSERT_EQUAL(cr3_after_switch & ~0xFFFULL, new_phys);
+
+    /* If the kernel's own code/stack were not reachable from this address
+     * space, this would triple-fault the machine rather than fail an
+     * assertion — the shared PML4[0] subtree is what keeps it alive. */
+    serial_print("vmm: (test) alive on a LibOS address space\n");
+
+    CU_ASSERT_EQUAL(vmm_switch_address_space(vmm_kernel_pml4()), VMM_OK);
+
+    uint64_t cr3_restored;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3_restored));
+    CU_ASSERT_EQUAL(cr3_restored, original_cr3);
+
+    CU_ASSERT_EQUAL(vmm_bind_address_space(ADDRSPACE_TEST_OWNER, new_phys),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(vmm_destroy_address_space(ADDRSPACE_TEST_OWNER), VMM_OK);
+}
+
+/* vmm_switch_address_space refuses 0 (vmm_address_space_for()'s "unbound"
+ * sentinel) rather than loading CR3 with the deliberately-unmapped NULL-guard
+ * page — the failure mode that would otherwise triple-fault the machine. */
+static void test_switch_address_space_rejects_zero(void)
+{
+    CU_ASSERT_EQUAL(vmm_switch_address_space(0), VMM_EINVAL);
+
+    /* Refused, so CR3 must be exactly where it was. */
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    CU_ASSERT_EQUAL(cr3 & ~0xFFFULL, vmm_kernel_pml4());
+}
+
+/* Destroying an owner with nothing bound — including a second call right
+ * after the first already tore the address space down — is refused rather
+ * than walking whatever now occupies the stale physical address. */
+static void test_destroy_unbound_owner_is_enoent(void)
+{
+    CU_ASSERT_EQUAL(vmm_destroy_address_space(ADDRSPACE_TEST_OWNER), VMM_ENOENT);
+
+    uint64_t new_phys = 0;
+    CU_ASSERT_EQUAL(vmm_create_address_space(&new_phys), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_bind_address_space(ADDRSPACE_TEST_OWNER, new_phys),
+                    VMM_OK);
+
+    CU_ASSERT_EQUAL(vmm_destroy_address_space(ADDRSPACE_TEST_OWNER), VMM_OK);
+    /* The first destroy already unbound it — a second call finds nothing. */
+    CU_ASSERT_EQUAL(vmm_destroy_address_space(ADDRSPACE_TEST_OWNER), VMM_ENOENT);
+    CU_ASSERT_EQUAL(vmm_address_space_for(ADDRSPACE_TEST_OWNER), 0);
+}
+
+/* PAGE_OWNER_FREE and PAGE_OWNER_KERNEL name no schedulable context — same
+ * refusal src/revoke.c gives them for revocation. */
+static void test_bind_rejects_free_and_kernel(void)
+{
+    CU_ASSERT_EQUAL(vmm_bind_address_space(PAGE_OWNER_FREE, 0x1000), VMM_EINVAL);
+    CU_ASSERT_EQUAL(vmm_bind_address_space(PAGE_OWNER_KERNEL, 0x1000), VMM_EINVAL);
+}
+
+/* A scratch context id the registry never sees outside this test — the
+ * bound value need not be a real PML4, since bind/lookup/unbind never
+ * dereference it. */
+#define REGISTRY_SCRATCH_OWNER ((page_owner_t)(PAGE_OWNER_LIBOS + 3))
+
+static void test_bind_rebind_and_unbind(void)
+{
+    CU_ASSERT_EQUAL(vmm_bind_address_space(REGISTRY_SCRATCH_OWNER, 0x2000),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(vmm_address_space_for(REGISTRY_SCRATCH_OWNER), 0x2000ULL);
+
+    /* Rebinding overwrites the existing slot rather than filling a new one. */
+    CU_ASSERT_EQUAL(vmm_bind_address_space(REGISTRY_SCRATCH_OWNER, 0x3000),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(vmm_address_space_for(REGISTRY_SCRATCH_OWNER), 0x3000ULL);
+
+    vmm_unbind_address_space(REGISTRY_SCRATCH_OWNER);
+    CU_ASSERT_EQUAL(vmm_address_space_for(REGISTRY_SCRATCH_OWNER), 0);
+}
+
 void suite_vmm_tests(CU_pSuite s)
 {
     CU_add_test(s, "kernel map is live in CR3", test_kernel_map_is_live);
@@ -313,4 +497,20 @@ void suite_vmm_tests(CU_pSuite s)
                 test_conflicting_map_does_not_split);
     CU_add_test(s, "2 MiB split preserves neighbours",
                 test_large_page_split_preserves_neighbours);
+
+    CU_add_test(s, "LibOS context bound to kernel map by default",
+                test_libos_bound_to_kernel_map_by_default);
+    CU_add_test(s, "new address space shares kernel subtree",
+                test_create_address_space_shares_kernel_subtree);
+    CU_add_test(s, "new address space window is empty and isolated",
+                test_new_address_space_window_is_empty_and_isolated);
+    CU_add_test(s, "switch address space round trip",
+                test_switch_address_space_round_trip);
+    CU_add_test(s, "switch address space rejects zero",
+                test_switch_address_space_rejects_zero);
+    CU_add_test(s, "destroy of an unbound owner is ENOENT",
+                test_destroy_unbound_owner_is_enoent);
+    CU_add_test(s, "bind rejects FREE and KERNEL",
+                test_bind_rejects_free_and_kernel);
+    CU_add_test(s, "bind/rebind/unbind registry", test_bind_rebind_and_unbind);
 }

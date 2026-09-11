@@ -47,6 +47,20 @@ static int64_t do_free(uint64_t paddr)
     return exo_syscall_dispatch(EXO_SYS_PAGE_FREE, paddr, 0, 0, 0, 0, 0);
 }
 
+/*
+ * The root do_map()/do_unmap() actually edit — resolved through the same
+ * registry syscall_mem.c's caller_pml4() uses (SCRUM-48), not assumed to be
+ * kernel_pml4. Today it resolves to kernel_pml4 anyway (kernel_main binds
+ * the v1 LibOS to the kernel's own map until SCRUM-47), but asserting the
+ * syscalls' effects through this rather than through vmm_translate()/
+ * vmm_map_page()/vmm_unmap_page() directly means this suite keeps testing
+ * the right thing once that binding changes.
+ */
+static uint64_t *current_root(void)
+{
+    return (uint64_t *)(uintptr_t)vmm_address_space_for(syscall_current_context());
+}
+
 #define MAP_RW (EXO_PAGE_READ | EXO_PAGE_WRITE | EXO_PAGE_USER)
 
 /*
@@ -99,11 +113,13 @@ static void test_map_own_page_round_trip(void)
     CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p, MAP_RW), 0);
 
     uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH, &resolved, NULL), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_translate_in(current_root(), SCRATCH, &resolved, NULL),
+                    VMM_OK);
     CU_ASSERT_EQUAL(resolved, (uint64_t)p);
 
     CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH, &resolved, NULL), VMM_ENOENT);
+    CU_ASSERT_EQUAL(vmm_translate_in(current_root(), SCRATCH, &resolved, NULL),
+                    VMM_ENOENT);
 
     CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
 }
@@ -124,7 +140,8 @@ static void test_foreign_page_rejected(void)
                     -EXO_EPERM);
 
     uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH, &resolved, NULL), VMM_ENOENT);
+    CU_ASSERT_EQUAL(vmm_translate_in(current_root(), SCRATCH, &resolved, NULL),
+                    VMM_ENOENT);
 
     free_page_owned(theirs, OTHER_LIBOS);
 }
@@ -173,19 +190,23 @@ static void test_remap_over_foreign_mapping_rejected(void)
         return;
 
     /* Put the other context's page there behind the syscall's back — the
-     * syscall would (rightly) not have let the caller do it. */
-    CU_ASSERT_EQUAL(vmm_map_page(SCRATCH_2, (uint64_t)(uintptr_t)theirs,
-                                 VMM_WRITE | VMM_USER), VMM_OK);
+     * syscall would (rightly) not have let the caller do it.  Targets the
+     * same root the syscall itself would edit, so the premise ("the caller
+     * could not have created this mapping via exo_page_map") stays true
+     * regardless of what that root is bound to. */
+    uint64_t *root = current_root();
+    CU_ASSERT_EQUAL(vmm_map_page_in(root, SCRATCH_2, (uint64_t)(uintptr_t)theirs,
+                                    VMM_WRITE | VMM_USER), VMM_OK);
 
     CU_ASSERT_EQUAL(do_map(SCRATCH_2, (uint64_t)mine, MAP_RW), -EXO_EINVAL);
     CU_ASSERT_EQUAL(do_unmap(SCRATCH_2), -EXO_EPERM);
 
     /* The foreign mapping is still intact — a refused call changes nothing. */
     uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_2, &resolved, NULL), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_translate_in(root, SCRATCH_2, &resolved, NULL), VMM_OK);
     CU_ASSERT_EQUAL(resolved, (uint64_t)(uintptr_t)theirs);
 
-    CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_2), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_unmap_page_in(root, SCRATCH_2), VMM_OK);
     free_page_owned(theirs, OTHER_LIBOS);
     CU_ASSERT_EQUAL(do_free((uint64_t)mine), 0);
 }
@@ -262,7 +283,8 @@ static void test_framebuffer_follows_the_binding(void)
     CU_ASSERT_EQUAL(do_map(SCRATCH, fb_page, MAP_RW), 0);
 
     uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH, &resolved, NULL), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_translate_in(current_root(), SCRATCH, &resolved, NULL),
+                    VMM_OK);
     CU_ASSERT_EQUAL(resolved, fb_page);
 
     CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
@@ -300,7 +322,8 @@ static void test_fb_mapping_removable_after_reclaim(void)
     CU_ASSERT_EQUAL(do_unmap(SCRATCH_2), 0);
 
     uint64_t resolved = 0;
-    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_2, &resolved, NULL), VMM_ENOENT);
+    CU_ASSERT_EQUAL(vmm_translate_in(current_root(), SCRATCH_2, &resolved, NULL),
+                    VMM_ENOENT);
 }
 
 /* The suite borrows the framebuffer binding and allocates under a second
