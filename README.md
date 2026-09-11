@@ -31,16 +31,21 @@ That’s it. No local cross-compiler required.
 
 The build container runs `docker/scripts/build.sh`:
 
-1. Assemble `src/boot.s` → `build/boot.o`
-2. Compile `src/kernel.c` (freestanding) → `build/kernel.o`
-3. Link with `src/linker.ld` → `build/exodoom`
-4. Verify it’s Multiboot-valid using `grub-file`
-5. Stage an ISO tree under `build/isodir/boot/...`
-6. Create `build/exodoom.iso` using `grub-mkrescue`
+1. Fetch the Freedoom v0.13.0 `freedoom2.wad` IWAD, verified against a
+   pinned sha1 and cached at `build/freedoom2.wad` (re-downloaded only if
+   missing or the hash doesn't match — see "Assets fetched at build time"
+   below)
+2. Assemble `src/boot.s` → `build/boot.o`
+3. Compile `src/kernel.c` (freestanding) → `build/kernel.o`
+4. Link with `src/linker.ld` → `build/exodoom`
+5. Verify it’s Multiboot-valid using `grub-file`
+6. Stage an ISO tree under `build/isodir/boot/...`
+7. Create `build/exodoom.iso` using `grub-mkrescue`
 
 Outputs:
 - `build/exodoom` (kernel ELF)
-- `build/exodoom.iso` (bootable ISO)
+- `build/exodoom.iso` (bootable ISO, including `freedoom2.wad` as a GRUB
+  Multiboot 2 module)
 
 ## Makefile usage
 
@@ -81,6 +86,14 @@ make clean
 ## Third-party code
 [doomgeneric](https://github.com/ozkl/doomgeneric) is vendored under `src/doom/`
 as the Doom engine this kernel targets — see `src/doom/LICENSE` (GPL-2.0).
+
+## Assets fetched at build time
+`freedoom2.wad` isn't committed to the repo — `docker/scripts/build.sh` fetches
+it from the official [Freedoom](https://github.com/freedoom/freedoom) v0.13.0
+release on every build, pinned and verified by sha1/sha256 rather than trusted
+blindly, and fails the build loudly on a hash mismatch. It's cached at
+`build/freedoom2.wad` so a rebuild doesn't re-download it. See
+`docs/architecture.md` §7 for the exact pin and how it was verified.
 
 ## License
 MIT License (at least for now, may change later...?)

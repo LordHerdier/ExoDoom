@@ -528,29 +528,30 @@ fake `FILE*` backed by a pointer into the module's mapped memory, and
 `fread`/`fseek` operate as offset arithmetic over that region. This avoids
 implementing any real file I/O for the game's largest data source.
 
-> ⚠️ **The WAD we currently ship is a `PWAD`, not an `IWAD`.** Verify this
-> before writing `DG_Init` (SCRUM-73).
+> ✅ **SCRUM-164:** the WAD is now a genuine `IWAD`, fetched at build time
+> rather than committed. `docker/scripts/build.sh` downloads the official
+> Freedoom v0.13.0 release zip from `github.com/freedoom/freedoom`, checks it
+> against that release's GPG-signed `CHECKSUM` file, extracts `freedoom2.wad`,
+> and caches the result in `build/freedoom2.wad` (host-bind-mounted, so a
+> valid download survives across builds); either hash mismatch fails the
+> build loudly rather than shipping a bad WAD. Swapping WADs going forward is
+> a URL + hash edit in `build.sh`, not a multi-megabyte commit.
 >
-> The `freedoom2.wad` in use — 21,699,491 bytes, sha1
-> `b51be0646fb0c682663b523ba08df703ee56fff8`, 1351 lumps — begins with the four
-> bytes `PWAD`. Official Freedoom releases ship `freedoom2.wad` with `IWAD`
-> magic. doomgeneric is Chocolate Doom-derived, and that lineage distinguishes
-> the two: an IWAD is a complete base game, a PWAD is a patch layered on top of
-> one. IWAD identification may therefore reject this file or fail to find a base
-> game at all.
->
-> This costs nothing until Doom actually boots, which is why it has gone
-> unnoticed — the page allocator only needs *a* module to reserve, and any 21 MB
-> blob satisfies that. The danger is that it surfaces as a startup failure deep
-> in `W_Init`/`Z_Malloc`/`R_Init` (SCRUM-81), where the stack trace points at
-> the allocator or the renderer and the actual cause is four bytes in a file
-> header. Check `head -c4` on the WAD before debugging anything in those
-> routines.
->
-> The agreed plan (PR #13, not yet implemented) is to fetch the WAD at build
-> time against a pinned sha1 rather than commit it, which would make replacing
-> it a URL and hash change in `docker/scripts/build.sh` rather than another
-> 21 MB commit.
+> Current pin: Freedoom v0.13.0's `freedoom2.wad`, 28,787,748 bytes, sha1
+> `975f781e6d801c0a23e3caa33f70493efe68a880`, magic `IWAD` — verified by
+> extracting it from a zip whose sha256 matched the signed release checksum.
+> An earlier pin (an archive.org-hosted file) also had `IWAD` magic but
+> matched no official Freedoom release by size or hash across v0.11–v0.14.0
+> alpha when checked against this same repo, so it was dropped in favor of
+> this one. The file shipped before that was a `PWAD` (a patch layered on a
+> base game) rather than a complete `IWAD`, which would have surfaced as a
+> startup failure deep in
+> `W_Init`/`Z_Malloc`/`R_Init` (SCRUM-81) with a stack trace pointing at the
+> allocator or renderer instead of the real four-byte cause — worth
+> remembering if a future WAD swap reintroduces the same class of bug. `src/grub.cfg`'s
+> `module2 /boot/freedoom2.wad freedoom2.wad` line and `build.sh`'s ISO-staging
+> step now both exist; before this ticket neither did, so no module tag ever
+> reached the kernel despite `page_alloc.c` already being able to reserve one.
 
 ### libc shim scope
 

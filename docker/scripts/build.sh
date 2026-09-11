@@ -6,6 +6,46 @@ cd /work
 mkdir -p build/isodir/boot/grub
 cp /usr/share/grub/unicode.pf2 build/isodir/boot/grub/
 
+echo "[1/7] Fetch freedoom2 IWAD"
+# Fetched at build time and pinned by sha1 rather than committed (SCRUM-164)
+# -- avoids a 29 MB binary in git and makes swapping WADs a URL+hash edit
+# here. build/ is bind-mounted from the host (see Makefile), so a valid
+# download is reused across builds instead of re-fetched every time.
+#
+# Official Freedoom v0.13.0 release (github.com/freedoom/freedoom).
+# ZIP_SHA256 was checked against the project's GPG-signed
+# freedoom-0.13.0-CHECKSUM before pinning; WAD_SHA1 is freedoom2.wad's own
+# hash once extracted from that verified zip. Re-verify both if this pin
+# ever changes.
+ZIP_URL="https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip"
+ZIP_SHA256="3f9b264f3e3ce503b4fb7f6bdcb1f419d93c7b546f4df3e874dd878db9688f59"
+WAD_SHA1="975f781e6d801c0a23e3caa33f70493efe68a880"
+WAD_PATH="build/freedoom2.wad"
+ZIP_PATH="build/freedoom-0.13.0.zip"
+
+mkdir -p build
+if [[ -f "$WAD_PATH" ]] && echo "${WAD_SHA1}  ${WAD_PATH}" | sha1sum -c - >/dev/null 2>&1; then
+  echo "    cached at $WAD_PATH, sha1 verified"
+else
+  echo "    downloading freedoom-0.13.0.zip..."
+  curl -fsSL "$ZIP_URL" -o "$ZIP_PATH"
+  if ! echo "${ZIP_SHA256}  ${ZIP_PATH}" | sha256sum -c -; then
+    echo "    ERROR: freedoom-0.13.0.zip sha256 mismatch"
+    rm -f "$ZIP_PATH"
+    exit 1
+  fi
+  unzip -p "$ZIP_PATH" "freedoom-0.13.0/freedoom2.wad" > "$WAD_PATH"
+  rm -f "$ZIP_PATH"
+  if ! echo "${WAD_SHA1}  ${WAD_PATH}" | sha1sum -c -; then
+    echo "    ERROR: freedoom2.wad sha1 mismatch"
+    echo "           got:  $(sha1sum "$WAD_PATH" | awk '{print $1}')"
+    echo "           want: ${WAD_SHA1}"
+    rm -f "$WAD_PATH"
+    exit 1
+  fi
+  echo "    downloaded and verified"
+fi
+
 if [[ "${DEBUG:-0}" == "1" ]]; then
   CFLAGS=(-std=gnu99 -ffreestanding -g -O0 -Wall -Wextra -mno-red-zone -mcmodel=small -mno-sse -mno-sse2 -mno-mmx)
 else
@@ -18,7 +58,7 @@ fi
 
 LDFLAGS=(-T src/linker.ld -ffreestanding -O2 -nostdlib -z max-page-size=0x1000)
 
-echo "[1/6] Assemble boot.s"
+echo "[2/7] Assemble boot.s"
 # RING3_PROBE makes boot.s set the U/S bit through the identity map, without
 # which the ring-3 syscall test (tests/kernel/ring3_probe.s) cannot execute a
 # single instruction.  It is scoped to test builds on purpose: it opens all of
@@ -31,7 +71,7 @@ fi
 
 x86_64-elf-as "${BOOT_ASFLAGS[@]}" src/boot.s -o build/boot.o
 
-echo "[1b/6] Verify page-table protection"
+echo "[2b/7] Verify page-table protection"
 # Assert the U/S gate landed the way this build intends, rather than trusting
 # that it did.  boot.s exports the two flag words it actually used as absolute
 # symbols, so this reads the real constants -- not a restatement of them that
@@ -80,7 +120,7 @@ fi
 
 echo "    identity map is $want_desc (link=0x${pt_link: -2} leaf=0x${pt_leaf: -2})"
 
-echo "[2/6] Compile C sources"
+echo "[3/7] Compile C sources"
 objs=(build/boot.o)
 
 # -DEXO_KERNEL selects the kernel view of src/exo_syscall.h (numbers, shared
@@ -110,7 +150,7 @@ for s in src/*.s; do
 done
 
 if [[ "${TESTING:-0}" == "1" ]]; then
-  echo "[2b/6] Compile kernel test sources"
+  echo "[3b/7] Compile kernel test sources"
   for c in tests/kernel/*.c; do
     o="build/$(basename "${c%.c}.o")"
     echo "    CC $(basename "$c")"
@@ -132,11 +172,11 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   done
 fi
 
-echo "[3/6] Link kernel -> build/exodoom"
+echo "[4/7] Link kernel -> build/exodoom"
 x86_64-elf-gcc "${LDFLAGS[@]}" -o build/exodoom \
   "${objs[@]}" -lgcc
 
-echo "[4/6] Sanity check multiboot2 header"
+echo "[5/7] Sanity check multiboot2 header"
 if grub-file --is-x86-multiboot2 build/exodoom; then
   echo "    multiboot2 confirmed"
 else
@@ -144,12 +184,13 @@ else
   exit 1
 fi
 
-echo "[5/6] Build ISO staging tree"
+echo "[6/7] Build ISO staging tree"
 mkdir -p build/isodir/boot
 cp build/exodoom build/isodir/boot/exodoom
+cp build/freedoom2.wad build/isodir/boot/freedoom2.wad
 cp src/grub.cfg build/isodir/boot/grub/grub.cfg
 
-echo "[6/6] Create ISO -> build/exodoom.iso"
+echo "[7/7] Create ISO -> build/exodoom.iso"
 grub-mkrescue -o build/exodoom.iso build/isodir >/dev/null
 
 echo "Done:"
