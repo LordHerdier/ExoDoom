@@ -528,17 +528,23 @@ fake `FILE*` backed by a pointer into the module's mapped memory, and
 implementing any real file I/O for the game's largest data source.
 
 > ✅ **SCRUM-164:** the WAD is now a genuine `IWAD`, fetched at build time
-> rather than committed. `docker/scripts/build.sh` downloads it from
-> archive.org, verifies it against a pinned sha1, and caches the result in
-> `build/freedoom2.wad` (host-bind-mounted, so a valid download survives
-> across builds); a hash mismatch fails the build loudly rather than shipping
-> a bad WAD. Swapping WADs going forward is a URL + hash edit in `build.sh`,
-> not a multi-megabyte commit.
+> rather than committed. `docker/scripts/build.sh` downloads the official
+> Freedoom v0.13.0 release zip from `github.com/freedoom/freedoom`, checks it
+> against that release's GPG-signed `CHECKSUM` file, extracts `freedoom2.wad`,
+> and caches the result in `build/freedoom2.wad` (host-bind-mounted, so a
+> valid download survives across builds); either hash mismatch fails the
+> build loudly rather than shipping a bad WAD. Swapping WADs going forward is
+> a URL + hash edit in `build.sh`, not a multi-megabyte commit.
 >
-> Current pin: `freedoom2.wad`, 28,865,760 bytes, sha1
-> `5438510bb0ed2a16a8e3cad71d50e8b9137fd3dc`, magic `IWAD`. The previously
-> shipped file was a `PWAD` (a patch layered on a base game) rather than a
-> complete `IWAD`, which would have surfaced as a startup failure deep in
+> Current pin: Freedoom v0.13.0's `freedoom2.wad`, 28,787,748 bytes, sha1
+> `975f781e6d801c0a23e3caa33f70493efe68a880`, magic `IWAD` — verified by
+> extracting it from a zip whose sha256 matched the signed release checksum.
+> An earlier pin (an archive.org-hosted file) also had `IWAD` magic but
+> matched no official Freedoom release by size or hash across v0.11–v0.14.0
+> alpha when checked against this same repo, so it was dropped in favor of
+> this one. The file shipped before that was a `PWAD` (a patch layered on a
+> base game) rather than a complete `IWAD`, which would have surfaced as a
+> startup failure deep in
 > `W_Init`/`Z_Malloc`/`R_Init` (SCRUM-81) with a stack trace pointing at the
 > allocator or renderer instead of the real four-byte cause — worth
 > remembering if a future WAD swap reintroduces the same class of bug. `src/grub.cfg`'s

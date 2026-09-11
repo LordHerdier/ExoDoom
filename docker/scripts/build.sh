@@ -11,17 +11,31 @@ echo "[1/7] Fetch freedoom2 IWAD"
 # -- avoids a 29 MB binary in git and makes swapping WADs a URL+hash edit
 # here. build/ is bind-mounted from the host (see Makefile), so a valid
 # download is reused across builds instead of re-fetched every time.
-WAD_URL="https://archive.org/download/wadarchive/DATA/54.zip/54%2F38510bb0ed2a16a8e3cad71d50e8b9137fd3dc%2F5438510bb0ed2a16a8e3cad71d50e8b9137fd3dc.wad.gz"
-WAD_SHA1="5438510bb0ed2a16a8e3cad71d50e8b9137fd3dc"
+#
+# Official Freedoom v0.13.0 release (github.com/freedoom/freedoom).
+# ZIP_SHA256 was checked against the project's GPG-signed
+# freedoom-0.13.0-CHECKSUM before pinning; WAD_SHA1 is freedoom2.wad's own
+# hash once extracted from that verified zip. Re-verify both if this pin
+# ever changes.
+ZIP_URL="https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip"
+ZIP_SHA256="3f9b264f3e3ce503b4fb7f6bdcb1f419d93c7b546f4df3e874dd878db9688f59"
+WAD_SHA1="975f781e6d801c0a23e3caa33f70493efe68a880"
 WAD_PATH="build/freedoom2.wad"
+ZIP_PATH="build/freedoom-0.13.0.zip"
 
 mkdir -p build
 if [[ -f "$WAD_PATH" ]] && echo "${WAD_SHA1}  ${WAD_PATH}" | sha1sum -c - >/dev/null 2>&1; then
   echo "    cached at $WAD_PATH, sha1 verified"
 else
-  echo "    downloading..."
-  curl -fsSL "$WAD_URL" -o "${WAD_PATH}.gz"
-  gunzip -f "${WAD_PATH}.gz"
+  echo "    downloading freedoom-0.13.0.zip..."
+  curl -fsSL "$ZIP_URL" -o "$ZIP_PATH"
+  if ! echo "${ZIP_SHA256}  ${ZIP_PATH}" | sha256sum -c -; then
+    echo "    ERROR: freedoom-0.13.0.zip sha256 mismatch"
+    rm -f "$ZIP_PATH"
+    exit 1
+  fi
+  unzip -p "$ZIP_PATH" "freedoom-0.13.0/freedoom2.wad" > "$WAD_PATH"
+  rm -f "$ZIP_PATH"
   if ! echo "${WAD_SHA1}  ${WAD_PATH}" | sha1sum -c -; then
     echo "    ERROR: freedoom2.wad sha1 mismatch"
     echo "           got:  $(sha1sum "$WAD_PATH" | awk '{print $1}')"
