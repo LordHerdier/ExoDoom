@@ -471,6 +471,14 @@ separate metadata allocator is needed to bootstrap it.
   of scope for SCRUM-25's acceptance criteria; a future ticket if heap
   fragmentation or memory pressure makes it worth the complexity of partial-
   segment frees.
+- A single-page segment can get stranded: its first block is only
+  `4096 - 32 - 32 = 4032` bytes, so a request above that can never be served
+  from a segment created to satisfy it. This happens when `alloc_page()`
+  hands back a page that isn't contiguous with `heap_growth_cursor`, which
+  becomes routine once `exo_page_free`/revoke start returning low pages to
+  the PMM. Since segments are never freed (see above), a stranded segment
+  stays stranded — self-limiting (growth just keeps retrying until it finds
+  a contiguous run) rather than a hang, but a slow waste of memory.
 - Not thread/interrupt-safe — no locking, consistent with the rest of the
   allocator stack (`page_alloc.c` has none either); fine while allocation
   only ever happens from kernel code running with a single execution
