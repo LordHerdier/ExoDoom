@@ -15,6 +15,16 @@ idt_load:
     lidt (%rdi)
     ret
 
+/* ── TSS loader (SCRUM-46) ────────────────────────────────────────────────
+ * void tss_load(uint16_t selector); — ltr takes its operand from a register
+ * or memory, never an immediate, so the selector travels in %di (the low 16
+ * bits of the first SysV argument register) rather than being baked in here;
+ * src/tss.c owns the actual selector value. */
+.global tss_load
+tss_load:
+    ltr %di
+    ret
+
 /* ── Default stub for unregistered vectors ─────────────────────────────── */
 .global default_stub
 default_stub:
