@@ -13,6 +13,14 @@ jobs:
       contents: read
       packages: write
 
+    env:
+      # Legacy (non-BuildKit) builder matches build cache against any local
+      # image's layer history, not just `--cache-from`-listed ones -- needed
+      # for the pulled exodoom-build image below to actually get used as
+      # cache by the plain `docker build` inside `make docker-ci`. BuildKit
+      # (the default) ignores it unless passed --cache-from explicitly.
+      DOCKER_BUILDKIT: "0"
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
