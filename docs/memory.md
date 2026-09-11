@@ -421,11 +421,21 @@ Available to alloc: ~62,064  (~242 MiB)
 
 ---
 
-## 6b. Kernel heap (SCRUM-25)
+## 6b. Kernel heap (SCRUM-25, SCRUM-26)
 
 **Files:** `src/heap.c`, `src/heap.h`, `src/memory.c` **Status:** ✅ Done
 **Called from:** `kmalloc`/`kfree`/`krealloc` (`src/memory.c`), once the PMM is
 live
+
+SCRUM-26 ("heap grows by requesting pages from PMM on demand") is not a
+separate mechanism from SCRUM-25 — the heap starts with zero pages committed,
+so `heap_grow_one_page()` (see "Segments" below) runs the first time *any*
+allocation can't be served from the free list, not just once some initial
+pool is exhausted. `tests/kernel/test_heap_k.c` proves both directions of
+"on demand" explicitly using `page_count_owned(PAGE_OWNER_KERNEL)` as an
+outside witness: an allocation bigger than anything already free increases
+the PMM's kernel-owned page count, and one that fits in already-freed
+capacity does not.
 
 ### What it does
 
