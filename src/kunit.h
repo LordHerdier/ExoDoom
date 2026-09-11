@@ -15,8 +15,14 @@
 #include "string.h"   /* strcmp for CU_ASSERT_STRING_* macros */
 
 /* ---- Capacity limits --------------------------------------------------- */
-/* Increase these if you hit the suite or per-suite test ceiling at link time. */
-#define KUNIT_MAX_SUITES          16
+/* Increase these if you hit the suite or per-suite test ceiling.
+ *
+ * Note the ceiling is NOT reported at link time, and not at run time either:
+ * CU_add_suite returns NULL once it is reached, CU_add_test(NULL, ...) is a
+ * no-op, and the run still prints ALL TESTS PASSED with the whole suite
+ * silently missing.  Raised from 16 to 32 when the fault suite (SCRUM-17)
+ * took the last slot. */
+#define KUNIT_MAX_SUITES          32
 #define KUNIT_MAX_TESTS_PER_SUITE 64
 #define KUNIT_NAME_LEN            64
 

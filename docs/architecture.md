@@ -287,9 +287,10 @@ framebuffer aperture, and nothing else; page 0 is left unmapped as a NULL
 guard. 2 MB leaves are used where alignment allows and split on demand when a
 4 KiB mapping lands inside one, which is the primitive `exo_page_map`
 (SCRUM-35/-153) is built on. Cost on QEMU `-m 256M`: 8 pages, plus one table
-per 2 MB of LibOS address space a mapping syscall touches. Still ahead:
-per-section permissions and a read-only WAD (SCRUM-16), a page-fault handler
-(SCRUM-17), and per-LibOS address spaces (SCRUM-48). Full detail in `docs/memory.md` §7.
+per 2 MB of LibOS address space a mapping syscall touches. A page fault
+is reported and halts (SCRUM-17, `src/fault.c`). Still ahead: per-section
+permissions and a read-only WAD (SCRUM-16), and per-LibOS address spaces
+(SCRUM-48). Full detail in `docs/memory.md` §7.
 
 **Memory map (QEMU, at boot, pre-paging):**
 
@@ -341,7 +342,7 @@ instructions do not exist in long mode.
 | Vector | Exception                | Handler status                                       |
 | ------ | ------------------------ | ---------------------------------------------------- |
 | 13     | General Protection Fault | Planned: serial diagnostic + halt                    |
-| 14     | Page Fault               | Planned: print CR2, error code, faulting RIP to serial |
+| 14     | Page Fault               | ✅ `pf_stub` → `page_fault_handler`: CR2, decoded error code, RIP, live mapping; halts |
 | 32     | IRQ0 / Timer             | ✅ `irq0_stub` → `irq0_handler`                      |
 | 33     | IRQ1 / Keyboard          | ✅ `irq1_stub` → `irq1_handler`                      |
 | 44     | IRQ12 / Mouse            | ⬜ Sprint 2 (SCRUM-19)                                |
@@ -662,7 +663,7 @@ bare-metal foundations to a playable game.
 | Sprint                                                  | Focus                                    | Key deliverables                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | ------------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Sprint 1: Memory + Timer**                            | Foundations                              | Multiboot 2 mmap ✅, bump allocator ✅, bitmap page allocator 🔄, PIT/timer ✅, sleep ✅, string.h ✅, ctype.h ✅, KUnit ✅, PS/2 keyboard ✅, x86_64 migration ✅, error_stub bug fix ⬜                                                                                                                                                                                                                                                    |
-| **Sprint 2: VMem + Input + libc**                       | Virtual memory + input                   | Paging on (kernel page tables from the PMM ✅ SCRUM-15), page fault handler, framebuffer+WAD mapped, keyboard ring buffer, PS/2 mouse init, `printf`→serial shim                                                                                                                                                                                                                                                                                                           |
+| **Sprint 2: VMem + Input + libc**                       | Virtual memory + input                   | Paging on (kernel page tables from the PMM ✅ SCRUM-15), page fault handler ✅ SCRUM-17, framebuffer+WAD mapped, keyboard ring buffer, PS/2 mouse init, `printf`→serial shim                                                                                                                                                                                                                                                                                                           |
 | **Sprint 3: Heap+Mouse+Syscalls** _(20 Apr – 4 May)_    | Kernel heap + syscall gate               | First-fit heap allocator (`kmalloc`/`kfree`/`krealloc`) backed by PMM, mouse packet decoding + delta accumulator, `stdlib.h` wrappers (`malloc`/`free`/`realloc`, `atoi`, `abs`, `qsort`), `errno`/`assert`/`abort`, `syscall`/`sysret` entry path via MSRs (SCRUM-32), `exo_get_ticks` as first end-to-end syscall                                                                                                                                               |
 | **Sprint 4: LibOS mem+input+math** _(4 May – 18 May)_   | LibOS address space + remaining syscalls | `exo_page_alloc`/`exo_page_free`/`exo_page_map`/`exo_fb_map` in dispatcher, LibOS-side page allocator + heap, `exo_get_key`/`exo_get_mouse_delta` syscalls, Doom keycode → PS/2 scancode translation, `math.h` (fixed-point sin/cos table, `abs`, `floor`/`ceil`), `FILE*` shim (`fopen`/`fclose`/`fread`/`fwrite`/`fseek`/`ftell`) backed by `exo_file_*`, `strcasecmp`/`strncasecmp`, `exo_file_*` kernel dispatcher                      |
 | **Sprint 5: LibOS struct+ring 3** _(18 May – 1 Jun)_    | Ring 0 → ring 3 transition               | GDT with ring 0 + ring 3 segments, TSS for kernel stack on syscall entry, boot LibOS in ring 3 via `iret` to user-mode entry point, separate page directory per LibOS, LibOS binary loading at fixed user-space address, `libos_main()` entry framework, port libc shim to use syscall stubs, `exo_serial_write` syscall                                                                                                                    |
