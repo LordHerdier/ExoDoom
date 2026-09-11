@@ -7,6 +7,7 @@
 #include "vmm.h"
 
 #include "idt.h"
+#include "tss.h"
 #include "pic.h"
 #include "pit.h"
 #include "ps2.h"
@@ -535,6 +536,17 @@ void kernel_main(void *mb2_info_ptr) {
     // pushed.  Anything added between here and pic_remap() must leave IF
     // alone.
     idt_init();
+
+    // ── TSS (SCRUM-46) ───────────────────────────────────────────────────
+    // Every gate idt_init() just installed has IST=0, so a CPL 3 -> CPL 0
+    // exception loads its stack from TSS.RSP0. Without a TSS loaded, TR is
+    // null and that load itself faults -- straight to #GP, then #DF, then a
+    // triple fault, before any handler runs. Depends on nothing but static
+    // storage, so it goes in immediately after idt_init() and, like it,
+    // ahead of the TESTING branch: the ring-3 fault tests need it, and nothing
+    // reaches ring 3 to exercise it before that (SCRUM-47) on a normal boot.
+    tss_init();
+
     // ── Page allocator (SCRUM-7) ───────────────────────────────────────
     page_alloc_init(mb);
 

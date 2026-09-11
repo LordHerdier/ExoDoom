@@ -158,17 +158,17 @@ void page_fault_handler(exception_frame_t *f)
 
     /* CPL comes from the low two bits of the saved CS.
      *
-     * The ring-3 arm cannot actually be reached yet, and not merely because
-     * no LibOS runs (SCRUM-47): no TSS is loaded anywhere in the kernel
-     * (SCRUM-46) and idt_set_gate leaves IST at 0, so a fault taken at CPL 3
-     * has no RSP0 to switch to.  The CPU raises #GP, then #DF -- which needs
-     * the same stack switch -- and the machine triple-faults before this stub
-     * is entered.  Gating vector 14 on an IST once the TSS exists is what
-     * makes this branch live; until then it is written, not exercised.
+     * The ring-3 arm is reachable now that tss_init() loads a TSS with a
+     * valid RSP0 (SCRUM-46): idt_set_gate's gates are all IST=0, so a CPL 3
+     * exception loads that RSP0 rather than faulting for want of one.
+     * tests/kernel/test_tss_k.c drives it deliberately; no LibOS runs in
+     * ring 3 on a normal boot yet (SCRUM-47), so in practice this still only
+     * fires under test.
      *
-     * When it is live, this is where a faulting LibOS gets terminated and its
-     * resources reclaimed via revoke_all(), rather than taking the machine
-     * down with it. */
+     * A real LibOS fault still just halts, because there is no policy yet
+     * for what should happen instead -- this is where a faulting LibOS gets
+     * terminated and its resources reclaimed via revoke_all(), once that
+     * policy exists. */
     serial_print("  context:   ");
     if ((f->cs & 3) != 0) {
         serial_print("ring 3 (LibOS) -- no per-context teardown yet, halting\n");

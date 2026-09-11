@@ -374,8 +374,14 @@ reentrant**. That is safe today only because `FMASK` clears `IF` and there is
 one CPU. When SCRUM-107 introduces multiple LibOS contexts this becomes
 `swapgs` plus a per-CPU block reached through `IA32_KERNEL_GS_BASE`.
 
-No TSS is involved: `syscall` never consults `TSS.RSP0`. SCRUM-46 is needed
-before ring-3 code can take an *interrupt*, not before it can make a syscall.
+No TSS is involved: `syscall` never consults `TSS.RSP0` — SCRUM-46's TSS
+matters to ring-3 code taking an *interrupt or exception*, not to it making a
+syscall. `src/tss.c`'s `tss_init()` loads one anyway (called from
+`kernel_main` right after `idt_init()`), because every gate `idt_init()`
+installs has `IST=0`, and a CPL 3 → CPL 0 exception with `IST=0` loads its
+stack from `TSS.RSP0` regardless of whether anything ever calls `syscall`.
+Without it, a fault taken at CPL 3 has no valid stack to build its frame on
+and triple-faults — see the page-fault bullet under §3.7 below.
 
 **Register preservation.** The stub saves all 14 registers it must return
 intact — the six argument registers included, not merely the SysV callee-saved
@@ -682,15 +688,16 @@ A page belonging to the kernel or to another context is still refused.
   128 TiB window installing one mapping per 2 MiB to consume them without
   bound. Harmless while the only caller is the kernel itself; a per-context
   quota is required before ring 3 can reach it.
-- **A page fault reports, but only from ring 0, and nothing recovers.**
-  SCRUM-17 put a real handler on vector 14: a kernel-side access to an unmapped
-  address now yields CR2, the decoded error code, the faulting RIP and the live
-  mapping state on COM1 instead of a silent loop in `error_stub`. A *ring-3*
-  fault still takes the machine down without a word — a CPL 3 → CPL 0 exception
-  needs `TSS.RSP0`, and no TSS is loaded yet (SCRUM-46), so it triple-faults
-  before the handler runs. Vector 14 needs an IST before the LibOS side of this
-  is real; terminating a faulting LibOS and reclaiming its resources then needs
-  SCRUM-47/48 on top.
+- **A page fault reports, from either ring, but nothing recovers.**
+  SCRUM-17 put a real handler on vector 14: an access to an unmapped address
+  now yields CR2, the decoded error code, the faulting RIP and the live
+  mapping state on COM1 instead of a silent loop in `error_stub`. A CPL 3 →
+  CPL 0 exception needs `TSS.RSP0`; SCRUM-46 loads a TSS with a valid one, so
+  a ring-3 fault reaches the handler and reports instead of triple-faulting
+  (`tests/kernel/test_tss_k.c` drives one for real). What is still missing is
+  policy on top of that report: the handler halts either way today.
+  Terminating a faulting LibOS and reclaiming its resources instead needs
+  SCRUM-47/48.
 
 ---
 
