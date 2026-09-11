@@ -7,25 +7,43 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+
+    env:
+      # The exodoom-build image compiles a full binutils+gcc cross-toolchain
+      # from source (~13 min), which dominates CI time. This tells the
+      # Makefile's `docker buildx build` (see BUILDX_CACHE_ARGS there) to
+      # import/export its layers via the GitHub Actions cache, so unchanged
+      # Dockerfile.build steps are skipped on later runs instead of
+      # recompiling from scratch. Requires the docker-container driver set up
+      # below -- it's the only driver that supports cache export.
+      BUILDX_CACHE_ARGS: --cache-from type=gha --cache-to type=gha,mode=max
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # type=gha cache import/export needs ACTIONS_CACHE_URL/ACTIONS_RUNTIME_TOKEN
+      # exposed as env vars -- setup-buildx-action alone doesn't do this for a
+      # plain `run:` step, so cache-from/cache-to silently no-op without it.
+      - name: Expose GitHub Actions runtime for buildx cache
+        uses: crazy-max/ghaction-github-runtime@v3
+
       - name: Build + test (QEMU)
         run: |
           set -euo pipefail
 
-          output="$(make docker-ci 2>&1 || true)"
-          echo "$output"
+          make docker-ci 2>&1 | tee build.log || true
 
-          if grep -q "TESTS FAILED" <<<"$output"; then
+          if grep -q "TESTS FAILED" build.log; then
             echo "One or more tests failed!"
             exit 1
           fi
 
-          if ! grep -q "ALL TESTS PASSED" <<<"$output"; then
+          if ! grep -q "ALL TESTS PASSED" build.log; then
             echo "Test completion signal not found in serial output!"
             exit 1
           fi
