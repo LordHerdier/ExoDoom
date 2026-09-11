@@ -656,15 +656,19 @@ Three things are worth knowing about it:
 - **`idt_init()` now runs early**, right after `memory_init()` and above the
   `TESTING` branch, so a fault during `page_alloc_init()`, `vmm_init()` or the
   test suite is reported rather than looped on.
-- **Only ring 0 faults actually reach it.** The handler classifies by the
-  saved `CS`'s CPL and prints which ring faulted, but the ring-3 arm is
-  written, not exercised: **no TSS is loaded anywhere in the kernel yet**
-  (SCRUM-46) and `idt_set_gate` leaves `IST` at 0, so a fault taken at CPL 3
-  has no `RSP0` to switch to — the CPU raises `#GP`, then `#DF`, which needs
-  the same stack switch, and the machine triple-faults before `pf_stub` runs.
-  Gating vector 14 on an IST once the TSS exists is what makes that arm live;
-  terminating the faulting LibOS through `revoke_all()` then needs SCRUM-47/48
-  on top.
+- **Ring-3 faults reach it now, but nothing acts on the report yet.** The
+  handler classifies by the saved `CS`'s CPL and prints which ring faulted.
+  Before SCRUM-46, this arm was dead code: no TSS was loaded anywhere in the
+  kernel, and with `idt_set_gate` leaving `IST` at 0, a fault taken at CPL 3
+  had no `RSP0` to switch to — the CPU raised `#GP`, then `#DF`, needing the
+  same stack switch, and the machine triple-faulted before `pf_stub` ran.
+  `src/tss.c`'s `tss_init()` now loads a TSS with a valid `RSP0`
+  (`tests/kernel/test_tss_k.c` drives a real CPL-3 fault to prove it), and
+  SCRUM-47's `src/libos_launch.c/h` launches real ring-3 code on its own
+  address space rather than the kernel's, so the arm is exercised for real
+  (`tests/kernel/test_libos_launch_k.c`). Terminating the faulting LibOS
+  through `revoke_all()` instead of just reporting and halting is still
+  unbuilt policy on top.
 
 Not covered, for the same reason: a fault taken on a corrupt or unmapped stack
 still double-faults, because the handler runs on whatever stack was live. The

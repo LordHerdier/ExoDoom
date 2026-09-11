@@ -512,8 +512,10 @@ return instead of halting, so a test can fault deliberately and resume by
 pointing `f->rip` somewhere safe. That is how `tests/kernel/test_fault_k.c`
 proves the frame layout and the error-code bits from a real fault rather than a
 simulation. A shipped kernel has no such hook, and no policy for resuming from
-a page fault — that arrives with per-LibOS address spaces (SCRUM-47/48), where
-a ring-3 fault terminates the LibOS instead of the machine.
+a page fault. Per-LibOS address spaces (SCRUM-48) and the mechanism to launch
+one in ring 3 (SCRUM-47, `tests/kernel/test_libos_launch_k.c`) both exist now
+— what is still missing is the policy on top: terminating the faulting LibOS
+via `revoke_all()` instead of halting the machine.
 
 ---
 
