@@ -28,6 +28,7 @@ void suite_revoke_tests(CU_pSuite s);
 void suite_page_map_tests(CU_pSuite s);
 void suite_fault_tests(CU_pSuite s);
 void suite_heap_tests(CU_pSuite s);
+void suite_heap_stress_tests(CU_pSuite s);
 void suite_tss_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
@@ -48,6 +49,12 @@ int page_map_suite_cleanup(void);
  * installed would make a later genuine fault resume into a stale label
  * instead of reporting (SCRUM-17). */
 int fault_suite_cleanup(void);
+
+/* The heap stress suite (SCRUM-27) runs its whole 2-pass, 20,000-allocation
+ * load in suite init so the tests below can each make one independent claim
+ * about the same run.  It allocates nothing that outlives init and so needs
+ * no cleanup. */
+int heap_stress_suite_init(void);
 
 /* Same idea for the TSS suite: it installs the fault hook and a SYS_ESCAPE
  * handler around its live ring-3 fault test (SCRUM-46). */
@@ -113,6 +120,9 @@ int run_tests(void)
 
     s = CU_add_suite("heap", NULL, NULL);
     suite_heap_tests(s);
+
+    s = CU_add_suite("heap_stress", heap_stress_suite_init, NULL);
+    suite_heap_stress_tests(s);
 
     s = CU_add_suite("tss", NULL, tss_suite_cleanup);
     suite_tss_tests(s);
