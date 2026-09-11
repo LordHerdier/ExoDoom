@@ -484,6 +484,62 @@ separate metadata allocator is needed to bootstrap it.
   only ever happens from kernel code running with a single execution
   context.
 
+### Accounting and the stress audit (SCRUM-27)
+
+`heap_get_stats()` fills a `heap_stats_t` by walking every block of every
+segment, and `heap_report("label")` prints one line of it to COM1. There are
+no running counters behind them — the walk is O(blocks), so both belong in
+boot diagnostics and tests, never in an allocation path.
+
+Every byte count is **payload**, excluding block headers, which makes
+`total_bytes` deliberately not invariant: splitting a block carves a new
+header out of it and costs `sizeof(block_t)` of payload, and coalescing the
+two gives exactly that back. A snapshot is therefore only meaningful next to a
+snapshot of a comparable state. `used_bytes`/`used_blocks` are the exception —
+split and coalesce never move them — which is why a leak check keys on those
+and not on `free_bytes` whenever the heap may have grown in between.
+
+`tests/kernel/test_heap_stress_k.c` is the audit built on it. Two shapes of
+load, each breaking something different:
+
+- **churn** — 10,000 alloc/free cycles over a 128-slot rolling working set, so
+  every free has live neighbours on both sides. This is what leans on
+  split/coalesce and the free-list bookkeeping.
+- **peak** — 10,000 blocks live *simultaneously* (varied sizes, 8–3719 bytes,
+  weighted small), then freed in a scattered order via a stride coprime with
+  the count. This is what forces repeated `heap_grow_one_page()` and then
+  proves coalescing reassembles the heap instead of leaving fragments.
+
+Both run twice from one PRNG seed, so the second pass replays the first byte
+for byte. That is what makes "consistent free memory before and after"
+checkable at all: the first pass is a **warm-up** that lets the heap reach its
+high-water mark, and the second must then fit entirely inside it. Comparing
+across the *first* pass would only measure growth, which is not a leak.
+
+Observed under QEMU `-m 256M`:
+
+```
+heap[before]:        free=28416    used=0 total=28416    blocks=4/0 seg=4 pages=7
+heap[after warm-up]: free=4218624  used=0 total=4218624  blocks=4/0 seg=4 pages=1030
+heap[after]:         free=4218624  used=0 total=4218624  blocks=4/0 seg=4 pages=1030
+free delta across measured pass = 0 bytes, pages taken = 0
+```
+
+Four free blocks across four segments, before and after — 20,000 allocations
+leave the free list exactly as they found it, with no fragmentation and no
+page taken that the warm-up had not already paid for.
+
+Two notes for anyone changing the load:
+
+- The size mix tops out at 3719 bytes on purpose, under the 4032 a freshly
+  created single-page segment has to offer. A larger request cannot be served
+  by a segment created to satisfy it, so if `alloc_page()` ever returned
+  non-contiguous pages, `heap_alloc()`'s growth loop would keep taking pages
+  until the PMM ran dry — the stranded-segment case in **Properties** above.
+  Multi-page allocations are covered separately by `test_heap_k.c`.
+- The suite is the most expensive one in the run (~2.5 s of the ~6 s QEMU
+  boot). CI kills QEMU at 30 s; see `docs/testing.md`.
+
 ### The libc face: `malloc`/`free`/`realloc` (SCRUM-30)
 
 `src/stdlib.c` gives this heap its standard-library names. `malloc` is

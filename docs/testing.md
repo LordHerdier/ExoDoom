@@ -44,6 +44,20 @@ end.
 greps the serial output for `ALL TESTS PASSED` and fails the job if that
 string is absent or if `TESTS FAILED` is present.
 
+### Time budget
+
+Both `docker-test` and `docker-ci` run QEMU under `timeout 30`. The whole
+suite currently boots and finishes in roughly 6 seconds, so there is ample
+headroom — but it is a hard ceiling, and a suite that blows through it looks
+like a *truncated serial log*, not like a failure: the grep for
+`ALL TESTS PASSED` simply finds nothing and CI reports the completion signal
+as missing.
+
+The expensive suite is `heap_stress` (SCRUM-27), at about 2.5 seconds: it runs
+20,000 allocations against a first-fit allocator whose search is O(live
+blocks). If you add load there, re-measure rather than assuming the headroom
+is still there.
+
 ---
 
 ## Writing tests

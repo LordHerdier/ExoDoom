@@ -2,6 +2,7 @@
 #include "page_alloc.h"
 #include "string.h"
 #include "serial.h"
+#include "stdio.h"
 
 #include <stdint.h>
 
@@ -245,4 +246,54 @@ void *heap_realloc(void *ptr, size_t size) {
     memcpy(newp, ptr, b->size < size ? b->size : size);
     heap_free(ptr);
     return newp;
+}
+
+/* ---- Accounting (SCRUM-27) ---------------------------------------------
+ *
+ * Walks every block of every segment; see heap.h for what the counters mean
+ * and why used_bytes rather than free_bytes is the one to compare when the
+ * heap may have grown in between.
+ */
+
+void heap_get_stats(heap_stats_t *out) {
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+
+    for (segment_t *seg = segments; seg != NULL; seg = seg->next) {
+        out->segments++;
+        out->pages += (size_t)((seg->end - seg->start) / PAGE_SIZE);
+
+        for (block_t *b = seg->first; b != NULL; b = b->next) {
+            out->total_bytes += b->size;
+            if (b->free) {
+                out->free_bytes += b->size;
+                out->free_blocks++;
+            } else {
+                out->used_bytes += b->size;
+                out->used_blocks++;
+            }
+        }
+    }
+}
+
+void heap_report(const char *label) {
+    heap_stats_t s;
+    heap_get_stats(&s);
+
+    /* printf() has no length modifiers (see src/stdio.h), so %u is an
+     * unsigned int -- narrow the size_t counters deliberately.  The heap
+     * would have to reach 4 GiB for that to lose anything, which the PMM's
+     * single managed region cannot supply. */
+    printf("heap[%s]: free=%u used=%u total=%u "
+           "blocks=%u/%u seg=%u pages=%u\n",
+           label,
+           (unsigned)s.free_bytes,
+           (unsigned)s.used_bytes,
+           (unsigned)s.total_bytes,
+           (unsigned)s.free_blocks,
+           (unsigned)s.used_blocks,
+           (unsigned)s.segments,
+           (unsigned)s.pages);
 }
