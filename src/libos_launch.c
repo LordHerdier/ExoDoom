@@ -113,21 +113,23 @@ int libos_build_image(page_owner_t owner,
                       const void *data, size_t data_len, size_t bss_len,
                       libos_image_t *out)
 {
+    const size_t max_code_bytes = (size_t)LIBOS_LAUNCH_MAX_CODE_PAGES * VMM_PAGE_SIZE;
+    const size_t max_data_bytes = (size_t)LIBOS_LAUNCH_MAX_DATA_PAGES * VMM_PAGE_SIZE;
+
     /* code_len == 0 is rejected, not just oversized code: entry_vaddr would
      * otherwise point at a page this call never mapped, and libos_enter()
      * would iretq straight into an unmapped page. */
-    if (code_len == 0 ||
-        code_len > LIBOS_LAUNCH_MAX_CODE_PAGES * VMM_PAGE_SIZE) {
+    if (code_len == 0 || code_len > max_code_bytes) {
         return VMM_EINVAL;
     }
     /* Each term is checked individually against the same bound before the
      * sum is: `data_len + bss_len` alone could wrap size_t and slip under
      * the combined check on its own, but two operands already known to be
-     * <= LIBOS_LAUNCH_MAX_DATA_PAGES * VMM_PAGE_SIZE (a few KiB) can never
-     * overflow a 64-bit size_t when added together. */
-    if (data_len > LIBOS_LAUNCH_MAX_DATA_PAGES * VMM_PAGE_SIZE ||
-        bss_len  > LIBOS_LAUNCH_MAX_DATA_PAGES * VMM_PAGE_SIZE ||
-        data_len + bss_len > LIBOS_LAUNCH_MAX_DATA_PAGES * VMM_PAGE_SIZE) {
+     * <= max_data_bytes (a few KiB) can never overflow a 64-bit size_t when
+     * added together. */
+    if (data_len > max_data_bytes ||
+        bss_len  > max_data_bytes ||
+        data_len + bss_len > max_data_bytes) {
         return VMM_EINVAL;
     }
 

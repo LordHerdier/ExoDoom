@@ -1,11 +1,14 @@
 #ifndef LIBOS_LAUNCH_H
 #define LIBOS_LAUNCH_H
 
+#include "exo_syscall.h"  /* EXO_USER_VA_BASE, EXO_SYS_EXIT -- __ASSEMBLER__-safe */
+
+#ifndef __ASSEMBLER__
 #include <stddef.h>
 #include <stdint.h>
 
 #include "page_alloc.h"   /* page_owner_t */
-#include "exo_syscall.h"  /* EXO_USER_VA_BASE */
+#endif
 
 /*
  * libos_launch — the real ring-3 launch mechanism (SCRUM-47).
@@ -51,6 +54,16 @@
  * contiguous mapped range, since both are just "writable state at a known
  * address" as far as this loader cares -- splitting them further has no
  * customer until something needs different permissions for the two.
+ *
+ * SCRUM-50: this header is also included by bare assembly test probes (the
+ * .s files under tests/kernel), preprocessed with the C preprocessor before
+ * assembly
+ * (docker/scripts/build.sh, `-x assembler-with-cpp`, which predefines
+ * `__ASSEMBLER__`) so a probe can reference LIBOS_LAUNCH_DATA_VADDR or
+ * LIBOS_RETURN_SYSCALL_NUM as the same macro the C side uses instead of a
+ * hand-copied literal. Everything an assembler cannot parse -- the typedef,
+ * the function prototypes, the layout `_Static_assert` -- is wrapped in
+ * `#ifndef __ASSEMBLER__`; keep new C-only content wrapped the same way.
  */
 
 /* Fixed layout inside the LibOS window: code, then data+bss, then the stack,
@@ -68,10 +81,32 @@
 #define LIBOS_LAUNCH_STACK_VADDR (LIBOS_LAUNCH_DATA_VADDR + \
                                   LIBOS_LAUNCH_MAX_DATA_PAGES * 0x1000ULL)
 
+#ifndef __ASSEMBLER__
+/* The comment above promises the whole layout stays below
+ * EXO_USER_VA_BASE + 0x20000 (libos_launch_probe.s's deliberate unmapped
+ * fault target) -- checked here, at compile time, rather than left as prose
+ * a future change to either constant could silently invalidate. One stack
+ * page, same as the struct field below and libos_build_image()'s single
+ * alloc_page_owned() call for it. */
+_Static_assert(LIBOS_LAUNCH_STACK_VADDR + 0x1000ULL <=
+              EXO_USER_VA_BASE + 0x20000ULL,
+              "libos_launch layout no longer fits below the probes' fault "
+              "target -- update libos_launch_probe.s's FAULT_VA (and any "
+              "other probe relying on that gap) before changing this");
+
+/*
+ * entry_vaddr and stack_top_vaddr are runtime fields, not compile-time
+ * constants, so nothing here can `_Static_assert` them equal to
+ * LIBOS_LAUNCH_CODE_VADDR / (LIBOS_LAUNCH_STACK_VADDR + VMM_PAGE_SIZE) the
+ * way the layout invariant above can. libos_build_image() is the only place
+ * that assigns them, and it always assigns exactly those two expressions —
+ * that single assignment site is what keeps the promise, not anything a
+ * caller can check.
+ */
 typedef struct {
     uint64_t pml4_phys;        /* the new address space's PML4 (for teardown) */
-    uint64_t entry_vaddr;      /* LIBOS_LAUNCH_CODE_VADDR, for libos_enter()  */
-    uint64_t stack_top_vaddr;  /* top of the mapped stack page, ditto         */
+    uint64_t entry_vaddr;      /* always LIBOS_LAUNCH_CODE_VADDR, for libos_enter() */
+    uint64_t stack_top_vaddr;  /* always LIBOS_LAUNCH_STACK_VADDR + VMM_PAGE_SIZE, ditto */
     uint64_t code_paddrs[LIBOS_LAUNCH_MAX_CODE_PAGES]; /* backing pages, in order */
     uint32_t code_pages;       /* how many of the above are actually mapped   */
     uint64_t data_paddrs[LIBOS_LAUNCH_MAX_DATA_PAGES]; /* ditto, for data+bss  */
@@ -184,5 +219,19 @@ uint64_t libos_enter(uint64_t entry_vaddr, uint64_t stack_top_vaddr);
  * exo_syscall_register(SOME_NUM, libos_return). */
 int64_t libos_return(uint64_t result, uint64_t a2, uint64_t a3, uint64_t a4,
                      uint64_t a5, uint64_t a6);
+#endif /* __ASSEMBLER__ */
+
+/*
+ * The syscall number every test harness in this tree borrows to register
+ * libos_return() -- there being no dedicated ABI number for "leave the
+ * launched context" yet, since nothing calls libos_return() in production
+ * (see above). EXO_SYS_EXIT is the natural borrow: exo_exit() is the closest
+ * real ABI meaning ("this context is done"), and it has no handler of its
+ * own bound today (SCRUM-155). One named constant here rather than a
+ * `#define SYS_LIBOS_RETURN 20` repeated in every test file that needs it
+ * (and every launch probe's `.set SYS_LIBOS_RETURN, 20`) is what keeps them
+ * from drifting apart if the borrow ever moves to a different number.
+ */
+#define LIBOS_RETURN_SYSCALL_NUM EXO_SYS_EXIT
 
 #endif

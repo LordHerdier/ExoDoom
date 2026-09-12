@@ -20,39 +20,22 @@
  * into itself.
  */
 
-/* Is [buf, buf+len) entirely inside the LibOS mapping window? Mirrors
- * syscall_mem.c's in_user_window(), duplicated rather than shared because
- * the two files check different things (a single vaddr there, a range here)
- * and neither has a second caller yet to justify a shared header for one
- * predicate. `len == 0` is trivially in-window regardless of `buf` — an
- * empty write can't read past anything. */
-static int range_in_user_window(uint64_t buf, uint64_t len)
-{
-    if (len == 0)
-        return 1;
-
-    if (buf < EXO_USER_VA_BASE || buf >= EXO_USER_VA_END)
-        return 0;
-
-    /* buf is already >= EXO_USER_VA_BASE and < EXO_USER_VA_END, both well
-     * clear of the top of a 64-bit range, so buf + len cannot wrap here even
-     * though len is caller-controlled and otherwise unbounded. */
-    uint64_t end = buf + len;
-    return end >= buf && end <= EXO_USER_VA_END;
-}
-
 /* #8 — write `len` bytes of `buf` to COM1.
  *   >= 0           bytes written (always exactly `len` on success — the
  *                  serial driver is a busy-wait UART, not a buffered device
  *                  that can partially accept a write)
  *   -EXO_EFAULT    [buf, buf+len) is not entirely inside the LibOS window
+ *   -EXO_EINVAL    len exceeds SERIAL_WRITE_MAX_LEN
  * Backs the printf/fprintf shim (docs/syscall_spec.md §3.2 #8). */
 static int64_t sys_serial_write(uint64_t buf, uint64_t len, uint64_t a3,
                                 uint64_t a4, uint64_t a5, uint64_t a6)
 {
     (void)a3; (void)a4; (void)a5; (void)a6;
 
-    if (!range_in_user_window(buf, len))
+    if (len > SERIAL_WRITE_MAX_LEN)
+        return -EXO_EINVAL;
+
+    if (!exo_range_in_user_window(buf, len))
         return -EXO_EFAULT;
 
     const char *p = (const char *)(uintptr_t)buf;

@@ -23,6 +23,7 @@
 
 #include "kunit.h"
 #include "syscall.h"
+#include "syscall_serial.h"
 #include "exo_syscall.h"
 
 #include <stdint.h>
@@ -88,6 +89,23 @@ static void test_buffer_spanning_window_end_rejected(void)
     CU_ASSERT_EQUAL(do_serial_write(EXO_USER_VA_END - 1, 2), -EXO_EFAULT);
 }
 
+static void test_oversized_write_rejected(void)
+{
+    /* The whole call runs with IF clear (syscall's FMASK) -- a real DoS
+     * surface without a cap, not just a slow write. buf doesn't need to be
+     * valid: the length check runs first, so this is rejected before the
+     * window check ever looks at it. */
+    CU_ASSERT_EQUAL(do_serial_write(0, SERIAL_WRITE_MAX_LEN + 1), -EXO_EINVAL);
+}
+
+static void test_max_length_at_cap_not_rejected_by_length_check(void)
+{
+    /* Exactly at the cap must not trip -EXO_EINVAL -- only fail on the
+     * window check that necessarily follows a NULL buf, proving the cap
+     * itself is inclusive ("exceeds", not "reaches"). */
+    CU_ASSERT_EQUAL(do_serial_write(0, SERIAL_WRITE_MAX_LEN), -EXO_EFAULT);
+}
+
 static void test_valid_write_reports_full_length(void)
 {
     int64_t p = do_alloc();
@@ -115,6 +133,9 @@ void suite_syscall_serial_tests(CU_pSuite s)
     CU_add_test(s, "buffer below window rejected", test_buffer_below_window_rejected);
     CU_add_test(s, "buffer spanning window end rejected",
                test_buffer_spanning_window_end_rejected);
+    CU_add_test(s, "oversized write rejected", test_oversized_write_rejected);
+    CU_add_test(s, "max length at cap not rejected by length check",
+               test_max_length_at_cap_not_rejected_by_length_check);
     CU_add_test(s, "valid write reports full length",
                test_valid_write_reports_full_length);
 }

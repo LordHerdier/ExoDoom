@@ -1,5 +1,15 @@
 #pragma once
 
+/* The most bytes a single exo_serial_write call will send. The whole call
+ * runs with interrupts off (`syscall`'s FMASK clears IF, src/syscall.c), so
+ * an uncapped write would stall the timer and keyboard IRQs for as long as
+ * the busy-wait UART takes to drain it — 4096 bytes at 38400 baud is a
+ * little over a millisecond, generous for a printf/fprintf line. Exposed
+ * here (rather than kept `static` in syscall_serial.c) so
+ * test_syscall_serial_k.c can assert the real limit instead of a restated
+ * literal. */
+#define SERIAL_WRITE_MAX_LEN 4096u
+
 /*
  * syscall_serial.h — exo_serial_write handler (SCRUM-50).
  *

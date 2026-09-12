@@ -8,38 +8,45 @@
  * fixed *immediate* address is fine either way -- its value does not depend
  * on where this blob itself ends up.
  *
+ * SCRUM-50: preprocessed with the C preprocessor before assembly
+ * (docker/scripts/build.sh, `-x assembler-with-cpp` + `-DEXO_KERNEL`), so
+ * FAULT_VA and SYS_LIBOS_RETURN below are the real EXO_USER_VA_BASE and
+ * LIBOS_RETURN_SYSCALL_NUM macros, not hand-copied literals that could
+ * silently drift from libos_launch.h/exo_syscall.h.
+ *
  * The probe faults on an address inside its own LibOS window that nothing
  * mapped (LIBOS_LAUNCH_CODE_VADDR + 0x10000, well clear of the code, data
  * and stack regions at +0x1000/+0x5000/+0x9000, SCRUM-49) rather than on
- * kernel memory. It would be
- * more direct to touch kernel memory instead, but TESTING builds
- * deliberately map the *entire* kernel identity range VMM_USER (src/vmm.c's
- * KERNEL_LEAF/KERNEL_MAP_USER) so tests/kernel/ring3_probe.s and
- * tss_fault_probe.s can execute against kernel .text/.bss at CPL 3 -- so a
- * kernel-memory read would not actually fault under the harness this test
- * itself runs in. vmm.c's own comment names the fix: SCRUM-55/56 tighten
- * KERNEL_MAP_USER back to supervisor-only once nothing still needs the
- * blanket exception, and assert the wall for real. This probe proves the
- * launch mechanism -- real address space, real CPL 3 execution, a fault
- * caught and the machine kept running -- which is what makes that later
- * tightening safe to test against.
+ * kernel memory. It would be more direct to touch kernel memory instead,
+ * but TESTING builds deliberately map the *entire* kernel identity range
+ * VMM_USER (src/vmm.c's KERNEL_LEAF/KERNEL_MAP_USER) so
+ * tests/kernel/ring3_probe.s and tss_fault_probe.s can execute against
+ * kernel .text/.bss at CPL 3 -- so a kernel-memory read would not actually
+ * fault under the harness this test itself runs in. vmm.c's own comment
+ * names the fix: SCRUM-55/56 tighten KERNEL_MAP_USER back to
+ * supervisor-only once nothing still needs the blanket exception, and
+ * assert the wall for real. This probe proves the launch mechanism -- real
+ * address space, real CPL 3 execution, a fault caught and the machine kept
+ * running -- which is what makes that later tightening safe to test
+ * against.
  *
  * `probe_end` bounds the copy the same way fault_probe.s's resume labels
  * bound a single instruction: nothing else lives in this file, so nothing
  * else can be reordered in between by the assembler.
  */
 
+#include "exo_syscall.h"
+#include "libos_launch.h"
+
 .code64
 
-.set SYS_LIBOS_RETURN, 20     /* EXO_SYS_EXIT, borrowed -- see ring3_probe.s */
+.set SYS_LIBOS_RETURN, LIBOS_RETURN_SYSCALL_NUM
 .set RESULT_MARKER, 0x600DC0DE
 
-/* EXO_USER_VA_BASE (src/exo_syscall.h) + an offset well clear of the code
- * and stack regions libos_build_image() maps at +0x1000/+0x5000/+0x9000
- * (SCRUM-49). A fixed
- * immediate, not computed from this blob's own address -- must match
+/* An offset well clear of the code and stack regions libos_build_image()
+ * maps at +0x1000/+0x5000/+0x9000 (SCRUM-49). Must match
  * LIBOS_LAUNCH_PROBE_FAULT_VADDR in test_libos_launch_k.c. */
-.set FAULT_VA, 0x400000000000 + 0x20000
+.set FAULT_VA, EXO_USER_VA_BASE + 0x20000
 
 .global libos_launch_probe
 .global libos_launch_probe_resume

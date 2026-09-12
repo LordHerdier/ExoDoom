@@ -9,6 +9,13 @@
  * *data* region libos_build_image() maps separately (SCRUM-49), then
  * escaping the same way every launch probe in this tree does.
  *
+ * Preprocessed with the C preprocessor before assembly
+ * (docker/scripts/build.sh, `-x assembler-with-cpp` + `-DEXO_KERNEL`), so
+ * DATA_VADDR/SYS_SERIAL_WRITE/SYS_LIBOS_RETURN below are the real
+ * LIBOS_LAUNCH_DATA_VADDR / EXO_SYS_SERIAL_WRITE / LIBOS_RETURN_SYSCALL_NUM
+ * macros, not hand-copied literals -- exactly the drift libos_launch_probe.s
+ * used to be exposed to before SCRUM-50 (see that file's history).
+ *
  * Same PIC rules as libos_launch_probe.s: no internal jump/call, no
  * RIP-relative reference to anything that moves. libos_main_probe_data is
  * read at *build* time by libos_build_image() (the kernel is still on its
@@ -19,18 +26,14 @@
  * libos_launch.h's convention for referencing the data region.
  */
 
+#include "exo_syscall.h"
+#include "libos_launch.h"
+
 .code64
 
-.set SYS_SERIAL_WRITE, 8
-.set SYS_LIBOS_RETURN, 20     /* EXO_SYS_EXIT, borrowed -- see libos_launch_probe.s */
-
-/* LIBOS_LAUNCH_DATA_VADDR (src/libos_launch.h) = EXO_USER_VA_BASE + 0x5000
- * = EXO_USER_VA_BASE + LIBOS_LAUNCH_MAX_CODE_PAGES*0x1000, with
- * LIBOS_LAUNCH_MAX_CODE_PAGES == 4 today. A fixed immediate, not computed
- * from this blob's own address -- must match the constant test_libos_main_k.c
- * gets from the real header, which is what catches this going stale if
- * either side ever changes without the other. */
-.set DATA_VADDR, 0x400000000000 + 0x5000
+.set SYS_SERIAL_WRITE, EXO_SYS_SERIAL_WRITE
+.set SYS_LIBOS_RETURN, LIBOS_RETURN_SYSCALL_NUM
+.set DATA_VADDR, LIBOS_LAUNCH_DATA_VADDR
 
 .global libos_main_probe
 .global libos_main_probe_end

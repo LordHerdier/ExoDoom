@@ -238,8 +238,12 @@ convention and calls it from `kernel_main` instead of a test harness.
   `exo_fb_acquire` (#4) in `src/syscall_fb.c` (SCRUM-154), and
   `exo_serial_write` (#8) in `src/syscall_serial.c` (SCRUM-50) — no ownership
   to check for the latter, since COM1 isn't acquired/released like the
-  framebuffer; the only rejection is `-EXO_EFAULT` for a `[buf, buf+len)`
-  that isn't entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)`.
+  framebuffer; it rejects `-EXO_EFAULT` for a `[buf, buf+len)` that isn't
+  entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` and `-EXO_EINVAL` for
+  `len` over `SERIAL_WRITE_MAX_LEN` (4096) — the whole call runs with
+  interrupts off (`syscall`'s FMASK clears IF), so an uncapped write is a
+  one-syscall denial of service against the timer and keyboard IRQs, not
+  just slow.
   **Every other number still returns `-EXO_ENOSYS`**; binding one is
   `exo_syscall_register(EXO_SYS_*, handler)` from an `*_init()` called in
   `kernel_main` ahead of the `TESTING` branch, so the handler exists for both a
