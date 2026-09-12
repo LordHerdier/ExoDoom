@@ -9,8 +9,9 @@
  * on where this blob itself ends up.
  *
  * The probe faults on an address inside its own LibOS window that nothing
- * mapped (LIBOS_LAUNCH_CODE_VADDR + 0x10000, well clear of the code and
- * stack pages at +0x1000/+0x2000) rather than on kernel memory. It would be
+ * mapped (LIBOS_LAUNCH_CODE_VADDR + 0x10000, well clear of the code, data
+ * and stack regions at +0x1000/+0x5000/+0x9000, SCRUM-49) rather than on
+ * kernel memory. It would be
  * more direct to touch kernel memory instead, but TESTING builds
  * deliberately map the *entire* kernel identity range VMM_USER (src/vmm.c's
  * KERNEL_LEAF/KERNEL_MAP_USER) so tests/kernel/ring3_probe.s and
@@ -34,7 +35,8 @@
 .set RESULT_MARKER, 0x600DC0DE
 
 /* EXO_USER_VA_BASE (src/exo_syscall.h) + an offset well clear of the code
- * and stack pages libos_build_image() maps at +0x1000/+0x2000. A fixed
+ * and stack regions libos_build_image() maps at +0x1000/+0x5000/+0x9000
+ * (SCRUM-49). A fixed
  * immediate, not computed from this blob's own address -- must match
  * LIBOS_LAUNCH_PROBE_FAULT_VADDR in test_libos_launch_k.c. */
 .set FAULT_VA, 0x400000000000 + 0x20000

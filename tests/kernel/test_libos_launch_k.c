@@ -26,6 +26,7 @@
 #include "exo_syscall.h"
 #include "syscall.h"
 #include "page_alloc.h"
+#include "string.h"
 
 #include <stdint.h>
 
@@ -65,7 +66,7 @@ static void test_ring3_launch_faults_are_caught(void) {
     libos_image_t img;
     CU_ASSERT_EQUAL(libos_build_image(LIBOS_LAUNCH_TEST_OWNER,
                                       (const void *)&libos_launch_probe,
-                                      code_len, &img),
+                                      code_len, 0, 0, 0, &img),
                    VMM_OK);
 
     /* The window is fresh (vmm_create_address_space leaves it entirely
@@ -109,16 +110,92 @@ static void test_ring3_launch_faults_are_caught(void) {
     libos_destroy_image(LIBOS_LAUNCH_TEST_OWNER, &img);
 }
 
+/* Static, not a stack local: this is now up to
+ * LIBOS_LAUNCH_MAX_CODE_PAGES * VMM_PAGE_SIZE + 1 bytes (16 KiB+), too big to
+ * carry safely on the 16 KiB kernel test stack. */
+static unsigned char oversized_code[LIBOS_LAUNCH_MAX_CODE_PAGES * VMM_PAGE_SIZE + 1];
+
 static void test_build_image_rejects_oversized_code(void) {
-    unsigned char big[VMM_PAGE_SIZE + 1] = {0};
     libos_image_t img;
 
-    CU_ASSERT_EQUAL(libos_build_image(LIBOS_LAUNCH_TEST_OWNER, big,
-                                      sizeof(big), &img),
+    CU_ASSERT_EQUAL(libos_build_image(LIBOS_LAUNCH_TEST_OWNER, oversized_code,
+                                      sizeof(oversized_code), 0, 0, 0, &img),
                    VMM_EINVAL);
 
     /* Rejected before anything was created -- nothing bound to clean up. */
     CU_ASSERT_EQUAL(vmm_address_space_for(LIBOS_LAUNCH_TEST_OWNER), 0);
+}
+
+static void test_build_image_rejects_zero_code_len(void) {
+    libos_image_t img;
+
+    /* code_len == 0 would otherwise leave entry_vaddr pointing at a page
+     * this call never mapped -- libos_enter() would iretq straight into
+     * an unmapped page. */
+    CU_ASSERT_EQUAL(libos_build_image(LIBOS_LAUNCH_TEST_OWNER,
+                                      (const void *)&libos_launch_probe, 0,
+                                      0, 0, 0, &img),
+                   VMM_EINVAL);
+
+    CU_ASSERT_EQUAL(vmm_address_space_for(LIBOS_LAUNCH_TEST_OWNER), 0);
+}
+
+/* Static for the same reason as oversized_code above. */
+static unsigned char oversized_data[LIBOS_LAUNCH_MAX_DATA_PAGES * VMM_PAGE_SIZE + 1];
+
+static void test_build_image_rejects_oversized_data(void) {
+    size_t code_len = (uintptr_t)&libos_launch_probe_end -
+                      (uintptr_t)&libos_launch_probe;
+    libos_image_t img;
+
+    CU_ASSERT_EQUAL(libos_build_image(LIBOS_LAUNCH_TEST_OWNER,
+                                      (const void *)&libos_launch_probe,
+                                      code_len,
+                                      oversized_data, sizeof(oversized_data),
+                                      0, &img),
+                   VMM_EINVAL);
+
+    /* Rejected before anything was created -- nothing bound to clean up. */
+    CU_ASSERT_EQUAL(vmm_address_space_for(LIBOS_LAUNCH_TEST_OWNER), 0);
+}
+
+/* SCRUM-49: code and data now land at their own defined, fixed virtual
+ * addresses with distinct permissions -- prove placement, permissions and
+ * that the copy (and the bss zero-fill after it) actually landed, all from
+ * ring 0 via the identity map rather than by executing anything. */
+static void test_build_image_places_code_and_data(void) {
+    static const unsigned char sample_data[] = "SCRUM-49 data segment";
+    size_t code_len = (uintptr_t)&libos_launch_probe_end -
+                      (uintptr_t)&libos_launch_probe;
+
+    libos_image_t img;
+    CU_ASSERT_EQUAL(libos_build_image(LIBOS_LAUNCH_TEST_OWNER,
+                                      (const void *)&libos_launch_probe,
+                                      code_len,
+                                      sample_data, sizeof(sample_data),
+                                      64, &img),
+                   VMM_OK);
+
+    uint64_t *pml4 = (uint64_t *)(uintptr_t)img.pml4_phys;
+    uint64_t paddr, flags;
+
+    CU_ASSERT_EQUAL(vmm_translate_in(pml4, LIBOS_LAUNCH_CODE_VADDR,
+                                     &paddr, &flags), VMM_OK);
+    CU_ASSERT_EQUAL(paddr, img.code_paddrs[0]);
+    CU_ASSERT_EQUAL(flags & VMM_WRITE, 0);
+
+    CU_ASSERT_EQUAL(vmm_translate_in(pml4, LIBOS_LAUNCH_DATA_VADDR,
+                                     &paddr, &flags), VMM_OK);
+    CU_ASSERT_EQUAL(paddr, img.data_paddrs[0]);
+    CU_ASSERT_NOT_EQUAL(flags & VMM_WRITE, 0);
+
+    /* Still identity-mapped for the kernel, so the physical address doubles
+     * as a valid ring-0 pointer to check what actually landed there. */
+    unsigned char *data_page = (unsigned char *)(uintptr_t)paddr;
+    CU_ASSERT_EQUAL(memcmp(data_page, sample_data, sizeof(sample_data)), 0);
+    CU_ASSERT_EQUAL(data_page[sizeof(sample_data)], 0);   /* bss tail */
+
+    libos_destroy_image(LIBOS_LAUNCH_TEST_OWNER, &img);
 }
 
 /* Leaves nothing behind even if an assertion above failed mid-test and
@@ -143,4 +220,10 @@ void suite_libos_launch_tests(CU_pSuite s) {
                 test_ring3_launch_faults_are_caught);
     CU_add_test(s, "build_image rejects oversized code",
                 test_build_image_rejects_oversized_code);
+    CU_add_test(s, "build_image rejects zero code_len",
+                test_build_image_rejects_zero_code_len);
+    CU_add_test(s, "build_image rejects oversized data",
+                test_build_image_rejects_oversized_data);
+    CU_add_test(s, "build_image places code and data at fixed addresses",
+                test_build_image_places_code_and_data);
 }

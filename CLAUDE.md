@@ -109,11 +109,13 @@ PIC, PIT and keyboard are all below it and do **not** exist during tests.
 
 The kernel links at virtual/physical `2M` (`src/linker.ld`) and both the boot
 map and the kernel map are identity maps, so virtual == physical throughout.
-Per-LibOS address spaces can now be built (SCRUM-48), and the mechanism to
+Per-LibOS address spaces can now be built (SCRUM-48), the mechanism to
 actually launch one in ring 3 on its own address space exists and is tested
-(SCRUM-47, `src/libos_launch.c/h` + `src/libos_enter.s`) — see below. v1's one
-LibOS still runs on the kernel's own map on a normal boot, because nothing
-yet loads a real binary to launch (SCRUM-49/50).
+(SCRUM-47, `src/libos_launch.c/h` + `src/libos_enter.s`), and that mechanism
+now places code and data at their own defined, fixed virtual addresses rather
+than one undifferentiated blob (SCRUM-49) — see below. v1's one LibOS still
+runs on the kernel's own map on a normal boot, because nothing yet defines
+what runs after the jump (SCRUM-50's `libos_main()`).
 
 ### Subsystem map
 
@@ -154,17 +156,26 @@ yet loads a real binary to launch (SCRUM-49/50).
   (`vmm_bind_address_space`/`vmm_address_space_for`) tracks which context runs
   on which root; `syscall_mem.c`'s `exo_page_map`/`exo_page_unmap` already
   resolve the caller's root through it. `src/libos_launch.c/h` +
-  `src/libos_enter.s` (SCRUM-47) are the real launch mechanism on top of all
-  that: `libos_build_image()` builds a fresh address space, maps a code page
-  and a stack page into its LibOS window, and `libos_enter()` switches CR3
-  and `iretq`s to CPL 3 — proven by `tests/kernel/test_libos_launch_k.c`
+  `src/libos_enter.s` (SCRUM-47, extended by SCRUM-49) are the real launch
+  mechanism on top of all that: `libos_build_image()` builds a fresh address
+  space and places code, data+bss and a stack at three fixed addresses inside
+  the LibOS window — `LIBOS_LAUNCH_CODE_VADDR`/`_DATA_VADDR`/`_STACK_VADDR`
+  in `src/libos_launch.h`. Code and data+bss each span up to
+  `LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES` pages now, rather than the single
+  undifferentiated page SCRUM-47 shipped with; the stack is still exactly one
+  fixed page — and `libos_enter()` switches
+  CR3 and `iretq`s to CPL 3 — proven by `tests/kernel/test_libos_launch_k.c`
   against a real, separate address space rather than the TESTING-only
-  blanket-user-accessible trick `tests/kernel/ring3_probe.s` uses. What
-  SCRUM-47 does *not* do is wire this into `kernel_main`: on a normal boot,
-  `kernel_main` still binds the one v1 LibOS to `vmm_kernel_pml4()` itself, a
-  placeholder that keeps it running on the kernel's own map, because there is
-  no real binary to launch yet (SCRUM-49 loads one; SCRUM-50 defines
-  `libos_main()`'s calling convention) and the normal boot tail is a live
+  blanket-user-accessible trick `tests/kernel/ring3_probe.s` uses. This is
+  still a fixed-size loader, not a general one: `code`/`data` are copied
+  verbatim into position, position-independent by convention (no ELF, no
+  relocation), and oversized input is rejected as `VMM_EINVAL` before
+  anything is allocated. What SCRUM-49 does *not* do is wire this into
+  `kernel_main` or say what runs once execution reaches
+  `LIBOS_LAUNCH_CODE_VADDR`: on a normal boot, `kernel_main` still binds the
+  one v1 LibOS to `vmm_kernel_pml4()` itself, a placeholder that keeps it
+  running on the kernel's own map, because SCRUM-50 hasn't yet defined
+  `libos_main()`'s calling convention and the normal boot tail is a live
   interactive demo, not a placeholder waiting to be replaced. Read
   `docs/memory.md` §7, `docs/syscall_spec.md` §3.7 and `docs/architecture.md`
   §5.1/§6 before implementing anything in that space.
