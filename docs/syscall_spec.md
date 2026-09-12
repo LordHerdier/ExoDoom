@@ -709,9 +709,10 @@ A page belonging to the kernel or to another context is still refused.
   a context's mappings, so nothing can tear them down: `exo_page_free` leaves a
   live PTE pointing at a page the PMM may hand to somebody else, and
   repossessing the framebuffer (§3.6) clears the binding while the old holder's
-  mapping keeps writing to the screen. Both need per-context address-space
-  tracking, which arrives with SCRUM-48; neither is reachable before a LibOS
-  runs in ring 3 (SCRUM-47).
+  mapping keeps writing to the screen. Both need per-context tracking that
+  neither SCRUM-48's address spaces nor SCRUM-47's launch mechanism add —
+  those two make a LibOS's mappings reachable and exercisable from ring 3 at
+  all, but nothing has recorded what one has mapped yet.
 - **No quota on page tables.** Every level `vmm.c` allocates is a
   `PAGE_OWNER_KERNEL` page that no sweep reclaims, and a caller can walk the
   128 TiB window installing one mapping per 2 MiB to consume them without
@@ -723,10 +724,13 @@ A page belonging to the kernel or to another context is still refused.
   mapping state on COM1 instead of a silent loop in `error_stub`. A CPL 3 →
   CPL 0 exception needs `TSS.RSP0`; SCRUM-46 loads a TSS with a valid one, so
   a ring-3 fault reaches the handler and reports instead of triple-faulting
-  (`tests/kernel/test_tss_k.c` drives one for real). What is still missing is
+  (`tests/kernel/test_tss_k.c` drives one for real, and
+  `tests/kernel/test_libos_launch_k.c` drives one from a genuine, separate
+  LibOS address space rather than the kernel's own). What is still missing is
   policy on top of that report: the handler halts either way today.
-  Terminating a faulting LibOS and reclaiming its resources instead needs
-  SCRUM-47/48.
+  Terminating a faulting LibOS and reclaiming its resources instead still
+  needs building, now that SCRUM-47/48 supply the address space and launch
+  mechanism it would act on.
 
 ---
 

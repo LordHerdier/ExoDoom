@@ -30,6 +30,7 @@ void suite_fault_tests(CU_pSuite s);
 void suite_heap_tests(CU_pSuite s);
 void suite_heap_stress_tests(CU_pSuite s);
 void suite_tss_tests(CU_pSuite s);
+void suite_libos_launch_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -59,6 +60,11 @@ int heap_stress_suite_init(void);
 /* Same idea for the TSS suite: it installs the fault hook and a SYS_ESCAPE
  * handler around its live ring-3 fault test (SCRUM-46). */
 int tss_suite_cleanup(void);
+
+/* Same idea for the libos_launch suite: it installs the fault hook, a
+ * SYS_LIBOS_RETURN handler, and a real address space around its live
+ * ring-3 launch test (SCRUM-47). */
+int libos_launch_suite_cleanup(void);
 
 int run_tests(void)
 {
@@ -126,6 +132,9 @@ int run_tests(void)
 
     s = CU_add_suite("tss", NULL, tss_suite_cleanup);
     suite_tss_tests(s);
+
+    s = CU_add_suite("libos_launch", NULL, libos_launch_suite_cleanup);
+    suite_libos_launch_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

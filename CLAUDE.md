@@ -109,8 +109,11 @@ PIC, PIT and keyboard are all below it and do **not** exist during tests.
 
 The kernel links at virtual/physical `2M` (`src/linker.ld`) and both the boot
 map and the kernel map are identity maps, so virtual == physical throughout.
-Per-LibOS address spaces can now be built (SCRUM-48, see below); a LibOS
-actually running in one of its own, rather than the kernel's, is SCRUM-47.
+Per-LibOS address spaces can now be built (SCRUM-48), and the mechanism to
+actually launch one in ring 3 on its own address space exists and is tested
+(SCRUM-47, `src/libos_launch.c/h` + `src/libos_enter.s`) — see below. v1's one
+LibOS still runs on the kernel's own map on a normal boot, because nothing
+yet loads a real binary to launch (SCRUM-49/50).
 
 ### Subsystem map
 
@@ -119,6 +122,7 @@ actually running in one of its own, rather than the kernel's, is SCRUM-47.
 | Boot / entry | `src/boot.s`, `src/linker.ld`, `src/multiboot2.h`, `src/grub.cfg` |
 | Memory (mmap parse, bump allocator, bitmap PMM) | `src/mmap.c/h`, `src/memory.c/h`, `src/page_alloc.c/h` |
 | Virtual memory (kernel page tables, map/unmap/translate) | `src/vmm.c/h` |
+| Ring-3 LibOS launch (image build, CR3 switch, `iretq`) | `src/libos_launch.c/h`, `src/libos_enter.s` |
 | Interrupts (IDT/PIC/ISR, TSS, page-fault diagnostics) | `src/idt.c/h`, `src/pic.c/h`, `src/isr.s`, `src/io.h`, `src/tss.c/h`, `src/fault.c/h` |
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
@@ -149,14 +153,21 @@ actually running in one of its own, rather than the kernel's, is SCRUM-47.
   between address spaces — and a `page_owner_t`-keyed registry
   (`vmm_bind_address_space`/`vmm_address_space_for`) tracks which context runs
   on which root; `syscall_mem.c`'s `exo_page_map`/`exo_page_unmap` already
-  resolve the caller's root through it. What is still missing is SCRUM-47:
-  `kernel_main` binds the one v1 LibOS to `vmm_kernel_pml4()` itself, a
-  placeholder that keeps it running on the kernel's own map until something
-  actually calls `vmm_create_address_space()` and rebinds it, and switches CR3
-  before a real ring-3 entry. There is also no page-fault handler yet, so any
-  fault is still fatal. Read `docs/memory.md` §7, `docs/syscall_spec.md` §3.7
-  and `docs/architecture.md` §5.1/§6 before implementing anything in that
-  space.
+  resolve the caller's root through it. `src/libos_launch.c/h` +
+  `src/libos_enter.s` (SCRUM-47) are the real launch mechanism on top of all
+  that: `libos_build_image()` builds a fresh address space, maps a code page
+  and a stack page into its LibOS window, and `libos_enter()` switches CR3
+  and `iretq`s to CPL 3 — proven by `tests/kernel/test_libos_launch_k.c`
+  against a real, separate address space rather than the TESTING-only
+  blanket-user-accessible trick `tests/kernel/ring3_probe.s` uses. What
+  SCRUM-47 does *not* do is wire this into `kernel_main`: on a normal boot,
+  `kernel_main` still binds the one v1 LibOS to `vmm_kernel_pml4()` itself, a
+  placeholder that keeps it running on the kernel's own map, because there is
+  no real binary to launch yet (SCRUM-49 loads one; SCRUM-50 defines
+  `libos_main()`'s calling convention) and the normal boot tail is a live
+  interactive demo, not a placeholder waiting to be replaced. Read
+  `docs/memory.md` §7, `docs/syscall_spec.md` §3.7 and `docs/architecture.md`
+  §5.1/§6 before implementing anything in that space.
 - **`vmm.c` mirrors boot.s's ring-3 U/S gate.** Test builds map the identity
   range user-accessible (`#ifdef TESTING`), because `vmm_init()` runs before
   `run_tests()` and the ring-3 probe executes against the kernel map. Change one
