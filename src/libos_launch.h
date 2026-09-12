@@ -39,65 +39,103 @@
  * placeholder, and there is nothing real yet for it to jump to. This lands
  * as a proven primitive + its own test suite, the same way the syscall entry
  * path (SCRUM-32) and the TSS (SCRUM-46) did.
+ *
+ * SCRUM-49 extends the above with a real code *and* data placement: a LibOS
+ * is no longer assumed to fit in one PIC page with no writable state. Code
+ * and data now live at their own defined, fixed virtual addresses inside the
+ * LibOS window, sized independently and each spanning up to
+ * LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES -- still a fixed cap, not a general
+ * loader, because nothing above this layer parses a binary format yet
+ * (SCRUM-50 is the entry framework that will want one). The data region
+ * covers `.data` (copied) immediately followed by `.bss` (zeroed) in one
+ * contiguous mapped range, since both are just "writable state at a known
+ * address" as far as this loader cares -- splitting them further has no
+ * customer until something needs different permissions for the two.
  */
 
-/* One page of code, one page of stack -- plenty for a placeholder entry
- * point, and simple: no growth policy is needed until SCRUM-49 loads a real
- * binary that might not fit in one page, at which point this is the file to
- * extend. */
+/* Fixed layout inside the LibOS window: code, then data+bss, then the stack,
+ * each given enough headroom (LIBOS_LAUNCH_MAX_*_PAGES) that one section's
+ * worst case cannot overlap the next section's base. Everything here stays
+ * well below EXO_USER_VA_BASE + 0x20000, which tests/kernel/libos_launch_probe.s
+ * relies on being unmapped (its deliberate page-fault target) -- move the
+ * stack without checking that file's comment first. */
+#define LIBOS_LAUNCH_MAX_CODE_PAGES 4
+#define LIBOS_LAUNCH_MAX_DATA_PAGES 4
+
 #define LIBOS_LAUNCH_CODE_VADDR  (EXO_USER_VA_BASE + 0x1000ULL)
-#define LIBOS_LAUNCH_STACK_VADDR (EXO_USER_VA_BASE + 0x2000ULL)
+#define LIBOS_LAUNCH_DATA_VADDR  (LIBOS_LAUNCH_CODE_VADDR + \
+                                  LIBOS_LAUNCH_MAX_CODE_PAGES * 0x1000ULL)
+#define LIBOS_LAUNCH_STACK_VADDR (LIBOS_LAUNCH_DATA_VADDR + \
+                                  LIBOS_LAUNCH_MAX_DATA_PAGES * 0x1000ULL)
 
 typedef struct {
     uint64_t pml4_phys;        /* the new address space's PML4 (for teardown) */
     uint64_t entry_vaddr;      /* LIBOS_LAUNCH_CODE_VADDR, for libos_enter()  */
     uint64_t stack_top_vaddr;  /* top of the mapped stack page, ditto         */
-    uint64_t code_paddr;       /* backing page for entry_vaddr, for teardown  */
-    uint64_t stack_paddr;      /* backing page for the stack, ditto           */
+    uint64_t code_paddrs[LIBOS_LAUNCH_MAX_CODE_PAGES]; /* backing pages, in order */
+    uint32_t code_pages;       /* how many of the above are actually mapped   */
+    uint64_t data_paddrs[LIBOS_LAUNCH_MAX_DATA_PAGES]; /* ditto, for data+bss  */
+    uint32_t data_pages;
+    uint64_t stack_paddr;      /* backing page for the stack                  */
 } libos_image_t;
 
 /*
- * Build a fresh address space for `owner`, copy `code_len` bytes of `code`
- * into a page mapped at LIBOS_LAUNCH_CODE_VADDR (present, user, NOT
- * writable -- it is instructions, not data, and nothing after setup ever
- * needs to write it again), and map a second page at LIBOS_LAUNCH_STACK_VADDR
- * (present, user, writable) for its stack. Binds the address space to
- * `owner` in the vmm registry as a side effect, so a caller only has to hang
- * onto `owner` to tear it down later (vmm_destroy_address_space).
+ * Build a fresh address space for `owner` and place three things in it, each
+ * at its own fixed address in the LibOS window:
  *
- * `code` must be position-independent: it is assembled/linked at whatever
- * address the compiler happened to place it in the kernel image, and runs
- * copied verbatim to LIBOS_LAUNCH_CODE_VADDR instead -- no internal
- * jumps/calls, no RIP-relative data references. A plain sequence of
- * immediate-loads ending in `syscall` satisfies this trivially; see
- * tests/kernel/libos_launch_probe.s.
+ *   - `code_len` bytes of `code`, at LIBOS_LAUNCH_CODE_VADDR, across as many
+ *     pages as needed (present, user, NOT writable -- it is instructions,
+ *     copied once here and never written again).
+ *   - `data_len` bytes of `data` followed by `bss_len` zeroed bytes, at
+ *     LIBOS_LAUNCH_DATA_VADDR, across as many pages as `data_len + bss_len`
+ *     needs (present, user, writable). `data` may be NULL / `data_len` and
+ *     `bss_len` may both be 0 for a LibOS with no writable state to load.
+ *   - one stack page at LIBOS_LAUNCH_STACK_VADDR (present, user, writable),
+ *     zeroed, unconditionally.
+ *
+ * Binds the address space to `owner` in the vmm registry as a side effect,
+ * so a caller only has to hang onto `owner` to tear it down later
+ * (vmm_destroy_address_space).
+ *
+ * `code` and `data` must be position-independent with respect to each other
+ * and to wherever the compiler happened to place them in the kernel image:
+ * both are copied verbatim to their fixed destinations, so no internal
+ * jump/call and no RIP-relative reference is allowed in `code` that assumes
+ * it and `data` keep their relative offset from the kernel image -- a
+ * reference to `data` must instead use the fixed immediate
+ * LIBOS_LAUNCH_DATA_VADDR, the same way tests/kernel/libos_launch_probe.s
+ * already does for other fixed addresses.
  *
  * `owner` must not already have a bound address space (this always creates a
  * new one) and must not be PAGE_OWNER_FREE/PAGE_OWNER_KERNEL, same
  * restriction vmm_bind_address_space enforces.
  *
  * Returns VMM_OK, or a VMM_E* status (see vmm.h) from whichever step failed.
- * On any failure after the address space was created and bound, both the
- * code/stack pages (whichever were allocated) and the address space itself
- * are freed before returning, so a failed call leaves nothing behind for the
- * caller to clean up. `code_len` above VMM_PAGE_SIZE is rejected as
- * VMM_EINVAL before anything is allocated.
+ * On any failure after the address space was created and bound, every page
+ * allocated so far and the address space itself are freed before returning,
+ * so a failed call leaves nothing behind for the caller to clean up.
+ * `code_len` above `LIBOS_LAUNCH_MAX_CODE_PAGES * VMM_PAGE_SIZE`, or
+ * `data_len + bss_len` above `LIBOS_LAUNCH_MAX_DATA_PAGES * VMM_PAGE_SIZE`,
+ * is rejected as VMM_EINVAL before anything is allocated.
  *
- * On success, the two backing pages are still owned by `owner` and mapped
- * into the new address space -- pass `out` to libos_destroy_image() (with
- * the same `owner`) to tear the whole thing down, rather than calling
+ * On success, every backing page is still owned by `owner` and mapped into
+ * the new address space -- pass `out` to libos_destroy_image() (with the
+ * same `owner`) to tear the whole thing down, rather than calling
  * vmm_destroy_address_space() directly, which frees page tables only and
- * leaks these two.
+ * leaks these.
  */
-int libos_build_image(page_owner_t owner, const void *code, size_t code_len,
+int libos_build_image(page_owner_t owner,
+                      const void *code, size_t code_len,
+                      const void *data, size_t data_len, size_t bss_len,
                       libos_image_t *out);
 
 /*
- * Undo a successful libos_build_image(): frees the code and stack pages
- * back to the PMM (free_page_owned(), since alloc_page_owned() tagged them
- * `owner`) and then vmm_destroy_address_space()s the PML4 they were mapped
- * into. `owner`/`img` must be the same pair libos_build_image() returned
- * VMM_OK for -- this is the only correct way to tear down a built image.
+ * Undo a successful libos_build_image(): frees every code, data and the
+ * stack page back to the PMM (free_page_owned(), since alloc_page_owned()
+ * tagged them `owner`) and then vmm_destroy_address_space()s the PML4 they
+ * were mapped into. `owner`/`img` must be the same pair libos_build_image()
+ * returned VMM_OK for -- this is the only correct way to tear down a built
+ * image.
  */
 void libos_destroy_image(page_owner_t owner, const libos_image_t *img);
 
