@@ -126,6 +126,39 @@ static void test_build_image_rejects_oversized_code(void) {
     CU_ASSERT_EQUAL(vmm_address_space_for(LIBOS_LAUNCH_TEST_OWNER), 0);
 }
 
+static void test_build_image_rejects_zero_code_len(void) {
+    libos_image_t img;
+
+    /* code_len == 0 would otherwise leave entry_vaddr pointing at a page
+     * this call never mapped -- libos_enter() would iretq straight into
+     * an unmapped page. */
+    CU_ASSERT_EQUAL(libos_build_image(LIBOS_LAUNCH_TEST_OWNER,
+                                      (const void *)&libos_launch_probe, 0,
+                                      0, 0, 0, &img),
+                   VMM_EINVAL);
+
+    CU_ASSERT_EQUAL(vmm_address_space_for(LIBOS_LAUNCH_TEST_OWNER), 0);
+}
+
+/* Static for the same reason as oversized_code above. */
+static unsigned char oversized_data[LIBOS_LAUNCH_MAX_DATA_PAGES * VMM_PAGE_SIZE + 1];
+
+static void test_build_image_rejects_oversized_data(void) {
+    size_t code_len = (uintptr_t)&libos_launch_probe_end -
+                      (uintptr_t)&libos_launch_probe;
+    libos_image_t img;
+
+    CU_ASSERT_EQUAL(libos_build_image(LIBOS_LAUNCH_TEST_OWNER,
+                                      (const void *)&libos_launch_probe,
+                                      code_len,
+                                      oversized_data, sizeof(oversized_data),
+                                      0, &img),
+                   VMM_EINVAL);
+
+    /* Rejected before anything was created -- nothing bound to clean up. */
+    CU_ASSERT_EQUAL(vmm_address_space_for(LIBOS_LAUNCH_TEST_OWNER), 0);
+}
+
 /* SCRUM-49: code and data now land at their own defined, fixed virtual
  * addresses with distinct permissions -- prove placement, permissions and
  * that the copy (and the bss zero-fill after it) actually landed, all from
@@ -187,6 +220,10 @@ void suite_libos_launch_tests(CU_pSuite s) {
                 test_ring3_launch_faults_are_caught);
     CU_add_test(s, "build_image rejects oversized code",
                 test_build_image_rejects_oversized_code);
+    CU_add_test(s, "build_image rejects zero code_len",
+                test_build_image_rejects_zero_code_len);
+    CU_add_test(s, "build_image rejects oversized data",
+                test_build_image_rejects_oversized_data);
     CU_add_test(s, "build_image places code and data at fixed addresses",
                 test_build_image_places_code_and_data);
 }

@@ -114,9 +114,12 @@ typedef struct {
  * On any failure after the address space was created and bound, every page
  * allocated so far and the address space itself are freed before returning,
  * so a failed call leaves nothing behind for the caller to clean up.
- * `code_len` above `LIBOS_LAUNCH_MAX_CODE_PAGES * VMM_PAGE_SIZE`, or
- * `data_len + bss_len` above `LIBOS_LAUNCH_MAX_DATA_PAGES * VMM_PAGE_SIZE`,
- * is rejected as VMM_EINVAL before anything is allocated.
+ * Rejected as VMM_EINVAL before anything is allocated: `code_len` of 0 (there
+ * is nothing for `entry_vaddr` to point at); `code_len` above
+ * `LIBOS_LAUNCH_MAX_CODE_PAGES * VMM_PAGE_SIZE`; `data_len` or `bss_len`
+ * individually, or `data_len + bss_len`, above
+ * `LIBOS_LAUNCH_MAX_DATA_PAGES * VMM_PAGE_SIZE`; or `data` NULL while
+ * `data_len` is nonzero.
  *
  * On success, every backing page is still owned by `owner` and mapped into
  * the new address space -- pass `out` to libos_destroy_image() (with the

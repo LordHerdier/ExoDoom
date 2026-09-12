@@ -160,9 +160,10 @@ what runs after the jump (SCRUM-50's `libos_main()`).
   mechanism on top of all that: `libos_build_image()` builds a fresh address
   space and places code, data+bss and a stack at three fixed addresses inside
   the LibOS window — `LIBOS_LAUNCH_CODE_VADDR`/`_DATA_VADDR`/`_STACK_VADDR`
-  in `src/libos_launch.h`, each spanning up to
-  `LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES` pages rather than the single
-  undifferentiated page SCRUM-47 shipped with — and `libos_enter()` switches
+  in `src/libos_launch.h`. Code and data+bss each span up to
+  `LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES` pages now, rather than the single
+  undifferentiated page SCRUM-47 shipped with; the stack is still exactly one
+  fixed page — and `libos_enter()` switches
   CR3 and `iretq`s to CPL 3 — proven by `tests/kernel/test_libos_launch_k.c`
   against a real, separate address space rather than the TESTING-only
   blanket-user-accessible trick `tests/kernel/ring3_probe.s` uses. This is
