@@ -17,6 +17,7 @@
 #include "syscall.h"
 #include "syscall_mem.h"
 #include "syscall_fb.h"
+#include "syscall_serial.h"
 #include "fb_binding.h"
 #include "revoke.h"
 #include "vmm.h"
@@ -598,6 +599,12 @@ void kernel_main(void *mb2_info_ptr) {
     // syscall_init, ahead of the TESTING branch.  fb_tag may be NULL, in which
     // case acquire reports -EXO_ENODEV rather than -EXO_ENOSYS.
     syscall_fb_init((const struct mb2_tag_framebuffer *)fb_tag);
+
+    // ── Serial syscall (SCRUM-50) ────────────────────────────────────────
+    // Binds exo_serial_write (#8), the printf/fprintf shim's backend.  Same
+    // placement rule as the memory and framebuffer syscalls: after
+    // syscall_init, ahead of the TESTING branch.
+    syscall_serial_init();
 
 #ifdef TESTING
     serial_flush();
