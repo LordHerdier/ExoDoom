@@ -43,6 +43,7 @@ int libos_build_image(page_owner_t owner, const void *code, size_t code_len,
 
     void *stack_page = alloc_page_owned(owner);
     if (stack_page == NULL) {
+        free_page_owned(code_page, owner);
         vmm_destroy_address_space(owner);
         return VMM_ENOMEM;
     }
@@ -62,6 +63,8 @@ int libos_build_image(page_owner_t owner, const void *code, size_t code_len,
                          (uint64_t)(uintptr_t)code_page,
                          VMM_PRESENT | VMM_USER);
     if (rc != VMM_OK) {
+        free_page_owned(code_page, owner);
+        free_page_owned(stack_page, owner);
         vmm_destroy_address_space(owner);
         return rc;
     }
@@ -70,6 +73,8 @@ int libos_build_image(page_owner_t owner, const void *code, size_t code_len,
                          (uint64_t)(uintptr_t)stack_page,
                          VMM_PRESENT | VMM_USER | VMM_WRITE);
     if (rc != VMM_OK) {
+        free_page_owned(code_page, owner);
+        free_page_owned(stack_page, owner);
         vmm_destroy_address_space(owner);
         return rc;
     }
@@ -77,5 +82,14 @@ int libos_build_image(page_owner_t owner, const void *code, size_t code_len,
     out->pml4_phys      = pml4_phys;
     out->entry_vaddr     = LIBOS_LAUNCH_CODE_VADDR;
     out->stack_top_vaddr = LIBOS_LAUNCH_STACK_VADDR + VMM_PAGE_SIZE;
+    out->code_paddr       = (uint64_t)(uintptr_t)code_page;
+    out->stack_paddr      = (uint64_t)(uintptr_t)stack_page;
     return VMM_OK;
+}
+
+void libos_destroy_image(page_owner_t owner, const libos_image_t *img)
+{
+    free_page_owned((void *)(uintptr_t)img->code_paddr, owner);
+    free_page_owned((void *)(uintptr_t)img->stack_paddr, owner);
+    vmm_destroy_address_space(owner);
 }

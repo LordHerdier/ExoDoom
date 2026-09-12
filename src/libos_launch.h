@@ -52,6 +52,8 @@ typedef struct {
     uint64_t pml4_phys;        /* the new address space's PML4 (for teardown) */
     uint64_t entry_vaddr;      /* LIBOS_LAUNCH_CODE_VADDR, for libos_enter()  */
     uint64_t stack_top_vaddr;  /* top of the mapped stack page, ditto         */
+    uint64_t code_paddr;       /* backing page for entry_vaddr, for teardown  */
+    uint64_t stack_paddr;      /* backing page for the stack, ditto           */
 } libos_image_t;
 
 /*
@@ -75,13 +77,29 @@ typedef struct {
  * restriction vmm_bind_address_space enforces.
  *
  * Returns VMM_OK, or a VMM_E* status (see vmm.h) from whichever step failed.
- * On any failure after the address space was created and bound, it is torn
- * down via vmm_destroy_address_space() before returning, so a failed call
- * leaves nothing behind for the caller to clean up. `code_len` above
- * VMM_PAGE_SIZE is rejected as VMM_EINVAL before anything is allocated.
+ * On any failure after the address space was created and bound, both the
+ * code/stack pages (whichever were allocated) and the address space itself
+ * are freed before returning, so a failed call leaves nothing behind for the
+ * caller to clean up. `code_len` above VMM_PAGE_SIZE is rejected as
+ * VMM_EINVAL before anything is allocated.
+ *
+ * On success, the two backing pages are still owned by `owner` and mapped
+ * into the new address space -- pass `out` to libos_destroy_image() (with
+ * the same `owner`) to tear the whole thing down, rather than calling
+ * vmm_destroy_address_space() directly, which frees page tables only and
+ * leaks these two.
  */
 int libos_build_image(page_owner_t owner, const void *code, size_t code_len,
                       libos_image_t *out);
+
+/*
+ * Undo a successful libos_build_image(): frees the code and stack pages
+ * back to the PMM (free_page_owned(), since alloc_page_owned() tagged them
+ * `owner`) and then vmm_destroy_address_space()s the PML4 they were mapped
+ * into. `owner`/`img` must be the same pair libos_build_image() returned
+ * VMM_OK for -- this is the only correct way to tear down a built image.
+ */
+void libos_destroy_image(page_owner_t owner, const libos_image_t *img);
 
 /*
  * `iretq` to CPL 3 at `entry_vaddr` with RSP = `stack_top_vaddr`. RFLAGS is
@@ -89,6 +107,17 @@ int libos_build_image(page_owner_t owner, const void *code, size_t code_len,
  * mechanistically expected to switch to TSS.RSP0 the same way the SCRUM-46
  * page-fault test proves an exception does, but that is unverified
  * (SCRUM-170) and deliberately not this ticket's risk to take on.
+ *
+ * libos_return() unwinds with IF still clear regardless of what it was in
+ * the caller -- fine today because every caller runs before kernel_main's
+ * `sti`, but a caller running after it must re-enable interrupts itself on
+ * the way back; this function does not save/restore RFLAGS across the trip.
+ *
+ * `libos_saved_rsp` (src/libos_enter.s) is a single global, so only one
+ * libos_enter()/libos_return() round trip can be in flight at a time -- the
+ * same non-reentrancy syscall_entry.s's saved-user-RSP slot calls out, and
+ * the same fix applies: `swapgs` plus a per-CPU block once SCRUM-107 needs
+ * more than one context live at once.
  *
  * Does NOT switch CR3 -- `entry_vaddr`/`stack_top_vaddr` only resolve inside
  * the address space libos_build_image() mapped them into, so the caller
