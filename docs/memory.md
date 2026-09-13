@@ -827,8 +827,8 @@ fault — but cannot rescue a bad `RSP`.
 ## 8. Phase 5 — LibOS heap
 
 **Files:** `src/libos_page_alloc.c/h` (SCRUM-37, ✅ Done);
-`src/libos_heap.c/h` (SCRUM-38, planned)
-**Status:** 🟡 Sprint 3, page-granularity layer done
+`src/libos_heap.c/h` (SCRUM-38, ✅ Done)
+**Status:** ✅ Sprint 3, both layers done
 
 ### Design
 
@@ -888,6 +888,35 @@ effects, error codes) without the hazard. The inline stubs remain the correct
 convention for genuine ring-3 code; using them is blocked on a real LibOS
 launch harness for more than a single hand-written probe function, the same
 gap SCRUM-51/SCRUM-66 are waiting on.
+
+### SCRUM-38: `libos_heap`
+
+The byte-granularity layer on top is also done: `src/libos_heap.c` is
+`src/heap.c`'s first-fit, segmented free-list algorithm verbatim, with the
+page source swapped for `libos_page_alloc()` (SCRUM-37) in place of
+`alloc_page()`. The one other substitution is what "contiguous" means for
+segment growth: `heap.c` checks *physical* adjacency between successive
+`alloc_page()` calls, this file checks *virtual* adjacency between
+successive `libos_page_alloc()` calls — sound because nothing (this file
+included) ever calls `libos_page_free()` in steady state, so growth only
+ever bumps the page allocator's high-water mark forward. Like `heap.c`,
+segments here never shrink: a freed block stays in its segment's free list
+rather than the underlying page going back to `libos_page_alloc()`.
+
+`libos_heap_alloc`/`_free`/`_realloc` and the `libos_heap_get_stats`/
+`_report` accounting pair mirror `heap.c`'s API 1:1 under new names —
+deliberately not a shared engine with `heap.c`, since that file is
+hard-wired to `alloc_page()` and parameterizing it over a page source is
+more refactor than either ticket needs. `tests/kernel/test_libos_heap_k.c`
+mirrors `test_heap_k.c`'s correctness suite plus a scaled-down version of
+`test_heap_stress_k.c`'s churn+peak, warm-up+measured leak audit (500
+ops/blocks instead of 10,000 — each page grow here costs two real
+dispatcher round trips through `libos_page_alloc()` rather than one
+bitmap-scan `alloc_page()` call, so the load is sized down against
+`docs/testing.md`'s 30s CI ceiling rather than reused unchanged). Measured
+at 500/500: a single 51-page segment, zero fragmentation, zero pages taken
+between the warm-up and measured passes — the virtual-contiguity assumption
+above held throughout.
 
 ### Sizing
 
