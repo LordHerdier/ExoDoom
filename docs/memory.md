@@ -826,8 +826,9 @@ fault — but cannot rescue a bad `RSP`.
 
 ## 8. Phase 5 — LibOS heap
 
-**Files:** LibOS source _(planned — SCRUM-25, SCRUM-26, SCRUM-37, SCRUM-38)_
-**Status:** ⬜ Sprint 3
+**Files:** `src/libos_page_alloc.c/h` (SCRUM-37, ✅ Done);
+`src/libos_heap.c/h` (SCRUM-38, planned)
+**Status:** 🟡 Sprint 3, page-granularity layer done
 
 ### Design
 
@@ -837,8 +838,9 @@ the kernel has no knowledge of it beyond handing out physical pages.
 
 > **Not what `malloc` does today.** `src/stdlib.c`'s `malloc` forwards to the
 > *kernel* heap (§6b), which is correct while the LibOS shares the kernel's
-> address space. Re-pointing `malloc` at this allocator is the work of
-> SCRUM-37/-38, not a change to the wrapper's signature.
+> address space. Re-pointing `malloc` at this allocator is out of scope for
+> both SCRUM-37 and SCRUM-38 — it needs the kernel/LibOS dual-build split
+> SCRUM-51/SCRUM-66 are gated on (see the note in `src/libos_page_alloc.h`).
 
 ```
 LibOS malloc(size):
@@ -853,6 +855,39 @@ blocks to reduce fragmentation.
 
 `realloc(ptr, size)` is implemented as `malloc(size)` + `memcpy` + `free(ptr)` —
 no in-place resize for the initial implementation.
+
+### SCRUM-37: `libos_page_alloc`/`libos_page_free`
+
+The page-granularity layer above is done: `libos_page_alloc()` calls
+`EXO_SYS_PAGE_ALLOC` then `EXO_SYS_PAGE_MAP` to place the new page at a fresh
+virtual address in `[LIBOS_HEAP_VADDR_BASE, LIBOS_HEAP_VADDR_BASE +
+LIBOS_PAGE_ALLOC_MAX_PAGES * 0x1000)` — 16 MiB of window starting 16 MiB into
+the LibOS window, clear of the fixed `libos_launch` region — and
+`libos_page_free()` reverses it (`EXO_SYS_PAGE_UNMAP` then
+`EXO_SYS_PAGE_FREE`). A small parallel array tracks each slot's physical
+page (mirroring `page_alloc.c`'s own bitmap-PMM shape, one entry per page
+rather than per byte), with a LIFO free list so returned slots are reused
+before the high-water mark grows further.
+
+**It calls `exo_syscall_dispatch()` directly, not the inline `syscall`-
+instruction stubs in `exo_syscall.h`.** Those stubs return via `sysretq`,
+which *unconditionally* forces CPL 3 — `src/syscall_entry.s` spells this out:
+"the CPU does not consult RCX/R11 for anything but RIP and RFLAGS." `syscall`
+itself doesn't care what privilege level issued it, but there is no matching
+leniency on the way out: code that must resume at CPL 0 after the call — this
+allocator, linked into the kernel binary today because no separate LibOS
+build target exists yet — silently drops to ring 3 for everything that runs
+afterward if it uses the real stub. This was found the hard way: an earlier
+version of this file called the stubs directly, and the very next KUnit suite
+after it hung the whole run past the 30s CI ceiling instead of failing
+cleanly. Calling `exo_syscall_dispatch()` is a plain C call with no CPL
+transition, and is the same convention `test_syscall_mem_k.c` and
+`test_syscall_serial_k.c` already use to test a handler from kernel context —
+it proves the same handler-side behavior (ownership stamps, page-table
+effects, error codes) without the hazard. The inline stubs remain the correct
+convention for genuine ring-3 code; using them is blocked on a real LibOS
+launch harness for more than a single hand-written probe function, the same
+gap SCRUM-51/SCRUM-66 are waiting on.
 
 ### Sizing
 
