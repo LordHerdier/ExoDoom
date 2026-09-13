@@ -18,6 +18,7 @@
 #include "syscall_mem.h"
 #include "syscall_fb.h"
 #include "syscall_serial.h"
+#include "syscall_pit.h"
 #include "fb_binding.h"
 #include "revoke.h"
 #include "vmm.h"
@@ -606,7 +607,36 @@ void kernel_main(void *mb2_info_ptr) {
     // syscall_init, ahead of the TESTING branch.
     syscall_serial_init();
 
+    // ── PIC / PIT (SCRUM-172) ────────────────────────────────────────────
+    // Moved ahead of the TESTING branch, same reasoning as tss_init() for
+    // SCRUM-46: exo_get_ticks (#5) needs a live, advancing tick count to
+    // prove itself from ring 3, and pit_init()/IRQ0 previously ran only in
+    // the normal-boot tail below, well after a TESTING build has already
+    // exited. IRQ1/keyboard wiring (idt_set_gate(33), kbd_init()) stays in
+    // the tail -- nothing under TESTING touches the keyboard, and default_stub
+    // (installed for every vector by idt_init()) absorbs a stray IRQ1 safely
+    // if one somehow arrived first.
+    pic_remap();
+    idt_set_gate(32, (uintptr_t)irq0_stub);
+    pit_init(1000);
+
+    // ── Timer syscall (SCRUM-172) ────────────────────────────────────────
+    // Binds exo_get_ticks (#5). After pit_init() -- the handler reports
+    // kernel_get_ticks_ms(), which stays at 0 without it -- and, like the
+    // other syscall *_init()s, ahead of the TESTING branch.
+    syscall_pit_init();
+
 #ifdef TESTING
+    // No blanket `sti` here: several suites (fault, tss, libos_launch,
+    // libos_main) drive a real ring-3 fault on purpose with RFLAGS.IF
+    // hardcoded clear (tests/kernel/ring3_probe.s, src/libos_enter.s), and
+    // their hook-driven resume (src/fault.c's test_hook) `iretq`s with that
+    // same saved RFLAGS -- so IF ends up clear again after any of them runs,
+    // no matter what it was set to here. A single early `sti` would only be
+    // true until the first such suite, which is worse than not claiming it at
+    // all. The one test that needs ticks to actually advance
+    // (tests/kernel/test_syscall_pit_k.c) enables interrupts for just its own
+    // wait instead.
     serial_flush();
     qemu_exit((uint32_t)run_tests());
 #endif
@@ -700,11 +730,9 @@ void kernel_main(void *mb2_info_ptr) {
     // fault handler rather than looping (SCRUM-17).
     klog(&con, 0, "IDT initialized (256 entries)");
 
-    pic_remap();
+    // pic_remap()/idt_set_gate(32)/pit_init() already ran above, ahead of the
+    // TESTING branch (SCRUM-172) -- these just narrate what already happened.
     klog(&con, 0, "PIC remapped (IRQs -> vectors 0x20-0x2F)");
-
-    idt_set_gate(32, (uintptr_t)irq0_stub);
-    pit_init(1000);
     klog(&con, 0, "PIT initialized at 1000 Hz (IRQ0 -> vector 0x20)");
 
     idt_set_gate(33, (uintptr_t)irq1_stub);
