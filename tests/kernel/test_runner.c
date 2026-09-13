@@ -35,6 +35,7 @@ void suite_syscall_serial_tests(CU_pSuite s);
 void suite_libos_main_tests(CU_pSuite s);
 void suite_libos_page_alloc_tests(CU_pSuite s);
 void suite_libos_heap_tests(CU_pSuite s);
+void suite_libos_heap_stress_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -75,13 +76,16 @@ int libos_launch_suite_cleanup(void);
  * ring-3 entry-framework test (SCRUM-50). */
 int libos_main_suite_cleanup(void);
 
-/* The libos_heap stress suite (SCRUM-38) runs its whole 2-pass, ~2,000-
+/* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
- * above. It allocates nothing that outlives init and so needs no cleanup. It
- * must run after "libos_page_alloc": its segment-growth contiguity
- * assumption depends on that suite's last test having reset libos_page_alloc
- * back to a clean, empty state (see libos_page_alloc.h's suite-ordering
- * note). */
+ * above -- kept as its own suite, separate from "libos_heap"'s plain
+ * correctness tests, so those run against a pristine allocator instead of
+ * one this load has already warmed up. It allocates nothing that outlives
+ * init and so needs no cleanup. It must run after "libos_page_alloc": its
+ * segment-growth contiguity assumption depends on that suite's last test,
+ * test_slot_table_exhaustion (tests/kernel/test_libos_page_alloc_k.c),
+ * having reset libos_page_alloc back to a clean, empty state as its final
+ * action. */
 int libos_heap_stress_suite_init(void);
 
 int run_tests(void)
@@ -162,13 +166,16 @@ int run_tests(void)
 
     /* No cleanup: the suite's last test (test_slot_table_exhaustion) resets
      * src/libos_page_alloc.c's static state to empty as its final action,
-     * which "libos_heap" below relies on -- keep this suite immediately
-     * before it. */
+     * which "libos_heap_stress" below relies on -- keep this suite
+     * immediately before it. */
     s = CU_add_suite("libos_page_alloc", NULL, NULL);
     suite_libos_page_alloc_tests(s);
 
-    s = CU_add_suite("libos_heap", libos_heap_stress_suite_init, NULL);
+    s = CU_add_suite("libos_heap", NULL, NULL);
     suite_libos_heap_tests(s);
+
+    s = CU_add_suite("libos_heap_stress", libos_heap_stress_suite_init, NULL);
+    suite_libos_heap_stress_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

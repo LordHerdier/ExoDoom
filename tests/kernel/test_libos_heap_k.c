@@ -6,14 +6,26 @@
  * (SCRUM-37) -- see that file's top comment for why via
  * exo_syscall_dispatch() and not the inline `syscall`-instruction stubs.
  *
- * The correctness tests mirror test_heap_k.c's shape exactly (this is the
- * same allocator algorithm, different page source). The stress test at the
- * bottom mirrors test_heap_stress_k.c's churn+peak, warm-up+measured design
- * but at roughly 1/20th the scale: each page grow here costs two real
- * dispatcher round trips (EXO_SYS_PAGE_ALLOC then EXO_SYS_PAGE_MAP) instead
- * of one bitmap-scan alloc_page() call, and docs/testing.md's 30s CI ceiling
- * is shared with every other suite -- see that file before raising these
- * numbers back up.
+ * Two suites, registered separately in test_runner.c (see the
+ * suite_libos_heap_tests()/suite_libos_heap_stress_tests() split below):
+ *
+ *   - "libos_heap" mirrors test_heap_k.c's shape exactly (same allocator
+ *     algorithm, different page source) and runs with no init, against a
+ *     pristine allocator -- same as "heap" in test_heap_k.c.
+ *   - "libos_heap_stress" mirrors test_heap_stress_k.c's churn+peak,
+ *     warm-up+measured design but at roughly 1/20th the scale: each page
+ *     grow here costs two real dispatcher round trips (EXO_SYS_PAGE_ALLOC
+ *     then EXO_SYS_PAGE_MAP) instead of one bitmap-scan alloc_page() call,
+ *     and docs/testing.md's 30s CI ceiling is shared with every other
+ *     suite -- see that file before raising these numbers back up.
+ *
+ * Keeping these as two suites, not one, matters: a suite's init
+ * (libos_heap_stress_suite_init() below) runs once before any of its own
+ * tests, but has no effect on a *different* suite's tests. Combining both
+ * sets of tests into a single suite with the stress load as its init would
+ * mean the "correctness" tests silently ran against a heap the stress load
+ * had already warmed up and fragmented, not the pristine one their names
+ * imply.
  */
 
 #include "kunit.h"
@@ -340,6 +352,24 @@ static void test_load_actually_grew_the_heap(void) {
     CU_ASSERT_TRUE(s_warm.total_bytes > s_entry.total_bytes);
 }
 
+/*
+ * Two suites, deliberately -- not one. suite_libos_heap_tests() below is
+ * the correctness suite, registered with a NULL init (see test_runner.c),
+ * so its tests run against a pristine, freshly-booted allocator, exactly
+ * like test_heap_k.c's "heap" suite. suite_libos_heap_stress_tests() is
+ * registered separately, with libos_heap_stress_suite_init() as its init,
+ * exactly like test_heap_stress_k.c's "heap_stress" suite.
+ *
+ * An earlier version of this file combined both into one suite whose init
+ * ran the whole stress load. Since CUnit runs a suite's init once, before
+ * any of its tests -- regardless of registration order -- that meant the
+ * "basic correctness" tests were silently running against a heap the
+ * stress load had already warmed up and fragmented, not the pristine one
+ * their names and this file's own docs claimed. Keeping them as two
+ * suites, with the plain one registered first in test_runner.c, is what
+ * actually guarantees that.
+ */
+
 void suite_libos_heap_tests(CU_pSuite s) {
     CU_add_test(s, "alloc nonnull and aligned",       test_alloc_nonnull_and_aligned);
     CU_add_test(s, "sequential allocs don't overlap", test_sequential_allocs_dont_overlap);
@@ -347,7 +377,9 @@ void suite_libos_heap_tests(CU_pSuite s) {
     CU_add_test(s, "free then realloc reuses block",  test_free_then_realloc_reuses_block);
     CU_add_test(s, "large alloc forces growth",       test_large_alloc_forces_growth);
     CU_add_test(s, "realloc NULL and zero",           test_realloc_null_and_zero);
+}
 
+void suite_libos_heap_stress_tests(CU_pSuite s) {
     CU_add_test(s, "warm-up pass: 500 churn ops + 500 live blocks",
                 test_warmup_pass_completes);
     CU_add_test(s, "measured pass: 500 churn ops + 500 live blocks",
