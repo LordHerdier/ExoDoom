@@ -21,6 +21,7 @@
 
 #include "kunit.h"
 #include "libos_launch.h"
+#include "libos_test_common.h"
 #include "vmm.h"
 #include "fault.h"
 #include "exo_syscall.h"
@@ -30,12 +31,8 @@
 
 #include <stdint.h>
 
-/* Distinct from every other suite's scratch owner id (page_alloc.h /
- * PAGE_OWNER_LIBOS + N): +1 (ownership/revoke/page_map/fb_binding), +3 and
- * +4 (vmm). */
-#define LIBOS_LAUNCH_TEST_OWNER ((page_owner_t)(PAGE_OWNER_LIBOS + 5))
+#define LIBOS_LAUNCH_TEST_OWNER TEST_OWNER_LIBOS_LAUNCH
 
-#define SYS_LIBOS_RETURN 20     /* EXO_SYS_EXIT, borrowed -- see the probe */
 #define RESULT_MARKER    0x600DC0DEULL   /* must match libos_launch_probe.s */
 #define FAULT_VADDR      (EXO_USER_VA_BASE + 0x20000ULL) /* ditto */
 
@@ -86,13 +83,13 @@ static void test_ring3_launch_faults_are_caught(void) {
     hook_calls = 0;
     seen_err = seen_cs = 0;
     fault_set_hook(recording_hook);
-    exo_syscall_register(SYS_LIBOS_RETURN, libos_return);
+    exo_syscall_register(LIBOS_RETURN_SYSCALL_NUM, libos_return);
 
     CU_ASSERT_EQUAL(vmm_switch_address_space(img.pml4_phys), VMM_OK);
     uint64_t result = libos_enter(img.entry_vaddr, img.stack_top_vaddr);
     CU_ASSERT_EQUAL(vmm_switch_address_space(vmm_kernel_pml4()), VMM_OK);
 
-    exo_syscall_register(SYS_LIBOS_RETURN, 0);
+    exo_syscall_register(LIBOS_RETURN_SYSCALL_NUM, 0);
     fault_set_hook(0);
 
     /* Reached the resume label and escaped cleanly -- the machine did not
@@ -199,19 +196,12 @@ static void test_build_image_places_code_and_data(void) {
 }
 
 /* Leaves nothing behind even if an assertion above failed mid-test and
- * skipped its own cleanup -- same reasoning as the fault/tss suites'
- * cleanups. Unlike the normal path (libos_destroy_image, which knows exactly
- * which two pages to free), `img` is out of scope here, so this falls back
- * to page_reclaim_all() to sweep up anything the test's owner id still
- * holds before tearing down the address space. */
+ * skipped its own cleanup -- see libos_test_common.h. Unlike the normal path
+ * (libos_destroy_image, which knows exactly which pages to free), `img` is
+ * out of scope here, so the shared teardown falls back to page_reclaim_all()
+ * to sweep up anything the test's owner id still holds. */
 int libos_launch_suite_cleanup(void) {
-    fault_set_hook(0);
-    exo_syscall_register(SYS_LIBOS_RETURN, 0);
-    if (vmm_address_space_for(LIBOS_LAUNCH_TEST_OWNER) != 0) {
-        vmm_switch_address_space(vmm_kernel_pml4());
-        page_reclaim_all(LIBOS_LAUNCH_TEST_OWNER);
-        vmm_destroy_address_space(LIBOS_LAUNCH_TEST_OWNER);
-    }
+    libos_test_teardown_owner(LIBOS_LAUNCH_TEST_OWNER);
     return 0;
 }
 

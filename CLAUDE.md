@@ -113,9 +113,14 @@ Per-LibOS address spaces can now be built (SCRUM-48), the mechanism to
 actually launch one in ring 3 on its own address space exists and is tested
 (SCRUM-47, `src/libos_launch.c/h` + `src/libos_enter.s`), and that mechanism
 now places code and data at their own defined, fixed virtual addresses rather
-than one undifferentiated blob (SCRUM-49) — see below. v1's one LibOS still
-runs on the kernel's own map on a normal boot, because nothing yet defines
-what runs after the jump (SCRUM-50's `libos_main()`).
+than one undifferentiated blob (SCRUM-49) — see below. The `libos_main()`
+entry convention (SCRUM-50) — code runs PIC at `LIBOS_LAUNCH_CODE_VADDR`,
+references its own data only via the fixed immediate `LIBOS_LAUNCH_DATA_VADDR`,
+and can call any bound syscall through the ordinary `exo_syscall.h` stubs —
+is now proven end to end (`tests/kernel/libos_main_probe.s` calls the real,
+bound `exo_serial_write`), but v1's one LibOS still runs on the kernel's own
+map on a normal boot: nothing yet loads a real binary's code/data into that
+convention and calls it from `kernel_main` instead of a test harness.
 
 ### Subsystem map
 
@@ -129,7 +134,7 @@ what runs after the jump (SCRUM-50's `libos_main()`).
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
-| Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h` |
+| Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h` |
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer) |
 | Resource revocation (repossession) | `src/revoke.c/h` (protocol), the `page_revoke_*`/`fb_binding_revoke_*` primitives |
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
@@ -170,13 +175,21 @@ what runs after the jump (SCRUM-50's `libos_main()`).
   still a fixed-size loader, not a general one: `code`/`data` are copied
   verbatim into position, position-independent by convention (no ELF, no
   relocation), and oversized input is rejected as `VMM_EINVAL` before
-  anything is allocated. What SCRUM-49 does *not* do is wire this into
-  `kernel_main` or say what runs once execution reaches
-  `LIBOS_LAUNCH_CODE_VADDR`: on a normal boot, `kernel_main` still binds the
-  one v1 LibOS to `vmm_kernel_pml4()` itself, a placeholder that keeps it
-  running on the kernel's own map, because SCRUM-50 hasn't yet defined
-  `libos_main()`'s calling convention and the normal boot tail is a live
-  interactive demo, not a placeholder waiting to be replaced. Read
+  anything is allocated. SCRUM-50 defines and proves the `libos_main()` entry
+  convention on top: code launched at `LIBOS_LAUNCH_CODE_VADDR` is PIC by the
+  same rule as `libos_build_image()`'s `code`/`data` (no internal jump/call,
+  no RIP-relative reference; a reference to its own data uses the fixed
+  immediate `LIBOS_LAUNCH_DATA_VADDR`), and it can call any syscall the
+  dispatcher has bound through the ordinary `exo_syscall.h` stubs — proven by
+  `tests/kernel/libos_main_probe.s` + `test_libos_main_k.c`, which call the
+  real `exo_serial_write` (#8, `src/syscall_serial.c`, also SCRUM-50) from
+  ring 3 and check the genuine syscall result comes back through
+  `libos_return()`, not a fixed marker. What neither SCRUM-49 nor SCRUM-50
+  does is wire this into `kernel_main`: on a normal boot, `kernel_main` still
+  binds the one v1 LibOS to `vmm_kernel_pml4()` itself, a placeholder that
+  keeps it running on the kernel's own map, because there is still no real
+  binary's code/data to build an image from and the normal boot tail is a
+  live interactive demo, not a placeholder waiting to be replaced. Read
   `docs/memory.md` §7, `docs/syscall_spec.md` §3.7 and `docs/architecture.md`
   §5.1/§6 before implementing anything in that space.
 - **`vmm.c` mirrors boot.s's ring-3 U/S gate.** Test builds map the identity
@@ -216,13 +229,21 @@ what runs after the jump (SCRUM-50's `libos_main()`).
   (`src/serial.c`, mapped to QEMU stdio via `-serial mon:stdio`). Test framework
   output and all kernel diagnostics go through it; `serial_flush()` must be
   called before `qemu_exit()` or buffered bytes are lost.
-- **Syscall entry works; five handlers are bound.** The `syscall`/`sysret`
+- **Syscall entry works; six handlers are bound.** The `syscall`/`sysret`
   path is implemented (SCRUM-32): `syscall_init()` in `src/syscall.c` programs
   `EFER.SCE`/`STAR`/`LSTAR`/`FMASK`, `src/syscall_entry.s` is the entry stub,
   and `exo_syscall_dispatch` routes on the number. Bound today:
   `exo_page_alloc` (#0), `exo_page_free` (#1), `exo_page_map` (#2) and
-  `exo_page_unmap` (#3) in `src/syscall_mem.c` (SCRUM-34, SCRUM-35), and
-  `exo_fb_acquire` (#4) in `src/syscall_fb.c` (SCRUM-154).
+  `exo_page_unmap` (#3) in `src/syscall_mem.c` (SCRUM-34, SCRUM-35),
+  `exo_fb_acquire` (#4) in `src/syscall_fb.c` (SCRUM-154), and
+  `exo_serial_write` (#8) in `src/syscall_serial.c` (SCRUM-50) — no ownership
+  to check for the latter, since COM1 isn't acquired/released like the
+  framebuffer; it rejects `-EXO_EFAULT` for a `[buf, buf+len)` that isn't
+  entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` and `-EXO_EINVAL` for
+  `len` over `SERIAL_WRITE_MAX_LEN` (4096) — the whole call runs with
+  interrupts off (`syscall`'s FMASK clears IF), so an uncapped write is a
+  one-syscall denial of service against the timer and keyboard IRQs, not
+  just slow.
   **Every other number still returns `-EXO_ENOSYS`**; binding one is
   `exo_syscall_register(EXO_SYS_*, handler)` from an `*_init()` called in
   `kernel_main` ahead of the `TESTING` branch, so the handler exists for both a

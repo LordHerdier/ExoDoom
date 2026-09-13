@@ -161,13 +161,26 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     objs+=("$o")
   done
 
-  # Test-only assembly (ring3_probe.s).  Lives under tests/ rather than src/
-  # so it cannot leak into a shipped kernel.
+  # Test-only assembly (ring3_probe.s, libos_launch_probe.s, ...).  Lives
+  # under tests/ rather than src/ so it cannot leak into a shipped kernel.
+  #
+  # Run through the C preprocessor first (`-x assembler-with-cpp`, which
+  # predefines __ASSEMBLER__) rather than handed to `as` directly: probes
+  # that need a syscall number or a LibOS-window constant #include the real
+  # kernel header (exo_syscall.h / libos_launch.h) and reference its actual
+  # macro instead of a hand-copied literal that can silently drift from it
+  # (SCRUM-50). -DEXO_KERNEL matches every other kernel-side TU so the
+  # LibOS-only stub block those headers guard with `#ifndef EXO_KERNEL`
+  # -- plain C with inline asm inside, which `as` cannot parse -- is skipped
+  # here exactly as it is for a normal kernel .c file. A probe with nothing
+  # to include still assembles fine: cpp with no macros used is a no-op.
   for s in tests/kernel/*.s; do
     [ -e "$s" ] || continue
+    pp="build/$(basename "${s%.s}.pp.s")"
     o="build/$(basename "${s%.s}.o")"
     echo "    AS $(basename "$s")"
-    x86_64-elf-as "$s" -o "$o"
+    x86_64-elf-gcc -E -P -x assembler-with-cpp -I src/ -DEXO_KERNEL "$s" -o "$pp"
+    x86_64-elf-as "$pp" -o "$o"
     objs+=("$o")
   done
 fi

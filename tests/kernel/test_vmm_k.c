@@ -15,6 +15,7 @@
 #include "memory.h"
 #include "serial.h"
 #include "exo_syscall.h"
+#include "libos_test_common.h"
 
 #include <stdint.h>
 
@@ -308,11 +309,13 @@ static void test_conflicting_map_does_not_split(void)
  */
 #define ADDRSPACE_SCRATCH_VA (EXO_USER_VA_BASE + 0x10000000ULL)
 
-/* A context id these tests own for their own create/bind/destroy lifecycle,
- * distinct from OTHER_LIBOS (test_page_map_k.c, +1) and
- * REGISTRY_SCRATCH_OWNER (below, +3) so none of the suites' registry state
- * collides. */
-#define ADDRSPACE_TEST_OWNER ((page_owner_t)(PAGE_OWNER_LIBOS + 4))
+/* A context id these tests own for their own create/bind/destroy lifecycle.
+ * Sourced from libos_test_common.h, which is what actually guarantees this
+ * differs from REGISTRY_SCRATCH_OWNER (below) and from the other suites that
+ * bind an address space (test_libos_launch_k.c, test_libos_main_k.c) —
+ * OTHER_LIBOS-style suites (test_page_map_k.c, +1) never touch the registry,
+ * so they need no such guarantee. */
+#define ADDRSPACE_TEST_OWNER TEST_OWNER_VMM_ADDRSPACE
 
 /* kernel_main binds the one v1 LibOS to the kernel's own map (SCRUM-47 has
  * not landed a private one yet) — this is the observable proof that the
@@ -460,8 +463,9 @@ static void test_bind_rejects_free_and_kernel(void)
 
 /* A scratch context id the registry never sees outside this test — the
  * bound value need not be a real PML4, since bind/lookup/unbind never
- * dereference it. */
-#define REGISTRY_SCRATCH_OWNER ((page_owner_t)(PAGE_OWNER_LIBOS + 3))
+ * dereference it. Sourced from libos_test_common.h; see ADDRSPACE_TEST_OWNER
+ * above for why. */
+#define REGISTRY_SCRATCH_OWNER TEST_OWNER_VMM_REGISTRY
 
 static void test_bind_rebind_and_unbind(void)
 {

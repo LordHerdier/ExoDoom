@@ -1,5 +1,8 @@
 #pragma once
+
+#ifndef __ASSEMBLER__
 #include <stdint.h>
+#endif
 
 /*
  * exo_syscall.h — ExoDoom exokernel syscall ABI (SCRUM-24).
@@ -43,6 +46,16 @@
  * individual handlers land across Sprints 3-5.  The header exists so the
  * kernel dispatcher and the LibOS libc shim (SCRUM-51) agree on the ABI
  * before either is written.
+ *
+ * A third audience as of SCRUM-50: bare assembly test probes (the .s files
+ * under tests/kernel) that need a syscall number or a LibOS-window constant
+ * without hardcoding it a second time. docker/scripts/build.sh preprocesses
+ * those files with the C preprocessor (`-x assembler-with-cpp`, which
+ * predefines `__ASSEMBLER__`) before handing them to `as`, so every typedef,
+ * struct and function prototype below that an assembler cannot parse is
+ * wrapped in `#ifndef __ASSEMBLER__` — only the #define numbers survive into
+ * assembly text. Keep that wrapping intact when adding new C-only content
+ * here.
  */
 
 /* ---- Syscall numbers (docs/syscall_spec.md §3.2) ------------------------ */
@@ -158,6 +171,7 @@
  * everything is little-endian x86_64 and the sizes are asserted below.
  */
 
+#ifndef __ASSEMBLER__
 /* exo_fb_acquire(info_out) — #4 */
 typedef struct {
     uint64_t phys_addr;   /* framebuffer base, physical; LibOS maps it itself */
@@ -167,6 +181,7 @@ typedef struct {
     uint8_t  bpp;         /* bits per pixel; 32 (BGRX8888) on QEMU today      */
     uint8_t  reserved[3]; /* zeroed by the kernel                             */
 } exo_fb_info_t;
+#endif /* __ASSEMBLER__ */
 
 /* Modifier bits in exo_kbd_event_t.modifiers.  Sampled when the event was
  * queued, so a chord reads correctly even if the modifier is released before
@@ -196,13 +211,16 @@ typedef struct {
  * `key` is that struct's `key` — but the two are not the same type: this one
  * carries a trailing reserved byte and is ABI, while the kernel struct is free
  * to grow.  The #6 handler converts field by field rather than casting. */
+#ifndef __ASSEMBLER__
 typedef struct {
     uint8_t pressed;      /* 1 = key down, 0 = key up            */
     uint8_t key;          /* decoded ps2_key_t index             */
     uint8_t modifiers;    /* EXO_MOD_* mask held when queued     */
     uint8_t reserved;     /* zeroed by the kernel                */
 } exo_kbd_event_t;
+#endif /* __ASSEMBLER__ */
 
+#ifndef __ASSEMBLER__
 /* exo_mouse_poll(state_out) — #7.  Deltas accumulate in the kernel between
  * calls and are reset to zero by each poll; buttons are a level, not a delta. */
 typedef struct {
@@ -216,6 +234,7 @@ typedef struct {
 _Static_assert(sizeof(exo_fb_info_t)     == 24, "exo_fb_info_t layout is ABI");
 _Static_assert(sizeof(exo_kbd_event_t)   ==  4, "exo_kbd_event_t layout is ABI");
 _Static_assert(sizeof(exo_mouse_state_t) ==  6, "exo_mouse_state_t layout is ABI");
+#endif /* __ASSEMBLER__ */
 
 #ifndef EXO_KERNEL
 
