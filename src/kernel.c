@@ -530,8 +530,9 @@ void kernel_main(void *mb2_info_ptr) {
     // the faulting instruction.
     //
     // Safe this early for exactly one reason: IF is clear.  The CPU comes out
-    // of boot.s with interrupts disabled and nothing calls `sti` until after
-    // pic_remap() far below, so no hardware IRQ can arrive in between.  Do
+    // of boot.s with interrupts disabled and nothing calls `sti` before
+    // pic_remap() a short way below (SCRUM-172 moved it up from the
+    // normal-boot tail), so no hardware IRQ can arrive in between.  Do
     // NOT rely on the PIC being masked here -- the BIOS typically leaves
     // IRQ0/IRQ1 unmasked, and until pic_remap() they still land on vectors
     // 8-15, where vector 8's error_stub would pop an error code the PIC never
@@ -612,10 +613,12 @@ void kernel_main(void *mb2_info_ptr) {
     // SCRUM-46: exo_get_ticks (#5) needs a live, advancing tick count to
     // prove itself from ring 3, and pit_init()/IRQ0 previously ran only in
     // the normal-boot tail below, well after a TESTING build has already
-    // exited. IRQ1/keyboard wiring (idt_set_gate(33), kbd_init()) stays in
-    // the tail -- nothing under TESTING touches the keyboard, and default_stub
-    // (installed for every vector by idt_init()) absorbs a stray IRQ1 safely
-    // if one somehow arrived first.
+    // exited. IRQ1/keyboard wiring (idt_set_gate(33), kbd_init(),
+    // pic_unmask_irq1()) stays in the tail -- nothing under TESTING touches
+    // the keyboard, and pic_remap() now leaves IRQ1 masked at the PIC
+    // precisely so a stray one arriving before kbd_init() runs cannot reach
+    // idt_init()'s default_stub, whose bare iretq sends no EOI and would
+    // wedge IRQ1's in-service bit for good (see src/pic.c).
     pic_remap();
     idt_set_gate(32, (uintptr_t)irq0_stub);
     pit_init(1000);
@@ -737,6 +740,10 @@ void kernel_main(void *mb2_info_ptr) {
 
     idt_set_gate(33, (uintptr_t)irq1_stub);
     kbd_init();
+    // Only now is IRQ1 unmasked at the PIC (src/pic.c) -- the vector is
+    // wired to irq1_stub and kbd_init() has drained any stale byte, so a
+    // keyboard interrupt landing right after this has somewhere real to go.
+    pic_unmask_irq1();
     klog(&con, 0, "PS/2 keyboard initialized (IRQ1 -> vector 0x21)");
 
     __asm__ volatile ("sti");

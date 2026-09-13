@@ -37,15 +37,12 @@ static void test_handler_is_bound(void)
     CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_GET_TICKS));
 }
 
-static void test_ticks_never_negative(void)
-{
-    CU_ASSERT(do_get_ticks() >= 0);
-}
-
 static void test_ticks_match_kernel_get_ticks_ms(void)
 {
     /* Same source, sampled back to back -- must never disagree by more than
-     * the time the two calls themselves take. */
+     * the time the two calls themselves take. Also the non-negativity check:
+     * before/after are uint32_t, so via_syscall >= before already forces
+     * via_syscall >= 0. */
     uint32_t before = kernel_get_ticks_ms();
     int64_t via_syscall = do_get_ticks();
     uint32_t after = kernel_get_ticks_ms();
@@ -72,7 +69,6 @@ static void test_ticks_advance_over_time(void)
 void suite_syscall_pit_tests(CU_pSuite s)
 {
     CU_add_test(s, "handler is bound", test_handler_is_bound);
-    CU_add_test(s, "ticks never negative", test_ticks_never_negative);
     CU_add_test(s, "ticks match kernel_get_ticks_ms",
                test_ticks_match_kernel_get_ticks_ms);
     CU_add_test(s, "ticks advance over time", test_ticks_advance_over_time);
