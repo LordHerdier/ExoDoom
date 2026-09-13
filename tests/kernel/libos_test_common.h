@@ -23,13 +23,18 @@
 #define TEST_OWNER_VMM_ADDRSPACE ((page_owner_t)(PAGE_OWNER_LIBOS + 4))
 #define TEST_OWNER_LIBOS_LAUNCH  ((page_owner_t)(PAGE_OWNER_LIBOS + 5))
 #define TEST_OWNER_LIBOS_MAIN    ((page_owner_t)(PAGE_OWNER_LIBOS + 6))
+#define TEST_OWNER_LIBOS_C_PROBE ((page_owner_t)(PAGE_OWNER_LIBOS + 7))
 
 _Static_assert(TEST_OWNER_VMM_REGISTRY  != TEST_OWNER_VMM_ADDRSPACE &&
               TEST_OWNER_VMM_REGISTRY  != TEST_OWNER_LIBOS_LAUNCH  &&
               TEST_OWNER_VMM_REGISTRY  != TEST_OWNER_LIBOS_MAIN    &&
+              TEST_OWNER_VMM_REGISTRY  != TEST_OWNER_LIBOS_C_PROBE &&
               TEST_OWNER_VMM_ADDRSPACE != TEST_OWNER_LIBOS_LAUNCH  &&
               TEST_OWNER_VMM_ADDRSPACE != TEST_OWNER_LIBOS_MAIN    &&
-              TEST_OWNER_LIBOS_LAUNCH  != TEST_OWNER_LIBOS_MAIN,
+              TEST_OWNER_VMM_ADDRSPACE != TEST_OWNER_LIBOS_C_PROBE &&
+              TEST_OWNER_LIBOS_LAUNCH  != TEST_OWNER_LIBOS_MAIN    &&
+              TEST_OWNER_LIBOS_LAUNCH  != TEST_OWNER_LIBOS_C_PROBE &&
+              TEST_OWNER_LIBOS_MAIN    != TEST_OWNER_LIBOS_C_PROBE,
               "address-space-binding test owner ids must be pairwise distinct");
 
 /*

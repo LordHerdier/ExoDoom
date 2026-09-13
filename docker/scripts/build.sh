@@ -150,14 +150,74 @@ for s in src/*.s; do
 done
 
 if [[ "${TESTING:-0}" == "1" ]]; then
-  echo "[3b/7] Compile kernel test sources"
+  echo "[3b/7] Build LibOS C probe (SCRUM-173)"
+  # Compiled and linked at its real, final ring-3 addresses
+  # (LIBOS_LAUNCH_CODE_VADDR/_DATA_VADDR) rather than copied there
+  # afterward like the hand-written .s probes -- see libos_c_probe.c's own
+  # comment for why that makes ordinary compiler-generated addressing
+  # correct with no PIC workaround. mcmodel=large replaces the kernel's own
+  # mcmodel=small: that model only supports symbols in the first 2 GB, and
+  # LIBOS_LAUNCH_CODE_VADDR sits inside the 64 TiB LibOS window
+  # (EXO_USER_VA_BASE, src/exo_syscall.h), nowhere near it.
+  probe_cflags=("${CFLAGS[@]/-mcmodel=small/-mcmodel=large}")
+  x86_64-elf-gcc -c tests/kernel/libos_c_probe.c -o build/libos_c_probe.o \
+    "${probe_cflags[@]}" -I src/
+
+  # ld's expression syntax has no C integer-suffix notion, so LIBOS_LAUNCH_*'s
+  # ULL literals (src/libos_launch.h) survive cpp expansion intact and then
+  # fail to parse; strip the suffix (unambiguous here -- 'U'/'L' cannot occur
+  # inside a hex literal, so every "ULL" in the preprocessed output is a C
+  # suffix, never a false match).
+  x86_64-elf-gcc -E -P -x assembler-with-cpp -I src/ -DEXO_KERNEL \
+    tests/kernel/libos_c_probe.ld.in | sed 's/ULL//g' > build/libos_c_probe.ld
+  x86_64-elf-ld -T build/libos_c_probe.ld -o build/libos_c_probe.elf \
+    build/libos_c_probe.o
+
+  x86_64-elf-objcopy -O binary --only-section=.text \
+    build/libos_c_probe.elf build/libos_c_probe_code.bin
+  x86_64-elf-objcopy -O binary --only-section=.data \
+    build/libos_c_probe.elf build/libos_c_probe_data.bin
+
+  # .bss carries no file bytes to extract -- its length comes from the
+  # linker-defined start/end symbols instead (nm, the same technique step
+  # 2b already uses to read boot.s's exported flag words).
+  bss_start=$(x86_64-elf-nm build/libos_c_probe.elf | awk '$3=="__libos_c_probe_bss_start"{print "0x"$1}')
+  bss_end=$(x86_64-elf-nm build/libos_c_probe.elf | awk '$3=="__libos_c_probe_bss_end"{print "0x"$1}')
+  if [[ -z "$bss_start" || -z "$bss_end" ]]; then
+    echo "    ERROR: libos_c_probe.elf missing __libos_c_probe_bss_start/_end"
+    echo "           -- did libos_c_probe.ld.in's .bss block change?"
+    exit 1
+  fi
+  bss_len=$(( bss_end - bss_start ))
+  printf '#define LIBOS_C_PROBE_BSS_LEN %d\n' "$bss_len" \
+    > build/libos_c_probe_layout.h
+
+  # objcopy -I binary derives symbol names from the exact path given on the
+  # command line; cd into build/ first so they come out as the predictable
+  # _binary_libos_c_probe_{code,data}_bin_{start,end,size} rather than
+  # something that embeds this script's working directory.
+  ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+      libos_c_probe_code.bin libos_c_probe_code_blob.o )
+  ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+      libos_c_probe_data.bin libos_c_probe_data_blob.o )
+  objs+=(build/libos_c_probe_code_blob.o build/libos_c_probe_data_blob.o)
+
+  echo "[3c/7] Compile kernel test sources"
   for c in tests/kernel/*.c; do
+    # libos_c_probe.c is not a kernel TU -- it was just linked separately,
+    # above, at ring-3 addresses. Compiling it into the kernel image here as
+    # well would be wrong twice over: wrong view (it wants the LibOS syscall
+    # stubs, not -DEXO_KERNEL) and wrong link (its symbols belong at
+    # LIBOS_LAUNCH_CODE_VADDR/_DATA_VADDR, not wherever this loop's link
+    # step puts them).
+    [[ "$c" == "tests/kernel/libos_c_probe.c" ]] && continue
     o="build/$(basename "${c%.c}.o")"
     echo "    CC $(basename "$c")"
     # Kernel view by default -- these run in ring 0.  The one TU that needs
     # the LibOS view (test_exo_syscall_k.c, which instantiates the stubs)
-    # #undefs it before its first include.
-    x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+    # #undefs it before its first include. -I build/ finds
+    # libos_c_probe_layout.h, generated above, for test_libos_c_probe_k.c.
+    x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/ -I build/ -DEXO_KERNEL
     objs+=("$o")
   done
 
