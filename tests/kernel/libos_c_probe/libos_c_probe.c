@@ -28,12 +28,14 @@
  * #8) called from the launched code returns its real result through
  * libos_return(), not a fixed marker.
  *
- * #undef EXO_KERNEL for the same reason test_exo_syscall_k.c does: this file
- * wants the LibOS view of exo_syscall.h (the inline `syscall`-instruction
- * stubs), not the kernel view docker/scripts/build.sh's -DEXO_KERNEL
- * otherwise selects for every TU it compiles.
+ * This file is compiled by its own dedicated build.sh step (see that file),
+ * not the shared tests/kernel/*.c loop that passes -DEXO_KERNEL to every
+ * other test TU -- so it already gets the LibOS view of exo_syscall.h (the
+ * inline `syscall`-instruction stubs) with nothing to undo. There is no
+ * #undef EXO_KERNEL here for that reason: unlike test_exo_syscall_k.c, which
+ * *is* compiled through the shared loop and has to opt back out, EXO_KERNEL
+ * is never defined for this TU in the first place.
  */
-#undef EXO_KERNEL
 
 #include "exo_syscall.h"
 #include "libos_launch.h"

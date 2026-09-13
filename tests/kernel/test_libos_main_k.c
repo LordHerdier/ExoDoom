@@ -31,10 +31,6 @@
 #include "libos_launch.h"
 #include "libos_test_common.h"
 #include "vmm.h"
-#include "fault.h"
-#include "exo_syscall.h"
-#include "syscall.h"
-#include "page_alloc.h"
 
 #include <stdint.h>
 
@@ -44,17 +40,6 @@ extern void libos_main_probe(void);
 extern void libos_main_probe_end(void);
 extern const char libos_main_probe_data;
 extern const char libos_main_probe_data_end;
-
-static volatile int hook_calls;
-
-/* Not expected to fire in the happy path -- registered anyway so a
- * regression (the probe touching something unmapped) reports as a failed
- * assertion instead of a triple fault taking the whole suite down with it. */
-static int recording_hook(exception_frame_t *f, uint64_t cr2) {
-    (void)f; (void)cr2;
-    hook_calls++;
-    return 0;
-}
 
 static void test_libos_main_calls_real_syscall(void) {
     size_t code_len = (uintptr_t)&libos_main_probe_end -
@@ -71,25 +56,18 @@ static void test_libos_main_calls_real_syscall(void) {
                                       &img),
                    VMM_OK);
 
-    hook_calls = 0;
-    fault_set_hook(recording_hook);
-    exo_syscall_register(LIBOS_RETURN_SYSCALL_NUM, libos_return);
-
-    CU_ASSERT_EQUAL(vmm_switch_address_space(img.pml4_phys), VMM_OK);
-    uint64_t result = libos_enter(img.entry_vaddr, img.stack_top_vaddr);
-    CU_ASSERT_EQUAL(vmm_switch_address_space(vmm_kernel_pml4()), VMM_OK);
-
-    exo_syscall_register(LIBOS_RETURN_SYSCALL_NUM, 0);
-    fault_set_hook(0);
+    libos_test_launch_result_t run = libos_test_launch(&img);
+    CU_ASSERT_EQUAL(run.switch_in_status, VMM_OK);
+    CU_ASSERT_EQUAL(run.switch_out_status, VMM_OK);
 
     /* No fault: the write landed in the mapped data region, not off the end
      * of it. */
-    CU_ASSERT_EQUAL(hook_calls, 0);
+    CU_ASSERT_EQUAL(run.fault_count, 0);
 
     /* The real exo_serial_write result, round-tripped through libos_return()
      * -- not a fixed marker. A launched context calling a real syscall and
      * getting the real answer back is this ticket's whole point. */
-    CU_ASSERT_EQUAL(result, (uint64_t)data_len);
+    CU_ASSERT_EQUAL(run.result, (uint64_t)data_len);
 
     libos_destroy_image(LIBOS_MAIN_TEST_OWNER, &img);
 }
