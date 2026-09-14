@@ -564,6 +564,38 @@ are in. The most significant gaps remaining are `strdup`, `strncmp`,
 `strrchr`, `strstr`, `strerror`, `vsnprintf`, `sscanf`, `exit`/`abort`, and the
 full `FILE*` interface. See `docs/syscall_spec.md` §2 for the complete audit.
 
+> ✅ **SCRUM-64:** all 79 files under `src/doom/` now compile to `.o` with zero
+> errors (`make docker-build-doom`, now a CI gate that exits non-zero on any
+> failure). It was 2 of 79 before. Almost all of it was missing *headers*
+> rather than anything wrong with the vendored source: 77 files stopped at
+> their first `#include` — 66 of them on `<strings.h>`, which `doomtype.h`
+> includes on every non-Windows build — long before the compiler could reach a
+> real error. `src/strings.h`, `src/inttypes.h`, `src/errno.h`(`+.c`),
+> `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`,
+> `src/sys/types.h` and `src/sys/stat.h` are new, the doom compile pass now
+> gets `-I src`, and `src/stdio.h` grew the `FILE*` declarations.
+>
+> **Compiling is not linking.** Everything in that new `stdio.h` block, plus
+> `mkdir`, `strdup` and `atof`, is *declared and undefined* on purpose — the
+> objects compile and would fail at link with undefined references, which is
+> the honest state rather than stubs that let Doom link and then misbehave
+> inside `W_Init`. `docs/libc_audit.md` (SCRUM-72) is the per-function,
+> per-call-site list of what is still owed.
+>
+> ⚠️ **Doom requires SSE, and the kernel does not enable it.** The x86_64 SysV
+> ABI returns `float` in `xmm0`, so `m_config.c`'s `M_GetFloatVariable()`
+> cannot compile under the kernel's `-mno-sse` — no flag combination avoids
+> this (`-msoft-float` and `-mfpmath=387` both still hit the ABI). The doom
+> compile pass therefore drops `-mno-sse`; the kernel build keeps it and is
+> unaffected (no `src/*.c` uses a float). But `src/boot.s` sets only CR4.PAE —
+> never CR4.OSFXSR/OSXMMEXCPT, never clearing CR0.EM — so the first SSE
+> instruction any of these objects executes raises `#UD` today. Only 4 objects
+> hold float arithmetic (18 instructions), but allowing SSE also lets GCC
+> inline struct copies with `movaps`/`movdqa`/`pxor` engine-wide (~143 more),
+> and both need the same bits set. **No ticket owns enabling SSE or deciding
+> whether XMM state must be saved across the syscall/interrupt paths**; it is a
+> hard prerequisite for running any of this.
+
 > ✅ **SCRUM-51:** `malloc`/`free`/`realloc` and `printf` now go through the
 > real `syscall` instruction, not a kernel function call, when compiled for
 > the ring-3 LibOS link target SCRUM-173 introduced
