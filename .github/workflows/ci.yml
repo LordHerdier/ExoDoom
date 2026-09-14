@@ -48,5 +48,17 @@ jobs:
             exit 1
           fi
 
+      # SCRUM-64 got all 79 files under src/doom/ compiling; this keeps them
+      # that way. It reuses the exodoom-build image the step above already
+      # built (and cached), so it costs one `docker run`, not another
+      # toolchain compile.
+      #
+      # This is a COMPILE gate, not a link or a test: nothing in src/doom/ is
+      # linked into build/exodoom yet, and much of what it calls still has no
+      # definition (see docs/libc_audit.md). A green check here means the
+      # vendored engine and the libc shim's headers still agree — no more.
+      - name: Compile vendored Doom engine (src/doom)
+        run: make docker-build-doom
+
       - name: Success
-        run: echo "All kernel tests passed."
+        run: echo "All kernel tests passed; src/doom compiles clean."
