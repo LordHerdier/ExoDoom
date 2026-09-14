@@ -1,6 +1,9 @@
 #pragma once
 
 #include "page_alloc.h"   /* page_owner_t */
+#include "libos_launch.h" /* libos_image_t */
+
+#include <stdint.h>
 
 /*
  * libos_test_common.h — shared helpers for the ring-3 launch/entry suites
@@ -23,13 +26,18 @@
 #define TEST_OWNER_VMM_ADDRSPACE ((page_owner_t)(PAGE_OWNER_LIBOS + 4))
 #define TEST_OWNER_LIBOS_LAUNCH  ((page_owner_t)(PAGE_OWNER_LIBOS + 5))
 #define TEST_OWNER_LIBOS_MAIN    ((page_owner_t)(PAGE_OWNER_LIBOS + 6))
+#define TEST_OWNER_LIBOS_C_PROBE ((page_owner_t)(PAGE_OWNER_LIBOS + 7))
 
 _Static_assert(TEST_OWNER_VMM_REGISTRY  != TEST_OWNER_VMM_ADDRSPACE &&
               TEST_OWNER_VMM_REGISTRY  != TEST_OWNER_LIBOS_LAUNCH  &&
               TEST_OWNER_VMM_REGISTRY  != TEST_OWNER_LIBOS_MAIN    &&
+              TEST_OWNER_VMM_REGISTRY  != TEST_OWNER_LIBOS_C_PROBE &&
               TEST_OWNER_VMM_ADDRSPACE != TEST_OWNER_LIBOS_LAUNCH  &&
               TEST_OWNER_VMM_ADDRSPACE != TEST_OWNER_LIBOS_MAIN    &&
-              TEST_OWNER_LIBOS_LAUNCH  != TEST_OWNER_LIBOS_MAIN,
+              TEST_OWNER_VMM_ADDRSPACE != TEST_OWNER_LIBOS_C_PROBE &&
+              TEST_OWNER_LIBOS_LAUNCH  != TEST_OWNER_LIBOS_MAIN    &&
+              TEST_OWNER_LIBOS_LAUNCH  != TEST_OWNER_LIBOS_C_PROBE &&
+              TEST_OWNER_LIBOS_MAIN    != TEST_OWNER_LIBOS_C_PROBE,
               "address-space-binding test owner ids must be pairwise distinct");
 
 /*
@@ -42,3 +50,30 @@ _Static_assert(TEST_OWNER_VMM_REGISTRY  != TEST_OWNER_VMM_ADDRSPACE &&
  * enough to build one.
  */
 void libos_test_teardown_owner(page_owner_t owner);
+
+/*
+ * Result of libos_test_launch() (below) -- the switch-in/switch-out VMM
+ * status, the value libos_return() was given, and how many times the
+ * fault hook fired. Left for the caller to CU_ASSERT on, the same division
+ * libos_test_teardown_owner() already draws: this file performs kernel-side
+ * mechanics, the test file makes the claims.
+ */
+typedef struct {
+    int      switch_in_status;   /* vmm_switch_address_space(img->pml4_phys) */
+    uint64_t result;             /* value passed to libos_return() */
+    int      switch_out_status;  /* vmm_switch_address_space(vmm_kernel_pml4()) */
+    int      fault_count;        /* times the fault hook fired during the run */
+} libos_test_launch_result_t;
+
+/*
+ * The launch/run/unwind boilerplate every suite that drives libos_enter() to
+ * completion needs (test_libos_main_k.c, test_libos_c_probe_k.c): registers
+ * libos_return() and a fault-counting hook, switches into `img`'s address
+ * space, runs libos_enter(img->entry_vaddr, img->stack_top_vaddr), switches
+ * back to the kernel's own map, then unregisters both. Building `img` (via
+ * libos_build_image()) and tearing it down (libos_destroy_image() or
+ * libos_test_teardown_owner()) stay the caller's job -- this only covers the
+ * run in between, which is identical across every such suite regardless of
+ * what code is actually launched.
+ */
+libos_test_launch_result_t libos_test_launch(const libos_image_t *img);

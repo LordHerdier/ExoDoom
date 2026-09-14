@@ -490,6 +490,20 @@ static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
     fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
 }
 
+// ── PIC/PIT boot narration (SCRUM-172) ──────────────────────────────────────
+//
+// pic_remap()/idt_set_gate(32)/pit_init() themselves run early in
+// kernel_main, ahead of the TESTING branch (see that call site) -- long
+// before the framebuffer console they'd narrate to exists. This function is
+// the one place that narration text lives; kernel_main calls it once, later,
+// once `con` exists, instead of restating the same two lines inline at that
+// distant call site where nothing but a comment would keep them in sync with
+// what actually ran.
+static void log_pic_pit_ready(fb_console_t *con) {
+    klog(con, 0, "PIC remapped (IRQs -> vectors 0x20-0x2F)");
+    klog(con, 0, "PIT initialized at 1000 Hz (IRQ0 -> vector 0x20)");
+}
+
 // ── Kernel entry ──────────────────────────────────────────────────────────
 
 void kernel_main(void *mb2_info_ptr) {
@@ -614,11 +628,15 @@ void kernel_main(void *mb2_info_ptr) {
     // prove itself from ring 3, and pit_init()/IRQ0 previously ran only in
     // the normal-boot tail below, well after a TESTING build has already
     // exited. IRQ1/keyboard wiring (idt_set_gate(33), kbd_init(),
-    // pic_unmask_irq1()) stays in the tail -- nothing under TESTING touches
+    // pic_unmask_irq(1)) stays in the tail -- nothing under TESTING touches
     // the keyboard, and pic_remap() now leaves IRQ1 masked at the PIC
     // precisely so a stray one arriving before kbd_init() runs cannot reach
     // idt_init()'s default_stub, whose bare iretq sends no EOI and would
     // wedge IRQ1's in-service bit for good (see src/pic.c).
+    //
+    // log_pic_pit_ready() (defined just above, ahead of kernel_main) is
+    // where this gets narrated to the console -- later in this same
+    // function, once one exists.
     pic_remap();
     idt_set_gate(32, (uintptr_t)irq0_stub);
     pit_init(1000);
@@ -727,23 +745,22 @@ void kernel_main(void *mb2_info_ptr) {
     run_ownership_demo(&con, &fb);
     fbcon_write(&con, "\n");
 
-    // ── IDT / PIC / PIT / PS2 ─────────────────────────────────────���────
+    // ── IDT / PIC / PIT / PS2 ───────────────────────────────────────────
     // The IDT is already loaded -- idt_init() runs far above, ahead of the
     // TESTING branch, so a fault anywhere in early boot lands in the page
     // fault handler rather than looping (SCRUM-17).
     klog(&con, 0, "IDT initialized (256 entries)");
 
-    // pic_remap()/idt_set_gate(32)/pit_init() already ran above, ahead of the
-    // TESTING branch (SCRUM-172) -- these just narrate what already happened.
-    klog(&con, 0, "PIC remapped (IRQs -> vectors 0x20-0x2F)");
-    klog(&con, 0, "PIT initialized at 1000 Hz (IRQ0 -> vector 0x20)");
+    // pic_remap()/idt_set_gate(32)/pit_init() already ran above, ahead of
+    // the TESTING branch (SCRUM-172) -- see that call site's own comment.
+    log_pic_pit_ready(&con);
 
     idt_set_gate(33, (uintptr_t)irq1_stub);
     kbd_init();
     // Only now is IRQ1 unmasked at the PIC (src/pic.c) -- the vector is
     // wired to irq1_stub and kbd_init() has drained any stale byte, so a
     // keyboard interrupt landing right after this has somewhere real to go.
-    pic_unmask_irq1();
+    pic_unmask_irq(1);
     klog(&con, 0, "PS/2 keyboard initialized (IRQ1 -> vector 0x21)");
 
     __asm__ volatile ("sti");

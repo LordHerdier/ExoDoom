@@ -50,7 +50,29 @@ make clean                     # rm -rf build
   LibOS view (`tests/kernel/test_exo_syscall_k.c`) `#undef`s it first.
 - Test sources in `tests/kernel/*.c` are picked up **automatically** by
   `build.sh` when `TESTING=1` — no Makefile/build-script changes needed to add
-  a test file.
+  a test file, and that loop's own invocation stays untouched no matter what
+  gets added under `tests/kernel/`. `tests/kernel/libos_c_probe/` (SCRUM-173)
+  is how a file opts out of it instead of the loop special-casing a filename:
+  it lives in its own subdirectory, which `tests/kernel/*.c` never matches,
+  and is built by its own explicit step. That step compiles and links
+  `libos_c_probe.c` *separately*, with its own linker script
+  (`libos_c_probe.ld.in`) that places `.text` at `LIBOS_LAUNCH_CODE_VADDR` and
+  `.data`/`.bss` at `LIBOS_LAUNCH_DATA_VADDR` (`src/libos_launch.h`) — the real
+  addresses `libos_build_image()` maps a LibOS to — rather than at the
+  kernel's own 2M link address. Because the compiler/linker see the address
+  this code will actually run at, ordinary compiled C works there with no
+  hand-written PIC convention, unlike every earlier ring-3 probe in
+  `tests/kernel/*.s`. The resulting `.text`/`.data` bytes are extracted with
+  `objcopy` and embedded into the kernel image as ordinary blobs
+  (`_binary_libos_c_probe_{code,data}_bin_{start,end}`); `.bss`'s length (no
+  file bytes to extract) is written to a generated
+  `tests/kernel/libos_c_probe/libos_c_probe_layout.h` instead — inside that
+  same subdirectory so `#include`ing it from `tests/kernel/test_libos_c_probe_k.c`
+  needs no extra `-I` flag either. `test_libos_c_probe_k.c` drives
+  `libos_build_image()`/`libos_enter()` against those blobs the same way
+  `test_libos_main_k.c` drives the hand-assembled probe, proving a real bound
+  syscall (`exo_serial_write`) works from *compiled* ring-3 code — the
+  prerequisite SCRUM-51's libc-shim port needs and didn't have before this.
 - CI (`.github/workflows/ci.yml`) runs `make docker-ci` and greps serial
   output for `ALL TESTS PASSED` / `TESTS FAILED`.
 - QEMU shortcuts: `Ctrl+A` then `X` to exit; `Ctrl+A` then `C` for the QEMU

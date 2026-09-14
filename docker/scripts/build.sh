@@ -82,12 +82,16 @@ echo "[2b/7] Verify page-table protection"
 #   - a test kernel *without* it triple-faults the moment the ring-3 probe is
 #     entered, which surfaces as an unexplained CI timeout rather than a
 #     failing assertion.
-pt_flag() {
-  x86_64-elf-nm build/boot.o | awk -v s="$1" '$3 == s { print $1 }'
+# Read one absolute symbol's value out of an object/ELF via nm -- reused
+# below (step 3b) to read libos_c_probe.elf's __libos_c_probe_bss_start/_end,
+# the same "trust the real exported constant, not a restatement of it"
+# reasoning as here.
+nm_symbol_value() {
+  x86_64-elf-nm "$1" | awk -v s="$2" '$3 == s { print $1 }'
 }
 
-pt_link="$(pt_flag boot_pt_link_flags)"
-pt_leaf="$(pt_flag boot_pt_leaf_flags)"
+pt_link="$(nm_symbol_value build/boot.o boot_pt_link_flags)"
+pt_leaf="$(nm_symbol_value build/boot.o boot_pt_leaf_flags)"
 
 if [[ -z "$pt_link" || -z "$pt_leaf" ]]; then
   echo "    ERROR: boot.s no longer exports boot_pt_link_flags/boot_pt_leaf_flags."
@@ -150,7 +154,74 @@ for s in src/*.s; do
 done
 
 if [[ "${TESTING:-0}" == "1" ]]; then
-  echo "[3b/7] Compile kernel test sources"
+  echo "[3b/7] Build LibOS C probe (SCRUM-173)"
+  # tests/kernel/libos_c_probe/ is its own directory, not tests/kernel/*.c,
+  # specifically so the shared test-compile loop below (step 3c) never needs
+  # to know this file exists -- CLAUDE.md's "no build-script change needed to
+  # add a test file" promise stays true for that loop; this probe simply
+  # isn't a file the loop's glob ever sees, rather than an exception it has
+  # to special-case.
+  #
+  # Compiled and linked at its real, final ring-3 addresses
+  # (LIBOS_LAUNCH_CODE_VADDR/_DATA_VADDR) rather than copied there
+  # afterward like the hand-written .s probes -- see libos_c_probe.c's own
+  # comment for why that makes ordinary compiler-generated addressing
+  # correct with no PIC workaround. mcmodel=large replaces the kernel's own
+  # mcmodel=small: that model only supports symbols in the first 2 GB, and
+  # LIBOS_LAUNCH_CODE_VADDR sits inside the 64 TiB LibOS window
+  # (EXO_USER_VA_BASE, src/exo_syscall.h), nowhere near it.
+  probe_dir=tests/kernel/libos_c_probe
+  probe_cflags=("${CFLAGS[@]/-mcmodel=small/-mcmodel=large}")
+  x86_64-elf-gcc -c "$probe_dir/libos_c_probe.c" -o build/libos_c_probe.o \
+    "${probe_cflags[@]}" -I src/
+
+  # ld's expression syntax has no C integer-suffix notion, so LIBOS_LAUNCH_*'s
+  # ULL literals (src/libos_launch.h) survive cpp expansion intact and then
+  # fail to parse; strip the suffix (unambiguous here -- 'U'/'L' cannot occur
+  # inside a hex literal, so every "ULL" in the preprocessed output is a C
+  # suffix, never a false match).
+  x86_64-elf-gcc -E -P -x assembler-with-cpp -I src/ -DEXO_KERNEL \
+    "$probe_dir/libos_c_probe.ld.in" | sed 's/ULL//g' > build/libos_c_probe.ld
+  x86_64-elf-ld -T build/libos_c_probe.ld -o build/libos_c_probe.elf \
+    build/libos_c_probe.o
+
+  x86_64-elf-objcopy -O binary --only-section=.text \
+    build/libos_c_probe.elf build/libos_c_probe_code.bin
+  x86_64-elf-objcopy -O binary --only-section=.data \
+    build/libos_c_probe.elf build/libos_c_probe_data.bin
+
+  # .bss carries no file bytes to extract -- its length comes from the
+  # linker-defined start/end symbols instead, via the same nm_symbol_value()
+  # helper step 2b uses to read boot.s's exported flag words.
+  bss_start=0x$(nm_symbol_value build/libos_c_probe.elf __libos_c_probe_bss_start)
+  bss_end=0x$(nm_symbol_value build/libos_c_probe.elf __libos_c_probe_bss_end)
+  if [[ "$bss_start" == "0x" || "$bss_end" == "0x" ]]; then
+    echo "    ERROR: libos_c_probe.elf missing __libos_c_probe_bss_start/_end"
+    echo "           -- did libos_c_probe.ld.in's .bss block change?"
+    exit 1
+  fi
+  bss_len=$(( bss_end - bss_start ))
+
+  # Generated into the probe's own directory, not build/: a plain
+  # #include "libos_c_probe_layout.h" from test_libos_c_probe_k.c
+  # (tests/kernel/, one level up) then resolves via cpp's "search the
+  # including file's own directory" rule with no -I flag needed on the
+  # shared test-compile loop below -- the same reasoning as keeping
+  # libos_c_probe.c out of that loop's glob in the first place.
+  printf '#define LIBOS_C_PROBE_BSS_LEN %d\n' "$bss_len" \
+    > "$probe_dir/libos_c_probe_layout.h"
+
+  # objcopy -I binary derives symbol names from the exact path given on the
+  # command line; cd into build/ first so they come out as the predictable
+  # _binary_libos_c_probe_{code,data}_bin_{start,end,size} rather than
+  # something that embeds this script's working directory.
+  ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+      libos_c_probe_code.bin libos_c_probe_code_blob.o )
+  ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+      libos_c_probe_data.bin libos_c_probe_data_blob.o )
+  objs+=(build/libos_c_probe_code_blob.o build/libos_c_probe_data_blob.o)
+
+  echo "[3c/7] Compile kernel test sources"
   for c in tests/kernel/*.c; do
     o="build/$(basename "${c%.c}.o")"
     echo "    CC $(basename "$c")"
