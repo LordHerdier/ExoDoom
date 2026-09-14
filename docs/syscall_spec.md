@@ -439,6 +439,24 @@ stack from `TSS.RSP0` regardless of whether anything ever calls `syscall`.
 Without it, a fault taken at CPL 3 has no valid stack to build its frame on
 and triple-faults — see the page-fault bullet under §3.7 below.
 
+**Port I/O is walled off as a side effect of a correctly-sized TSS
+(SCRUM-56).** `tss_init()` sets `tss.iomap_base = sizeof(struct tss64)`,
+pointing one byte past the segment limit. Nothing in `boot.s`/`libos_enter.s`
+ever raises `RFLAGS.IOPL` above 0 either, so a ring-3 `IN`/`OUT` fails both
+ways at once: CPL(3) > IOPL(0) traps regardless, and even if IOPL were
+raised, "no I/O permission bitmap" would still deny it. The trap lands on
+vector 13 (#GP), which `gpf_stub`/`gp_fault_handler` (`src/isr.s`/`src/fault.c`)
+now report the same way `pf_stub`/`page_fault_handler` report a page fault —
+sharing the same `exception_frame_t` and the same TESTING-only
+`fault_set_hook()` resume mechanism, rather than the old `error_stub`, which
+discarded the error code and `iretq`'d straight back into the same faulting
+instruction forever. `tests/kernel/test_port_io_fault_k.c` (with
+`tests/kernel/port_io_fault_probe.s`) launches a real LibOS address space via
+`libos_build_image()`, executes `outb %al, $0x80` at CPL 3, and asserts the
+hook fired exactly once, at CPL 3, before the probe resumed past the
+instruction and returned normally through `libos_return()` — proving the
+kernel is the only path to hardware, not just documenting that it should be.
+
 **Register preservation.** The stub saves all 14 registers it must return
 intact — the six argument registers included, not merely the SysV callee-saved
 set — plus `RCX` and `R11`, which `sysretq` needs as the return `RIP` and
