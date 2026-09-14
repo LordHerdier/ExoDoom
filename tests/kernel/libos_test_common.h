@@ -28,6 +28,26 @@
 #define TEST_OWNER_LIBOS_MAIN    ((page_owner_t)(PAGE_OWNER_LIBOS + 6))
 #define TEST_OWNER_LIBOS_C_PROBE ((page_owner_t)(PAGE_OWNER_LIBOS + 7))
 
+/*
+ * test_libc_shim_probe_k.c (SCRUM-51) deliberately does NOT get its own
+ * TEST_OWNER_* sentinel here, unlike every suite above. Those suites only
+ * ever call exo_serial_write (#8) from their launched ring-3 code, which
+ * src/syscall_serial.c never routes through an address space -- any owner
+ * id works. The libc shim probe is the first to call exo_page_alloc/
+ * exo_page_map (#0/#2) as *real* ring-3 syscalls, and those handlers
+ * resolve "whose address space is this" via syscall_current_context()
+ * (src/syscall.c), which for v1's single-LibOS kernel is hardcoded to
+ * return the one id PAGE_OWNER_LIBOS -- not whatever owner a test happened
+ * to launch under. Launching under a distinct sentinel (as every suite
+ * above does) would make the syscall handler resolve a *different*
+ * address space than the one actually loaded in CR3 -- silently mapping
+ * into the kernel's own page tables instead -- so that suite binds
+ * PAGE_OWNER_LIBOS itself. Safe because no suite here calls
+ * vmm_bind_address_space() on bare PAGE_OWNER_LIBOS; the ownership suites
+ * that do touch it (test_ownership_k.c and friends) only tag plain pages,
+ * never bind an address space to it.
+ */
+
 _Static_assert(TEST_OWNER_VMM_REGISTRY  != TEST_OWNER_VMM_ADDRSPACE &&
               TEST_OWNER_VMM_REGISTRY  != TEST_OWNER_LIBOS_LAUNCH  &&
               TEST_OWNER_VMM_REGISTRY  != TEST_OWNER_LIBOS_MAIN    &&

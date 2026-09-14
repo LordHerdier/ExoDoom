@@ -27,16 +27,33 @@
  * transition at all — so it proves the same handler-side behavior
  * (ownership stamps, page-table effects, error codes) without that hazard.
  * The inline stubs remain the correct call convention for genuine ring-3
- * code; using them here is out of reach until a real LibOS build/launch
- * harness exists for more than a single hand-written probe function
- * (SCRUM-51/SCRUM-66 territory), because only libos_enter()/libos_return()
- * (src/libos_launch.h) currently manage that CPL transition safely.
+ * code; using them here was out of reach until a real LibOS build/launch
+ * harness existed for more than a single hand-written probe function.
+ * SCRUM-173 built that harness (the ring-3 LibOS link target) and SCRUM-51
+ * is what actually calls this file from it: when this translation unit is
+ * compiled for that target (i.e. NOT -DEXO_KERNEL), the hazard above does
+ * not apply -- the code is already running at CPL 3, having arrived there
+ * via libos_enter(), so a stub's sysretq keeps it exactly where it already
+ * was rather than dropping some *other*, CPL-0, caller down a level. Under
+ * EXO_KERNEL (every existing tests/kernel/*.c suite, compiled into the
+ * kernel and run from ring 0) do_page_*() still goes through
+ * exo_syscall_dispatch() for exactly the reason described above.
  */
 
 #include "libos_page_alloc.h"
 #include "exo_syscall.h"
+
+#ifdef EXO_KERNEL
 #include "syscall.h"
 #include "serial.h"
+#else
+#include <stdio.h>
+/* Not puts(s): puts() always appends its own trailing '\n' (src/stdio.c),
+ * but every serial_print(...) call site below already ends its string
+ * literal in '\n' (matching the kernel-side serial_print()'s contract of
+ * never adding one), so puts() here would double it. */
+#define serial_print(s) printf("%s", s)
+#endif
 
 #include <stddef.h>
 
@@ -45,6 +62,8 @@
  * EXO_USER_VA_BASE + 0x20000 fault-target invariant (src/libos_launch.h). */
 #define LIBOS_HEAP_VADDR_BASE (EXO_USER_VA_BASE + 0x1000000ULL)
 #define PAGE_SIZE 0x1000ULL
+
+#ifdef EXO_KERNEL
 
 static int64_t do_page_alloc(void)
 {
@@ -66,6 +85,30 @@ static int64_t do_page_unmap(uint64_t vaddr)
 {
     return exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, vaddr, 0, 0, 0, 0, 0);
 }
+
+#else /* !EXO_KERNEL — the ring-3 LibOS link target (SCRUM-51/-173) */
+
+static int64_t do_page_alloc(void)
+{
+    return exo_page_alloc();
+}
+
+static int64_t do_page_free(uint64_t paddr)
+{
+    return exo_page_free(paddr);
+}
+
+static int64_t do_page_map(uint64_t vaddr, uint64_t paddr, uint64_t flags)
+{
+    return exo_page_map(vaddr, paddr, (uint32_t)flags);
+}
+
+static int64_t do_page_unmap(uint64_t vaddr)
+{
+    return exo_page_unmap(vaddr);
+}
+
+#endif /* EXO_KERNEL */
 
 /* Slot i backs the page at LIBOS_HEAP_VADDR_BASE + i * PAGE_SIZE.
  * paddr[i] == 0 means the slot is not currently in use (page 0 is never

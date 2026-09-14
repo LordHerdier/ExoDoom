@@ -39,8 +39,10 @@ libos_test_launch_result_t libos_test_launch(const libos_image_t *img)
     exo_syscall_register(LIBOS_RETURN_SYSCALL_NUM, libos_return);
 
     r.switch_in_status  = vmm_switch_address_space(img->pml4_phys);
-    r.result            = libos_enter(img->entry_vaddr, img->stack_top_vaddr);
-    r.switch_out_status = vmm_switch_address_space(vmm_kernel_pml4());
+    if (r.switch_in_status == VMM_OK) {
+        r.result            = libos_enter(img->entry_vaddr, img->stack_top_vaddr);
+        r.switch_out_status = vmm_switch_address_space(vmm_kernel_pml4());
+    }
 
     exo_syscall_register(LIBOS_RETURN_SYSCALL_NUM, 0);
     fault_set_hook(0);

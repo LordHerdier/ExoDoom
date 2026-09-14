@@ -10,9 +10,10 @@
  * kernel image at kernel addresses (2M) before being copied elsewhere.
  *
  * This file sidesteps that convention instead of following it: docker/scripts/
- * build.sh links it *separately*, with its own linker script
- * (libos_c_probe.ld.in) that places .text at the real LIBOS_LAUNCH_CODE_VADDR
- * and .data/.bss at the real LIBOS_LAUNCH_DATA_VADDR -- the exact addresses
+ * build.sh links it *separately*, via the shared
+ * tests/kernel/ring3_link_target.ld.in template, which places .text at the
+ * real LIBOS_LAUNCH_CODE_VADDR and .data/.bss at the real
+ * LIBOS_LAUNCH_DATA_VADDR -- the exact addresses
  * libos_build_image() will map it to. Because the compiler and linker already
  * see the address this code will actually run at, ordinary absolute and
  * RIP-relative addressing (a normal global array reference, here) resolves

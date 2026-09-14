@@ -1,6 +1,11 @@
 #include "stdlib.h"
 #include "ctype.h"
+
+#ifdef EXO_KERNEL
 #include "memory.h"
+#else
+#include "libos_heap.h"
+#endif
 
 #include <limits.h>
 #include <stdint.h>
@@ -16,24 +21,50 @@
 /* ---------------------------------------------------------------- memory */
 
 /*
- * malloc/free/realloc are the kernel heap under its libc name.  kmalloc
- * (src/memory.c) dispatches to heap_alloc once the PMM is live and bump-
- * allocates before that, so a malloc() made before page_alloc_init() returns
- * permanent memory that free() will refuse with a serial warning rather than
- * corrupt.  Nothing on the boot path does that today -- Doom's allocations
- * all happen long after the PMM comes up -- but it is the one ordering rule
- * these wrappers inherit from kmalloc.
+ * malloc/free/realloc back onto two different allocators depending on which
+ * side of the kernel/LibOS boundary this translation unit is built for
+ * (SCRUM-51) -- the same EXO_KERNEL switch src/exo_syscall.h already uses to
+ * pick between the kernel and LibOS views of the syscall ABI:
+ *
+ *   - EXO_KERNEL (kernel builds, and every existing tests/kernel/*.c suite
+ *     compiled through the shared loop): kmalloc/kfree/krealloc, the kernel
+ *     heap under its libc name.  kmalloc (src/memory.c) dispatches to
+ *     heap_alloc once the PMM is live and bump-allocates before that, so a
+ *     malloc() made before page_alloc_init() returns permanent memory that
+ *     free() will refuse with a serial warning rather than corrupt.
+ *   - otherwise (the ring-3 LibOS link target introduced by SCRUM-173):
+ *     libos_heap_alloc/_free/_realloc (src/libos_heap.c, SCRUM-38), which
+ *     gets its pages from libos_page_alloc() -- itself re-pointed at the
+ *     real `syscall` instruction stubs for this same build (see
+ *     src/libos_page_alloc.c) rather than the in-kernel dispatch call it
+ *     uses under EXO_KERNEL.  This is the wiring SCRUM-51's acceptance
+ *     criterion ("malloc ... works from ring 3 through the syscall
+ *     instruction") asks for -- libos_heap.c and libos_page_alloc.c already
+ *     existed (SCRUM-37/-38) but nothing called them from compiled code
+ *     running at LIBOS_LAUNCH_CODE_VADDR until this ticket.
  */
 void *malloc(size_t size) {
+#ifdef EXO_KERNEL
     return kmalloc(size);
+#else
+    return libos_heap_alloc(size);
+#endif
 }
 
 void free(void *ptr) {
+#ifdef EXO_KERNEL
     kfree(ptr);
+#else
+    libos_heap_free(ptr);
+#endif
 }
 
 void *realloc(void *ptr, size_t size) {
+#ifdef EXO_KERNEL
     return krealloc(ptr, size);
+#else
+    return libos_heap_realloc(ptr, size);
+#endif
 }
 
 /* --------------------------------------------------------------- numeric */

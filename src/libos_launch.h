@@ -71,15 +71,39 @@
  * worst case cannot overlap the next section's base. Everything here stays
  * well below EXO_USER_VA_BASE + 0x20000, which tests/kernel/libos_launch_probe.s
  * relies on being unmapped (its deliberate page-fault target) -- move the
- * stack without checking that file's comment first. */
-#define LIBOS_LAUNCH_MAX_CODE_PAGES 4
-#define LIBOS_LAUNCH_MAX_DATA_PAGES 4
+ * stack without checking that file's comment first.
+ *
+ * Raised from 4/4 pages to 8/16 under SCRUM-51: the ring-3 libc-shim probe
+ * links in libos_page_alloc.c's slot table (LIBOS_PAGE_ALLOC_MAX_PAGES = 4096
+ * slots, src/libos_page_alloc.h) as static data, which alone is 48 KiB
+ * (slot_paddr + free_slots) -- more than the whole old 16 KiB data budget.
+ * This is still headroom, not a real sizing exercise: a compiled libc shim
+ * that also links in libos_heap.c and the DG_* platform glue (SCRUM-66) will
+ * likely need to grow these again, the same way LIBOS_PAGE_ALLOC_MAX_PAGES's
+ * own 16 MiB was picked for the real Doom heap estimate rather than for any
+ * probe. Both stay comfortably under the 0x20000 ceiling below with this
+ * increase (24 pages of code+data + 1 guard page + 1 stack page + the 0x1000
+ * code-start offset = 0x1B000).
+ *
+ * LIBOS_LAUNCH_GUARD_PAGES leaves a deliberately unmapped page between the
+ * data+bss region's worst case and the stack: libos_build_image() never maps
+ * anything past LIBOS_LAUNCH_DATA_VADDR + (actual data_len+bss_len), which is
+ * capped at LIBOS_LAUNCH_MAX_DATA_PAGES*0x1000, so this page is guaranteed
+ * never to be mapped by that call no matter how much of the data budget a
+ * given LibOS actually uses. Without it, a LibOS that fills its data budget
+ * to the max would have its one-page stack sitting immediately below a
+ * mapped, writable page -- a stack overflow would then silently corrupt data
+ * instead of taking the page fault the guard page exists to produce. */
+#define LIBOS_LAUNCH_MAX_CODE_PAGES 8
+#define LIBOS_LAUNCH_MAX_DATA_PAGES 16
+#define LIBOS_LAUNCH_GUARD_PAGES    1
 
 #define LIBOS_LAUNCH_CODE_VADDR  (EXO_USER_VA_BASE + 0x1000ULL)
 #define LIBOS_LAUNCH_DATA_VADDR  (LIBOS_LAUNCH_CODE_VADDR + \
                                   LIBOS_LAUNCH_MAX_CODE_PAGES * 0x1000ULL)
 #define LIBOS_LAUNCH_STACK_VADDR (LIBOS_LAUNCH_DATA_VADDR + \
-                                  LIBOS_LAUNCH_MAX_DATA_PAGES * 0x1000ULL)
+                                  (LIBOS_LAUNCH_MAX_DATA_PAGES + \
+                                   LIBOS_LAUNCH_GUARD_PAGES) * 0x1000ULL)
 
 #ifndef __ASSEMBLER__
 /* The comment above promises the whole layout stays below

@@ -557,12 +557,25 @@ implementing any real file I/O for the game's largest data source.
 ### libc shim scope
 
 doomgeneric requires 82 C source files' worth of standard library. `string.h`
-(SCRUM-11), `ctype.h`, `printf`→serial (SCRUM-20) and `stdlib.h`'s allocation,
-numeric and sorting families (SCRUM-30: `malloc`/`free`/`realloc`, `atoi`,
-`abs`, `rand`/`srand`, `qsort`) are in. The most significant gaps remaining are
-`strdup`, `strcasecmp`, `strncasecmp`, `vsnprintf`, `sscanf`, `exit`/`abort`,
-and the full `FILE*` interface. See `docs/syscall_spec.md` §2 for the complete
-audit.
+(SCRUM-11, plus `strcasecmp`/`strncasecmp`), `ctype.h`, `printf`→serial
+(SCRUM-20) and `stdlib.h`'s allocation, numeric and sorting families
+(SCRUM-30: `malloc`/`free`/`realloc`, `atoi`, `abs`, `rand`/`srand`, `qsort`)
+are in. The most significant gaps remaining are `strdup`, `strncmp`,
+`strrchr`, `strstr`, `strerror`, `vsnprintf`, `sscanf`, `exit`/`abort`, and the
+full `FILE*` interface. See `docs/syscall_spec.md` §2 for the complete audit.
+
+> ✅ **SCRUM-51:** `malloc`/`free`/`realloc` and `printf` now go through the
+> real `syscall` instruction, not a kernel function call, when compiled for
+> the ring-3 LibOS link target SCRUM-173 introduced
+> (`tests/kernel/libc_shim_probe/`) — `malloc` reaches `libos_heap_alloc`
+> (SCRUM-38) → `libos_page_alloc` (SCRUM-37) → the real `exo_page_alloc`/
+> `exo_page_map` stubs, and `printf` buffers a full line through the real
+> `exo_serial_write` stub instead of one call per byte. The kernel build and
+> every `tests/kernel/*.c` suite are unaffected — `src/stdlib.c`/`src/stdio.c`
+> gate on `#ifdef EXO_KERNEL` and keep calling `kmalloc`/`serial_putc`
+> there, exactly as before. `exo_get_ticks` (already bound, SCRUM-172) is
+> proven reachable from the same real ring-3 call. See CLAUDE.md's build
+> section and `docs/memory.md` §8 for the mechanism.
 
 ### doomgeneric platform functions
 
@@ -670,7 +683,7 @@ bare-metal foundations to a playable game.
 | **Sprint 2: VMem + Input + libc**                       | Virtual memory + input                   | Paging on (kernel page tables from the PMM ✅ SCRUM-15), page fault handler ✅ SCRUM-17, framebuffer+WAD mapped, keyboard ring buffer, PS/2 mouse init, `printf`→serial shim                                                                                                                                                                                                                                                                                                           |
 | **Sprint 3: Heap+Mouse+Syscalls** _(20 Apr – 4 May)_    | Kernel heap + syscall gate               | First-fit heap allocator (`kmalloc`/`kfree`/`krealloc`) backed by PMM ✅ SCRUM-25, on-demand heap growth from the PMM ✅ SCRUM-26, 10K-block allocate/free stress + leak audit ✅ SCRUM-27, mouse packet decoding + delta accumulator, `stdlib.h` wrappers (`malloc`/`free`/`realloc`, `atoi`, `abs`, `rand`/`srand`, `qsort`) ✅ SCRUM-30, `errno`/`assert`/`abort`, `syscall`/`sysret` entry path via MSRs (SCRUM-32), `exo_get_ticks` as first end-to-end syscall                                                                                                                                               |
 | **Sprint 4: LibOS mem+input+math** _(4 May – 18 May)_   | LibOS address space + remaining syscalls | `exo_page_alloc`/`exo_page_free`/`exo_page_map`/`exo_fb_map` in dispatcher, LibOS-side page allocator + heap, `exo_get_key`/`exo_get_mouse_delta` syscalls, Doom keycode → PS/2 scancode translation, `math.h` (fixed-point sin/cos table, `abs`, `floor`/`ceil`), `FILE*` shim (`fopen`/`fclose`/`fread`/`fwrite`/`fseek`/`ftell`) backed by `exo_file_*`, `strcasecmp`/`strncasecmp`, `exo_file_*` kernel dispatcher                      |
-| **Sprint 5: LibOS struct+ring 3** _(18 May – 1 Jun)_    | Ring 0 → ring 3 transition               | GDT with ring 0 + ring 3 segments ✅ SCRUM-45, TSS for kernel stack on ring-3 exceptions ✅ SCRUM-46, boot LibOS in ring 3 via `iret` to user-mode entry point ✅ SCRUM-47, separate page directory per LibOS ✅ SCRUM-48, LibOS binary loading at fixed user-space address ✅ SCRUM-49, `libos_main()` entry framework ✅ SCRUM-50, `exo_serial_write` syscall ✅ SCRUM-50, port libc shim to use syscall stubs                                                                                                                    |
+| **Sprint 5: LibOS struct+ring 3** _(18 May – 1 Jun)_    | Ring 0 → ring 3 transition               | GDT with ring 0 + ring 3 segments ✅ SCRUM-45, TSS for kernel stack on ring-3 exceptions ✅ SCRUM-46, boot LibOS in ring 3 via `iret` to user-mode entry point ✅ SCRUM-47, separate page directory per LibOS ✅ SCRUM-48, LibOS binary loading at fixed user-space address ✅ SCRUM-49, `libos_main()` entry framework ✅ SCRUM-50, `exo_serial_write` syscall ✅ SCRUM-50, separate LibOS link target for compiled ring-3 code ✅ SCRUM-173, port libc shim (`malloc`/`printf`) to use syscall stubs ✅ SCRUM-51                                                                                                                    |
 | **Sprint 6: Syscall harden+Iso** _(1 Jun – 15 Jun)_     | Security + correctness                   | Syscall argument validation (bounds-check pointers, reject kernel addresses), test LibOS cannot read/write kernel memory (GPF), test LibOS cannot execute IN/OUT instructions (GPF), consistent `exo_errno.h` error codes, automated LibOS test suite via serial, memory isolation stress test (allocate/free all pages, verify no kernel corruption), syscall round-trip benchmarks                                                        |
 | **Sprint 7: Vendor Doomgeneric** _(15 Jun – 29 Jun)_    | Doom source integration                  | Vendor doomgeneric into `src/doom/` (or git submodule), resolve all compile errors (missing types, headers, signatures), fill remaining libc gaps found during compilation, link Doom + LibOS + libc shim into single exodoom ELF, `DG_Init` loading IWAD from multiboot module via `exo_fb_map`, `DG_GetTicksMs`/`DG_SleepMs` via `exo_get_ticks`, memory-mapped WAD reader replacing `w_file_stdc.c`, `sscanf` with `%d %f %x %s` support |
 | **Sprint 8: DG** callbacks+render_* _(29 Jun – 13 Jul)_ | First pixels on screen                   | `DG_DrawFrame`: blit 640×400 ARGB → 1024×768 FB (scaled), nearest-neighbour integer scale with 32-bit writes, `DG_GetKey` wired to `exo_get_key` with Doom keycode translation, `i_input.c` patched to post `ev_mouse` via `exo_mouse_poll`, debug Doom startup crash sequence (`Z_Malloc`, `W_Init`, `R_Init`), stub `I_StartSound`/`I_StopSound`/`I_UpdateSound` as no-ops, stub `I_Error`/`I_Quit` to serial + halt                      |

@@ -5,7 +5,7 @@
  * syscall round trip for hand-written assembly. This suite proves the thing
  * SCRUM-173 actually adds: a *compiled* C function, built and linked by
  * docker/scripts/build.sh's own dedicated step (see libos_c_probe.c and
- * libos_c_probe.ld.in) rather than hand-assembled, launched the same way and
+ * tests/kernel/ring3_link_target.ld.in) rather than hand-assembled, launched the same way and
  * driving the same real, bound syscall (exo_serial_write, #8) with its
  * result round-tripped through libos_return() -- not a fixed marker.
  *

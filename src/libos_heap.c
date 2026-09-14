@@ -1,8 +1,19 @@
 #include "libos_heap.h"
 #include "libos_page_alloc.h"
 #include "string.h"
-#include "serial.h"
 #include "stdio.h"
+
+#ifdef EXO_KERNEL
+#include "serial.h"
+#else
+/* src/serial.c is kernel-only and unreachable from ring 3 (SCRUM-51); route
+ * the same diagnostic through the LibOS's own printf (-> exo_serial_write)
+ * instead, the same substitution src/libos_page_alloc.c makes. Not puts(s):
+ * puts() always appends its own trailing '\n', but every serial_print(...)
+ * call site below already ends its string literal in '\n', so puts() here
+ * would double it. */
+#define serial_print(s) printf("%s", s)
+#endif
 
 #include <stdint.h>
 
