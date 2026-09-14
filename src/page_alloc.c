@@ -66,6 +66,33 @@ void page_alloc_init(const struct mb2_info* mb) {
         return;
     }
 
+    /* Skip kmalloc's bump pointer past every GRUB module before the two
+     * kmalloc() calls below (bitmap, owner table) touch it. GRUB commonly
+     * places the first module immediately after the kernel image -- the
+     * same address memory_init() starts bump-allocating from -- so without
+     * this, those calls can land squarely on top of module bytes nothing
+     * has reserved yet. reserve_region() for modules further down is too
+     * late to prevent that: it marks pages busy in the PMM's bitmap, it
+     * does not undo bytes the bump allocator already overwrote allocating
+     * that very bitmap. */
+    {
+        uintptr_t max_mod_end = 0;
+        const struct mb2_tag *tag = mb2_first_tag(mb);
+        const uintptr_t tags_end = (uintptr_t)mb + mb->total_size;
+        while ((uintptr_t)tag < tags_end && tag->type != MB2_TAG_END) {
+            if (tag->type == MB2_TAG_MODULE) {
+                const struct mb2_tag_module *m = (const struct mb2_tag_module *)tag;
+                if ((uintptr_t)m->mod_end > max_mod_end)
+                    max_mod_end = (uintptr_t)m->mod_end;
+            }
+            tag = mb2_next_tag(tag);
+        }
+        uintptr_t base = memory_base_address();
+        if (max_mod_end > base) {
+            kmalloc(max_mod_end - base);
+        }
+    }
+
     uint32_t count = 0;
     const mmap_region_t* regions = mmap_get_regions(&count);
 
@@ -103,6 +130,17 @@ void page_alloc_init(const struct mb2_info* mb) {
             reserve_region(reserve_start, reserve_end);
 
             serial_print("page_alloc: kernel/heap reserved\n");
+
+            /* The multiboot2 info struct + its tag list is metadata GRUB
+             * handed us, not something the kernel's own bump pool claimed --
+             * nothing above reserves *its* backing pages. vmm_init() maps it
+             * (map_identity) but a map is not a reservation: without this,
+             * the very next alloc_page() call (vmm_init()'s own page-table
+             * pages, or any syscall/demo allocation afterward) is free to
+             * hand out and overwrite the tag list before anything late in
+             * boot -- a module lookup, say -- gets a chance to read it. */
+            reserve_region((uintptr_t)mb, (uintptr_t)mb + mb->total_size);
+            serial_print("page_alloc: multiboot info reserved\n");
 
             const struct mb2_tag *tag = mb2_first_tag(mb);
             const uintptr_t tags_end = (uintptr_t)mb + mb->total_size;
