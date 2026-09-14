@@ -333,6 +333,158 @@ static void test_qsort_large_heap_array(void) {
     free(v);
 }
 
+/* ------------------------------------------------- qsort: equal-key cost */
+
+/*
+ * SCRUM-171.  The two-way Hoare partition this replaced scanned with
+ * `cmp(i, lo) <= 0` / `cmp(j, lo) >= 0`, so both pointers ran straight over
+ * keys equal to the pivot and every partition on an input with few distinct
+ * values split n-1/0 -- O(n^2).  Measured at n = 200,000 before the fix:
+ * all-equal 2.0e10 comparisons (5882x n log n, 29 s), two distinct values
+ * 1.5e10 (4431x, 18 s), ten distinct 1.7e9 (501x, 2.2 s).
+ *
+ * These tests assert *comparison counts*, not wall time.  The count is a
+ * property of the algorithm and so is identical on the host and under QEMU,
+ * where a timing bound would just be a flake generator.
+ */
+static unsigned long qsort_cmp_count;
+
+static int cmp_int_counting(const void *a, const void *b) {
+    qsort_cmp_count++;
+    return cmp_int(a, b);
+}
+
+typedef struct {
+    int      key;
+    uint32_t tag;
+} keyed_t;
+
+static int cmp_keyed(const void *a, const void *b) {
+    int x = ((const keyed_t *)a)->key, y = ((const keyed_t *)b)->key;
+    return (x > y) - (x < y);
+}
+
+/*
+ * The three-way partition moves whole equal-key runs with block swaps, so a
+ * wrong run length would drop or duplicate elements rather than merely
+ * mis-order them -- which a sortedness check alone would not catch.  Every
+ * element carries a unique tag; all N tags must come back exactly once.
+ */
+static void test_qsort_duplicate_keys_permute(void) {
+    enum { N = 4096 };
+    static const int distinct[] = { 1, 2, 3, 10, 64 };
+
+    keyed_t       *v    = (keyed_t *)malloc(N * sizeof(keyed_t));
+    unsigned char *seen = (unsigned char *)malloc(N);
+    CU_ASSERT_PTR_NOT_NULL(v);
+    CU_ASSERT_PTR_NOT_NULL(seen);
+    if (v == NULL || seen == NULL) {
+        free(v);
+        free(seen);
+        return;
+    }
+
+    for (size_t d = 0; d < sizeof(distinct) / sizeof(distinct[0]); d++) {
+        srand(7 + (unsigned)d);
+        for (int i = 0; i < N; i++) {
+            v[i].key = rand() % distinct[d];
+            v[i].tag = (uint32_t)i;
+        }
+        memset(seen, 0, N);
+
+        qsort(v, N, sizeof(keyed_t), cmp_keyed);
+
+        int ordered = 1, permuted = 1;
+        for (int i = 0; i < N; i++) {
+            if (i > 0 && v[i - 1].key > v[i].key) {
+                ordered = 0;
+            }
+            if (v[i].tag >= (uint32_t)N || seen[v[i].tag]) {
+                permuted = 0;
+            } else {
+                seen[v[i].tag] = 1;
+            }
+        }
+        CU_ASSERT_TRUE(ordered);
+        CU_ASSERT_TRUE(permuted);
+    }
+
+    free(v);
+    free(seen);
+}
+
+/*
+ * The regression guard itself: an input with few distinct values must cost
+ * O(n log n) comparisons, not O(n^2).  Budgets are stated as a multiple of N
+ * and sit ~5x above what the current implementation spends and >=12x below
+ * what the old partition spent at this N, so a genuine regression fails
+ * loudly while ordinary pivot tuning does not.
+ */
+static void test_qsort_equal_keys_stay_subquadratic(void) {
+    enum { N = 4096 };
+    static const struct {
+        int      distinct;
+        unsigned budget_x;   /* comparisons allowed, as a multiple of N */
+    } shapes[] = {
+        {  1,  4 },     /* all-equal: 4097 measured -- a single O(n) pass */
+        {  2,  8 },     /* two distinct:  6158 measured                   */
+        { 10, 16 },     /* ten distinct: 12382 measured                   */
+    };
+
+    int *v = (int *)malloc(N * sizeof(int));
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v == NULL) {
+        return;
+    }
+
+    for (size_t s = 0; s < sizeof(shapes) / sizeof(shapes[0]); s++) {
+        srand(1);
+        for (int i = 0; i < N; i++) {
+            v[i] = rand() % shapes[s].distinct;
+        }
+
+        qsort_cmp_count = 0;
+        qsort(v, N, sizeof(int), cmp_int_counting);
+
+        CU_ASSERT_TRUE(is_sorted(v, N));
+        /* The old partition spent N*N/2 here -- 2048x N for all-equal. */
+        CU_ASSERT_TRUE(qsort_cmp_count <= (unsigned long)shapes[s].budget_x * N);
+    }
+
+    free(v);
+}
+
+/*
+ * Duplicates must not cost the distinct-key shapes anything either: sorted,
+ * reverse and random input are all still bounded by a small multiple of
+ * n log2 n (measured 0.82x, 0.82x and 1.04x respectively at this N).
+ */
+static void test_qsort_distinct_keys_stay_n_log_n(void) {
+    enum { N = 4096, LOG2_N = 12 };
+    const unsigned long budget = 4UL * N * LOG2_N;
+
+    int *v = (int *)malloc(N * sizeof(int));
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v == NULL) {
+        return;
+    }
+
+    for (int shape = 0; shape < 3; shape++) {
+        srand(99);
+        for (int i = 0; i < N; i++) {
+            v[i] = (shape == 0) ? i : (shape == 1) ? (N - 1 - i) : rand();
+        }
+
+        qsort_cmp_count = 0;
+        qsort(v, N, sizeof(int), cmp_int_counting);
+
+        CU_ASSERT_TRUE(is_sorted(v, N));
+        CU_ASSERT_TRUE(qsort_cmp_count <= budget);
+    }
+
+    free(v);
+}
+
 void suite_stdlib_tests(CU_pSuite s) {
     CU_add_test(s, "malloc nonnull and aligned",      test_malloc_nonnull_and_aligned);
     CU_add_test(s, "malloc routes to kernel heap",    test_malloc_routes_to_kernel_heap);
@@ -356,4 +508,7 @@ void suite_stdlib_tests(CU_pSuite s) {
     CU_add_test(s, "qsort arbitrary element size",    test_qsort_arbitrary_element_size);
     CU_add_test(s, "qsort strings",                   test_qsort_strings);
     CU_add_test(s, "qsort large heap array",          test_qsort_large_heap_array);
+    CU_add_test(s, "qsort duplicate keys permute",     test_qsort_duplicate_keys_permute);
+    CU_add_test(s, "qsort equal keys stay subquadratic", test_qsort_equal_keys_stay_subquadratic);
+    CU_add_test(s, "qsort distinct keys stay n log n", test_qsort_distinct_keys_stay_n_log_n);
 }
