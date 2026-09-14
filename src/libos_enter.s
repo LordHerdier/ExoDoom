@@ -15,10 +15,27 @@
 .set USER_SS, 0x20 | 3
 .set USER_CS, 0x28 | 3
 
-/* RFLAGS for the launch: bit 1 is reserved and must be set; IF stays clear
- * (SCRUM-170 tracks proving a hardware interrupt taken at CPL 3 switches to
- * TSS.RSP0 correctly -- until that lands, nothing here relies on it). */
+/* RFLAGS for libos_enter(): bit 1 is reserved and must be set; IF stays
+ * clear (SCRUM-170 tracks proving a hardware interrupt taken at CPL 3
+ * switches to TSS.RSP0 correctly -- until that lands, nothing here relies
+ * on it). Every fault/launch test in tests/kernel/ depends on this exact
+ * value -- do not change it; add a new entry point instead, as
+ * libos_enter_irq below does. */
 .set LAUNCH_RFLAGS, 0x002
+
+/* RFLAGS for libos_enter_irq(): same, but with IF set. First (and so far
+ * only) user: src/libos_wad_viewer/libos_wad_viewer.c, whose exo_get_ticks()
+ * busy-wait delays and exo_kbd_poll() input both need PIT/keyboard IRQs to
+ * keep firing for the whole time this LibOS runs at CPL 3 -- with IF clear
+ * (LAUNCH_RFLAGS above) neither IRQ0 nor IRQ1 can ever be recognised once
+ * `iretq` drops to ring 3, so exo_get_ticks() would return a frozen value
+ * forever and exo_kbd_poll() would never see a keypress. This is the real
+ * exercise of what SCRUM-170 left unverified: idt_set_gate()'s IST=0 gates
+ * mean a hardware interrupt taken at CPL 3 loads TSS.RSP0 exactly like the
+ * CPL-3 page-fault SCRUM-46 already proved for an *exception* -- the ISR
+ * runs on the kernel stack, EOIs, and `iretq`s straight back to CPL 3, the
+ * same mechanism, just a different vector. */
+.set LAUNCH_RFLAGS_IRQ, 0x202
 
 .section .bss
 .align 8
@@ -51,6 +68,32 @@ libos_enter:
     pushq $USER_SS
     pushq %rsi                  /* user RSP = stack_top_vaddr */
     pushq $LAUNCH_RFLAGS
+    pushq $USER_CS
+    pushq %rdi                  /* user RIP = entry_vaddr */
+    iretq
+
+/*
+ * uint64_t libos_enter_irq(uint64_t entry_vaddr, uint64_t stack_top_vaddr);
+ *
+ * Identical to libos_enter() above except for RFLAGS -- IF is set
+ * (LAUNCH_RFLAGS_IRQ), so PIT/keyboard IRQs keep landing (on TSS.RSP0, then
+ * back to CPL 3 via their own iretq) for as long as this launched context
+ * runs. See LAUNCH_RFLAGS_IRQ's comment above for why libos_enter() itself
+ * is deliberately left alone rather than changed in place.
+ */
+.global libos_enter_irq
+libos_enter_irq:
+    push %rbx
+    push %rbp
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    movq %rsp, libos_saved_rsp(%rip)
+
+    pushq $USER_SS
+    pushq %rsi                  /* user RSP = stack_top_vaddr */
+    pushq $LAUNCH_RFLAGS_IRQ
     pushq $USER_CS
     pushq %rdi                  /* user RIP = entry_vaddr */
     iretq

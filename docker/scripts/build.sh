@@ -124,34 +124,12 @@ fi
 
 echo "    identity map is $want_desc (link=0x${pt_link: -2} leaf=0x${pt_leaf: -2})"
 
-echo "[3/7] Compile C sources"
+# Initialized here, ahead of the ring-3 link-target step below, rather than
+# at the top of "[3/7] Compile C sources" where it used to live: that step's
+# build_ring3_link_target calls append their blob objects to `objs` via
+# `objs+=(...)`, and step 3's own `objs=(build/boot.o)` would otherwise run
+# *after* them and silently wipe out whatever they had already added.
 objs=(build/boot.o)
-
-# -DEXO_KERNEL selects the kernel view of src/exo_syscall.h (numbers, shared
-# structs and error codes, no user-side `syscall` stubs).  It lives here rather
-# than in a per-file #define so it is guaranteed to precede every transitive
-# include of the header in a kernel TU -- a #define after the first include
-# would be too late.  tests/kernel/*.c gets it too (see below): those TUs link
-# into the kernel and run in ring 0, so the LibOS view is the wrong default
-# there -- a stub reaching a real `syscall` with IA32_LSTAR unset would triple
-# fault.
-for c in src/*.c; do
-  o="build/$(basename "${c%.c}.o")"
-  echo "    CC $(basename "$c")"
-  x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -DEXO_KERNEL
-  objs+=("$o")
-done
-
-# Assemble every other src/*.s.  boot.s is excluded because it is handled
-# above with its own flags; everything else (isr.s, syscall_entry.s, ...) is
-# picked up automatically, the same way src/*.c is.
-for s in src/*.s; do
-  [[ "$s" == "src/boot.s" ]] && continue
-  o="build/$(basename "${s%.s}.o")"
-  echo "    AS $(basename "$s")"
-  x86_64-elf-as "$s" -o "$o"
-  objs+=("$o")
-done
 
 probe_cflags=("${CFLAGS[@]/-mcmodel=small/-mcmodel=large}")
 
@@ -255,6 +233,56 @@ build_ring3_link_target() {
       "${name}_data.bin" "${name}_data_blob.o" )
   objs+=("build/${name}_code_blob.o" "build/${name}_data_blob.o")
 }
+
+echo "[2c/7] Build ring-3 WAD/automap viewer (demo)"
+# Unconditional -- unlike the TESTING-only targets further down, this is what
+# a normal boot (docker-run-kernel) actually launches into ring 3 in place of
+# the old ring-0 WAD showcase in src/kernel.c. Runs before "[3/7] Compile C
+# sources" below specifically so that step's kernel.c compile can
+# #include the libos_wad_viewer_layout.h this generates. Lives in its own
+# subdirectory, src/libos_wad_viewer/, so step 3's `for c in src/*.c` loop
+# never sees libos_wad_viewer.c and compiles it with -DEXO_KERNEL --
+# it calls the !EXO_KERNEL `syscall`-stub side of src/exo_syscall.h
+# (exo_get_ticks, exo_kbd_poll, ...), the same reason src/doom/ is excluded
+# from that glob. src/wad.c, src/flat.c, src/automap.c, src/fb.c and
+# src/fb_console.c have no EXO_KERNEL-only dependencies -- no kmalloc, no
+# serial_print, nothing privileged, just pointer arithmetic and framebuffer
+# blits -- so they link into this ring-3 target unmodified, the same file
+# providing both the ring-0 and ring-3 renderers. libos_wad_viewer.c MUST
+# stay first in this list -- see build_ring3_link_target's own comment on
+# why source order determines entry_vaddr.
+build_ring3_link_target libos_wad_viewer src/libos_wad_viewer "" \
+  src/libos_wad_viewer/libos_wad_viewer.c \
+  src/wad.c src/flat.c src/automap.c src/fb.c src/fb_console.c src/libos_fb.c
+
+
+echo "[3/7] Compile C sources"
+
+# -DEXO_KERNEL selects the kernel view of src/exo_syscall.h (numbers, shared
+# structs and error codes, no user-side `syscall` stubs).  It lives here rather
+# than in a per-file #define so it is guaranteed to precede every transitive
+# include of the header in a kernel TU -- a #define after the first include
+# would be too late.  tests/kernel/*.c gets it too (see below): those TUs link
+# into the kernel and run in ring 0, so the LibOS view is the wrong default
+# there -- a stub reaching a real `syscall` with IA32_LSTAR unset would triple
+# fault.
+for c in src/*.c; do
+  o="build/$(basename "${c%.c}.o")"
+  echo "    CC $(basename "$c")"
+  x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -DEXO_KERNEL
+  objs+=("$o")
+done
+
+# Assemble every other src/*.s.  boot.s is excluded because it is handled
+# above with its own flags; everything else (isr.s, syscall_entry.s, ...) is
+# picked up automatically, the same way src/*.c is.
+for s in src/*.s; do
+  [[ "$s" == "src/boot.s" ]] && continue
+  o="build/$(basename "${s%.s}.o")"
+  echo "    AS $(basename "$s")"
+  x86_64-elf-as "$s" -o "$o"
+  objs+=("$o")
+done
 
 if [[ "${TESTING:-0}" == "1" ]]; then
   echo "[3b/7] Build LibOS C probe (SCRUM-173)"

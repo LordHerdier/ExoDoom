@@ -238,6 +238,19 @@ void libos_destroy_image(page_owner_t owner, const libos_image_t *img);
  */
 uint64_t libos_enter(uint64_t entry_vaddr, uint64_t stack_top_vaddr);
 
+/*
+ * Same as libos_enter() (src/libos_enter.s), except RFLAGS.IF is set on the
+ * way in instead of clear, so PIT/keyboard IRQs keep landing -- on
+ * TSS.RSP0, then back to CPL 3 via their own iretq, per idt_set_gate()'s
+ * IST=0 gates -- for as long as the launched context runs. libos_enter()
+ * itself is left with IF clear for every existing fault/launch test; this
+ * is for a launched context that needs exo_get_ticks() to actually advance
+ * or exo_kbd_poll() to actually see input while it runs, which is not
+ * possible with interrupts globally masked the whole time (SCRUM-170).
+ * First user: src/libos_wad_viewer/libos_wad_viewer.c.
+ */
+uint64_t libos_enter_irq(uint64_t entry_vaddr, uint64_t stack_top_vaddr);
+
 /* The far side of libos_enter() -- see above. Signature matches
  * exo_handler_t (src/syscall.h) so it can be registered directly:
  * exo_syscall_register(SOME_NUM, libos_return). */

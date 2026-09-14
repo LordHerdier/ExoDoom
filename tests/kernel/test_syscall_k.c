@@ -124,10 +124,10 @@ static void test_dispatch_rejects_out_of_range(void)
 static void test_dispatch_rejects_unbound_number(void)
 {
     /* In range, nothing registered. EXO_SYS_GET_TICKS (#5) used to be the
-     * example here, but SCRUM-172 bound it -- EXO_SYS_KBD_POLL (#6) is still
-     * unclaimed (SCRUM-52). */
-    CU_ASSERT_PTR_NULL(exo_syscall_handler(EXO_SYS_KBD_POLL));
-    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_KBD_POLL, 0, 0, 0, 0, 0, 0),
+     * example here, then EXO_SYS_KBD_POLL (#6) until the ring-3 WAD/automap
+     * viewer demo bound it -- EXO_SYS_MOUSE_POLL (#7) is still unclaimed. */
+    CU_ASSERT_PTR_NULL(exo_syscall_handler(EXO_SYS_MOUSE_POLL));
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_MOUSE_POLL, 0, 0, 0, 0, 0, 0),
                     -EXO_ENOSYS);
 }
 

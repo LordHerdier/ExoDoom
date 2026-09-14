@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <stdint.h>
 #include "multiboot2.h"
 #include "serial.h"
@@ -19,13 +20,16 @@
 #include "syscall_fb.h"
 #include "syscall_serial.h"
 #include "syscall_pit.h"
+#include "syscall_kbd.h"
 #include "fb_binding.h"
 #include "revoke.h"
 #include "vmm.h"
 #include "exo_syscall.h"
 #include "wad.h"
-#include "flat.h"
-#include "automap.h"
+#include "libos_launch.h"
+#include "libos_wad_map.h"
+#include "libos_wad_params.h"
+#include "libos_wad_viewer/libos_wad_viewer_layout.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -527,18 +531,26 @@ static void log_pic_pit_ready(fb_console_t *con) {
     klog(con, 0, "PIT initialized at 1000 Hz (IRQ0 -> vector 0x20)");
 }
 
-// ── WAD asset showcase ──────────────────────────────────────────────────────
+// ── WAD asset showcase, at ring 3 ────────────────────────────────────────────
 //
 // Everything above this point exercises the exokernel's own primitives
 // (syscalls, ownership, revocation, address-space mapping) with synthetic
 // test data. This is the payload those primitives exist to eventually run:
 // GRUB hands the kernel a real Doom IWAD as a multiboot2 module
 // (docker/scripts/build.sh fetches freedoom2.wad and src/grub.cfg loads it),
-// vmm_init() identity-maps that module's pages alongside the rest of usable
-// RAM, and this code parses it and renders real game assets to the
-// framebuffer -- no libc, no doomgeneric, just wad.c's lump directory reader
-// and flat.c/automap.c's blitters. It does not run any game logic; that is
-// still src/doom/'s job once SCRUM-51's libc shim finishes growing.
+// and a real LibOS -- src/libos_wad_viewer/libos_wad_viewer.c, launched at
+// CPL 3 via libos_build_image()/libos_enter() the same way SCRUM-47/-49/-50
+// proved the mechanism -- parses it and renders real game assets to the
+// framebuffer through nothing but the exo_syscall.h ABI. It does not run any
+// game logic; that is still src/doom/'s job once SCRUM-51's libc shim
+// finishes growing.
+//
+// The one thing that ABI has no syscall for is the WAD itself (no
+// filesystem, no exo_wad_acquire), so kernel_main stages it before launch:
+// libos_map_wad() (src/libos_wad_map.c) maps the WAD's already-identity-
+// mapped physical pages read-only into the freshly built LibOS address
+// space, and libos_wad_params_t (src/libos_wad_params.h) -- passed as this
+// LibOS's whole `.data` blob -- is how the viewer learns where and how big.
 
 static const uint8_t *find_wad_module(const struct mb2_info *mb, uint32_t *size_out,
                                       const char **cmdline_out) {
@@ -557,107 +569,18 @@ static const uint8_t *find_wad_module(const struct mb2_info *mb, uint32_t *size_
     return (void *)0;
 }
 
-// Clears to black and blits every flat in the WAD as a 64x64 tile grid --
-// the same lumps the renderer would texture floors/ceilings with.
-static void render_flat_grid(framebuffer_t *fb, const wad_t *wad, const uint8_t *palette,
-                             uint32_t num_flats) {
-#define FLAT_SCALE 1
-    uint32_t grid_cols = fb->width  / (64u * FLAT_SCALE);
-    uint32_t grid_rows = fb->height / (64u * FLAT_SCALE);
+extern const uint8_t _binary_libos_wad_viewer_code_bin_start[];
+extern const uint8_t _binary_libos_wad_viewer_code_bin_end[];
+extern const uint8_t _binary_libos_wad_viewer_data_bin_start[];
+extern const uint8_t _binary_libos_wad_viewer_data_bin_end[];
 
-    fb_clear(fb, 0, 0, 0);
-
-    uint32_t flat_idx = 0;
-    for (uint32_t row = 0; row < grid_rows && flat_idx < num_flats; row++) {
-        for (uint32_t col = 0; col < grid_cols && flat_idx < num_flats; col++) {
-            const uint8_t *flat_data = wad_get_flat(wad, flat_idx, (void *)0);
-            if (flat_data)
-                flat_blit(fb, flat_data, palette, col * 64u * FLAT_SCALE,
-                         row * 64u * FLAT_SCALE, FLAT_SCALE);
-            flat_idx++;
-        }
-    }
-#undef FLAT_SCALE
-
-    serial_print("Flat grid rendered.\n");
-    serial_flush();
-}
-
-// Draws the header + automap for one map and reports the render to serial.
-static void render_automap_frame(fb_console_t *con, framebuffer_t *fb, const wad_t *wad,
-                                 const char *map_name, uint32_t current_map,
-                                 uint32_t num_maps) {
-    fb_clear(fb, 0, 0, 0);
-    fbcon_init(con, fb);
-
-    fbcon_set_color(con, 100, 220, 255, 0, 0, 0);
-    fbcon_write(con, "ExoDoom Automap");
-    fbcon_set_color(con, 60, 60, 60, 0, 0, 0);
-    fbcon_write(con, " | ");
-    fbcon_set_color(con, 255, 220, 80, 0, 0, 0);
-    fbcon_write(con, map_name);
-    fbcon_set_color(con, 60, 60, 60, 0, 0, 0);
-    fbcon_write(con, " | ");
-    fbcon_set_color(con, 140, 140, 140, 0, 0, 0);
-    fbcon_write_u32(con, current_map + 1);
-    fbcon_write(con, "/");
-    fbcon_write_u32(con, num_maps);
-    fbcon_set_color(con, 60, 60, 60, 0, 0, 0);
-    fbcon_write(con, " | ");
-    fbcon_set_color(con, 140, 140, 140, 0, 0, 0);
-    fbcon_write(con, "<-/-> to navigate\n");
-
-    fbcon_set_color(con, 60, 60, 60, 0, 0, 0);
-    fbcon_write(con, "-----------------------------------------------"
-                     "--------------------------------\n");
-
-    if (automap_render(fb, wad, map_name, 40) == 0) {
-        serial_print("Automap: ");
-        serial_print(map_name);
-        serial_print(" rendered.\n");
-    } else {
-        fbcon_set_color(con, 230, 50, 50, 0, 0, 0);
-        fbcon_write(con, "  Could not render ");
-        fbcon_write(con, map_name);
-        fbcon_write(con, " (missing VERTEXES/LINEDEFS?)\n");
-    }
-    serial_flush();
-}
-
-// Interactive automap viewer: <-/-> cycle MAPxx lumps. Runs until halted --
-// this is the last thing a normal boot does, so it never returns.
-static void run_automap_viewer(fb_console_t *con, framebuffer_t *fb, const wad_t *wad,
-                               uint32_t num_maps) {
-    uint32_t current_map = 0;
-    int need_redraw = 1;
-
-    for (;;) {
-        if (need_redraw) {
-            char map_name[9];
-            wad_get_map_name(wad, current_map, map_name);
-            render_automap_frame(con, fb, wad, map_name, current_map, num_maps);
-            need_redraw = 0;
-        }
-
-        kbd_event_t ev;
-        if (exo_kbd_poll(&ev) && ev.pressed) {
-            if (ev.key == KEY_RIGHT && current_map + 1 < num_maps) {
-                current_map++;
-                need_redraw = 1;
-            } else if (ev.key == KEY_LEFT && current_map > 0) {
-                current_map--;
-                need_redraw = 1;
-            }
-        }
-
-        __asm__ volatile ("hlt");
-    }
-}
-
-// Top-level driver: locate the WAD module, parse it, show the flat grid,
-// then hand off to the automap viewer. Returns 0 and falls through to the
-// caller's own idle loop if no WAD/maps are available to show.
-static int run_wad_showcase(fb_console_t *con, framebuffer_t *fb, const struct mb2_info *mb) {
+// Top-level driver: locate the WAD module, stage it read-only into a fresh
+// LibOS address space, and iretq into src/libos_wad_viewer/libos_wad_viewer.c
+// at ring 3. Returns (falling through to the caller's own idle loop) if no
+// WAD module is present, the image fails to build, or the ring-3 viewer
+// itself hits an error and calls libos_return() -- the success path (the
+// viewer's automap loop) never returns here at all.
+static void run_ring3_wad_viewer(fb_console_t *con, const struct mb2_info *mb) {
     uint32_t wad_size = 0;
     const char *wad_cmdline = (void *)0;
     const uint8_t *wad_data = find_wad_module(mb, &wad_size, &wad_cmdline);
@@ -665,11 +588,11 @@ static int run_wad_showcase(fb_console_t *con, framebuffer_t *fb, const struct m
     if (!wad_data) {
         klog(con, kernel_get_ticks_ms(),
              "No multiboot module found -- skipping WAD showcase.");
-        return 0;
+        return;
     }
 
     log_prefix(con, kernel_get_ticks_ms());
-    fbcon_write(con, "Loading WAD: ");
+    fbcon_write(con, "Loading WAD for ring-3 launch: ");
     fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
     fbcon_write(con, wad_cmdline ? wad_cmdline : "(module)");
     fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
@@ -677,51 +600,85 @@ static int run_wad_showcase(fb_console_t *con, framebuffer_t *fb, const struct m
     fbcon_write_memsize(con, wad_size);
     fbcon_write(con, ")\n");
 
-    wad_t wad;
-    if (wad_init(&wad, wad_data, wad_size) != 0) {
-        klog(con, kernel_get_ticks_ms(), "ERROR: WAD parse failed.");
-        return 0;
+    size_t code_len = (size_t)(_binary_libos_wad_viewer_code_bin_end -
+                               _binary_libos_wad_viewer_code_bin_start);
+    size_t data_len = (size_t)(_binary_libos_wad_viewer_data_bin_end -
+                               _binary_libos_wad_viewer_data_bin_start);
+
+    // `data`/`data_len` here is the viewer's own compiled .data section
+    // (its one mutable global -- see libos_wad_viewer.c's own comment on
+    // why it exists), copied verbatim to LIBOS_LAUNCH_DATA_VADDR exactly
+    // like every other ring-3 target's data region. The WAD parameters this
+    // LibOS actually needs go in a separate page, mapped below at
+    // LIBOS_WAD_PARAMS_VADDR -- not here, which would silently overwrite
+    // that compiled .data instead of the params struct landing anywhere
+    // useful.
+    libos_image_t img;
+    int build_rc = libos_build_image(PAGE_OWNER_LIBOS,
+                                     _binary_libos_wad_viewer_code_bin_start, code_len,
+                                     _binary_libos_wad_viewer_data_bin_start, data_len,
+                                     LIBOS_WAD_VIEWER_BSS_LEN,
+                                     &img);
+    if (build_rc != VMM_OK) {
+        klog(con, kernel_get_ticks_ms(), "ERROR: libos_build_image failed for WAD viewer.");
+        return;
     }
 
-    log_prefix(con, kernel_get_ticks_ms());
-    fbcon_write(con, "WAD initialized: ");
-    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
-    fbcon_write_u32(con, wad.numlumps);
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
-    fbcon_write(con, " lumps\n");
-
-    uint32_t playpal_size;
-    const uint8_t *palette = wad_find_lump(&wad, "PLAYPAL", &playpal_size);
-    if (!palette) {
-        klog(con, kernel_get_ticks_ms(), "ERROR: PLAYPAL not found.");
-        return 0;
-    }
-    klog(con, kernel_get_ticks_ms(), "PLAYPAL palette loaded");
-
-    uint32_t num_flats = wad_count_flats(&wad);
-    log_prefix(con, kernel_get_ticks_ms());
-    fbcon_write(con, "Flats found: ");
-    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
-    fbcon_write_u32(con, num_flats);
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
-    fbcon_write(con, "\n\n");
-
-    if (num_flats > 0) {
-        klog(con, kernel_get_ticks_ms(), "Rendering flat texture grid...");
-        kernel_sleep_ms(1500);
-        render_flat_grid(fb, &wad, palette, num_flats);
-        kernel_sleep_ms(3000);
+    if (libos_map_wad((uint64_t *)(uintptr_t)img.pml4_phys,
+                      (uint64_t)(uintptr_t)wad_data, wad_size) != VMM_OK) {
+        klog(con, kernel_get_ticks_ms(), "ERROR: libos_map_wad failed.");
+        libos_destroy_image(PAGE_OWNER_LIBOS, &img);
+        return;
     }
 
-    uint32_t num_maps = wad_count_maps(&wad);
-    if (num_maps == 0) {
-        klog(con, kernel_get_ticks_ms(), "No MAPxx lumps found in WAD.");
-        return 0;
+    // One owned page carrying libos_wad_params_t -- the only thing the
+    // viewer cannot learn through an ordinary syscall (see
+    // src/libos_wad_params.h). Mapped read-only: the viewer never writes it.
+    void *params_page = alloc_page_owned(PAGE_OWNER_LIBOS);
+    if (params_page == NULL) {
+        klog(con, kernel_get_ticks_ms(), "ERROR: no page for WAD viewer params.");
+        libos_destroy_image(PAGE_OWNER_LIBOS, &img);
+        return;
+    }
+    *(libos_wad_params_t *)params_page = (libos_wad_params_t){
+        .wad_vaddr = LIBOS_WAD_VADDR,
+        .wad_size  = wad_size,
+    };
+    if (vmm_map_page_in((uint64_t *)(uintptr_t)img.pml4_phys, LIBOS_WAD_PARAMS_VADDR,
+                        (uint64_t)(uintptr_t)params_page,
+                        VMM_PRESENT | VMM_USER) != VMM_OK) {
+        klog(con, kernel_get_ticks_ms(), "ERROR: could not map WAD viewer params.");
+        free_page_owned(params_page, PAGE_OWNER_LIBOS);
+        libos_destroy_image(PAGE_OWNER_LIBOS, &img);
+        return;
     }
 
-    run_automap_viewer(con, fb, &wad, num_maps);
-    /* unreachable: run_automap_viewer never returns */
-    return 1;
+    // libos_return() is the far side of libos_enter() (src/libos_launch.h) --
+    // registering it under LIBOS_RETURN_SYSCALL_NUM is what lets the viewer
+    // hand control back here on an error path instead of leaving libos_enter()
+    // stuck with nowhere to return to.
+    exo_syscall_register(LIBOS_RETURN_SYSCALL_NUM, libos_return);
+
+    klog(con, kernel_get_ticks_ms(),
+        "Switching to ring 3 -- WAD/automap viewer taking the screen...");
+    serial_flush();
+
+    if (vmm_switch_address_space(img.pml4_phys) != VMM_OK) {
+        klog(con, kernel_get_ticks_ms(), "ERROR: vmm_switch_address_space failed.");
+        libos_destroy_image(PAGE_OWNER_LIBOS, &img);
+        return;
+    }
+
+    // libos_enter_irq(), not libos_enter(): the viewer's exo_get_ticks()
+    // delays and exo_kbd_poll() navigation both need PIT/keyboard IRQs to
+    // keep firing while it runs at CPL 3 (src/libos_enter.s's
+    // LAUNCH_RFLAGS_IRQ comment).
+    (void)libos_enter_irq(img.entry_vaddr, img.stack_top_vaddr);
+
+    // Only reached if the viewer called libos_return() instead of running
+    // its automap loop forever -- an error before it, or an empty WAD.
+    vmm_switch_address_space(vmm_kernel_pml4());
+    klog(con, kernel_get_ticks_ms(), "Ring-3 WAD viewer returned early.");
 }
 
 // ── Kernel entry ──────────────────────────────────────────────────────────
@@ -841,6 +798,15 @@ void kernel_main(void *mb2_info_ptr) {
     // placement rule as the memory and framebuffer syscalls: after
     // syscall_init, ahead of the TESTING branch.
     syscall_serial_init();
+
+    // ── Keyboard syscall (demo: ring-3 WAD/automap viewer) ───────────────
+    // Binds exo_kbd_poll (#6) to the kernel's existing keyboard ring
+    // (src/ps2.c/h, src/kbd_ring.c/h) -- the ring-3 WAD viewer's <-/->
+    // navigation needs it. Same placement rule as the other syscalls: after
+    // syscall_init, ahead of the TESTING branch. Harmless before kbd_init()
+    // runs (below, in the normal-boot tail): the ring is simply empty until
+    // then, and nothing calls this handler during a TESTING build.
+    syscall_kbd_init();
 
     // ── PIC / PIT (SCRUM-172) ────────────────────────────────────────────
     // Moved ahead of the TESTING branch, same reasoning as tss_init() for
@@ -1005,15 +971,18 @@ void kernel_main(void *mb2_info_ptr) {
     fbcon_write(&con, "\n");
     klog(&con, kernel_get_ticks_ms(), "Timer demo complete.");
 
-    // ── WAD asset showcase ───────────────────────────────────────────────
-    // Renders real Doom assets (freedoom2.wad, loaded as a multiboot2 module
-    // by src/grub.cfg) through wad.c/flat.c/automap.c: a grid of every flat
-    // in the IWAD, then an interactive <-/-> automap viewer over every MAPxx
-    // lump. run_wad_showcase() only returns if no usable module/maps were
-    // found, in which case the boot falls back to the plain keyboard-log
-    // loop below rather than getting stuck.
+    // ── WAD asset showcase, at ring 3 ──────────────────────────────────────
+    // Launches src/libos_wad_viewer/libos_wad_viewer.c at CPL 3: a grid of
+    // every flat in freedoom2.wad (loaded as a multiboot2 module by
+    // src/grub.cfg), then an interactive <-/-> automap viewer over every
+    // MAPxx lump, both running as a real LibOS against the exo_syscall.h ABI
+    // rather than as ring-0 kernel code. run_ring3_wad_viewer() only returns
+    // if no usable module was found, the image failed to build, or the
+    // viewer itself errored out and called libos_return() -- in which case
+    // the boot falls back to the plain keyboard-log loop below rather than
+    // getting stuck.
     fbcon_write(&con, "\n");
-    run_wad_showcase(&con, &fb, mb);
+    run_ring3_wad_viewer(&con, mb);
 
     // ── Keyboard event loop ─────────────────────────────────────────────
     // IRQ1 only decodes scancodes and queues events; draining and printing
