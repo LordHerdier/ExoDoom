@@ -317,7 +317,7 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 1  | `exo_page_free(paddr)`              | Memory      | ✅     | Free a physical page. Bound to the dispatcher (SCRUM-34); currently `0` or `-EINVAL`. **Ownership-checked (§3.3)** — will return `-EPERM` unless the caller owns `paddr` once the page ownership table (SCRUM-152) lands.                  |
 | 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ✅     | Map physical page at virtual address in caller's address space. `flags`: `EXO_PAGE_READ`/`WRITE`/`USER`/`EXEC`. `EXEC` is accepted and ignored until `EFER.NXE` is enabled; `READ` is not representable on x86 (present implies readable) and is accepted and ignored. **Ownership-checked (§3.3):** `paddr` must be owned by the caller (or be the framebuffer the caller has acquired), and `vaddr` must lie in the LibOS window `[EXO_USER_VA_BASE, EXO_USER_VA_END)` — §3.7. Returns `0`, `-EINVAL` (misaligned address, unknown flag bit), `-EPERM` (window or ownership) or `-ENOMEM` (no page for an intermediate page table). Implemented in SCRUM-35 (`src/syscall_mem.c`, `src/vmm.c`), enforcement SCRUM-153. |
 | 3  | `exo_page_unmap(vaddr)`             | Memory      | ✅     | Unmap a virtual page; the physical page stays allocated (`exo_page_free` returns it). Only unmaps a mapping of a page the caller owns, holds the FB binding for, or that belongs to nobody — §3.7. Returns `0`, `-EINVAL` (misaligned, or nothing mapped there), `-EPERM` or `-ENOMEM`. Implemented in SCRUM-35, enforcement SCRUM-153. |
-| 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ✅     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct and **record the caller as the framebuffer owner (secure binding, §3.3, §3.5)**. LibOS then calls `exo_page_map` to map it — that map requires FB ownership. Released on `exo_exit`. Used by `DG_Init`. Returns `0` (including a re-acquire by the current owner), `-EBUSY` if another LibOS holds the FB, `-EFAULT` for an unusable `info_out`, or `-ENODEV` on a machine the bootloader gave no framebuffer. Implemented in SCRUM-154 (`src/syscall_fb.c`, `src/fb_binding.c`); the LibOS-side mapping of the returned range still waits on SCRUM-16/-35. |
+| 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ✅     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct and **record the caller as the framebuffer owner (secure binding, §3.3, §3.5)**. LibOS then calls `exo_page_map` to map it — that map requires FB ownership. Released on `exo_exit`. Used by `DG_Init`. Returns `0` (including a re-acquire by the current owner), `-EBUSY` if another LibOS holds the FB, `-EFAULT` if `[info_out, info_out + sizeof(exo_fb_info_t))` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` (SCRUM-54, same `exo_range_in_user_window` check #8 uses), or `-ENODEV` on a machine the bootloader gave no framebuffer. Implemented in SCRUM-154 (`src/syscall_fb.c`, `src/fb_binding.c`); the LibOS-side mapping of the returned range still waits on SCRUM-16/-35. |
 | 5  | `exo_get_ticks()`                   | Timer       | ✅     | Return `uint32_t` milliseconds since boot. Zero arguments. Never fails. Used by `DG_GetTicksMs` and `DG_SleepMs`. Kernel-side PIT + `kernel_get_ticks_ms()` done (SCRUM-9, -10); bound to the dispatcher in SCRUM-172 (`src/syscall_pit.c`) — `pic_remap()`/IRQ0/`pit_init()` moved ahead of the `TESTING` branch in `kernel_main` so ticks advance during a test boot too. |
 | 6  | `exo_kbd_poll(event_out)`           | Input       | 🔄     | Dequeue next keyboard event into `event_out` struct `{uint8_t pressed; uint8_t key; uint8_t modifiers; uint8_t reserved}`. `key` is a decoded `ps2_key_t` index (`KEY_A`, `KEY_ESC`, …), not a raw PS/2 scancode — the kernel's scancode decoder runs before the event is queued. `modifiers` is the `EXO_MOD_*` shift/ctrl/alt mask sampled when the event was queued, so a chord decodes correctly even if the modifier is released before the LibOS polls — Doom binds shift (run), ctrl (fire) and alt (strafe). Returns `1` if event available, `0` if empty. Prerequisite: IRQ1 handler (SCRUM-13, In Progress) + scancode table (SCRUM-14, In Progress). Ring buffer planned Sprint 2 (SCRUM-18). |
 | 7  | `exo_mouse_poll(state_out)`         | Input       | ⬜     | Write accumulated mouse state `{int16_t dx; int16_t dy; uint8_t buttons; uint8_t reserved}` to `state_out`, then reset accumulators. `reserved` is zeroed by the kernel and keeps the struct a fixed 6 bytes. Returns `0`. Prerequisite: PS/2 mouse init (SCRUM-19, Sprint 2).                                                                                            |
@@ -438,6 +438,24 @@ installs has `IST=0`, and a CPL 3 → CPL 0 exception with `IST=0` loads its
 stack from `TSS.RSP0` regardless of whether anything ever calls `syscall`.
 Without it, a fault taken at CPL 3 has no valid stack to build its frame on
 and triple-faults — see the page-fault bullet under §3.7 below.
+
+**Port I/O is walled off as a side effect of a correctly-sized TSS
+(SCRUM-56).** `tss_init()` sets `tss.iomap_base = sizeof(struct tss64)`,
+pointing one byte past the segment limit. Nothing in `boot.s`/`libos_enter.s`
+ever raises `RFLAGS.IOPL` above 0 either, so a ring-3 `IN`/`OUT` fails both
+ways at once: CPL(3) > IOPL(0) traps regardless, and even if IOPL were
+raised, "no I/O permission bitmap" would still deny it. The trap lands on
+vector 13 (#GP), which `gpf_stub`/`gp_fault_handler` (`src/isr.s`/`src/fault.c`)
+now report the same way `pf_stub`/`page_fault_handler` report a page fault —
+sharing the same `exception_frame_t` and the same TESTING-only
+`fault_set_hook()` resume mechanism, rather than the old `error_stub`, which
+discarded the error code and `iretq`'d straight back into the same faulting
+instruction forever. `tests/kernel/test_port_io_fault_k.c` (with
+`tests/kernel/port_io_fault_probe.s`) launches a real LibOS address space via
+`libos_build_image()`, executes `outb %al, $0x80` at CPL 3, and asserts the
+hook fired exactly once, at CPL 3, before the probe resumed past the
+instruction and returned normally through `libos_return()` — proving the
+kernel is the only path to hardware, not just documenting that it should be.
 
 **Register preservation.** The stub saves all 14 registers it must return
 intact — the six argument registers included, not merely the SysV callee-saved

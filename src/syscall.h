@@ -82,11 +82,12 @@ page_owner_t syscall_current_context(void);
 /*
  * Is [base, base+len) entirely inside the LibOS mapping window
  * [EXO_USER_VA_BASE, EXO_USER_VA_END)? Shared by every handler that takes a
- * LibOS pointer-and-length pair (syscall_serial.c today) so the bounds check
- * itself has one home instead of being re-derived per call site. A lone
- * vaddr with no length (exo_page_map/-unmap) stays syscall_mem.c's own
- * in_user_window() — folding a `len` of 0 into that check would be a
- * needless behavior change for callers that never had one to pass.
+ * LibOS pointer (syscall_serial.c's buf/len, syscall_fb.c's info_out with
+ * len = sizeof(the struct)) so the bounds check itself has one home instead
+ * of being re-derived per call site. A lone vaddr with no length
+ * (exo_page_map/-unmap) stays syscall_mem.c's own in_user_window() — folding
+ * a `len` of 0 into that check would be a needless behavior change for
+ * callers that never had one to pass.
  *
  * `len == 0` is trivially in-window regardless of `base`: an empty
  * read/write can't touch memory outside it. Otherwise `base` itself must be

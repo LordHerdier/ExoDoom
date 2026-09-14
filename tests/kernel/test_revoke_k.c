@@ -45,8 +45,15 @@
 #define TEST_FB_PITCH   4096u
 #define TEST_FB_BPP     32u
 
+/* Scratch virtual address for a real exo_fb_acquire info_out (SCRUM-54: the
+ * handler now bounds-checks it against the LibOS window, so a kernel-stack
+ * local no longer works — see test_fb_binding_k.c's file header for the same
+ * pattern). Apart from every other suite's range. */
+#define SCRATCH_INFO_VA (EXO_USER_VA_BASE + 0x34000000ULL)
+
 static fb_geometry_t boot_geometry;
 static int           boot_had_fb;
+static uint64_t      scratch_paddr;
 
 /* Suite init/cleanup, passed to CU_add_suite in test_runner.c. */
 int revoke_suite_init(void)
@@ -58,6 +65,15 @@ int revoke_suite_init(void)
         boot_geometry = *g;
 
     revoke_record_reset();
+
+    int64_t p = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
+    if (p <= 0)
+        return -1;
+
+    scratch_paddr = (uint64_t)p;
+    if (exo_syscall_dispatch(EXO_SYS_PAGE_MAP, SCRATCH_INFO_VA, scratch_paddr,
+                             EXO_PAGE_WRITE | EXO_PAGE_USER, 0, 0, 0) != 0)
+        return -1;
 
     return 0;
 }
@@ -71,7 +87,16 @@ int revoke_suite_cleanup(void)
     (void)page_reclaim_all(OTHER_LIBOS);
     revoke_record_reset();
 
+    exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, SCRATCH_INFO_VA, 0, 0, 0, 0, 0);
+    exo_syscall_dispatch(EXO_SYS_PAGE_FREE, scratch_paddr, 0, 0, 0, 0, 0);
+
     return 0;
+}
+
+/* A real, in-window info_out for tests that drive the actual #4 handler. */
+static exo_fb_info_t *scratch_info(void)
+{
+    return (exo_fb_info_t *)(uintptr_t)SCRATCH_INFO_VA;
 }
 
 static void install_test_fb(void)
@@ -472,9 +497,9 @@ static void test_fb_force_frees_the_screen(void)
 
     revoke_res_t fb = revoke_res_fb();
 
-    exo_fb_info_t info;
+    exo_fb_info_t *info = scratch_info();
     CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE,
-                                         (uint64_t)(uintptr_t)&info,
+                                         (uint64_t)(uintptr_t)info,
                                          0, 0, 0, 0, 0),
                     -EXO_EBUSY);
 
@@ -485,10 +510,10 @@ static void test_fb_force_frees_the_screen(void)
 
     /* The real syscall path can now take it. */
     CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE,
-                                         (uint64_t)(uintptr_t)&info,
+                                         (uint64_t)(uintptr_t)info,
                                          0, 0, 0, 0, 0),
                     0);
-    CU_ASSERT_EQUAL(info.phys_addr, TEST_FB_BASE);
+    CU_ASSERT_EQUAL(info->phys_addr, TEST_FB_BASE);
     CU_ASSERT_EQUAL(fb_binding_owner(), syscall_current_context());
 }
 

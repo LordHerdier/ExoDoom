@@ -206,19 +206,35 @@ static int ownership_check(fb_console_t *con, const char *label, int ok) {
 #define DEMO_OTHER_LIBOS ((page_owner_t)(PAGE_OWNER_LIBOS + 1))
 
 static int run_fb_binding_demo(fb_console_t *con) {
-    exo_fb_info_t info = { 0, 0, 0, 0, 0, { 0, 0, 0 } };
     int all = 1;
 
     klog(con, 0, "Framebuffer binding self-check (SCRUM-154):");
 
+    // exo_fb_acquire's info_out is bounds-checked against the LibOS window
+    // (SCRUM-54), same as exo_serial_write's buf — a kernel-stack local no
+    // longer qualifies, so this demo maps a scratch page the same way
+    // run_page_map_demo() does, at a VA of its own well clear of that one's.
+    const uint64_t scratch = EXO_USER_VA_BASE + 0x38000000ULL;
+    int64_t scratch_p = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
+    int64_t scratch_map = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, scratch,
+                                               (uint64_t)scratch_p,
+                                               EXO_PAGE_WRITE, 0, 0, 0);
+    if (scratch_p <= 0 || scratch_map != 0) {
+        klog(con, 0, "  scratch mapping for info_out failed, skipping\n");
+        return 0;
+    }
+
+    exo_fb_info_t *info = (exo_fb_info_t *)(uintptr_t)scratch;
+    *info = (exo_fb_info_t){ 0, 0, 0, 0, 0, { 0, 0, 0 } };
+
     // 1. Acquire binds the framebuffer to the calling context.
     int64_t r_acq = exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE,
-                                         (uint64_t)(uintptr_t)&info,
+                                         (uint64_t)(uintptr_t)info,
                                          0, 0, 0, 0, 0);
     log_prefix(con, 0);
     fbcon_write(con, "  exo_fb_acquire -> phys 0x");
     fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
-    fbcon_write_hex64(con, info.phys_addr);
+    fbcon_write_hex64(con, info->phys_addr);
     fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
     fbcon_write(con, "\n");
     all &= ownership_check(con, "  framebuffer bound to LibOS              ",
@@ -228,11 +244,11 @@ static int run_fb_binding_demo(fb_console_t *con) {
     // 2. The owner may map framebuffer pages; nobody else may (SCRUM-153 asks
     //    fb_binding_check_map before consulting per-page ownership).
     all &= ownership_check(con, "  owner may map FB pages                  ",
-                           fb_binding_check_map(info.phys_addr,
+                           fb_binding_check_map(info->phys_addr,
                                                 syscall_current_context())
                            == FB_MAP_ALLOW);
     all &= ownership_check(con, "  foreign FB map rejected (EPERM)         ",
-                           fb_binding_check_map(info.phys_addr,
+                           fb_binding_check_map(info->phys_addr,
                                                 DEMO_OTHER_LIBOS)
                            == FB_MAP_DENY);
 
@@ -240,7 +256,7 @@ static int run_fb_binding_demo(fb_console_t *con) {
     fb_binding_release(syscall_current_context());
     fb_binding_acquire(DEMO_OTHER_LIBOS);
     int64_t r_busy = exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE,
-                                          (uint64_t)(uintptr_t)&info,
+                                          (uint64_t)(uintptr_t)info,
                                           0, 0, 0, 0, 0);
     all &= ownership_check(con, "  second acquirer rejected (EBUSY)        ",
                            r_busy == -EXO_EBUSY);
@@ -249,6 +265,10 @@ static int run_fb_binding_demo(fb_console_t *con) {
     fb_binding_release(DEMO_OTHER_LIBOS);
     all &= ownership_check(con, "  release frees the binding               ",
                            fb_binding_owner() == PAGE_OWNER_FREE);
+
+    (void)exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, scratch, 0, 0, 0, 0, 0);
+    (void)exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)scratch_p,
+                               0, 0, 0, 0, 0);
 
     return all;
 }
