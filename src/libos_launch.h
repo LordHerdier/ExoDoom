@@ -203,10 +203,13 @@ void libos_destroy_image(page_owner_t owner, const libos_image_t *img);
 
 /*
  * `iretq` to CPL 3 at `entry_vaddr` with RSP = `stack_top_vaddr`. RFLAGS is
- * 0x002 (IF clear) -- a hardware interrupt arriving while CPL-3 code runs is
- * mechanistically expected to switch to TSS.RSP0 the same way the SCRUM-46
- * page-fault test proves an exception does, but that is unverified
- * (SCRUM-170) and deliberately not this ticket's risk to take on.
+ * 0x002 (IF clear) -- a hardware interrupt arriving while CPL-3 code runs
+ * does switch to TSS.RSP0 the same way the SCRUM-46 page-fault test proves
+ * an exception does (SCRUM-170 proved it live for IRQ0 too, via
+ * libos_enter_irq() below), but this entry point still launches with
+ * interrupts globally masked -- every existing fault/launch test depends on
+ * that exact behavior, so it stays that way; a launched context that needs
+ * IRQs to actually land uses libos_enter_irq() instead.
  *
  * libos_return() unwinds with IF still clear regardless of what it was in
  * the caller -- fine today because every caller runs before kernel_main's
@@ -237,6 +240,26 @@ void libos_destroy_image(page_owner_t owner, const libos_image_t *img);
  * registers it as a syscall handler, which is this ticket's tests' job.
  */
 uint64_t libos_enter(uint64_t entry_vaddr, uint64_t stack_top_vaddr);
+
+/*
+ * Same as libos_enter() (src/libos_enter.s), except RFLAGS.IF is set on the
+ * way in instead of clear, so PIT/keyboard IRQs keep landing -- on
+ * TSS.RSP0, then back to CPL 3 via their own iretq, per idt_set_gate()'s
+ * IST=0 gates -- for as long as the launched context runs. libos_enter()
+ * itself is left with IF clear for every existing fault/launch test; this
+ * is for a launched context that needs exo_get_ticks() to actually advance
+ * or exo_kbd_poll() to actually see input while it runs, which is not
+ * possible with interrupts globally masked the whole time.
+ *
+ * tests/kernel/test_irq_entry_k.c (SCRUM-170) drives this entry point and
+ * proves it live: a probe launched through it busy-waits on real
+ * exo_get_ticks() advancement, and src/pit.c's irq0_handler records
+ * (TESTING builds only) the stack pointer it observed on entry, which the
+ * test checks against tss_rsp0()'s range -- the same frame-location check
+ * test_tss_k.c makes for a CPL-3 page fault, done here for a hardware
+ * interrupt instead.
+ */
+uint64_t libos_enter_irq(uint64_t entry_vaddr, uint64_t stack_top_vaddr);
 
 /* The far side of libos_enter() -- see above. Signature matches
  * exo_handler_t (src/syscall.h) so it can be registered directly:
