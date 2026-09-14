@@ -4,6 +4,8 @@
 #include <stdint.h>
 #endif
 
+#include "exo_errno.h"
+
 /*
  * exo_syscall.h — ExoDoom exokernel syscall ABI (SCRUM-24).
  *
@@ -14,8 +16,9 @@
  * Both sides include this header:
  *
  *   - The kernel builds with EXO_KERNEL defined and gets only the numbers, the
- *     shared argument structs, and the error codes — it must not see the
- *     user-side stubs, which would issue a `syscall` against itself.  The
+ *     shared argument structs, and the error codes (exo_errno.h) — it must
+ *     not see the user-side stubs, which would issue a `syscall` against
+ *     itself.  The
  *     define comes from -DEXO_KERNEL on the kernel compiler command line in
  *     docker/scripts/build.sh, not from a #define in each file: with #pragma
  *     once, a #define placed after any transitive include of this header would
@@ -96,23 +99,9 @@
 
 /* ---- Error codes -------------------------------------------------------- */
 /*
- * Returned negated in RAX: a syscall that fails with EXO_ENOMEM returns
- * -EXO_ENOMEM.  Values match the Linux errno numbers of the same names so a
- * later libc errno.h can pass them through unmodified.  Prefixed because the
- * libc shim will define the unprefixed names for Doom (Sprint 3).
+ * Moved to exo_errno.h (SCRUM-57) — included above, alongside <stdint.h>, so
+ * every existing user of exo_syscall.h keeps seeing EXO_E* without change.
  */
-#define EXO_EPERM     1   /* operation not permitted for this LibOS       */
-#define EXO_ENOENT    2   /* no such file                                 */
-#define EXO_EBADF     9   /* bad file descriptor                          */
-#define EXO_ENOMEM   12   /* out of physical pages / heap                 */
-#define EXO_EACCES   13   /* permission denied                            */
-#define EXO_EFAULT   14   /* pointer argument outside caller address space */
-#define EXO_EBUSY    16   /* resource held by another LibOS (framebuffer) */
-#define EXO_ENODEV   19   /* the hardware resource does not exist here     */
-#define EXO_EINVAL   22   /* malformed or out-of-range argument           */
-#define EXO_EMFILE   24   /* file descriptor table full                   */
-#define EXO_ENOSPC   28   /* ramdisk full                                 */
-#define EXO_ENOSYS   38   /* syscall number not implemented               */
 
 /* ---- Argument constants ------------------------------------------------- */
 

@@ -20,6 +20,7 @@ Derived from static analysis of
 3. [Exokernel syscall specification](#3-exokernel-syscall-specification)
    - [3.1 Calling convention](#31-syscall-calling-convention)
    - [3.2 Syscall table](#32-syscall-table)
+   - [3.2a Error codes](#32a-error-codes-scrum-57)
    - [3.3 Secure binding & resource ownership](#33-secure-binding--resource-ownership)
    - [3.4 Entry path](#34-entry-path-scrum-32)
    - [3.5 Framebuffer binding](#35-framebuffer-binding-scrum-154)
@@ -294,15 +295,18 @@ requirements of doomgeneric, the libc shim, and the LibOS infrastructure. Each
 syscall is mapped to the Doom feature that requires it.
 
 > **This section has a C counterpart:** `src/exo_syscall.h` (SCRUM-24) declares
-> the numbers as `EXO_SYS_*`, the shared argument structs, the `EXO_E*` error
-> codes, and one inline stub per syscall. It is the same interface expressed in
-> C, and the two must be changed together — this document stays the source of
-> truth for *what* each syscall does. Kernel sources are compiled with
-> `-DEXO_KERNEL`, which suppresses the user-side stubs; the LibOS includes it
-> plainly. The define comes from the compiler command line rather than a
-> per-file `#define` because `#pragma once` would make a `#define` placed after
-> any transitive include of the header silently ineffective. `tests/kernel/test_exo_syscall_k.c` asserts the header still agrees
-> with §3.1 and §3.2.
+> the numbers as `EXO_SYS_*`, the shared argument structs, and one inline stub
+> per syscall; the `EXO_E*` error codes live in `src/exo_errno.h` (SCRUM-57),
+> which `exo_syscall.h` includes so existing users see no difference. Together
+> they are the same interface expressed in C, and the two must be changed
+> together — this document stays the source of truth for *what* each syscall
+> does. Kernel sources are compiled with `-DEXO_KERNEL`, which suppresses the
+> user-side stubs; the LibOS includes it plainly. The define comes from the
+> compiler command line rather than a per-file `#define` because `#pragma once`
+> would make a `#define` placed after any transitive include of the header
+> silently ineffective. `tests/kernel/test_exo_syscall_k.c` asserts the header
+> still agrees with §3.1 and §3.2; `tests/kernel/test_exo_errno_k.c` does the
+> same for §3.2a.
 
 ### 3.1 Syscall calling convention
 
@@ -364,6 +368,57 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 
 **Total: 21 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking.
+
+### 3.2a Error codes (SCRUM-57)
+
+`src/exo_errno.h` is the canonical definition; this table is the canonical
+*documentation* of it — one place instead of the per-handler comments
+scattered across `syscall_mem.c`/`syscall_fb.c`/`syscall_kbd.c`/
+`syscall_serial.c`. Change one, update the other, the same rule §3's own
+intro states for `exo_syscall.h`.
+
+Every value matches the Linux errno number of the same name, and — not by
+coincidence — `src/errno.h`'s value for the unprefixed name: nothing wires
+an `EXO_E*` return into libc's `errno` yet (`docs/libc_audit.md`), but
+keeping the numbering identical means that wiring, when it happens, is a
+pass-through rather than a translation table.
+
+| Code | Value | Meaning | Emitted today by |
+| --- | --- | --- | --- |
+| `EXO_EPERM` | 1 | Operation not permitted for this LibOS | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3) |
+| `EXO_ENOENT` | 2 | No such file | not yet — reserved for `exo_file_*` (#9-16) |
+| `EXO_EBADF` | 9 | Bad file descriptor | not yet — reserved for `exo_file_*` |
+| `EXO_ENOMEM` | 12 | Out of physical pages / heap | `exo_page_alloc` (#0), `exo_page_map` (#2, no page for an intermediate table), `exo_page_unmap` (#3, split requires a page) |
+| `EXO_EACCES` | 13 | Permission denied | not yet bound to a handler |
+| `EXO_EFAULT` | 14 | Pointer argument outside the caller's address space | `exo_fb_acquire` (#4), `exo_kbd_poll` (#6), `exo_serial_write` (#8) |
+| `EXO_EBUSY` | 16 | Resource held by another LibOS | `exo_fb_acquire` (#4) |
+| `EXO_EEXIST` | 17 | File already exists | not yet — reserved for `exo_file_open`/`exo_file_rename` |
+| `EXO_ENODEV` | 19 | The hardware resource does not exist on this machine | `exo_fb_acquire` (#4, no framebuffer) |
+| `EXO_ENOTDIR` | 20 | Not a directory | not yet — reserved for `exo_file_*` |
+| `EXO_EISDIR` | 21 | Is a directory | not yet — reserved for `exo_file_*` |
+| `EXO_EINVAL` | 22 | Malformed or out-of-range argument | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3), `exo_serial_write` (#8, `len` over `SERIAL_WRITE_MAX_LEN`) |
+| `EXO_ENFILE` | 23 | System-wide open-file table full | not yet — reserved for `exo_file_open` |
+| `EXO_EMFILE` | 24 | Per-context file descriptor table full | not yet — reserved for `exo_file_open` |
+| `EXO_EFBIG` | 27 | File too large | not yet — reserved for `exo_file_write` |
+| `EXO_ENOSPC` | 28 | Ramdisk full | not yet — reserved for `exo_file_write` |
+| `EXO_ESPIPE` | 29 | Seek on a non-seekable descriptor | not yet — reserved for `exo_file_seek` |
+| `EXO_EROFS` | 30 | Write attempted on a read-only filesystem | not yet — reserved for `exo_file_write` (e.g. a memory-mapped WAD reader, §4.1) |
+| `EXO_ENOSYS` | 38 | Syscall number not implemented, or out of range | `exo_syscall_dispatch` (`src/syscall.c`) for every unbound number — #7, #9-20 today |
+
+**"0 on success" is the default, not a universal rule.** Four bound syscalls
+document a positive success value instead of `0`, because the value itself
+*is* the answer the caller asked for, not a status flag:
+
+| Syscall | Success return | Why not `0` |
+| --- | --- | --- |
+| `exo_page_alloc` (#0) | the allocated page's physical address | the caller needs the address; a separate out-parameter would be one more pointer to fault-check |
+| `exo_get_ticks` (#5) | milliseconds since boot | the syscall's entire purpose is returning this number |
+| `exo_kbd_poll` (#6) | `1` if an event was dequeued, `0` if the queue was empty | "queue empty" is not a failure — it is the expected steady state between keystrokes |
+| `exo_serial_write` (#8) | bytes written (`len`, since COM1 never partially writes) | mirrors POSIX `write()`; `0` would be indistinguishable from "wrote nothing" |
+
+Every other bound syscall (`exo_page_free`, `exo_page_map`, `exo_page_unmap`,
+`exo_fb_acquire`) returns exactly `0` on success, matching the acceptance
+criterion literally.
 
 ### 3.3 Secure binding & resource ownership
 
