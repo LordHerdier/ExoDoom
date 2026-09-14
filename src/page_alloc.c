@@ -142,24 +142,13 @@ void page_alloc_init(const struct mb2_info* mb) {
             reserve_region((uintptr_t)mb, (uintptr_t)mb + mb->total_size);
             serial_print("page_alloc: multiboot info reserved\n");
 
-            const struct mb2_tag *tag = mb2_first_tag(mb);
-            const uintptr_t tags_end = (uintptr_t)mb + mb->total_size;
-            unsigned mods = 0;
-
-            while ((uintptr_t)tag < tags_end && tag->type != MB2_TAG_END) {
-                if (tag->type == MB2_TAG_MODULE) {
-                    const struct mb2_tag_module *m =
-                        (const struct mb2_tag_module *)tag;
-
-                    reserve_region((uintptr_t)m->mod_start,
-                                   (uintptr_t)m->mod_end);
-                    mods++;
-                }
-
-                tag = mb2_next_tag(tag);
-            }
-
-            if (mods > 0) {
+            /* This kernel's boot setup loads exactly one GRUB module (the
+             * WAD, see grub.cfg) -- mmap_find_module() only reports the
+             * first MB2_TAG_MODULE tag, which is why one call is enough
+             * here. */
+            uint64_t mod_start, mod_end;
+            if (mmap_find_module(&mod_start, &mod_end) == 0) {
+                reserve_region((uintptr_t)mod_start, (uintptr_t)mod_end);
                 serial_print("page_alloc: modules reserved\n");
             }
             serial_print("page_alloc: initialized\n");
