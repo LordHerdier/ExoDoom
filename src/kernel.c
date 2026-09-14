@@ -18,6 +18,7 @@
 #include "syscall_mem.h"
 #include "syscall_fb.h"
 #include "syscall_serial.h"
+#include "syscall_kbd.h"
 #include "syscall_pit.h"
 #include "fb_binding.h"
 #include "revoke.h"
@@ -641,6 +642,16 @@ void kernel_main(void *mb2_info_ptr) {
     // placement rule as the memory and framebuffer syscalls: after
     // syscall_init, ahead of the TESTING branch.
     syscall_serial_init();
+
+    // ── Keyboard syscall (SCRUM-39) ───────────────────────────────────────
+    // Binds exo_kbd_poll (#6) to the kernel's existing keyboard ring
+    // (src/ps2.c/h, src/kbd_ring.c/h) -- the same ring the ring-0 automap
+    // demo already drains directly, now also reachable from ring 3. Same
+    // placement rule as the other syscalls: after syscall_init, ahead of
+    // the TESTING branch. Harmless before kbd_init() runs (below, in the
+    // normal-boot tail): the ring is simply empty until then, and nothing
+    // calls this handler during a TESTING build.
+    syscall_kbd_init();
 
     // ── PIC / PIT (SCRUM-172) ────────────────────────────────────────────
     // Moved ahead of the TESTING branch, same reasoning as tss_init() for
