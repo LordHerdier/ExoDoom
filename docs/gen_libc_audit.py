@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""
+Generate docs/libc_audit.csv from the audit's single source of truth (SCRUM-72).
+
+The CSV is the "spreadsheet" SCRUM-72 asks for; docs/libc_audit.md is the
+narrative around the same rows. Keeping the row data here and generating the
+CSV from it means the two cannot drift into disagreeing about a status.
+
+The ROWS table below was not written by hand from grep output. It was derived
+from the linker's own answer to "what does Doom actually need", which is the
+only source that cannot miss a call or invent one:
+
+    x86_64-elf-nm --defined-only build/doom/*.o   -> what Doom defines itself
+    x86_64-elf-nm -u            build/doom/*.o    -> what it leaves undefined
+    comm -23 <undefined> <defined>                -> what it needs from outside
+
+cross-referenced against `nm --defined-only` over the kernel's own objects for
+the Status column, and against the compile logs for the implicit-declaration
+findings. Call-site counts are grep over src/doom/*.c and are therefore the one
+soft number here -- they count textual occurrences, including any inside
+`#if 0` / `#if ORIGCODE` blocks, whereas the symbol data counts only what
+survives to the object file. Where the two disagree the row says so.
+
+Re-run after changing ROWS:  python3 docs/gen_libc_audit.py
+"""
+
+import csv
+import os
+
+# ---------------------------------------------------------------------------
+# Status vocabulary
+# ---------------------------------------------------------------------------
+#   REAL       implemented in src/, behaves as the standard requires
+#   REAL*      implemented in src/, with a behavioural difference worth knowing
+#   MISSING    Doom references it and nothing in the tree defines it -> link
+#              error. "Declared" says whether a prototype exists; the ones
+#              marked no are worse than merely missing (see below).
+#   PLATFORM   not libc -- a doomgeneric DG_* callback the port must supply
+#   DEAD       called only from code the build compiles out or GCC proves
+#              unreachable, so it never reaches the object file
+# ---------------------------------------------------------------------------
+
+# fn, header, status, declared, impl, calls, files, deviation
+ROWS = [
+    # --- implemented ---------------------------------------------------------
+    ("abs", "stdlib.h", "REAL*", "yes", "src/stdlib.c", 30,
+     "g_game m_fixed p_enemy p_map p_maputl r_main r_plane r_segs r_things s_sound",
+     "abs(INT_MIN) returns INT_MIN rather than being undefined. Defined-but-negative "
+     "instead of UB; no caller in Doom passes INT_MIN."),
+    ("atoi", "stdlib.h", "REAL*", "yes", "src/stdlib.c", 9,
+     "d_loop d_main g_game i_system i_video",
+     "Clamps to INT_MAX/INT_MIN on overflow instead of being undefined, and "
+     "accumulates in long so the clamp is exact. Never sets errno (nothing does)."),
+    ("free", "stdlib.h", "REAL*", "yes", "src/stdlib.c -> kfree", 15,
+     "d_iwad d_main i_system m_config m_misc v_video w_wad",
+     "Silently refuses (with a serial warning) any pointer into the permanent "
+     "bump region kmalloc hands out before page_alloc_init. Such a free is a "
+     "no-op, not a fault."),
+    ("malloc", "stdlib.h", "REAL*", "yes", "src/stdlib.c -> kmalloc", 18,
+     "d_iwad d_main doomgeneric i_system m_argv m_config m_misc p_saveg v_video",
+     "Two allocators behind one name: a one-way bump allocator until "
+     "page_alloc_init() runs, heap_alloc after. Bump-phase allocations are "
+     "4K-aligned and can never be freed. Doom allocates long after the handoff, "
+     "so it always gets the real heap."),
+    ("realloc", "stdlib.h", "REAL*", "yes", "src/stdlib.c -> krealloc", 1,
+     "w_checksum",
+     "Returns NULL (with a serial warning) for a bump-region pointer rather than "
+     "moving it."),
+    ("memcpy", "string.h", "REAL*", "yes", "src/string.c", 39,
+     "d_loop f_finale f_wipe g_game i_endoom i_scale i_video m_cheat memio p_mobj "
+     "r_data r_draw r_segs r_things sha1 statdump v_video w_wad",
+     "Correct, but byte-at-a-time with no word or SIMD fast path. Doom calls it "
+     "from r_draw/v_video/f_wipe on framebuffer-sized spans every frame, so this "
+     "is the shim's most likely performance problem, not a correctness one."),
+    ("memset", "string.h", "REAL*", "yes", "src/string.c", 41,
+     "am_map d_loop g_game i_scale i_system i_video m_argv m_misc p_mobj p_saveg "
+     "p_setup p_spec r_data r_plane r_things sha1 v_video w_wad",
+     "Same as memcpy: correct, byte-at-a-time, on the per-frame path."),
+    ("strlen", "string.h", "REAL", "yes", "src/string.c", 56,
+     "d_iwad d_main f_finale g_game i_system m_cheat m_config m_menu m_misc "
+     "p_saveg sha1 w_wad", ""),
+    ("strcmp", "string.h", "REAL", "yes", "src/string.c", 11,
+     "d_iwad d_main i_video m_config m_menu m_misc p_saveg statdump", ""),
+    ("strchr", "string.h", "REAL", "yes", "src/string.c", 3,
+     "d_iwad i_system m_menu", ""),
+    ("strncpy", "string.h", "REAL", "yes", "src/string.c", 2,
+     "m_misc w_wad",
+     "Standard, including the standard footgun: no NUL terminator when the "
+     "source is at least n bytes."),
+    ("strcasecmp", "strings.h", "REAL*", "yes", "src/string.c", 9,
+     "d_iwad d_main i_system m_argv w_wad",
+     "ASCII / C locale only -- no locale support exists. Correct for WAD lump "
+     "and argv comparisons, which is all Doom uses it for."),
+    ("strncasecmp", "strings.h", "REAL*", "yes", "src/string.c", 7,
+     "d_main m_misc r_data r_things w_wad", "ASCII / C locale only."),
+    ("toupper", "ctype.h", "REAL*", "yes", "src/ctype.c", 11,
+     "f_finale hu_lib m_menu m_misc w_wad",
+     "ASCII only. Passes EOF through unchanged, as required."),
+    ("printf", "stdio.h", "REAL*", "yes", "src/stdio.c", 94,
+     "d_iwad d_loop d_main d_net g_game i_joystick i_scale i_system i_video m_argv "
+     "m_config m_misc memio mus2mid p_setup r_data r_main statdump v_video w_main "
+     "w_wad wi_stuff z_zone",
+     "Supports %d %i %u %x %p %c %s %% with field width and the '-' and '0' flags. "
+     "NO precision, no length modifiers, no %X/%o/%f/%e/%g. An unsupported "
+     "conversion is echoed verbatim AND ITS ARGUMENT IS NOT CONSUMED, which "
+     "desynchronises every later conversion in the same call. See the md."),
+    ("putchar", "stdio.h", "REAL*", "yes", "src/stdio.c", 3, "i_system",
+     "Writes to COM1 serial. There is no stdout to write to."),
+    ("puts", "stdio.h", "REAL*", "yes", "src/stdio.c", 4,
+     "i_endoom i_scale i_system", "Writes to COM1 serial."),
+
+    # --- missing, prototype exists (post-SCRUM-64) ---------------------------
+    ("fopen", "stdio.h", "MISSING", "yes", "-", 14,
+     "g_game m_argv m_config m_menu m_misc statdump v_video w_file_stdc w_wad",
+     "No filesystem exists. The intended answer for the WAD is not real file I/O "
+     "but the memory-mapped reader in docs/architecture.md sec7: fopen returns a "
+     "FILE* backed by a pointer into the mapped multiboot module."),
+    ("fclose", "stdio.h", "MISSING", "yes", "-", 14,
+     "g_game m_argv m_config m_menu m_misc statdump v_video w_file_stdc w_wad", ""),
+    ("fread", "stdio.h", "MISSING", "yes", "-", 5,
+     "m_argv m_menu m_misc p_saveg w_file_stdc",
+     "Becomes a memcpy out of the mapped WAD under the mmap design."),
+    ("fwrite", "stdio.h", "MISSING", "yes", "-", 2, "m_misc p_saveg",
+     "Only savegames and config need it; both could go to a RAM-backed file."),
+    ("fseek", "stdio.h", "MISSING", "yes", "-", 3, "m_misc w_file_stdc",
+     "Offset arithmetic under the mmap design."),
+    ("ftell", "stdio.h", "MISSING", "yes", "-", 5, "g_game m_misc p_saveg", ""),
+    ("fflush", "stdio.h", "MISSING", "yes", "-", 4, "i_scale i_system", ""),
+    ("fprintf", "stdio.h", "MISSING", "yes", "-", 65,
+     "g_game hu_stuff i_system m_config m_menu mus2mid p_doors p_map p_saveg "
+     "p_setup p_spec st_stuff statdump w_wad z_zone",
+     "The single most-called missing function. Most call sites are fprintf(stderr, "
+     "...) diagnostics, which can route to serial like printf; only m_config's "
+     "config writer genuinely needs a file."),
+    ("vfprintf", "stdio.h", "MISSING", "yes", "-", 1, "i_system", ""),
+    ("snprintf", "stdio.h", "MISSING", "yes", "-", 1,
+     "m_misc (and every DEH_snprintf, which is #defined to snprintf)",
+     "Cheapest of the block to finish: kvprintf already takes an arbitrary sink, "
+     "so this is that core plus a bounded-buffer emit. SCRUM-21 owns it. Inherits "
+     "printf's missing precision -- which is what breaks lump-name construction."),
+    ("vsnprintf", "stdio.h", "MISSING", "yes", "-", 4, "m_misc (M_vsnprintf)",
+     "Same as snprintf; M_snprintf/M_vsnprintf funnel through it."),
+    ("sscanf", "stdio.h", "MISSING", "yes", "-", 6, "m_config m_misc",
+     "Needs %d, %x and %o (M_StrToInt tries all three) plus %s. No parsing "
+     "machinery exists in the shim at all -- this is a from-scratch item, not a "
+     "sink swap like the printf family."),
+    ("remove", "stdio.h", "MISSING", "yes", "-", 1, "g_game",
+     "Savegame rotation only."),
+    ("rename", "stdio.h", "MISSING", "yes", "-", 1, "g_game",
+     "Savegame rotation only."),
+    ("stdout", "stdio.h", "MISSING", "yes", "-", 0, "i_scale (referenced, not called)",
+     "An object, not a function: extern FILE *. Needs a value once FILE exists."),
+    ("stderr", "stdio.h", "MISSING", "yes", "-", 0,
+     "8 objects reference it, all as fprintf's first argument",
+     "An object, not a function. The obvious binding is 'the serial port'."),
+    ("mkdir", "sys/stat.h", "MISSING", "yes", "-", 2, "m_misc (M_MakeDirectory)",
+     "Reached from m_config when it wants a config/savegame directory. There are "
+     "no directories; a no-op returning 0 is probably the right answer."),
+
+    # --- missing AND undeclared: the sharp edge ------------------------------
+    ("strdup", "string.h", "MISSING", "NO", "-", 9,
+     "d_iwad d_main m_config m_misc",
+     "NO PROTOTYPE -> implicitly declared int -> the returned char* is TRUNCATED "
+     "TO 32 BITS on assignment. 3 files warn today. Trivial to implement "
+     "(strlen+malloc+memcpy) but the prototype matters more than the body."),
+    ("strncmp", "string.h", "MISSING", "NO", "-", 5, "d_main m_misc w_wad",
+     "NO PROTOTYPE. Returns int, so no truncation, but still unchecked. "
+     "Trivial to implement alongside strcmp."),
+    ("strrchr", "string.h", "MISSING", "NO", "-", 3, "d_iwad d_main m_argv",
+     "NO PROTOTYPE -> pointer truncated to 32 bits. Used for path/extension "
+     "splitting. Trivial."),
+    ("strstr", "string.h", "MISSING", "NO", "-", 3, "d_iwad m_misc",
+     "NO PROTOTYPE -> pointer truncated to 32 bits."),
+    ("calloc", "stdlib.h", "MISSING", "NO", "-", 1, "w_wad",
+     "NO PROTOTYPE -> pointer truncated to 32 bits. malloc+memset, but must "
+     "check size*nmemb for overflow, which malloc alone does not."),
+    ("atof", "stdlib.h", "MISSING", "NO", "-", 1, "m_config",
+     "NO PROTOTYPE -> implicitly int, so the double return is read from the wrong "
+     "place entirely. Only DEFAULT_FLOAT config parsing needs it; see the SSE note."),
+    ("exit", "stdlib.h", "MISSING", "NO", "-", 12,
+     "d_main i_system m_argv mus2mid",
+     "NO PROTOTYPE. Cannot return, so the declaration needs _Noreturn or callers "
+     "get 'may be used uninitialized' noise. Maps naturally onto exo_exit "
+     "(SCRUM-155) rather than a libc exit."),
+    ("system", "stdlib.h", "MISSING", "NO", "-", 2, "i_system",
+     "NO PROTOTYPE. There is no shell and never will be; returning -1 is the "
+     "honest implementation."),
+
+    # --- doomgeneric platform callbacks -------------------------------------
+    ("DG_Init", "doomgeneric.h", "PLATFORM", "yes", "-", 1, "doomgeneric",
+     "SCRUM-73. Not libc -- the port supplies these six."),
+    ("DG_DrawFrame", "doomgeneric.h", "PLATFORM", "yes", "-", 1, "i_video",
+     "SCRUM-75-ish: blit DG_ScreenBuffer to the framebuffer via exo_fb_acquire."),
+    ("DG_GetKey", "doomgeneric.h", "PLATFORM", "yes", "-", 1, "i_input",
+     "Needs the keyboard syscall; kbd_ring exists kernel-side."),
+    ("DG_SetWindowTitle", "doomgeneric.h", "PLATFORM", "yes", "-", 1, "i_video",
+     "No windows. A no-op, or a serial line."),
+    ("DG_GetTicksMs", "doomgeneric.h", "PLATFORM", "yes", "-", 1, "i_timer",
+     "SCRUM-74 -- exo_get_ticks (#5) is already bound."),
+    ("DG_SleepMs", "doomgeneric.h", "PLATFORM", "yes", "-", 1, "i_timer",
+     "SCRUM-74 -- spin on exo_get_ticks; there is no blocking sleep syscall."),
+
+    # --- called only from code that is compiled out --------------------------
+    ("getenv", "stdlib.h", "DEAD", "no", "-", 3, "d_iwad m_misc",
+     "d_iwad's uses are inside #if ORIGCODE (config.h #undefs it); m_misc's is "
+     "inside #if defined(_WIN32). Never reaches the object file. No environment "
+     "exists, so this is the right outcome."),
+    ("abort", "stdlib.h", "DEAD", "no", "-", 1, "i_system",
+     "The one call site is commented out."),
+    ("tolower", "ctype.h", "DEAD", "yes", "src/ctype.c", 1, "i_input",
+     "Implemented and available, but i_input's only call is commented out. "
+     "Reached indirectly through strcasecmp."),
+    ("isspace", "ctype.h", "DEAD", "yes", "src/ctype.c", 4, "d_main m_argv",
+     "Implemented. m_argv's uses are inside #if ORIGCODE; d_main's are in a "
+     "branch guarded by deh_sub != banners[i], which cannot be true because "
+     "DEH_String(x) is #defined to (x) with FEATURE_DEHACKED off -- so GCC "
+     "eliminates the block."),
+    ("memmove", "string.h", "DEAD", "yes", "src/string.c", 2, "d_main m_config",
+     "Implemented and correct (handles overlap in both directions). Same dead "
+     "dehacked branch as isspace."),
+    ("feof", "stdio.h", "DEAD", "NO", "-", 1, "m_config",
+     "The single call site is inside LoadDefaultCollection, whose body the build "
+     "compiles out (its 'collection' parameter goes unused, which is how the "
+     "warning surfaces). Never reaches the object file -- unlike the rest of the "
+     "stdio family, nothing references it."),
+    ("isalpha", "ctype.h", "DEAD", "yes", "src/ctype.c", 0, "-",
+     "Implemented; Doom never calls it."),
+    ("isdigit", "ctype.h", "DEAD", "yes", "src/ctype.c", 0, "-",
+     "Implemented; Doom never calls it."),
+    ("memcmp", "string.h", "DEAD", "yes", "src/string.c", 0, "-",
+     "Implemented; Doom never calls it."),
+    ("strcat", "string.h", "DEAD", "yes", "src/string.c", 0, "-",
+     "Implemented (unbounded -- caller must size dest); Doom never calls it."),
+    ("qsort", "stdlib.h", "DEAD", "yes", "src/stdlib.c", 0, "-",
+     "Implemented (three-way Bentley-McIlroy, recurses only into the smaller "
+     "partition); Doom never calls it."),
+    ("rand", "stdlib.h", "DEAD", "yes", "src/stdlib.c", 0, "-",
+     "Implemented; Doom uses its own M_Random tables, not rand."),
+    ("srand", "stdlib.h", "DEAD", "yes", "src/stdlib.c", 0, "-",
+     "Implemented; Doom never calls it."),
+]
+
+HEADERS = ["Function", "Header", "Status", "Prototype exists", "Implemented in",
+           "Doom call sites", "Files", "Behavioural difference / notes"]
+
+
+def main():
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = os.path.join(here, "libc_audit.csv")
+    with open(out, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(HEADERS)
+        for fn, hdr, status, declared, impl, calls, files, dev in ROWS:
+            w.writerow([fn, hdr, status, declared, impl, calls, files,
+                        " ".join(dev.split())])
+    counts = {}
+    for r in ROWS:
+        counts[r[2]] = counts.get(r[2], 0) + 1
+    print("wrote %s (%d rows)" % (out, len(ROWS)))
+    for k in sorted(counts):
+        print("  %-9s %d" % (k, counts[k]))
+
+
+if __name__ == "__main__":
+    main()
