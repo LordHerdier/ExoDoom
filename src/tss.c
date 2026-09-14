@@ -90,8 +90,9 @@ void tss_init(void) {
      * byte past the segment limit below -- every port access from a lower
      * privilege level then reads as "no bitmap" and takes #GP, which is
      * exactly the "LibOS cannot execute IN/OUT" behaviour Sprint 6 wants.
-     * Free side effect of a correctly-sized TSS, not exercised by this
-     * ticket's tests. */
+     * Free side effect of a correctly-sized TSS -- exercised by SCRUM-56's
+     * tests/kernel/test_port_io_fault_k.c, which drives a real ring-3 IN/OUT
+     * against it and asserts the resulting #GP. */
     tss.iomap_base = sizeof(struct tss64);
 
     verify_tss_slot();

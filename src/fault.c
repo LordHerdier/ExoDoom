@@ -179,3 +179,54 @@ void page_fault_handler(exception_frame_t *f)
     serial_print("=== halted ===\n");
     halt_forever();
 }
+
+void gp_fault_handler(exception_frame_t *f)
+{
+    /* Guard first, so it covers the hook below as well as the reporting
+     * path -- same reasoning as page_fault_handler's guard. */
+    if (in_fault) {
+        serial_print("\n#GP while handling a fault -- halting\n");
+        halt_forever();
+    }
+    in_fault = 1;
+
+#ifdef TESTING
+    if (test_hook && f->rip != last_resume_rip && test_hook(f, 0)) {
+        last_resume_rip = f->rip;
+        in_fault = 0;
+        return;
+    }
+#endif
+
+    serial_print("\n=== GENERAL PROTECTION FAULT (#GP, vector 13) ===\n");
+
+    serial_print("  error:     0x");
+    serial_print_hex64(f->error_code);
+    serial_print("  (0 unless tied to a specific selector)\n");
+
+    serial_print("  rip:       0x");
+    serial_print_hex64(f->rip);
+    serial_print("\n");
+
+    serial_print("  cs:rsp:    0x");
+    serial_print_hex64(f->cs);
+    serial_print(":0x");
+    serial_print_hex64(f->rsp);
+    serial_print("\n");
+
+    serial_print("  rflags:    0x");
+    serial_print_hex64(f->rflags);
+    serial_print("\n");
+
+    /* See page_fault_handler's own comment: a real LibOS fault still just
+     * halts, because there is no teardown policy yet (SCRUM-147/revoke_all). */
+    serial_print("  context:   ");
+    if ((f->cs & 3) != 0) {
+        serial_print("ring 3 (LibOS) -- no per-context teardown yet, halting\n");
+    } else {
+        serial_print("ring 0 (kernel) -- fatal\n");
+    }
+
+    serial_print("=== halted ===\n");
+    halt_forever();
+}

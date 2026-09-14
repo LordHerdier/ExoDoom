@@ -25,6 +25,7 @@ extern void idt_load(struct idt_ptr *);
 extern void default_stub(void);
 extern void error_stub(void);
 extern void pf_stub(void);
+extern void gpf_stub(void);
 
 /* Vectors that push a hardware error code (SCRUM-135). default_stub's bare
  * iretq cannot handle these safely — error_stub must be installed instead. */
@@ -45,6 +46,10 @@ void idt_init() {
      * faults again immediately -- fine as a "don't triple-fault" measure, no
      * use as a diagnostic.  Installed after the loop above so it wins. */
     idt_set_gate(14, (uintptr_t)pf_stub);
+
+    /* Vector 13 (#GP) gets the same treatment (SCRUM-56) -- error_stub would
+     * otherwise silently re-fault forever on a ring-3 IN/OUT trap. */
+    idt_set_gate(13, (uintptr_t)gpf_stub);
 
     idt_load(&idtp);
 }

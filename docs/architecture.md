@@ -341,7 +341,7 @@ instructions do not exist in long mode.
 
 | Vector | Exception                | Handler status                                       |
 | ------ | ------------------------ | ---------------------------------------------------- |
-| 13     | General Protection Fault | Planned: serial diagnostic + halt                    |
+| 13     | General Protection Fault | ✅ `gpf_stub` → `gp_fault_handler` (SCRUM-56): decoded frame, RIP, CS:RSP; halts. Reuses `page_fault_handler`'s TESTING resume hook; no CR2, no useful error-code bits for the port-I/O case it exists to prove |
 | 14     | Page Fault               | ✅ `pf_stub` → `page_fault_handler`: CR2, decoded error code, RIP, live mapping; halts |
 | 32     | IRQ0 / Timer             | ✅ `irq0_stub` → `irq0_handler`                      |
 | 33     | IRQ1 / Keyboard          | ✅ `irq1_stub` → `irq1_handler`                      |
