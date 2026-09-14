@@ -26,6 +26,9 @@
  *     exo_serial_write per character.
  *   - exo_get_ticks() (already bound under SCRUM-172) is called directly --
  *     nothing to port there, just something to prove from ring 3 too.
+ *   - src/libos_fb.c (SCRUM-36) composes exo_fb_acquire()/exo_page_map()
+ *     into one call and is exercised the same way: a real framebuffer
+ *     mapping obtained and written to from ring 3.
  *
  * test_libc_shim_probe_k.c drives this the same way test_libos_c_probe_k.c
  * drives libos_c_probe_main(): libos_build_image() + libos_test_launch(),
@@ -35,6 +38,7 @@
 
 #include "exo_syscall.h"
 #include "libos_launch.h"
+#include "libos_fb.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -82,6 +86,28 @@ void libc_shim_probe_main(void)
     int64_t ticks = exo_get_ticks();
     if (ticks > 0)
         result |= LIBC_SHIM_OK_TICKS;
+
+    /* libos_fb_map() -> exo_fb_acquire() + a loop of exo_page_map() real
+     * syscalls, mapping the framebuffer into this address space. Writing a
+     * known pattern to the first and last pixel of the mapped range and
+     * reading it straight back proves the mapping is genuinely writable,
+     * not just present -- test_libc_shim_probe_k.c independently confirms
+     * the bytes landed in the real framebuffer by reading the same offsets
+     * back through the kernel's own identity-mapped view once this probe
+     * returns. */
+    libos_fb_t fb;
+    if (libos_fb_map(&fb) == 0 && fb.vaddr != NULL && fb.height > 0) {
+        volatile uint32_t *first = (volatile uint32_t *)fb.vaddr;
+        volatile uint32_t *last =
+            (volatile uint32_t *)((uint8_t *)fb.vaddr +
+                                  (uint64_t)fb.pitch * (fb.height - 1));
+
+        *first = 0xDEADBEEFu;
+        *last  = 0xCAFEF00Du;
+
+        if (*first == 0xDEADBEEFu && *last == 0xCAFEF00Du)
+            result |= LIBC_SHIM_OK_FB;
+    }
 
     /* LIBOS_RETURN_SYSCALL_NUM has no named wrapper -- see libos_c_probe.c's
      * identical comment. */
