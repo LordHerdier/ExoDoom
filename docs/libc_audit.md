@@ -35,9 +35,23 @@ Status was then cross-referenced against `nm --defined-only` over the kernel's
 own objects, and the behavioural notes against the actual implementations in
 `src/string.c`, `src/ctype.c`, `src/stdlib.c` and `src/stdio.c`.
 
-> This required all 79 files under `src/doom/` to compile, which is
-> **SCRUM-64** (PR #66). That PR and this one are companions: it makes the
-> objects, this explains what they still need.
+> **This audit has a soft dependency on SCRUM-64 (PR #66).** Deriving the
+> list at all required all 79 files under `src/doom/` to compile, which is
+> what that PR does — the two are companions: it makes the objects, this
+> explains what they still need. They are independent branches off `main` and
+> can merge in either order, but until #66 lands, these references in here
+> point at files that do not exist yet:
+>
+> - `src/errno.c` and `src/errno.h` (§4's `errno` paragraph, and the `EISDIR`
+>   discussion) — added by #66.
+> - The `Header` column in the CSV names `strings.h` for `strcasecmp` /
+>   `strncasecmp` and `sys/stat.h` for `mkdir`. Both headers are #66's; the
+>   *implementations* behind the first two are older (`src/string.c`,
+>   SCRUM-11) and are unaffected.
+> - §5's account of the doom pass dropping `-mno-sse`.
+>
+> Nothing in the status columns depends on #66 — what is implemented and what
+> is missing is the same either way. Only the file names move.
 
 Call-site counts in the CSV are grep, and are the one soft number — they count
 text, including occurrences in compiled-out blocks. Where grep and the symbol
@@ -147,8 +161,9 @@ deviations worth knowing:
 | `strncpy` | Standard, including the standard footgun: no NUL terminator when the source is at least `n` bytes. |
 | `memcpy`, `memset` | Correct, byte-at-a-time. See §3.3. |
 
-`errno` deserves its own line: it exists as an object (`src/errno.c`, SCRUM-64)
-and **nothing ever sets it**. `m_misc.c`'s `M_FileExists` tests
+`errno` deserves its own line: it exists as an object (`src/errno.c` — added by
+SCRUM-64 / PR #66, so not present on this branch; see §1) and **nothing ever
+sets it**. `m_misc.c`'s `M_FileExists` tests
 `errno == EISDIR` to distinguish "open failed" from "open failed because it's a
 directory", so it always reads false. That is the correct answer for a shim
 with no directories, but it is right by accident, and it will stay right only
