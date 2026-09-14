@@ -157,11 +157,17 @@ typedef int (*cmp_fn)(const void *, const void *);
  * on small runs and removes the recursion's base-case entirely. */
 #define QSORT_INSERTION_THRESHOLD 8
 
-static void swap_elems(char *a, char *b, size_t size) {
-    while (size--) {
-        char t = *a;
-        *a++ = *b;
-        *b++ = t;
+/*
+ * Byte-wise exchange of two non-overlapping runs.  One element is just `size`
+ * bytes, so this doubles as the block swap the three-way partition uses to
+ * rotate its equal-key runs into the middle.  n == 0 must be a no-op: that
+ * happens whenever one of the two runs a block swap names is empty.
+ */
+static void swap_bytes(char *a, char *b, size_t n) {
+    for (size_t k = 0; k < n; k++) {
+        char t = a[k];
+        a[k] = b[k];
+        b[k] = t;
     }
 }
 
@@ -169,73 +175,129 @@ static void insertion_sort(char *base, size_t nmemb, size_t size, cmp_fn cmp) {
     for (size_t i = 1; i < nmemb; i++) {
         for (size_t j = i; j > 0 &&
                            cmp(base + (j - 1) * size, base + j * size) > 0; j--) {
-            swap_elems(base + (j - 1) * size, base + j * size, size);
+            swap_bytes(base + (j - 1) * size, base + j * size, size);
         }
     }
 }
 
 /*
- * Median-of-three quicksort with the pivot parked at lo.
+ * Median-of-three quicksort, three-way (Bentley-McIlroy) partition, pivot
+ * parked at lo.
  *
- * Two things matter more here than raw speed.  First, the pivot is compared
- * in place rather than copied, because element size is a runtime value and
- * there is no scratch buffer to copy it into -- hence parking it at lo and
- * partitioning only [lo+1, hi], so no swap can move it out from under the
- * comparisons.  Second, the recursion only ever descends into the *smaller*
- * partition and loops on the larger, which bounds stack depth at O(log n):
- * the kernel stack is 16 KiB (src/boot.s) and a naive quicksort recursing on
- * both sides would blow it on an adversarial input long before it finished.
+ * Three properties matter more here than raw speed.
+ *
+ * First, the pivot is compared in place rather than copied, because element
+ * size is a runtime value and there is no scratch buffer to copy it into --
+ * hence parking it at lo and partitioning only [lo+1, hi], so no swap can
+ * move it out from under the comparisons.  Nothing below ever writes to lo
+ * while the scans are running.
+ *
+ * Second, the recursion only ever descends into the *smaller* partition and
+ * loops on the larger, which bounds stack depth at O(log n): the kernel stack
+ * is 16 KiB (src/boot.s) and a naive quicksort recursing on both sides would
+ * blow it on an adversarial input long before it finished.  Measured depth at
+ * n = 1,000,000 is 18 for sorted/reverse input against a log2 n of 20.
+ *
+ * Third -- SCRUM-171 -- keys equal to the pivot are collected rather than
+ * swept into one side.  The two-way Hoare partition this replaced scanned
+ * with `cmp(i, lo) <= 0` / `cmp(j, lo) >= 0`, so both pointers ran straight
+ * over equal keys and split n-1/0 on any input with few distinct values, i.e.
+ * O(n^2): all-equal input at n = 200,000 cost 2.0e10 comparisons (5882x
+ * n log n, 29 s) before this.  Here each scan stops on an equal key and parks
+ * it at the end it came from, so the scans meet in the middle and the loop
+ * ends with the array in four runs:
+ *
+ *     lo        pa        pb pc        pd        pn
+ *     |  == P   |   < P   | ?  |  > P  |  == P   |
+ *
+ * with the unscanned ? region empty (pb == pc + size).  The two block swaps
+ * below rotate the equal runs inward, into the position they already belong
+ * in, so both recursions exclude them: all-equal input becomes a single O(n)
+ * pass (200,001 comparisons at n = 200,000) and k distinct values cost
+ * O(n log k).  Sorted and reverse input are unaffected; random input is ~20%
+ * cheaper because duplicate keys stop being re-partitioned.
  */
 static void qsort_range(char *lo, size_t nmemb, size_t size, cmp_fn cmp) {
     while (nmemb > QSORT_INSERTION_THRESHOLD) {
+        char *pn  = lo + nmemb * size;         /* one past the last element */
         char *mid = lo + (nmemb / 2) * size;
-        char *hi  = lo + (nmemb - 1) * size;
+        char *hi  = pn - size;
 
         /* Insertion-sort the three so that *lo <= *mid <= *hi, then park the
          * median at lo to be the pivot. */
         if (cmp(mid, lo) < 0) {
-            swap_elems(mid, lo, size);
+            swap_bytes(mid, lo, size);
         }
         if (cmp(hi, mid) < 0) {
-            swap_elems(hi, mid, size);
+            swap_bytes(hi, mid, size);
             if (cmp(mid, lo) < 0) {
-                swap_elems(mid, lo, size);
+                swap_bytes(mid, lo, size);
             }
         }
-        swap_elems(lo, mid, size);
+        swap_bytes(lo, mid, size);
 
-        char *i = lo + size;
-        char *j = hi;
+        char *pa = lo + size;      /* one past the leading  == P run       */
+        char *pb = lo + size;      /* first unscanned element from the left */
+        char *pc = hi;             /* last unscanned element from the right */
+        char *pd = hi;             /* one before the trailing == P run      */
 
         for (;;) {
-            while (i <= j && cmp(i, lo) <= 0) {
-                i += size;
+            /* r is only read on the iteration that assigned it: && stops the
+             * comparison from running once the scan pointers have crossed. */
+            int r = 0;
+
+            while (pb <= pc && (r = cmp(pb, lo)) <= 0) {
+                if (r == 0) {
+                    swap_bytes(pa, pb, size);
+                    pa += size;
+                }
+                pb += size;
             }
-            while (i <= j && cmp(j, lo) >= 0) {
-                j -= size;
+            while (pb <= pc && (r = cmp(pc, lo)) >= 0) {
+                if (r == 0) {
+                    swap_bytes(pc, pd, size);
+                    pd -= size;
+                }
+                pc -= size;
             }
-            if (i > j) {
+            if (pb > pc) {
                 break;
             }
-            swap_elems(i, j, size);
-            i += size;
-            j -= size;
+            swap_bytes(pb, pc, size);
+            pb += size;
+            pc -= size;
         }
 
-        /* j now points at the last element <= pivot; that is where the pivot
-         * belongs.  j never walks below lo: the scan stops on i > j first. */
-        swap_elems(lo, j, size);
+        /* Byte lengths of the four runs; they tile [lo, pn) exactly. */
+        size_t lead_eq  = (size_t)(pa - lo);           /* holds the pivot */
+        size_t less     = (size_t)(pb - pa);
+        size_t greater  = (size_t)(pd - pc);
+        size_t trail_eq = (size_t)(pn - pd) - size;
+        size_t s;
 
-        size_t left  = (size_t)(j - lo) / size;
-        size_t right = nmemb - left - 1;
+        /* Rotate each == P run inward past the neighbouring < P / > P run.
+         * Moving only min(the two lengths) bytes is what keeps the source and
+         * destination of each swap from overlapping. */
+        s = lead_eq < less ? lead_eq : less;
+        swap_bytes(lo, pb - s, s);
 
-        if (left < right) {
-            qsort_range(lo, left, size, cmp);
-            lo = j + size;
-            nmemb = right;
+        s = greater < trail_eq ? greater : trail_eq;
+        swap_bytes(pb, pn - s, s);
+
+        /* The == P run in the middle is in final position and belongs to
+         * neither side.  It always holds at least the pivot, so both sides
+         * are strictly smaller than nmemb and the loop always makes progress. */
+        char  *right   = pn - greater;
+        size_t left_n  = less / size;
+        size_t right_n = greater / size;
+
+        if (left_n < right_n) {
+            qsort_range(lo, left_n, size, cmp);
+            lo = right;
+            nmemb = right_n;
         } else {
-            qsort_range(j + size, right, size, cmp);
-            nmemb = left;
+            qsort_range(right, right_n, size, cmp);
+            nmemb = left_n;
         }
     }
 

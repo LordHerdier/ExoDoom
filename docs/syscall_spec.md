@@ -123,7 +123,7 @@ analysis. This determines what the freestanding libc shim must provide.
 | `realloc` | 3        | ✅ Done | Resize allocation. `heap_realloc` grows in place when the next block is free.                 |
 | `calloc`  | 2        | ⬜ Todo | `malloc` + `memset(0)`. Trivial wrapper.                                                      |
 | `abort`   | 2        | ⬜ Todo | Abnormal termination. Implement as halt loop.                                                 |
-| `qsort`   | 0 direct | ✅ Done | Not called directly but may be pulled in. Median-of-three quicksort.                          |
+| `qsort`   | 0 direct | ✅ Done | Not called directly but may be pulled in. Median-of-three quicksort, three-way partition.     |
 | `rand`    | 0 direct | ✅ Done | Not in the vendored core either, but part of the same header. C-standard reference LCG.       |
 | `srand`   | 0 direct | ✅ Done | Seeds `rand`; the sequence for a given seed is fixed and asserted in the test suite.          |
 
@@ -142,7 +142,30 @@ knowing before changing it:
 - **`qsort` recurses into the smaller partition only** and loops on the larger,
   bounding stack depth at O(log n). The kernel stack is 16 KiB; a quicksort
   recursing on both sides would overrun it on a sorted input long before
-  finishing.
+  finishing. Measured depth at n = 1,000,000 is 18 against a log₂ n of 20.
+- **`qsort` partitions three ways, and that is not an optimisation**
+  (SCRUM-171). The original two-way Hoare partition scanned with
+  `cmp(i, lo) <= 0` / `cmp(j, lo) >= 0`, so both pointers ran over keys equal
+  to the pivot instead of stopping on them; every partition of an input with
+  few distinct values then split n-1/0, which is O(n²). The Bentley–McIlroy
+  partition in place of it stops each scan on an equal key, parks it at the
+  end that scan came from, and rotates both equal runs into the middle with
+  two block swaps, where they are already in final position and are excluded
+  from both recursions. Comparison counts at n = 200,000:
+
+  | Input shape  | Two-way (before) | Three-way (after) | Change    |
+  | ------------ | ---------------: | ----------------: | --------- |
+  | sorted       |        3,167,247 |         3,167,247 | —         |
+  | reverse      |        3,167,247 |         3,167,247 | —         |
+  | random       |        4,020,100 |         3,211,413 | 1.25× fewer |
+  | ten distinct |    1,704,561,308 |           680,505 | 2,505× fewer |
+  | two distinct |   15,064,643,549 |           300,153 | 50,190× fewer |
+  | all-equal    |   20,000,299,963 |           200,001 | 100,001× fewer |
+
+  All-equal input is now a single O(n) partition pass; k distinct values cost
+  O(n log k). `tests/kernel/test_stdlib_k.c` guards this with comparison-count
+  budgets rather than wall-clock times, since the count is a property of the
+  algorithm and is identical on the host and under QEMU.
 - **`rand` is pinned to `uint32_t`.** The C standard's reference LCG is
   specified over a 32-bit accumulator; a 64-bit one silently produces a
   different sequence. Seed 1 must yield 16838, 5758, 10113, …

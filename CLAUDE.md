@@ -281,9 +281,13 @@ convention and calls it from `kernel_main` instead of a test harness.
   `qsort`) lives in the same file; `calloc`, `exit`, `abort`, `atexit`,
   `getenv` and `atof` are still unimplemented. `qsort` recurses only into the
   smaller partition (the kernel stack is 16 KiB, and a both-sides recursion
-  overruns it on sorted input), and `rand` is the C-standard LCG pinned to
-  `uint32_t` — widen the accumulator and the seeded sequence silently changes.
-  See `docs/syscall_spec.md` §2.2.
+  overruns it on sorted input); it partitions **three ways** (Bentley–McIlroy,
+  SCRUM-171) because the two-way Hoare scan it replaced skipped over keys
+  equal to the pivot and went O(n²) on any input with few distinct values —
+  each scan must stop on an equal key, and the equal run that collects in the
+  middle is final and belongs to neither recursion. `rand` is the C-standard
+  LCG pinned to `uint32_t` — widen the accumulator and the seeded sequence
+  silently changes. See `docs/syscall_spec.md` §2.2.
 - **`kmalloc` is finished once `page_alloc_init` has run.** It reserves the
   bump pool as it stood at that moment and never hears about a later `kmalloc`,
   so a bump allocation made afterwards can alias a page `alloc_page()` has
