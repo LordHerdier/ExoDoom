@@ -633,13 +633,14 @@ somehow acquired the U/S bit fails the build rather than shipping, and a test
 kernel that lost it fails loudly instead of triple-faulting into an
 unexplained CI timeout. Do not delete those symbols; the check depends on them.
 
-The consequence is blunt: in a test build, all 4 GB of the identity map is
-readable and writable from CPL 3, including kernel text and the page tables
-themselves. There is no isolation to speak of yet — and the kernel map below
-deliberately mirrors the same gate, since it is the map the ring-3 probe
-actually runs against. It is gated to test builds so a shipped kernel never
-carries it. SCRUM-48 gives each LibOS its own page directory; SCRUM-55
-and SCRUM-56 then assert that a LibOS faults on kernel memory and on port I/O.
+The consequence is blunt: in a test build, all 4 GB of *this* map — the boot
+map `boot.s` builds to reach long mode, live only until `vmm_init()` replaces
+it — is readable and writable from CPL 3, including kernel text and the page
+tables themselves. That is harmless in practice: nothing ever executes at
+CPL 3 against the boot map, since `vmm_init()` loads its own `CR3` before
+`run_tests()` runs. The map that actually matters is the kernel map below,
+and SCRUM-55 tightens *that* one back to supervisor-only — see its own
+section.
 
 ### The kernel map (`vmm_init`, SCRUM-15)
 
@@ -680,15 +681,28 @@ calling `exo_page_free` on one gets `-EXO_EPERM` (SCRUM-152). That is not
 incidental: page tables are the one resource where a stray free is
 unrecoverable.
 
-#### U/S again: the kernel map mirrors boot.s
+#### U/S again: the kernel map is supervisor-only in every build (SCRUM-55)
 
-`vmm.c` sets the `USER` bit on its leaves and links under `-DTESTING` and
-nowhere else — the same gate `build.sh` gives `boot.s` via
-`--defsym RING3_PROBE=1`, for the same reason. `vmm_init()` runs *before*
-`run_tests()`, so the ring-3 probe executes against the kernel map; if the two
-disagreed, a test build would map ring-3 code supervisor-only and triple-fault.
-`tests/kernel/test_vmm_k.c` asserts the `USER` bit is present in a test build,
-the C-side mirror of `build.sh`'s step 1b.
+`vmm.c`'s `KERNEL_MAP_USER` used to mirror `boot.s`'s blanket `-DTESTING`
+gate — the reasoning above applied to the kernel map too, because
+`tests/kernel/ring3_probe.s` and `tss_fault_probe.s` predate SCRUM-48's
+per-LibOS address spaces and execute directly against the kernel's own
+tables rather than a copied-in LibOS window the way every later probe does.
+That made real isolation untestable: `vmm_create_address_space()` shares
+`kernel_pml4[0]` with every address space it builds (see "Address spaces
+beyond the kernel's own" below), so a fresh LibOS window saw the *same*
+open kernel range the kernel's own map did.
+
+SCRUM-55 closes it. `KERNEL_MAP_USER` is `0` unconditionally now, and
+`vmm_init()` separately calls `expose_ring3_legacy_probes()` (`src/vmm.c`)
+to re-flag just those two probes' own code ranges — not their stacks, since
+neither probe ever pushes to one — as the sole, explicitly-scoped exception.
+Everything else the kernel map covers, `tests/kernel/test_kernel_mem_fault_k.c`
+now asserts is genuinely off-limits: a real LibOS address space built via
+`libos_build_image()` takes a *protection* `#PF` (present, not not-present)
+reading or writing `_load_start`, the kernel image's own base.
+`tests/kernel/test_vmm_k.c` asserts both halves — ordinary kernel text is
+supervisor-only, and the two named legacy probes are the only exception.
 
 #### API
 

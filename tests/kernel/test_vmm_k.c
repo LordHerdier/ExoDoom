@@ -29,6 +29,8 @@
 #define SCRATCH_VA_2M 0x0000001040000000ULL
 
 extern uint8_t _load_start[];
+extern void ring3_probe(void);
+extern void tss_fault_probe(void);
 
 /* The map exists, CR3 points at it, and its tables belong to the kernel. */
 static void test_kernel_map_is_live(void)
@@ -76,20 +78,45 @@ static void test_kernel_image_identity_mapped(void)
 }
 
 /*
- * Test builds map the identity range user-accessible, matching the
- * --defsym RING3_PROBE=1 gate boot.s gets from build.sh: the ring-3 probe in
- * test_syscall_k.c runs against *these* tables, and the U/S bit is only
- * honoured when set at every level.  The C-side mirror of build.sh's step 1b.
- * (A shipped kernel sets no USER bit; this file only ever builds with
- * -DTESTING, so that direction is build.sh's to assert.)
+ * The kernel's own map is supervisor-only in every build, TESTING included
+ * (SCRUM-55) -- ordinary kernel .text, this test's own code included, is not
+ * user-accessible. This used to assert the opposite: TESTING builds mapped
+ * the *entire* identity range VMM_USER so tests/kernel/ring3_probe.s and
+ * tss_fault_probe.s could execute at CPL 3 against these very tables, but
+ * that made "a LibOS can't touch kernel memory" untestable, since every
+ * address space shares this same kernel subtree. See KERNEL_MAP_USER's own
+ * comment in src/vmm.c.
  */
-static void test_testing_build_maps_user_accessible(void)
+static void test_kernel_text_is_supervisor_only(void)
 {
     uint64_t flags = 0;
-    uint64_t text = (uint64_t)(uintptr_t)&test_testing_build_maps_user_accessible;
+    uint64_t text = (uint64_t)(uintptr_t)&test_kernel_text_is_supervisor_only;
 
     CU_ASSERT_EQUAL(vmm_translate(text, NULL, &flags), VMM_OK);
-    CU_ASSERT_TRUE((flags & VMM_USER) != 0);
+    CU_ASSERT_EQUAL(flags & VMM_USER, 0);
+}
+
+/*
+ * The sole, explicitly-scoped exception: ring3_probe.s and tss_fault_probe.s
+ * predate SCRUM-48's per-LibOS address spaces and still execute directly
+ * against the kernel's own .text rather than a copied-in LibOS window, so
+ * their code (and only their code -- see src/vmm.c's expose_ring3_legacy_
+ * probes()) stays user-executable. Both suites (test_syscall_k.c,
+ * test_tss_k.c) still pass under the tightened map; this just names the
+ * mechanism that keeps them passing.
+ */
+static void test_legacy_ring3_probes_stay_user_accessible(void)
+{
+    uint64_t flags = 0;
+
+    CU_ASSERT_EQUAL(vmm_translate((uint64_t)(uintptr_t)&ring3_probe,
+                                  NULL, &flags), VMM_OK);
+    CU_ASSERT_NOT_EQUAL(flags & VMM_USER, 0);
+
+    flags = 0;
+    CU_ASSERT_EQUAL(vmm_translate((uint64_t)(uintptr_t)&tss_fault_probe,
+                                  NULL, &flags), VMM_OK);
+    CU_ASSERT_NOT_EQUAL(flags & VMM_USER, 0);
 }
 
 /* Page 0 is left unmapped so a NULL dereference faults instead of quietly
@@ -487,8 +514,10 @@ void suite_vmm_tests(CU_pSuite s)
     CU_add_test(s, "kernel map is live in CR3", test_kernel_map_is_live);
     CU_add_test(s, "kernel image is identity mapped",
                 test_kernel_image_identity_mapped);
-    CU_add_test(s, "test build maps user-accessible",
-                test_testing_build_maps_user_accessible);
+    CU_add_test(s, "kernel text is supervisor-only",
+                test_kernel_text_is_supervisor_only);
+    CU_add_test(s, "legacy ring3 probes stay user-accessible",
+                test_legacy_ring3_probes_stay_user_accessible);
     CU_add_test(s, "page 0 is unmapped", test_null_page_unmapped);
     CU_add_test(s, "unmapped address reports ENOENT",
                 test_unmapped_address_translates_to_enoent);

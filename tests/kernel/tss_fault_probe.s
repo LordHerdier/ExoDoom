@@ -14,6 +14,11 @@
  * test_tss_k.c) resumes execution at the label below instead of halting,
  * so a passing run here is a passing run of the CPU's own privilege-change
  * stack switch, not a re-implementation of it.
+ *
+ * SCRUM-55 tightens the TESTING identity map back to supervisor-only outside
+ * this probe's own code: `tss_fault_probe`/`tss_fault_probe_end` bound the
+ * range src/vmm.c's vmm_init() re-exposes as user-executable, same reasoning
+ * as ring3_probe.s's own SCRUM-55 comment.
  */
 
 .code64
@@ -28,6 +33,7 @@
 
 .global tss_fault_probe
 .global tss_fault_probe_resume
+.global tss_fault_probe_end
 tss_fault_probe:
     movq $FAULT_VA, %rdi
     movq $0x5A5A5A5A, (%rdi)    /* faults: not-present, write, CPL 3 */
@@ -38,3 +44,4 @@ tss_fault_probe_resume:
 
     /* Unreachable: SYS_ESCAPE does not come back. */
     ud2
+tss_fault_probe_end:
