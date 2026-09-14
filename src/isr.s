@@ -220,3 +220,23 @@ pf_stub:
     POP_ALL_REGS
     add  $8, %rsp        // discard the CPU-pushed error code
     iretq
+
+/*
+ * ── gpf_stub — general protection fault, vector 13 (SCRUM-56) ──────────────
+ *
+ * Same shape as pf_stub, installed on vector 13 by idt_init() overriding the
+ * error_stub the loop puts there first. Shares exception_frame_t and the
+ * TESTING fault_hook_t plumbing with page_fault_handler via gp_fault_handler.
+ */
+.global gpf_stub
+.extern gp_fault_handler
+
+gpf_stub:
+    PUSH_ALL_REGS
+    mov  %rsp, %rdi
+    ALIGN_CALL_STACK
+    call gp_fault_handler
+    RESTORE_CALL_STACK
+    POP_ALL_REGS
+    add  $8, %rsp        // discard the CPU-pushed error code
+    iretq

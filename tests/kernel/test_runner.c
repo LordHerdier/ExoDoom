@@ -39,6 +39,8 @@ void suite_libc_shim_probe_tests(CU_pSuite s);
 void suite_libos_page_alloc_tests(CU_pSuite s);
 void suite_libos_heap_tests(CU_pSuite s);
 void suite_libos_heap_stress_tests(CU_pSuite s);
+void suite_port_io_fault_tests(CU_pSuite s);
+void suite_kernel_mem_fault_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -92,6 +94,16 @@ int libos_c_probe_suite_cleanup(void);
  * has to. */
 int libc_shim_probe_suite_init(void);
 int libc_shim_probe_suite_cleanup(void);
+
+/* Same idea for the port_io_fault suite: it installs the fault hook, a
+ * SYS_LIBOS_RETURN handler, and a real address space around its live
+ * ring-3 port-I/O trap test (SCRUM-56). */
+int port_io_fault_suite_cleanup(void);
+
+/* Same idea for the kernel_mem_fault suite: it installs the fault hook, a
+ * SYS_LIBOS_RETURN handler, and a real address space around its live
+ * ring-3 kernel-memory-fault test (SCRUM-55). */
+int kernel_mem_fault_suite_cleanup(void);
 
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
@@ -203,6 +215,12 @@ int run_tests(void)
 
     s = CU_add_suite("libos_heap_stress", libos_heap_stress_suite_init, NULL);
     suite_libos_heap_stress_tests(s);
+
+    s = CU_add_suite("port_io_fault", NULL, port_io_fault_suite_cleanup);
+    suite_port_io_fault_tests(s);
+
+    s = CU_add_suite("kernel_mem_fault", NULL, kernel_mem_fault_suite_cleanup);
+    suite_kernel_mem_fault_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

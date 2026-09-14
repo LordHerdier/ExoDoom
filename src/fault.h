@@ -16,8 +16,15 @@
  * tables actually say about the address, printed to COM1 before the machine
  * halts.
  *
- * The other nine error-code vectors still use error_stub; vector 13 (GPF) is
- * tracked separately (docs/drivers/idt.md §9) and can reuse everything here.
+ * Vector 13 (#GP) reuses the same frame, describer and TESTING hook via
+ * gp_fault_handler/gpf_stub (SCRUM-56) -- a ring-3 IN/OUT hits it because
+ * tss_init() (src/tss.c) points TSS.iomap_base past the segment limit, so
+ * any port access below IOPL reads as "no permission bitmap" and traps #GP
+ * regardless of the (always-0) IOPL in RFLAGS. Unlike #PF, #GP carries no
+ * CR2 and no useful error-code bits for an IN/OUT trap (the error code here
+ * is 0 unless the fault relates to a specific selector), so
+ * gp_fault_handler skips print_mapping() and the bit-decoded error line.
+ * The other eight error-code vectors still use plain error_stub.
  */
 
 /*
@@ -57,6 +64,11 @@ const char *fault_describe_err(uint64_t err, char *buf, size_t n);
  * hook that asks it to -- see below). */
 void page_fault_handler(exception_frame_t *f);
 
+/* Vector 13 (#GP) handler.  Called from gpf_stub with a pointer to the same
+ * frame shape (GPF pushes an error code too, see error_code_vectors in
+ * idt.c).  Same hook/halt behaviour as page_fault_handler, no CR2. */
+void gp_fault_handler(exception_frame_t *f);
+
 #ifdef TESTING
 /*
  * Test hook.  Called before anything is printed; returning nonzero makes the
@@ -64,6 +76,10 @@ void page_fault_handler(exception_frame_t *f);
  * deliberate fault by pointing f->rip at a fixup label.  Test builds only --
  * a shipped kernel has no way to resume from a page fault, because there is
  * no policy yet for what resuming would mean (SCRUM-47/48).
+ *
+ * Shared verbatim between page_fault_handler and gp_fault_handler via
+ * fault_set_hook() -- a test cannot tell which vector called it from the
+ * hook signature alone, only from which suite it wired the hook up in.
  */
 typedef int (*fault_hook_t)(exception_frame_t *f, uint64_t cr2);
 void fault_set_hook(fault_hook_t h);

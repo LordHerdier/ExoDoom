@@ -17,6 +17,15 @@
  * depend on the video mode GRUB happened to pick.  The suite's init/cleanup
  * pair snapshots and restores whatever kernel_main published, so the rest of
  * the boot (and the framebuffer console) is unaffected.
+ *
+ * exo_fb_acquire's info_out is now bounds-checked against the LibOS window
+ * (SCRUM-54), so a real call through do_fb_acquire() needs a buffer inside
+ * that window rather than an ordinary kernel-stack local — the same reason
+ * test_syscall_serial_k.c's valid-write case maps a scratch page instead of
+ * using a local array.  The suite maps one scratch page once in
+ * fb_binding_suite_init() and every test that needs a real info_out reuses
+ * it; tests that deliberately probe the bounds check (NULL, a kernel address,
+ * a straddling address) still pass a raw address of their own choosing.
  */
 
 #include "kunit.h"
@@ -41,8 +50,14 @@
 #define TEST_FB_BPP     32u
 #define TEST_FB_SIZE    ((uint64_t)TEST_FB_PITCH * TEST_FB_HEIGHT)
 
+/* Scratch virtual address for a real info_out, apart from every other suite's
+ * range (test_page_map_k.c: +0x20000000/+0x24000000, test_vmm_k.c:
+ * +0x10000000, test_syscall_serial_k.c: +0x28000000). */
+#define SCRATCH_INFO_VA (EXO_USER_VA_BASE + 0x2C000000ULL)
+
 static fb_geometry_t boot_geometry;
 static int           boot_had_fb;
+static uint64_t      scratch_paddr;
 
 /* Suite init/cleanup, passed to CU_add_suite in test_runner.c. */
 int fb_binding_suite_init(void)
@@ -53,6 +68,15 @@ int fb_binding_suite_init(void)
     if (boot_had_fb)
         boot_geometry = *g;
 
+    int64_t p = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
+    if (p <= 0)
+        return -1;
+
+    scratch_paddr = (uint64_t)p;
+    if (exo_syscall_dispatch(EXO_SYS_PAGE_MAP, SCRATCH_INFO_VA, scratch_paddr,
+                             EXO_PAGE_WRITE | EXO_PAGE_USER, 0, 0, 0) != 0)
+        return -1;
+
     return 0;
 }
 
@@ -62,7 +86,18 @@ int fb_binding_suite_cleanup(void)
      * normal boot continues with the screen unowned. */
     fb_binding_init(boot_had_fb ? &boot_geometry : (const fb_geometry_t *)0);
 
+    exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, SCRATCH_INFO_VA, 0, 0, 0, 0, 0);
+    exo_syscall_dispatch(EXO_SYS_PAGE_FREE, scratch_paddr, 0, 0, 0, 0, 0);
+
     return 0;
+}
+
+/* A real, in-window info_out every test that exercises a successful acquire
+ * can share — see the file header for why a kernel-stack local no longer
+ * works here. */
+static exo_fb_info_t *scratch_info(void)
+{
+    return (exo_fb_info_t *)(uintptr_t)SCRATCH_INFO_VA;
 }
 
 /* Publish the synthetic framebuffer.  fb_binding_init() also clears the owner,
@@ -116,22 +151,23 @@ static void test_acquire_binds_and_describes(void)
     install_test_fb();
     CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
 
-    exo_fb_info_t info = { 0, 0, 0, 0, 0, { 0xAA, 0xBB, 0xCC } };
+    exo_fb_info_t *info = scratch_info();
+    *info = (exo_fb_info_t){ 0, 0, 0, 0, 0, { 0xAA, 0xBB, 0xCC } };
 
-    CU_ASSERT_EQUAL(do_fb_acquire(&info), 0);
+    CU_ASSERT_EQUAL(do_fb_acquire(info), 0);
     CU_ASSERT_EQUAL(fb_binding_owner(), syscall_current_context());
 
-    CU_ASSERT_EQUAL(info.phys_addr, TEST_FB_BASE);
-    CU_ASSERT_EQUAL(info.width,     TEST_FB_WIDTH);
-    CU_ASSERT_EQUAL(info.height,    TEST_FB_HEIGHT);
-    CU_ASSERT_EQUAL(info.pitch,     TEST_FB_PITCH);
-    CU_ASSERT_EQUAL(info.bpp,       TEST_FB_BPP);
+    CU_ASSERT_EQUAL(info->phys_addr, TEST_FB_BASE);
+    CU_ASSERT_EQUAL(info->width,     TEST_FB_WIDTH);
+    CU_ASSERT_EQUAL(info->height,    TEST_FB_HEIGHT);
+    CU_ASSERT_EQUAL(info->pitch,     TEST_FB_PITCH);
+    CU_ASSERT_EQUAL(info->bpp,       TEST_FB_BPP);
 
     /* ABI: the kernel zeroes the padding instead of handing the caller's own
      * bytes back as if they were kernel data. */
-    CU_ASSERT_EQUAL(info.reserved[0], 0);
-    CU_ASSERT_EQUAL(info.reserved[1], 0);
-    CU_ASSERT_EQUAL(info.reserved[2], 0);
+    CU_ASSERT_EQUAL(info->reserved[0], 0);
+    CU_ASSERT_EQUAL(info->reserved[1], 0);
+    CU_ASSERT_EQUAL(info->reserved[2], 0);
 }
 
 /* A framebuffer already held by another LibOS is -EXO_EBUSY, and the failed
@@ -141,9 +177,7 @@ static void test_second_acquirer_is_ebusy(void)
     install_test_fb();
     CU_ASSERT_EQUAL(fb_binding_acquire(OTHER_LIBOS), FB_BIND_OK);
 
-    exo_fb_info_t info;
-
-    CU_ASSERT_EQUAL(do_fb_acquire(&info), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(do_fb_acquire(scratch_info()), -EXO_EBUSY);
     CU_ASSERT_EQUAL(fb_binding_owner(), OTHER_LIBOS);
 }
 
@@ -154,13 +188,14 @@ static void test_owner_may_reacquire(void)
 {
     install_test_fb();
 
-    exo_fb_info_t first  = { 0, 0, 0, 0, 0, { 0, 0, 0 } };
-    exo_fb_info_t second = { 0, 0, 0, 0, 0, { 0, 0, 0 } };
+    exo_fb_info_t *info = scratch_info();
 
-    CU_ASSERT_EQUAL(do_fb_acquire(&first), 0);
-    CU_ASSERT_EQUAL(do_fb_acquire(&second), 0);
+    CU_ASSERT_EQUAL(do_fb_acquire(info), 0);
+    uint64_t first_phys_addr = info->phys_addr;
 
-    CU_ASSERT_EQUAL(second.phys_addr, first.phys_addr);
+    CU_ASSERT_EQUAL(do_fb_acquire(info), 0);
+
+    CU_ASSERT_EQUAL(info->phys_addr, first_phys_addr);
     CU_ASSERT_EQUAL(fb_binding_owner(), syscall_current_context());
 }
 
@@ -171,6 +206,41 @@ static void test_null_info_faults_without_binding(void)
     install_test_fb();
 
     CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE, 0, 0, 0, 0, 0, 0),
+                    -EXO_EFAULT);
+    CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
+}
+
+/* A kernel-space info_out is rejected the same way NULL is (SCRUM-54): the
+ * identity map means a kernel address is present and writable, so without
+ * this check the kernel would write the struct into its own memory on
+ * request rather than the caller's. */
+static void test_kernel_address_info_faults_without_binding(void)
+{
+    install_test_fb();
+
+    /* A real kernel address: the kernel image loads at 2M (src/linker.ld). */
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE, 0x200000, 0, 0,
+                                         0, 0, 0),
+                    -EXO_EFAULT);
+    CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
+
+    /* One byte below the window. */
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE,
+                                         EXO_USER_VA_BASE - 1, 0, 0, 0, 0, 0),
+                    -EXO_EFAULT);
+    CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
+}
+
+/* A struct that starts inside the window but would straddle its end is
+ * rejected too — exo_range_in_user_window checks base + len, not just base. */
+static void test_info_straddling_window_end_faults(void)
+{
+    install_test_fb();
+
+    uint64_t straddling = EXO_USER_VA_END - sizeof(exo_fb_info_t) + 1;
+
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE, straddling, 0, 0,
+                                         0, 0, 0),
                     -EXO_EFAULT);
     CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
 }
@@ -192,9 +262,7 @@ static void test_headless_reports_enodev(void)
     CU_ASSERT_EQUAL(fb_binding_init((const fb_geometry_t *)0), FB_BIND_ENODEV);
     CU_ASSERT_PTR_NULL(fb_binding_geometry());
 
-    exo_fb_info_t info;
-
-    CU_ASSERT_EQUAL(do_fb_acquire(&info), -EXO_ENODEV);
+    CU_ASSERT_EQUAL(do_fb_acquire(scratch_info()), -EXO_ENODEV);
     CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
 
     /* With no framebuffer, no physical address is framebuffer memory, so the
@@ -319,14 +387,14 @@ static void test_release_lets_another_context_acquire(void)
     install_test_fb();
     CU_ASSERT_EQUAL(fb_binding_acquire(OTHER_LIBOS), FB_BIND_OK);
 
-    exo_fb_info_t info;
-    CU_ASSERT_EQUAL(do_fb_acquire(&info), -EXO_EBUSY);
+    exo_fb_info_t *info = scratch_info();
+    CU_ASSERT_EQUAL(do_fb_acquire(info), -EXO_EBUSY);
 
     fb_binding_release(OTHER_LIBOS);
     CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
 
-    CU_ASSERT_EQUAL(do_fb_acquire(&info), 0);
-    CU_ASSERT_EQUAL(info.phys_addr, TEST_FB_BASE);
+    CU_ASSERT_EQUAL(do_fb_acquire(info), 0);
+    CU_ASSERT_EQUAL(info->phys_addr, TEST_FB_BASE);
     CU_ASSERT_EQUAL(fb_binding_owner(), syscall_current_context());
 
     /* And the new owner can map it, which the previous one no longer can. */
@@ -365,6 +433,10 @@ void suite_fb_binding_tests(CU_pSuite s)
     CU_add_test(s, "owner may re-acquire", test_owner_may_reacquire);
     CU_add_test(s, "null info faults without binding",
                 test_null_info_faults_without_binding);
+    CU_add_test(s, "kernel address info faults without binding",
+                test_kernel_address_info_faults_without_binding);
+    CU_add_test(s, "info straddling window end faults",
+                test_info_straddling_window_end_faults);
     CU_add_test(s, "FREE sentinel cannot own", test_free_sentinel_cannot_own);
     CU_add_test(s, "headless reports ENODEV", test_headless_reports_enodev);
     CU_add_test(s, "degenerate geometry refused",
