@@ -221,6 +221,73 @@ if [[ "${TESTING:-0}" == "1" ]]; then
       libos_c_probe_data.bin libos_c_probe_data_blob.o )
   objs+=(build/libos_c_probe_code_blob.o build/libos_c_probe_data_blob.o)
 
+  echo "[3b2/7] Build libc shim probe (SCRUM-51)"
+  # Same mechanism as the libos_c_probe step just above -- a second,
+  # independent link target at LIBOS_LAUNCH_CODE_VADDR/_DATA_VADDR -- but
+  # this one links in the *actual* libc shim sources (SCRUM-51's real
+  # subject) rather than a single throwaway probe function: src/stdlib.c,
+  # src/stdio.c, src/string.c, src/ctype.c, plus the LibOS allocators they
+  # now sit on, src/libos_heap.c and src/libos_page_alloc.c (SCRUM-37/-38).
+  #
+  # Compiled WITHOUT -DEXO_KERNEL -- unlike every other src/*.c compile in
+  # this script (step 3 above always passes it) -- which is what flips
+  # stdlib.c's malloc/free/realloc onto libos_heap_alloc/_free/_realloc,
+  # stdio.c's printf onto exo_serial_write(), and libos_page_alloc.c's
+  # do_page_*() onto the real exo_page_alloc()/exo_page_map()/... `syscall`
+  # stubs instead of the in-process exo_syscall_dispatch() call those files
+  # use when built into the kernel for their own SCRUM-37/-38 unit tests
+  # (see each file's own #ifdef EXO_KERNEL comment). Each source needs its
+  # own object file distinct from the kernel-side build/<name>.o step 3
+  # already produced, hence the libc_shim_ prefix below.
+  shim_dir=tests/kernel/libc_shim_probe
+  # libc_shim_probe.c MUST come first: libos_build_image() always sets
+  # entry_vaddr to LIBOS_LAUNCH_CODE_VADDR itself (src/libos_launch.c) --
+  # the base of the whole code blob, not a symbol looked up by name -- the
+  # same convention libos_c_probe.c relies on by being the *only* object in
+  # its link. With more than one object file, ld places each input file's
+  # .text contiguously in command-line order, so whichever file is linked
+  # first lands at offset 0 of the blob, i.e. at LIBOS_LAUNCH_CODE_VADDR --
+  # and that has to be libc_shim_probe_main, or iretq lands on whatever
+  # stdlib.c/stdio.c function happened to compile first instead.
+  shim_srcs=("$shim_dir/libc_shim_probe.c" \
+             src/stdlib.c src/stdio.c src/string.c src/ctype.c \
+             src/libos_heap.c src/libos_page_alloc.c)
+  shim_objs=()
+  for c in "${shim_srcs[@]}"; do
+    o="build/libc_shim_$(basename "${c%.c}.o")"
+    echo "    CC $(basename "$c") (libc shim, ring 3)"
+    x86_64-elf-gcc -c "$c" -o "$o" "${probe_cflags[@]}" -I src/ -I "$shim_dir"
+    shim_objs+=("$o")
+  done
+
+  x86_64-elf-gcc -E -P -x assembler-with-cpp -I src/ -DEXO_KERNEL \
+    "$shim_dir/libc_shim_probe.ld.in" | sed 's/ULL//g' > build/libc_shim_probe.ld
+  x86_64-elf-ld -T build/libc_shim_probe.ld -o build/libc_shim_probe.elf \
+    "${shim_objs[@]}"
+
+  x86_64-elf-objcopy -O binary --only-section=.text \
+    build/libc_shim_probe.elf build/libc_shim_probe_code.bin
+  x86_64-elf-objcopy -O binary --only-section=.data \
+    build/libc_shim_probe.elf build/libc_shim_probe_data.bin
+
+  shim_bss_start=0x$(nm_symbol_value build/libc_shim_probe.elf __libc_shim_probe_bss_start)
+  shim_bss_end=0x$(nm_symbol_value build/libc_shim_probe.elf __libc_shim_probe_bss_end)
+  if [[ "$shim_bss_start" == "0x" || "$shim_bss_end" == "0x" ]]; then
+    echo "    ERROR: libc_shim_probe.elf missing __libc_shim_probe_bss_start/_end"
+    echo "           -- did libc_shim_probe.ld.in's .bss block change?"
+    exit 1
+  fi
+  shim_bss_len=$(( shim_bss_end - shim_bss_start ))
+
+  printf '#define LIBC_SHIM_PROBE_BSS_LEN %d\n' "$shim_bss_len" \
+    > "$shim_dir/libc_shim_probe_layout.h"
+
+  ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+      libc_shim_probe_code.bin libc_shim_probe_code_blob.o )
+  ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+      libc_shim_probe_data.bin libc_shim_probe_data_blob.o )
+  objs+=(build/libc_shim_probe_code_blob.o build/libc_shim_probe_data_blob.o)
+
   echo "[3c/7] Compile kernel test sources"
   for c in tests/kernel/*.c; do
     o="build/$(basename "${c%.c}.o")"

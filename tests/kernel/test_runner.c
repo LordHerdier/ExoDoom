@@ -35,6 +35,7 @@ void suite_syscall_serial_tests(CU_pSuite s);
 void suite_syscall_pit_tests(CU_pSuite s);
 void suite_libos_main_tests(CU_pSuite s);
 void suite_libos_c_probe_tests(CU_pSuite s);
+void suite_libc_shim_probe_tests(CU_pSuite s);
 void suite_libos_page_alloc_tests(CU_pSuite s);
 void suite_libos_heap_tests(CU_pSuite s);
 void suite_libos_heap_stress_tests(CU_pSuite s);
@@ -82,6 +83,15 @@ int libos_main_suite_cleanup(void);
  * SYS_LIBOS_RETURN handler, and a real address space around its live
  * compiled-ring-3 test (SCRUM-173). */
 int libos_c_probe_suite_cleanup(void);
+
+/* Same idea for the libc_shim_probe suite: it installs the fault hook, a
+ * SYS_LIBOS_RETURN handler, and a real address space around its live
+ * compiled-libc-shim-in-ring-3 test (SCRUM-51). Its init additionally saves
+ * PAGE_OWNER_LIBOS's boot-time address-space binding, which cleanup restores
+ * -- see test_libc_shim_probe_k.c's own comment on why this suite (alone)
+ * has to. */
+int libc_shim_probe_suite_init(void);
+int libc_shim_probe_suite_cleanup(void);
 
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
@@ -176,6 +186,10 @@ int run_tests(void)
 
     s = CU_add_suite("libos_c_probe", NULL, libos_c_probe_suite_cleanup);
     suite_libos_c_probe_tests(s);
+
+    s = CU_add_suite("libc_shim_probe", libc_shim_probe_suite_init,
+                     libc_shim_probe_suite_cleanup);
+    suite_libc_shim_probe_tests(s);
 
     /* No cleanup: the suite's last test (test_slot_table_exhaustion) resets
      * src/libos_page_alloc.c's static state to empty as its final action,

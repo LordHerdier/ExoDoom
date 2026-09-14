@@ -73,6 +73,34 @@ make clean                     # rm -rf build
   `test_libos_main_k.c` drives the hand-assembled probe, proving a real bound
   syscall (`exo_serial_write`) works from *compiled* ring-3 code — the
   prerequisite SCRUM-51's libc-shim port needs and didn't have before this.
+- `tests/kernel/libc_shim_probe/` (SCRUM-51) is a second, independent
+  application of that same link-target mechanism, opting out of the
+  `tests/kernel/*.c` loop the same way and for the same reason. Where
+  `libos_c_probe` links one throwaway probe function, this target links the
+  *real* libc shim — `src/stdlib.c`, `src/stdio.c`, `src/string.c`,
+  `src/ctype.c`, plus `src/libos_heap.c`/`src/libos_page_alloc.c` — compiled
+  a second time, **without** `-DEXO_KERNEL` (every other `src/*.c` compile in
+  `build.sh` always passes it). That flip is what SCRUM-51 actually did: it
+  is the same `#ifdef EXO_KERNEL` switch `src/exo_syscall.h` already used to
+  pick the kernel vs. LibOS view of the syscall ABI, now also gating
+  `malloc`/`free`/`realloc` (kmalloc vs. `libos_heap_alloc`/`_free`/`_realloc`),
+  `printf`'s sink (`serial_putc` vs. a buffered `exo_serial_write`), and
+  `libos_page_alloc.c`'s page source (the in-process `exo_syscall_dispatch()`
+  call its own kernel-side unit tests use vs. the real inline `syscall`
+  stubs) on which side of that `#ifdef` a given compile is on. `libc_shim_probe.c`
+  **must be linked first** on the object list: `libos_build_image()` always
+  treats the base of the code blob (`LIBOS_LAUNCH_CODE_VADDR`) as the entry
+  point rather than looking up a symbol, so whichever object file is linked
+  first is what ends up there — for `libos_c_probe` this was automatic (only
+  one object file); here it is an explicit ordering requirement documented
+  at the `shim_srcs` array in `build.sh`. `test_libc_shim_probe_k.c` launches
+  it under `PAGE_OWNER_LIBOS` rather than a fresh per-suite id, because
+  `exo_page_alloc`/`exo_page_map` (which `malloc` now reaches for real) route
+  "the caller's address space" through `syscall_current_context()`, hardcoded
+  in v1 to that one id — see that test file's own comment, and
+  `LIBOS_LAUNCH_MAX_CODE_PAGES`/`_DATA_PAGES`'s SCRUM-51 comment in
+  `src/libos_launch.h` for why both grew (4/4 → 8/16 pages) to fit a real
+  libc shim rather than a one-function probe.
 - CI (`.github/workflows/ci.yml`) runs `make docker-ci` and greps serial
   output for `ALL TESTS PASSED` / `TESTS FAILED`.
 - QEMU shortcuts: `Ctrl+A` then `X` to exit; `Ctrl+A` then `C` for the QEMU

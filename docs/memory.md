@@ -836,11 +836,16 @@ The LibOS heap is a **first-fit free-list allocator** that grows by requesting
 pages from the kernel via `exo_page_alloc`. It lives entirely in user space —
 the kernel has no knowledge of it beyond handing out physical pages.
 
-> **Not what `malloc` does today.** `src/stdlib.c`'s `malloc` forwards to the
-> *kernel* heap (§6b), which is correct while the LibOS shares the kernel's
-> address space. Re-pointing `malloc` at this allocator is out of scope for
-> both SCRUM-37 and SCRUM-38 — it needs the kernel/LibOS dual-build split
-> SCRUM-51/SCRUM-66 are gated on (see the note in `src/libos_page_alloc.h`).
+> **What `malloc` does depends on which build it's compiled into (SCRUM-51).**
+> `src/stdlib.c`'s `malloc`/`free`/`realloc` are gated on `#ifdef EXO_KERNEL` —
+> the kernel heap (§6b) when defined (every kernel `.c` compile, and every
+> `tests/kernel/*.c` suite compiled through the shared loop), this allocator
+> (`libos_heap_alloc`/`_free`/`_realloc`) when not. The "not" case is the ring-3
+> LibOS link target `tests/kernel/libc_shim_probe/` builds (see CLAUDE.md and
+> `docs/architecture.md` §7) — the same target SCRUM-173 introduced for a
+> single throwaway probe function, now also carrying the real
+> `src/stdlib.c`/`src/stdio.c`/`src/string.c`/`src/ctype.c`. `libos_page_alloc.c`
+> itself is gated the same way — see the next paragraph, updated by SCRUM-51.
 
 ```
 LibOS malloc(size):
@@ -869,25 +874,42 @@ page (mirroring `page_alloc.c`'s own bitmap-PMM shape, one entry per page
 rather than per byte), with a LIFO free list so returned slots are reused
 before the high-water mark grows further.
 
-**It calls `exo_syscall_dispatch()` directly, not the inline `syscall`-
-instruction stubs in `exo_syscall.h`.** Those stubs return via `sysretq`,
-which *unconditionally* forces CPL 3 — `src/syscall_entry.s` spells this out:
-"the CPU does not consult RCX/R11 for anything but RIP and RFLAGS." `syscall`
-itself doesn't care what privilege level issued it, but there is no matching
-leniency on the way out: code that must resume at CPL 0 after the call — this
-allocator, linked into the kernel binary today because no separate LibOS
-build target exists yet — silently drops to ring 3 for everything that runs
-afterward if it uses the real stub. This was found the hard way: an earlier
-version of this file called the stubs directly, and the very next KUnit suite
-after it hung the whole run past the 30s CI ceiling instead of failing
+**Which call convention it uses now depends on which build it's compiled
+into, the same `#ifdef EXO_KERNEL` gate as `malloc` above (SCRUM-51).** Under
+`EXO_KERNEL` it still calls `exo_syscall_dispatch()` directly rather than the
+inline `syscall`-instruction stubs in `exo_syscall.h`: those stubs return via
+`sysretq`, which *unconditionally* forces CPL 3 — `src/syscall_entry.s` spells
+this out: "the CPU does not consult RCX/R11 for anything but RIP and RFLAGS."
+`syscall` itself doesn't care what privilege level issued it, but there is no
+matching leniency on the way out: code that must resume at CPL 0 after the
+call — this file, when linked into the kernel binary for its own SCRUM-37/-38
+unit tests — silently drops to ring 3 for everything that runs afterward if
+it uses the real stub. This was found the hard way: an earlier version of
+this file called the stubs directly unconditionally, and the very next KUnit
+suite after it hung the whole run past the 30s CI ceiling instead of failing
 cleanly. Calling `exo_syscall_dispatch()` is a plain C call with no CPL
 transition, and is the same convention `test_syscall_mem_k.c` and
 `test_syscall_serial_k.c` already use to test a handler from kernel context —
 it proves the same handler-side behavior (ownership stamps, page-table
-effects, error codes) without the hazard. The inline stubs remain the correct
-convention for genuine ring-3 code; using them is blocked on a real LibOS
-launch harness for more than a single hand-written probe function, the same
-gap SCRUM-51/SCRUM-66 are waiting on.
+effects, error codes) without the hazard.
+
+Under the ring-3 LibOS link target (NOT `EXO_KERNEL`), this file now calls
+the real inline stubs — `exo_page_alloc()`/`exo_page_free()`/`exo_page_map()`/
+`exo_page_unmap()` — because the hazard above no longer applies: code compiled
+for that target already runs at CPL 3 (it got there via `libos_enter()`), so
+a stub's `sysretq` keeps it exactly where it already was. This is what SCRUM-51
+actually needed the SCRUM-173 link target *for*: proving `malloc` works from
+ring 3 through a real `syscall`, not through an in-process call dressed up to
+look like one. One consequence worth knowing: `exo_page_map`'s handler resolves
+"the caller's address space" via `syscall_current_context()`
+(`src/syscall.c`), hardcoded in v1 to the single id `PAGE_OWNER_LIBOS` — so
+anything exercising this path from a *real* ring-3 syscall must be launched
+under that exact id, not a distinct per-test sentinel, or the mapping lands in
+the kernel's own page tables instead of the address space actually loaded in
+CR3. `tests/kernel/test_libc_shim_probe_k.c` is the first suite that matters
+for, and its own comment (and `tests/kernel/libos_test_common.h`'s) explains
+the save/restore dance that keeps this from disturbing every other suite,
+which still expects `PAGE_OWNER_LIBOS` bound to the kernel's own map.
 
 ### SCRUM-38: `libos_heap`
 

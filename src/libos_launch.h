@@ -71,9 +71,21 @@
  * worst case cannot overlap the next section's base. Everything here stays
  * well below EXO_USER_VA_BASE + 0x20000, which tests/kernel/libos_launch_probe.s
  * relies on being unmapped (its deliberate page-fault target) -- move the
- * stack without checking that file's comment first. */
-#define LIBOS_LAUNCH_MAX_CODE_PAGES 4
-#define LIBOS_LAUNCH_MAX_DATA_PAGES 4
+ * stack without checking that file's comment first.
+ *
+ * Raised from 4/4 pages to 8/16 under SCRUM-51: the ring-3 libc-shim probe
+ * links in libos_page_alloc.c's slot table (LIBOS_PAGE_ALLOC_MAX_PAGES = 4096
+ * slots, src/libos_page_alloc.h) as static data, which alone is 48 KiB
+ * (slot_paddr + free_slots) -- more than the whole old 16 KiB data budget.
+ * This is still headroom, not a real sizing exercise: a compiled libc shim
+ * that also links in libos_heap.c and the DG_* platform glue (SCRUM-66) will
+ * likely need to grow these again, the same way LIBOS_PAGE_ALLOC_MAX_PAGES's
+ * own 16 MiB was picked for the real Doom heap estimate rather than for any
+ * probe. Both stay comfortably under the 0x20000 ceiling below with this
+ * increase (24 pages of code+data + 1 stack page + the 0x1000 code-start
+ * offset = 0x1A000). */
+#define LIBOS_LAUNCH_MAX_CODE_PAGES 8
+#define LIBOS_LAUNCH_MAX_DATA_PAGES 16
 
 #define LIBOS_LAUNCH_CODE_VADDR  (EXO_USER_VA_BASE + 0x1000ULL)
 #define LIBOS_LAUNCH_DATA_VADDR  (LIBOS_LAUNCH_CODE_VADDR + \
