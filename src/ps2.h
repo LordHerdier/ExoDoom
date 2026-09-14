@@ -108,7 +108,17 @@ void kbd_init(void);
  * from the IRQ1 path, and from elsewhere only with IRQ1 unable to run. */
 void kbd_enqueue(kbd_event_t event);
 int kbd_dequeue(kbd_event_t *out);
+
+/* Kernel-side-only: every caller (src/syscall_kbd.c's #6 handler,
+ * tests/kernel/test_kbd_ring.c) runs in ring 0 and is built with
+ * -DEXO_KERNEL. Guarded the same way exo_syscall.h guards its own
+ * exo_kbd_poll(exo_kbd_event_t *) stub, and for the same reason: a ring-3
+ * link target that includes this header for the ps2_key_t enum alone is
+ * compiled WITHOUT -DEXO_KERNEL, and without this guard the two same-named,
+ * differently-typed declarations would conflict. */
+#ifdef EXO_KERNEL
 int exo_kbd_poll(kbd_event_t *event_out);
+#endif
 uint8_t ps2_get_modifier_state(void);
 
 /* Empty the event queue and clear decoder/modifier state.  Not safe against a

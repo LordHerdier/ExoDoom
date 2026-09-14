@@ -564,6 +564,38 @@ are in. The most significant gaps remaining are `strdup`, `strncmp`,
 `strrchr`, `strstr`, `strerror`, `vsnprintf`, `sscanf`, `exit`/`abort`, and the
 full `FILE*` interface. See `docs/syscall_spec.md` §2 for the complete audit.
 
+> ✅ **SCRUM-64:** all 79 files under `src/doom/` now compile to `.o` with zero
+> errors (`make docker-build-doom`, now a CI gate that exits non-zero on any
+> failure). It was 2 of 79 before. Almost all of it was missing *headers*
+> rather than anything wrong with the vendored source: 77 files stopped at
+> their first `#include` — 66 of them on `<strings.h>`, which `doomtype.h`
+> includes on every non-Windows build — long before the compiler could reach a
+> real error. `src/strings.h`, `src/inttypes.h`, `src/errno.h`(`+.c`),
+> `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`,
+> `src/sys/types.h` and `src/sys/stat.h` are new, the doom compile pass now
+> gets `-I src`, and `src/stdio.h` grew the `FILE*` declarations.
+>
+> **Compiling is not linking.** Everything in that new `stdio.h` block, plus
+> `mkdir`, `strdup` and `atof`, is *declared and undefined* on purpose — the
+> objects compile and would fail at link with undefined references, which is
+> the honest state rather than stubs that let Doom link and then misbehave
+> inside `W_Init`. `docs/libc_audit.md` (SCRUM-72) is the per-function,
+> per-call-site list of what is still owed.
+>
+> ⚠️ **Doom requires SSE, and the kernel does not enable it.** The x86_64 SysV
+> ABI returns `float` in `xmm0`, so `m_config.c`'s `M_GetFloatVariable()`
+> cannot compile under the kernel's `-mno-sse` — no flag combination avoids
+> this (`-msoft-float` and `-mfpmath=387` both still hit the ABI). The doom
+> compile pass therefore drops `-mno-sse`; the kernel build keeps it and is
+> unaffected (no `src/*.c` uses a float). But `src/boot.s` sets only CR4.PAE —
+> never CR4.OSFXSR/OSXMMEXCPT, never clearing CR0.EM — so the first SSE
+> instruction any of these objects executes raises `#UD` today. Only 4 objects
+> hold float arithmetic (18 instructions), but allowing SSE also lets GCC
+> inline struct copies with `movaps`/`movdqa`/`pxor` engine-wide (~143 more),
+> and both need the same bits set. **No ticket owns enabling SSE or deciding
+> whether XMM state must be saved across the syscall/interrupt paths**; it is a
+> hard prerequisite for running any of this.
+
 > ✅ **SCRUM-51:** `malloc`/`free`/`realloc` and `printf` now go through the
 > real `syscall` instruction, not a kernel function call, when compiled for
 > the ring-3 LibOS link target SCRUM-173 introduced
@@ -587,6 +619,38 @@ full `FILE*` interface. See `docs/syscall_spec.md` §2 for the complete audit.
 | `DG_GetTicksMs`     | `exo_get_ticks`                                          |
 | `DG_GetKey`         | `exo_kbd_poll` dequeue                                   |
 | `DG_SetWindowTitle` | No-op (or `exo_serial_write` for debug)                  |
+
+> ✅ **SCRUM-74:** `DG_GetTicksMs` and `DG_SleepMs` are implemented, in
+> `src/doomgeneric_exo.c` — ExoDoom's doomgeneric platform file, the
+> equivalent of upstream's `doomgeneric_sdl.c`. It lives in `src/` rather than
+> `src/doom/` so the vendored tree (SCRUM-63) stays a clean drop-in on a
+> re-vendor, and it includes `doom/doomgeneric.h` for the prototypes rather
+> than restating them (which is why `build.sh`'s kernel C compile now passes
+> `-I src`). The other four callbacks are deliberately left **undefined
+> rather than stubbed** — nothing links `src/doom/` yet, so an undefined
+> reference is the honest placeholder.
+>
+> It carries the same `#ifdef EXO_KERNEL` split as `src/libos_page_alloc.c`:
+> a real ring-3 LibOS build calls the `exo_get_ticks()` stub, while the
+> kernel build reaches `exo_syscall_dispatch()` directly, because a `syscall`
+> executed from ring 0 would `sysretq` a CPL-0 caller down to CPL 3.
+> `tests/kernel/test_doomgeneric_timer_k.c` drives all five checks from ring 0.
+>
+> ⚠️ **`DG_SleepMs` spins on a counter only IRQ0 advances, so it returns only
+> with interrupts enabled.** That holds on a normal boot but **not** under
+> `-DTESTING`, where `kernel_main` deliberately performs no blanket `sti`
+> (several suites drive ring-3 faults with `RFLAGS.IF` hardcoded clear). A
+> `DG_SleepMs(n>0)` with interrupts off never returns, and would surface as a
+> CI timeout with no failing assertion — so every test that waits enables
+> interrupts for just its own wait and clears them after, as
+> `test_syscall_pit_k.c` already does. There is no internal bailout: a
+> deadline needs a second time source, and if one existed `DG_SleepMs` would
+> be using it.
+>
+> `DG_SleepMs` uses `pause`, not `hlt` — `hlt` is privileged and would `#GP`
+> in ring 3, where this is actually meant to run. The elapsed-time
+> subtraction is done in `uint32_t` so it stays correct across the counter's
+> ~49.7-day wrap, matching `kernel_sleep_ms` and Doom's own `I_GetTime`.
 
 ### Multi-application (Sprint 12)
 
@@ -682,10 +746,10 @@ bare-metal foundations to a playable game.
 | **Sprint 1: Memory + Timer**                            | Foundations                              | Multiboot 2 mmap ✅, bump allocator ✅, bitmap page allocator 🔄, PIT/timer ✅, sleep ✅, string.h ✅, ctype.h ✅, KUnit ✅, PS/2 keyboard ✅, x86_64 migration ✅, error_stub bug fix ⬜                                                                                                                                                                                                                                                    |
 | **Sprint 2: VMem + Input + libc**                       | Virtual memory + input                   | Paging on (kernel page tables from the PMM ✅ SCRUM-15), page fault handler ✅ SCRUM-17, framebuffer+WAD mapped, keyboard ring buffer, PS/2 mouse init, `printf`→serial shim                                                                                                                                                                                                                                                                                                           |
 | **Sprint 3: Heap+Mouse+Syscalls** _(20 Apr – 4 May)_    | Kernel heap + syscall gate               | First-fit heap allocator (`kmalloc`/`kfree`/`krealloc`) backed by PMM ✅ SCRUM-25, on-demand heap growth from the PMM ✅ SCRUM-26, 10K-block allocate/free stress + leak audit ✅ SCRUM-27, mouse packet decoding + delta accumulator, `stdlib.h` wrappers (`malloc`/`free`/`realloc`, `atoi`, `abs`, `rand`/`srand`, `qsort`) ✅ SCRUM-30, `errno`/`assert`/`abort`, `syscall`/`sysret` entry path via MSRs (SCRUM-32), `exo_get_ticks` as first end-to-end syscall                                                                                                                                               |
-| **Sprint 4: LibOS mem+input+math** _(4 May – 18 May)_   | LibOS address space + remaining syscalls | `exo_page_alloc`/`exo_page_free`/`exo_page_map`/`exo_fb_map` in dispatcher, LibOS-side page allocator + heap, `exo_get_key`/`exo_get_mouse_delta` syscalls, Doom keycode → PS/2 scancode translation, `math.h` (fixed-point sin/cos table, `abs`, `floor`/`ceil`), `FILE*` shim (`fopen`/`fclose`/`fread`/`fwrite`/`fseek`/`ftell`) backed by `exo_file_*`, `strcasecmp`/`strncasecmp`, `exo_file_*` kernel dispatcher                      |
+| **Sprint 4: LibOS mem+input+math** _(4 May – 18 May)_   | LibOS address space + remaining syscalls | `exo_page_alloc`/`exo_page_free`/`exo_page_map`/`exo_fb_acquire` in dispatcher (framebuffer mapping is `exo_fb_acquire` + `exo_page_map`, composed LibOS-side by `libos_fb_map()` — SCRUM-36; there is no separate `exo_fb_map` syscall), LibOS-side page allocator + heap, `exo_get_key`/`exo_get_mouse_delta` syscalls, Doom keycode → PS/2 scancode translation, `math.h` (fixed-point sin/cos table, `abs`, `floor`/`ceil`), `FILE*` shim (`fopen`/`fclose`/`fread`/`fwrite`/`fseek`/`ftell`) backed by `exo_file_*`, `strcasecmp`/`strncasecmp`, `exo_file_*` kernel dispatcher                      |
 | **Sprint 5: LibOS struct+ring 3** _(18 May – 1 Jun)_    | Ring 0 → ring 3 transition               | GDT with ring 0 + ring 3 segments ✅ SCRUM-45, TSS for kernel stack on ring-3 exceptions ✅ SCRUM-46, boot LibOS in ring 3 via `iret` to user-mode entry point ✅ SCRUM-47, separate page directory per LibOS ✅ SCRUM-48, LibOS binary loading at fixed user-space address ✅ SCRUM-49, `libos_main()` entry framework ✅ SCRUM-50, `exo_serial_write` syscall ✅ SCRUM-50, separate LibOS link target for compiled ring-3 code ✅ SCRUM-173, port libc shim (`malloc`/`printf`) to use syscall stubs ✅ SCRUM-51                                                                                                                    |
 | **Sprint 6: Syscall harden+Iso** _(1 Jun – 15 Jun)_     | Security + correctness                   | Syscall argument validation (bounds-check pointers, reject kernel addresses), test LibOS cannot read/write kernel memory (#PF, protection not not-present) ✅ SCRUM-55, test LibOS cannot execute IN/OUT instructions (#GP) ✅ SCRUM-56, consistent `exo_errno.h` error codes, automated LibOS test suite via serial, memory isolation stress test (allocate/free all pages, verify no kernel corruption), syscall round-trip benchmarks                                                        |
-| **Sprint 7: Vendor Doomgeneric** _(15 Jun – 29 Jun)_    | Doom source integration                  | Vendor doomgeneric into `src/doom/` (or git submodule), resolve all compile errors (missing types, headers, signatures), fill remaining libc gaps found during compilation, link Doom + LibOS + libc shim into single exodoom ELF, `DG_Init` loading IWAD from multiboot module via `exo_fb_map`, `DG_GetTicksMs`/`DG_SleepMs` via `exo_get_ticks`, memory-mapped WAD reader replacing `w_file_stdc.c`, `sscanf` with `%d %f %x %s` support |
+| **Sprint 7: Vendor Doomgeneric** _(15 Jun – 29 Jun)_    | Doom source integration                  | Vendor doomgeneric into `src/doom/` (or git submodule), resolve all compile errors (missing types, headers, signatures), fill remaining libc gaps found during compilation, link Doom + LibOS + libc shim into single exodoom ELF, `DG_Init` loading IWAD from multiboot module via the mapped WAD module (`mmap_find_module()`, SCRUM-16), `DG_GetTicksMs`/`DG_SleepMs` via `exo_get_ticks`, memory-mapped WAD reader replacing `w_file_stdc.c`, `sscanf` with `%d %f %x %s` support |
 | **Sprint 8: DG** callbacks+render_* _(29 Jun – 13 Jul)_ | First pixels on screen                   | `DG_DrawFrame`: blit 640×400 ARGB → 1024×768 FB (scaled), nearest-neighbour integer scale with 32-bit writes, `DG_GetKey` wired to `exo_get_key` with Doom keycode translation, `i_input.c` patched to post `ev_mouse` via `exo_mouse_poll`, debug Doom startup crash sequence (`Z_Malloc`, `W_Init`, `R_Init`), stub `I_StartSound`/`I_StopSound`/`I_UpdateSound` as no-ops, stub `I_Error`/`I_Quit` to serial + halt                      |
 | **Sprint 9: Playability E1M1** _(13 Jul – 27 Jul)_      | Playable first level                     | Debug and fix E1M1 rendering (walls, floors, ceilings, sprites), verify combat (shooting, enemy AI, damage, pickups, status bar), menu navigation (new game, options, difficulty, quit), performance profiling (frame time per subsystem), fix top 3 bottlenecks, verify 35 tics/sec game loop timing, test with Freedoom2 IWAD and original DOOM2.WAD                                                                                      |
 | **Sprint 10: Gameplay + Save/Load**                     | Save games                               | Ramdisk save/load (`exo_file_*`), `exo_file_remove`/`exo_file_rename`, `sscanf` for config                                                                                                                                                                                                                                                                                                                                                  |

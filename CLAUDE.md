@@ -28,7 +28,7 @@ make docker-run                # Build, then boot the ISO in QEMU (GRUB menu)
 make docker-run-kernel         # Build, then boot the kernel directly (no GRUB) -- preferred for dev iteration
 make docker-test               # Build with TESTING=1, boot, stream serial test output
 make docker-ci                 # Same as docker-test; what CI runs
-make docker-build-doom         # Best-effort compile pass over vendored src/doom/ (NOT part of CI)
+make docker-build-doom         # Compile-only gate over vendored src/doom/ (79/79; CI runs it)
 make docker-build DEBUG=1      # Unoptimized build (-g -O0) for GDB
 make docker-run-debug DEBUG=1  # Boot QEMU frozen at start, GDB stub on port 1234
 make clean                     # rm -rf build
@@ -48,6 +48,14 @@ make clean                     # rm -rf build
   selects the kernel view (numbers, shared structs, error codes) over the LibOS
   view (user-side `syscall` stubs). Test TUs get it too; the one that needs the
   LibOS view (`tests/kernel/test_exo_syscall_k.c`) `#undef`s it first.
+- The kernel C compile also passes **`-I src`** (SCRUM-74). Every other
+  `src/*.c` reaches its headers with quoted includes and is unaffected; the
+  flag is there because `src/doomgeneric_exo.c` includes
+  `doom/doomgeneric.h` for the `DG_*` prototypes rather than restating them,
+  and that header's own `#include <stdlib.h>` only finds the shim's
+  `src/stdlib.h` with `src/` on the angle-bracket path. `src/` holds no header
+  that shadows one of GCC's freestanding four (`stddef`/`stdint`/`stdarg`/
+  `limits`), so nothing is redirected that wasn't already coming from `src/`.
 - Test sources in `tests/kernel/*.c` are picked up **automatically** by
   `build.sh` when `TESTING=1` — no Makefile/build-script changes needed to add
   a test file, and that loop's own invocation stays untouched no matter what
@@ -203,8 +211,9 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer) |
 | Resource revocation (repossession) | `src/revoke.c/h` (protocol), the `page_revoke_*`/`fb_binding_revoke_*` primitives |
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
-| Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h` |
+| Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`; header-only: `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/types.h`, `src/sys/stat.h` |
 | Vendored Doom engine (not yet linked) | `src/doom/` |
+| doomgeneric platform layer | `src/doomgeneric_exo.c/h` (timer half: `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
 | Test framework | `src/kunit.h`, `tests/kernel/*.c`, `tests/kernel/kunit.c`, `tests/kernel/ring3_probe.s` |
 
 ### Key architectural facts worth knowing before editing
@@ -396,12 +405,32 @@ convention and calls it from `kernel_main` instead of a test harness.
   syscall probe can run. All of physical memory is then reachable from CPL 3 —
   test builds only; a normal build keeps supervisor-only pages. SCRUM-48/-55/-56
   close this properly.
-- **The vendored Doom engine is present but not built.** `src/doom/` holds
-  doomgeneric's core (SCRUM-63) and is excluded from the normal build on
-  purpose — many files still need libc gaps filled. `make docker-build-doom`
-  runs `docker/scripts/build-doom.sh` as a best-effort compile pass; it is not
-  part of `docker-build` or CI, and nothing in `src/doom/` links into
-  `build/exodoom` yet.
+- **The vendored Doom engine compiles, but is not linked.** `src/doom/` holds
+  doomgeneric's core (SCRUM-63). `make docker-build-doom` runs
+  `docker/scripts/build-doom.sh`, which since SCRUM-64 compiles **all 79 files
+  with zero errors** (it was 2 of 79) and **exits non-zero if that regresses** —
+  it is a gate now, not a status report, and CI runs it. Nothing in `src/doom/`
+  links into `build/exodoom`, and `docker-build` still excludes it.
+  **Compiling is not linking**: the `FILE*` block in `src/stdio.h`, plus
+  `mkdir`, `strdup` and `atof`, are *declared and undefined* on purpose, so
+  these objects would fail at link with undefined references. That is
+  deliberate — stubbing them would let Doom link and then misbehave deep inside
+  `W_Init` with no sign the filesystem under it was imaginary. See
+  `docs/libc_audit.md` (SCRUM-72) for the per-function, per-call-site list of
+  what is still owed.
+  - What SCRUM-64 fixed was overwhelmingly *missing headers*, not bad vendored
+    source: 77 files stopped at their first `#include`, 66 of them on
+    `<strings.h>` alone (`doomtype.h` includes it on every non-Windows build).
+    The doom pass now also gets `-I src` so the libc shim's headers are
+    reachable at all.
+  - ⚠️ **Doom needs SSE; the kernel does not enable it.** The x86_64 SysV ABI
+    returns `float` in `xmm0`, so `m_config.c`'s `M_GetFloatVariable()` cannot
+    compile under `-mno-sse` — `-msoft-float` and `-mfpmath=387` both still hit
+    the ABI. The doom pass drops `-mno-sse`; the kernel build keeps it and is
+    unaffected (no `src/*.c` uses a float). But `src/boot.s` sets only CR4.PAE,
+    so the first SSE instruction these objects execute would `#UD` today.
+    Enabling SSE, and deciding whether XMM state must be preserved across the
+    syscall/interrupt paths, is an unowned prerequisite for running any of it.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - Sprint status/roadmap and current in-flight Jira stories are tracked in

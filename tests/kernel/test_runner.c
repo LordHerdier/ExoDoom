@@ -24,6 +24,7 @@ void suite_syscall_mem_tests(CU_pSuite s);
 void suite_ownership_tests(CU_pSuite s);
 void suite_fb_binding_tests(CU_pSuite s);
 void suite_vmm_tests(CU_pSuite s);
+void suite_vmm_fb_wad_tests(CU_pSuite s);
 void suite_revoke_tests(CU_pSuite s);
 void suite_page_map_tests(CU_pSuite s);
 void suite_fault_tests(CU_pSuite s);
@@ -32,7 +33,9 @@ void suite_heap_stress_tests(CU_pSuite s);
 void suite_tss_tests(CU_pSuite s);
 void suite_libos_launch_tests(CU_pSuite s);
 void suite_syscall_serial_tests(CU_pSuite s);
+void suite_syscall_kbd_tests(CU_pSuite s);
 void suite_syscall_pit_tests(CU_pSuite s);
+void suite_doomgeneric_timer_tests(CU_pSuite s);
 void suite_libos_main_tests(CU_pSuite s);
 void suite_libos_c_probe_tests(CU_pSuite s);
 void suite_libc_shim_probe_tests(CU_pSuite s);
@@ -41,6 +44,7 @@ void suite_libos_heap_tests(CU_pSuite s);
 void suite_libos_heap_stress_tests(CU_pSuite s);
 void suite_port_io_fault_tests(CU_pSuite s);
 void suite_kernel_mem_fault_tests(CU_pSuite s);
+void suite_irq_entry_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -105,6 +109,11 @@ int port_io_fault_suite_cleanup(void);
  * ring-3 kernel-memory-fault test (SCRUM-55). */
 int kernel_mem_fault_suite_cleanup(void);
 
+/* Same idea for the irq_entry suite: it installs the fault hook, a
+ * SYS_LIBOS_RETURN handler, and a real address space around its live
+ * ring-3 hardware-interrupt test (SCRUM-170). */
+int irq_entry_suite_cleanup(void);
+
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
  * above -- kept as its own suite, separate from "libos_heap"'s plain
@@ -166,6 +175,9 @@ int run_tests(void)
     s = CU_add_suite("vmm", NULL, NULL);
     suite_vmm_tests(s);
 
+    s = CU_add_suite("vmm_fb_wad", NULL, NULL);
+    suite_vmm_fb_wad_tests(s);
+
     s = CU_add_suite("revoke", revoke_suite_init, revoke_suite_cleanup);
     suite_revoke_tests(s);
 
@@ -190,8 +202,16 @@ int run_tests(void)
     s = CU_add_suite("syscall_serial", NULL, NULL);
     suite_syscall_serial_tests(s);
 
+    s = CU_add_suite("syscall_kbd", NULL, NULL);
+    suite_syscall_kbd_tests(s);
+
     s = CU_add_suite("syscall_pit", NULL, NULL);
     suite_syscall_pit_tests(s);
+
+    /* Right after syscall_pit: this suite sits directly on top of
+     * exo_get_ticks, and if that one is failing its failures explain these. */
+    s = CU_add_suite("doomgeneric_timer", NULL, NULL);
+    suite_doomgeneric_timer_tests(s);
 
     s = CU_add_suite("libos_main", NULL, libos_main_suite_cleanup);
     suite_libos_main_tests(s);
@@ -221,6 +241,9 @@ int run_tests(void)
 
     s = CU_add_suite("kernel_mem_fault", NULL, kernel_mem_fault_suite_cleanup);
     suite_kernel_mem_fault_tests(s);
+
+    s = CU_add_suite("irq_entry", NULL, irq_entry_suite_cleanup);
+    suite_irq_entry_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 
