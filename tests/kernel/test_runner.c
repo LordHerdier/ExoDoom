@@ -32,6 +32,7 @@ void suite_heap_stress_tests(CU_pSuite s);
 void suite_tss_tests(CU_pSuite s);
 void suite_libos_launch_tests(CU_pSuite s);
 void suite_syscall_serial_tests(CU_pSuite s);
+void suite_syscall_kbd_tests(CU_pSuite s);
 void suite_syscall_pit_tests(CU_pSuite s);
 void suite_libos_main_tests(CU_pSuite s);
 void suite_libos_c_probe_tests(CU_pSuite s);
@@ -189,6 +190,9 @@ int run_tests(void)
 
     s = CU_add_suite("syscall_serial", NULL, NULL);
     suite_syscall_serial_tests(s);
+
+    s = CU_add_suite("syscall_kbd", NULL, NULL);
+    suite_syscall_kbd_tests(s);
 
     s = CU_add_suite("syscall_pit", NULL, NULL);
     suite_syscall_pit_tests(s);
