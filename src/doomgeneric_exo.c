@@ -114,6 +114,31 @@ uint32_t DG_GetTicksMs(void)
  * precondition is the honest option; inventing an escape hatch that silently
  * returns early would turn a hang into wrong game timing, which is harder to
  * notice and harder to debug.
+ *
+ * ── Cost: one syscall per iteration, not one memory read ────────────────
+ *
+ * Worth knowing before anyone leans on this for a long sleep. In the ring-3
+ * build every exo_ticks_ms() here is a real `syscall` round trip, not a
+ * load, so the loop is far busier than the `pause` suggests.
+ *
+ * It is worse than the instruction count implies, too: `syscall`'s FMASK
+ * clears IF (SYSCALL_FMASK in src/syscall.c), so each iteration spends its
+ * whole syscall duration with interrupts disabled -- unable to take the very
+ * IRQ0 it is waiting on. The tick is not lost, since it stays pending at the
+ * PIC and fires once sysret restores IF, so this costs CPU and jitter rather
+ * than correctness.
+ *
+ * It stays this way because there is nothing better to reach for: `hlt` is
+ * privileged, and no blocking sleep syscall exists. The real fixes are both
+ * new kernel surface and belong to their own ticket -- a blocking exo_sleep,
+ * or a shared tick page mapped read-only into the LibOS so the common case
+ * is a load instead of a trap.
+ *
+ * In practice Doom's own demand is small: the hot path asks for 1 ms
+ * (d_loop.c's TryRunTics and d_main.c's D_DoomLoop both call I_Sleep(1)), so
+ * at a 1000 Hz PIT each sleep waits at most one tick. The single large call,
+ * I_Sleep(100) at d_loop.c:334, is in the netgame startup wait, which a
+ * single-player boot never reaches.
  */
 void DG_SleepMs(uint32_t ms)
 {
