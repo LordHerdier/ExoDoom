@@ -60,9 +60,36 @@ internally by the engine.
 
 ## 2. Complete libc dependency audit
 
-The following is an exhaustive list of every standard C library function called
-by doomgeneric's 82 core source files, with call counts from static grep
-analysis. This determines what the freestanding libc shim must provide.
+> ⚠️ **Superseded by [`docs/libc_audit.md`](libc_audit.md) (SCRUM-72).** This
+> section is kept for its per-family design notes, but **its status column and
+> call counts are no longer authoritative.** They came from static grep over
+> "doomgeneric's 82 core source files", which counts text rather than reachable
+> calls and covers a file set wider than what `src/doom/` actually vendors (79
+> `.c` files). The SCRUM-72 audit instead derives the list from the linker —
+> `nm -u` over the compiled objects minus what Doom defines itself — which
+> cannot count a call inside `#if ORIGCODE`, miss one made through a macro, or
+> include a file that was never vendored.
+>
+> Concrete corrections that follow from that:
+>
+> - **`strerror` is listed below with 4 calls. It has zero.** Nothing under
+>   `src/doom/` calls it, and no object references it. It does not need
+>   implementing.
+> - **`memcmp` and `memmove` are not referenced either** — both are implemented
+>   and correct, but Doom never reaches them (`memmove`'s two call sites are in
+>   a dehacked branch GCC proves dead, since `DEH_String(x)` is `#define`d to
+>   `(x)`).
+> - **`strcasecmp`/`strncasecmp` are marked Todo below; both have been
+>   implemented** in `src/string.c` since SCRUM-11's follow-up.
+> - Call counts differ throughout — e.g. `strlen` is 56 occurrences in the
+>   vendored tree, not 64; `strdup` is 9, not 16.
+>
+> Use `docs/libc_audit.md` and its `libc_audit.csv` for status. Use this
+> section for the "why" notes per family.
+
+The following is a list of standard C library functions called by
+doomgeneric, with call counts from static grep analysis. This was the original
+basis for what the freestanding libc shim must provide.
 
 ### 2.1 `string.h` — all required, no shortcuts
 
