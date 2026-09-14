@@ -1,0 +1,46 @@
+/*
+ * ring3_link_target.ld.in — shared linker script template for every ring-3
+ * link target build_ring3_link_target() (docker/scripts/build.sh) builds:
+ * one ELF with .text at LIBOS_LAUNCH_CODE_VADDR and .data/.bss at
+ * LIBOS_LAUNCH_DATA_VADDR, mirroring exactly what libos_build_image() does
+ * at runtime, so ordinary compiler-generated addressing between the two is
+ * correct without any hand-written PIC convention (SCRUM-173, extended to a
+ * second target by SCRUM-51).
+ *
+ * Preprocessed with the C preprocessor before being handed to ld
+ * (docker/scripts/build.sh, `-x assembler-with-cpp` + `-DEXO_KERNEL`, the
+ * same treatment the .s probes under tests/kernel/ get), so
+ * LIBOS_LAUNCH_CODE_VADDR/_DATA_VADDR below are the real macros from
+ * src/libos_launch.h, not hand-copied literals. RING3_ENTRY_SYM,
+ * RING3_BSS_START_SYM and RING3_BSS_END_SYM are supplied the same way, via
+ * -D on that same cpp pass, so this one file can serve every target instead
+ * of each target keeping its own byte-identical copy with only the entry
+ * point and bss symbol names differing.
+ */
+#include "libos_launch.h"
+
+OUTPUT_FORMAT(elf64-x86-64)
+ENTRY(RING3_ENTRY_SYM)
+
+SECTIONS
+{
+    . = LIBOS_LAUNCH_CODE_VADDR;
+    .text : { *(.text) *(.text.*) *(.rodata*) }
+
+    . = LIBOS_LAUNCH_DATA_VADDR;
+    .data : { *(.data) }
+
+    /* NOLOAD: nothing here is real file content, just the address range
+     * libos_build_image() zero-fills for `bss_len`. The two symbols let
+     * build.sh compute that length (via nm) without duplicating
+     * LIBOS_LAUNCH_MAX_DATA_PAGES arithmetic or trusting an empty section
+     * to still report a correct size through other means. */
+    .bss (NOLOAD) : {
+        RING3_BSS_START_SYM = .;
+        *(COMMON)
+        *(.bss)
+        RING3_BSS_END_SYM = .;
+    }
+
+    /DISCARD/ : { *(.comment) *(.eh_frame*) *(.note.*) }
+}

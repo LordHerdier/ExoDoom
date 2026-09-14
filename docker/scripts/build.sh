@@ -153,6 +153,109 @@ for s in src/*.s; do
   objs+=("$o")
 done
 
+probe_cflags=("${CFLAGS[@]/-mcmodel=small/-mcmodel=large}")
+
+# Compile+link one ring-3 link target at its real, final ring-3 addresses
+# (LIBOS_LAUNCH_CODE_VADDR/_DATA_VADDR) rather than copied there afterward
+# like the hand-written .s probes, and objcopy its .text/.data into blobs
+# embedded in the kernel image -- the shape libos_c_probe.c's own comment
+# describes, shared here so libos_c_probe (SCRUM-173) and libc_shim_probe
+# (SCRUM-51) -- and whatever the next such target turns out to be -- can't
+# drift on it. mcmodel=large (probe_cflags, set once above) replaces the
+# kernel's own mcmodel=small: that model only supports symbols in the first
+# 2 GB, and LIBOS_LAUNCH_CODE_VADDR sits inside the 64 TiB LibOS window
+# (EXO_USER_VA_BASE, src/exo_syscall.h), nowhere near it.
+#
+#   $1        name      -- link target name; also its entry symbol
+#                          (${name}_main), its bss symbols
+#                          (__${name}_bss_start/_end), the _layout.h
+#                          basename and the _BSS_LEN macro prefix
+#                          (upper-cased), e.g. "libos_c_probe"
+#   $2        dir        -- directory holding $name.c(s) and where
+#                          ${name}_layout.h is generated
+#   $3        extra_inc  -- extra -I path for the compile step ("" for none)
+#   $4..      srcs       -- source files to compile and link, IN ORDER: the
+#                          first one lands at offset 0 of the .text blob
+#                          (ld places each input file's .text contiguously
+#                          in command-line order), which is what
+#                          libos_build_image() treats as entry_vaddr -- so
+#                          the file defining the entry point MUST be listed
+#                          first whenever more than one source is passed.
+# Appends the resulting code/data blob objects to the global `objs` array.
+build_ring3_link_target() {
+  local name="$1" dir="$2" extra_inc="$3"
+  shift 3
+  local srcs=("$@")
+
+  local target_objs=()
+  for c in "${srcs[@]}"; do
+    local o="build/${name}_$(basename "${c%.c}.o")"
+    echo "    CC $(basename "$c") (${name}, ring 3)"
+    if [[ -n "$extra_inc" ]]; then
+      x86_64-elf-gcc -c "$c" -o "$o" "${probe_cflags[@]}" -I src/ -I "$extra_inc"
+    else
+      x86_64-elf-gcc -c "$c" -o "$o" "${probe_cflags[@]}" -I src/
+    fi
+    target_objs+=("$o")
+  done
+
+  # ld's expression syntax has no C integer-suffix notion, so LIBOS_LAUNCH_*'s
+  # ULL literals (src/libos_launch.h) survive cpp expansion intact and then
+  # fail to parse; strip the suffix (unambiguous here -- 'U'/'L' cannot occur
+  # inside a hex literal, so every "ULL" in the preprocessed output is a C
+  # suffix, never a false match).
+  #
+  # tests/kernel/ring3_link_target.ld.in is one shared template for every
+  # such target; RING3_ENTRY_SYM/_BSS_START_SYM/_BSS_END_SYM are this
+  # target's own names, substituted the same way EXO_KERNEL and
+  # LIBOS_LAUNCH_CODE_VADDR already are on this same cpp pass.
+  x86_64-elf-gcc -E -P -x assembler-with-cpp -I src/ -DEXO_KERNEL \
+    -DRING3_ENTRY_SYM="${name}_main" \
+    -DRING3_BSS_START_SYM="__${name}_bss_start" \
+    -DRING3_BSS_END_SYM="__${name}_bss_end" \
+    tests/kernel/ring3_link_target.ld.in | sed 's/ULL//g' > "build/$name.ld"
+  x86_64-elf-ld -T "build/$name.ld" -o "build/$name.elf" "${target_objs[@]}"
+
+  x86_64-elf-objcopy -O binary --only-section=.text \
+    "build/$name.elf" "build/${name}_code.bin"
+  x86_64-elf-objcopy -O binary --only-section=.data \
+    "build/$name.elf" "build/${name}_data.bin"
+
+  # .bss carries no file bytes to extract -- its length comes from the
+  # linker-defined start/end symbols instead, via the nm_symbol_value()
+  # helper step 2b uses to read boot.s's exported flag words.
+  local bss_start bss_end bss_len
+  bss_start=0x$(nm_symbol_value "build/$name.elf" "__${name}_bss_start")
+  bss_end=0x$(nm_symbol_value "build/$name.elf" "__${name}_bss_end")
+  if [[ "$bss_start" == "0x" || "$bss_end" == "0x" ]]; then
+    echo "    ERROR: $name.elf missing __${name}_bss_start/_end"
+    echo "           -- did tests/kernel/ring3_link_target.ld.in's .bss block change?"
+    exit 1
+  fi
+  bss_len=$(( bss_end - bss_start ))
+
+  # Generated into the target's own directory, not build/: a plain
+  # #include "${name}_layout.h" from the matching tests/kernel/test_*_k.c
+  # (one level up) then resolves via cpp's "search the including file's own
+  # directory" rule with no -I flag needed on the shared test-compile loop
+  # below -- the same reasoning as keeping these sources out of that loop's
+  # glob in the first place.
+  local macro_prefix
+  macro_prefix=$(echo "$name" | tr '[:lower:]' '[:upper:]')
+  printf '#define %s_BSS_LEN %d\n' "$macro_prefix" "$bss_len" \
+    > "$dir/${name}_layout.h"
+
+  # objcopy -I binary derives symbol names from the exact path given on the
+  # command line; cd into build/ first so they come out as the predictable
+  # _binary_${name}_{code,data}_bin_{start,end,size} rather than something
+  # that embeds this script's working directory.
+  ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+      "${name}_code.bin" "${name}_code_blob.o" )
+  ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+      "${name}_data.bin" "${name}_data_blob.o" )
+  objs+=("build/${name}_code_blob.o" "build/${name}_data_blob.o")
+}
+
 if [[ "${TESTING:-0}" == "1" ]]; then
   echo "[3b/7] Build LibOS C probe (SCRUM-173)"
   # tests/kernel/libos_c_probe/ is its own directory, not tests/kernel/*.c,
@@ -161,65 +264,8 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # add a test file" promise stays true for that loop; this probe simply
   # isn't a file the loop's glob ever sees, rather than an exception it has
   # to special-case.
-  #
-  # Compiled and linked at its real, final ring-3 addresses
-  # (LIBOS_LAUNCH_CODE_VADDR/_DATA_VADDR) rather than copied there
-  # afterward like the hand-written .s probes -- see libos_c_probe.c's own
-  # comment for why that makes ordinary compiler-generated addressing
-  # correct with no PIC workaround. mcmodel=large replaces the kernel's own
-  # mcmodel=small: that model only supports symbols in the first 2 GB, and
-  # LIBOS_LAUNCH_CODE_VADDR sits inside the 64 TiB LibOS window
-  # (EXO_USER_VA_BASE, src/exo_syscall.h), nowhere near it.
-  probe_dir=tests/kernel/libos_c_probe
-  probe_cflags=("${CFLAGS[@]/-mcmodel=small/-mcmodel=large}")
-  x86_64-elf-gcc -c "$probe_dir/libos_c_probe.c" -o build/libos_c_probe.o \
-    "${probe_cflags[@]}" -I src/
-
-  # ld's expression syntax has no C integer-suffix notion, so LIBOS_LAUNCH_*'s
-  # ULL literals (src/libos_launch.h) survive cpp expansion intact and then
-  # fail to parse; strip the suffix (unambiguous here -- 'U'/'L' cannot occur
-  # inside a hex literal, so every "ULL" in the preprocessed output is a C
-  # suffix, never a false match).
-  x86_64-elf-gcc -E -P -x assembler-with-cpp -I src/ -DEXO_KERNEL \
-    "$probe_dir/libos_c_probe.ld.in" | sed 's/ULL//g' > build/libos_c_probe.ld
-  x86_64-elf-ld -T build/libos_c_probe.ld -o build/libos_c_probe.elf \
-    build/libos_c_probe.o
-
-  x86_64-elf-objcopy -O binary --only-section=.text \
-    build/libos_c_probe.elf build/libos_c_probe_code.bin
-  x86_64-elf-objcopy -O binary --only-section=.data \
-    build/libos_c_probe.elf build/libos_c_probe_data.bin
-
-  # .bss carries no file bytes to extract -- its length comes from the
-  # linker-defined start/end symbols instead, via the same nm_symbol_value()
-  # helper step 2b uses to read boot.s's exported flag words.
-  bss_start=0x$(nm_symbol_value build/libos_c_probe.elf __libos_c_probe_bss_start)
-  bss_end=0x$(nm_symbol_value build/libos_c_probe.elf __libos_c_probe_bss_end)
-  if [[ "$bss_start" == "0x" || "$bss_end" == "0x" ]]; then
-    echo "    ERROR: libos_c_probe.elf missing __libos_c_probe_bss_start/_end"
-    echo "           -- did libos_c_probe.ld.in's .bss block change?"
-    exit 1
-  fi
-  bss_len=$(( bss_end - bss_start ))
-
-  # Generated into the probe's own directory, not build/: a plain
-  # #include "libos_c_probe_layout.h" from test_libos_c_probe_k.c
-  # (tests/kernel/, one level up) then resolves via cpp's "search the
-  # including file's own directory" rule with no -I flag needed on the
-  # shared test-compile loop below -- the same reasoning as keeping
-  # libos_c_probe.c out of that loop's glob in the first place.
-  printf '#define LIBOS_C_PROBE_BSS_LEN %d\n' "$bss_len" \
-    > "$probe_dir/libos_c_probe_layout.h"
-
-  # objcopy -I binary derives symbol names from the exact path given on the
-  # command line; cd into build/ first so they come out as the predictable
-  # _binary_libos_c_probe_{code,data}_bin_{start,end,size} rather than
-  # something that embeds this script's working directory.
-  ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
-      libos_c_probe_code.bin libos_c_probe_code_blob.o )
-  ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
-      libos_c_probe_data.bin libos_c_probe_data_blob.o )
-  objs+=(build/libos_c_probe_code_blob.o build/libos_c_probe_data_blob.o)
+  build_ring3_link_target libos_c_probe tests/kernel/libos_c_probe "" \
+    tests/kernel/libos_c_probe/libos_c_probe.c
 
   echo "[3b2/7] Build libc shim probe (SCRUM-51)"
   # Same mechanism as the libos_c_probe step just above -- a second,
@@ -238,55 +284,17 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # use when built into the kernel for their own SCRUM-37/-38 unit tests
   # (see each file's own #ifdef EXO_KERNEL comment). Each source needs its
   # own object file distinct from the kernel-side build/<name>.o step 3
-  # already produced, hence the libc_shim_ prefix below.
+  # already produced, hence build_ring3_link_target's libc_shim_probe_
+  # prefix on every object it compiles.
+  #
+  # libc_shim_probe.c MUST come first in this list -- see
+  # build_ring3_link_target's own comment on why source order determines
+  # entry_vaddr.
   shim_dir=tests/kernel/libc_shim_probe
-  # libc_shim_probe.c MUST come first: libos_build_image() always sets
-  # entry_vaddr to LIBOS_LAUNCH_CODE_VADDR itself (src/libos_launch.c) --
-  # the base of the whole code blob, not a symbol looked up by name -- the
-  # same convention libos_c_probe.c relies on by being the *only* object in
-  # its link. With more than one object file, ld places each input file's
-  # .text contiguously in command-line order, so whichever file is linked
-  # first lands at offset 0 of the blob, i.e. at LIBOS_LAUNCH_CODE_VADDR --
-  # and that has to be libc_shim_probe_main, or iretq lands on whatever
-  # stdlib.c/stdio.c function happened to compile first instead.
-  shim_srcs=("$shim_dir/libc_shim_probe.c" \
-             src/stdlib.c src/stdio.c src/string.c src/ctype.c \
-             src/libos_heap.c src/libos_page_alloc.c)
-  shim_objs=()
-  for c in "${shim_srcs[@]}"; do
-    o="build/libc_shim_$(basename "${c%.c}.o")"
-    echo "    CC $(basename "$c") (libc shim, ring 3)"
-    x86_64-elf-gcc -c "$c" -o "$o" "${probe_cflags[@]}" -I src/ -I "$shim_dir"
-    shim_objs+=("$o")
-  done
-
-  x86_64-elf-gcc -E -P -x assembler-with-cpp -I src/ -DEXO_KERNEL \
-    "$shim_dir/libc_shim_probe.ld.in" | sed 's/ULL//g' > build/libc_shim_probe.ld
-  x86_64-elf-ld -T build/libc_shim_probe.ld -o build/libc_shim_probe.elf \
-    "${shim_objs[@]}"
-
-  x86_64-elf-objcopy -O binary --only-section=.text \
-    build/libc_shim_probe.elf build/libc_shim_probe_code.bin
-  x86_64-elf-objcopy -O binary --only-section=.data \
-    build/libc_shim_probe.elf build/libc_shim_probe_data.bin
-
-  shim_bss_start=0x$(nm_symbol_value build/libc_shim_probe.elf __libc_shim_probe_bss_start)
-  shim_bss_end=0x$(nm_symbol_value build/libc_shim_probe.elf __libc_shim_probe_bss_end)
-  if [[ "$shim_bss_start" == "0x" || "$shim_bss_end" == "0x" ]]; then
-    echo "    ERROR: libc_shim_probe.elf missing __libc_shim_probe_bss_start/_end"
-    echo "           -- did libc_shim_probe.ld.in's .bss block change?"
-    exit 1
-  fi
-  shim_bss_len=$(( shim_bss_end - shim_bss_start ))
-
-  printf '#define LIBC_SHIM_PROBE_BSS_LEN %d\n' "$shim_bss_len" \
-    > "$shim_dir/libc_shim_probe_layout.h"
-
-  ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
-      libc_shim_probe_code.bin libc_shim_probe_code_blob.o )
-  ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
-      libc_shim_probe_data.bin libc_shim_probe_data_blob.o )
-  objs+=(build/libc_shim_probe_code_blob.o build/libc_shim_probe_data_blob.o)
+  build_ring3_link_target libc_shim_probe "$shim_dir" "$shim_dir" \
+    "$shim_dir/libc_shim_probe.c" \
+    src/stdlib.c src/stdio.c src/string.c src/ctype.c \
+    src/libos_heap.c src/libos_page_alloc.c
 
   echo "[3c/7] Compile kernel test sources"
   for c in tests/kernel/*.c; do

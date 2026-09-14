@@ -55,8 +55,10 @@ make clean                     # rm -rf build
   is how a file opts out of it instead of the loop special-casing a filename:
   it lives in its own subdirectory, which `tests/kernel/*.c` never matches,
   and is built by its own explicit step. That step compiles and links
-  `libos_c_probe.c` *separately*, with its own linker script
-  (`libos_c_probe.ld.in`) that places `.text` at `LIBOS_LAUNCH_CODE_VADDR` and
+  `libos_c_probe.c` *separately*, via the shared
+  `tests/kernel/ring3_link_target.ld.in` template (parameterized per target
+  by `build_ring3_link_target()` in `build.sh` — see its own comment) that
+  places `.text` at `LIBOS_LAUNCH_CODE_VADDR` and
   `.data`/`.bss` at `LIBOS_LAUNCH_DATA_VADDR` (`src/libos_launch.h`) — the real
   addresses `libos_build_image()` maps a LibOS to — rather than at the
   kernel's own 2M link address. Because the compiler/linker see the address
@@ -93,7 +95,9 @@ make clean                     # rm -rf build
   point rather than looking up a symbol, so whichever object file is linked
   first is what ends up there — for `libos_c_probe` this was automatic (only
   one object file); here it is an explicit ordering requirement documented
-  at the `shim_srcs` array in `build.sh`. `test_libc_shim_probe_k.c` launches
+  at `build_ring3_link_target()`'s own comment in `build.sh` and at its
+  `libc_shim_probe` call site, which lists `libc_shim_probe.c` first.
+  `test_libc_shim_probe_k.c` launches
   it under `PAGE_OWNER_LIBOS` rather than a fresh per-suite id, because
   `exo_page_alloc`/`exo_page_map` (which `malloc` now reaches for real) route
   "the caller's address space" through `syscall_current_context()`, hardcoded
@@ -141,15 +145,26 @@ framebuffer) → `_start` in `src/boot.s` (sets up a 16 KiB stack, pushes
 
 ```
 serial_init() -> framebuffer tag discovery (serial diagnostics only)
-  -> mmap_init(mb) -> memory_init() -> page_alloc_init(mb) -> vmm_init(mb, fb)
+  -> idt_init() -> tss_init() -> mmap_init(mb) -> memory_init()
+  -> page_alloc_init(mb) -> vmm_init(mb, fb)
   -> syscall_init() -> syscall_mem_init() -> syscall_fb_init(fb)
+  -> syscall_serial_init()
+  -> pic_remap() -> idt_set_gate(32, irq0_stub) -> pit_init(1000)
+  -> syscall_pit_init()
   [if -DTESTING]  serial_flush() -> qemu_exit(run_tests())
   [normal boot]   fb_init_bgrx8888() + fbcon_init()  (halts if absent)
-                  -> banner/mmap dump -> ownership self-check -> idt_init()
-                  -> pic_remap() -> idt_set_gate(32, irq0_stub) -> pit_init(1000)
+                  -> banner/mmap dump -> ownership self-check
                   -> idt_set_gate(33, irq1_stub) -> kbd_init()
                   -> sti -> `sti; hlt` idle loop
 ```
+
+`idt_init()`/`tss_init()`/`pic_remap()`/`idt_set_gate(32, irq0_stub)`/
+`pit_init(1000)`/`syscall_pit_init()` all run ahead of the `TESTING` branch
+(SCRUM-172, SCRUM-51) — only IRQ1/keyboard wiring
+(`idt_set_gate(33, irq1_stub)`, `kbd_init()`, `pic_unmask_irq(1)`) stays in
+the normal-boot tail, since nothing under `TESTING` touches the keyboard and
+`pic_remap()` leaves IRQ1 masked at the PIC precisely so a stray one arriving
+before `kbd_init()` runs cannot reach `idt_init()`'s `default_stub`.
 
 **Anything the ring-3 tests need must be initialised before the `TESTING`
 branch** — that branch exits QEMU and never returns, so `page_alloc_init`,

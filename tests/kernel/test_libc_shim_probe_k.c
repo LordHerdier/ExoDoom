@@ -87,13 +87,20 @@ static void test_libc_shim_works_from_ring3(void) {
                                _binary_libc_shim_probe_data_bin_start);
 
     libos_image_t img;
-    CU_ASSERT_EQUAL(libos_build_image(LIBC_SHIM_PROBE_TEST_OWNER,
-                                      _binary_libc_shim_probe_code_bin_start,
-                                      code_len,
-                                      _binary_libc_shim_probe_data_bin_start,
-                                      data_len, LIBC_SHIM_PROBE_BSS_LEN,
-                                      &img),
-                   VMM_OK);
+    int build_rc = libos_build_image(LIBC_SHIM_PROBE_TEST_OWNER,
+                                     _binary_libc_shim_probe_code_bin_start,
+                                     code_len,
+                                     _binary_libc_shim_probe_data_bin_start,
+                                     data_len, LIBC_SHIM_PROBE_BSS_LEN,
+                                     &img);
+    CU_ASSERT_EQUAL(build_rc, VMM_OK);
+    /* CU_ASSERT_EQUAL logs and returns rather than aborting the test
+     * function (src/kunit.h) -- on a failed build, `img` was never (fully)
+     * populated, so this bails out here instead of feeding that garbage to
+     * libos_test_launch()/vmm_switch_address_space(). */
+    if (build_rc != VMM_OK) {
+        return;
+    }
 
     libos_test_launch_result_t run = libos_test_launch(&img);
     CU_ASSERT_EQUAL(run.switch_in_status, VMM_OK);
@@ -105,7 +112,17 @@ static void test_libc_shim_works_from_ring3(void) {
     CU_ASSERT_EQUAL(run.result & LIBC_SHIM_OK_TICKS,  LIBC_SHIM_OK_TICKS);
     CU_ASSERT_EQUAL(run.result, (uint64_t)LIBC_SHIM_OK_ALL);
 
-    libos_destroy_image(LIBC_SHIM_PROBE_TEST_OWNER, &img);
+    /*
+     * Deliberately NOT libos_destroy_image() here, unlike the other launch
+     * suites: this probe's malloc() makes a real exo_page_alloc/exo_page_map
+     * syscall (src/libos_page_alloc.c's !EXO_KERNEL path) that hands out
+     * heap-growth pages img never learns about, so libos_destroy_image()'s
+     * free-by-paddrs-array walk can't reach them and they'd be leaked.
+     * libc_shim_probe_suite_cleanup()'s libos_test_teardown_owner() call
+     * sweeps every page LIBC_SHIM_PROBE_TEST_OWNER still holds (code, data,
+     * stack, and any heap growth) via page_reclaim_all() before destroying
+     * the address space, so it alone is a complete teardown here.
+     */
 }
 
 /*

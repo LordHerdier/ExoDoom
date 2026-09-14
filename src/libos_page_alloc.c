@@ -48,7 +48,11 @@
 #include "serial.h"
 #else
 #include <stdio.h>
-#define serial_print(s) puts(s)
+/* Not puts(s): puts() always appends its own trailing '\n' (src/stdio.c),
+ * but every serial_print(...) call site below already ends its string
+ * literal in '\n' (matching the kernel-side serial_print()'s contract of
+ * never adding one), so puts() here would double it. */
+#define serial_print(s) printf("%s", s)
 #endif
 
 #include <stddef.h>
