@@ -273,7 +273,10 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # this one links in the *actual* libc shim sources (SCRUM-51's real
   # subject) rather than a single throwaway probe function: src/stdlib.c,
   # src/stdio.c, src/string.c, src/ctype.c, plus the LibOS allocators they
-  # now sit on, src/libos_heap.c and src/libos_page_alloc.c (SCRUM-37/-38).
+  # now sit on, src/libos_heap.c and src/libos_page_alloc.c (SCRUM-37/-38),
+  # plus src/libos_fb.c (SCRUM-36), the framebuffer-mapping helper built on
+  # exo_fb_acquire/exo_page_map the same way libos_heap.c is built on
+  # libos_page_alloc.c.
   #
   # Compiled WITHOUT -DEXO_KERNEL -- unlike every other src/*.c compile in
   # this script (step 3 above always passes it) -- which is what flips
@@ -294,7 +297,7 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   build_ring3_link_target libc_shim_probe "$shim_dir" "$shim_dir" \
     "$shim_dir/libc_shim_probe.c" \
     src/stdlib.c src/stdio.c src/string.c src/ctype.c \
-    src/libos_heap.c src/libos_page_alloc.c
+    src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c
 
   echo "[3c/7] Compile kernel test sources"
   for c in tests/kernel/*.c; do

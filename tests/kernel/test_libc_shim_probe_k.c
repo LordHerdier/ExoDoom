@@ -8,7 +8,7 @@
  * ctype.c/libos_heap.c/libos_page_alloc.c dependencies) compiled without
  * -DEXO_KERNEL, and asserts on the bitmask libc_shim_probe_main() hands back
  * through libos_return() -- one bit per acceptance criterion (malloc, printf,
- * timer), not just "it didn't fault".
+ * timer, framebuffer map+write -- SCRUM-36), not just "it didn't fault".
  *
  * _binary_libc_shim_probe_{code,data}_bin_{start,end} are the objcopy-
  * embedded blobs build.sh's dedicated step produces from the separately-
@@ -23,6 +23,7 @@
 #include "vmm.h"
 #include "sleep.h"
 #include "pit.h"
+#include "fb_binding.h"
 #include "libc_shim_probe/libc_shim_probe_layout.h"
 #include "libc_shim_probe/libc_shim_probe_result.h"
 
@@ -110,7 +111,29 @@ static void test_libc_shim_works_from_ring3(void) {
     CU_ASSERT_EQUAL(run.result & LIBC_SHIM_OK_MALLOC, LIBC_SHIM_OK_MALLOC);
     CU_ASSERT_EQUAL(run.result & LIBC_SHIM_OK_PRINTF, LIBC_SHIM_OK_PRINTF);
     CU_ASSERT_EQUAL(run.result & LIBC_SHIM_OK_TICKS,  LIBC_SHIM_OK_TICKS);
+    CU_ASSERT_EQUAL(run.result & LIBC_SHIM_OK_FB,     LIBC_SHIM_OK_FB);
     CU_ASSERT_EQUAL(run.result, (uint64_t)LIBC_SHIM_OK_ALL);
+
+    /*
+     * The probe already checked its own mapped view read back what it wrote
+     * (LIBC_SHIM_OK_FB); this is the independent half -- proving those bytes
+     * actually reached the framebuffer's real physical memory, not just a
+     * private copy the probe's own mapping happened to agree with itself
+     * about. The kernel's own map is a plain identity map (src/vmm.c), so
+     * the physical address IS the virtual address to read through here.
+     */
+    const fb_geometry_t *geom = fb_binding_geometry();
+    CU_ASSERT_PTR_NOT_NULL(geom);
+    if (geom != NULL && geom->height > 0) {
+        volatile uint32_t *first =
+            (volatile uint32_t *)(uintptr_t)geom->phys_addr;
+        volatile uint32_t *last =
+            (volatile uint32_t *)(uintptr_t)(geom->phys_addr +
+                                  (uint64_t)geom->pitch * (geom->height - 1));
+
+        CU_ASSERT_EQUAL(*first, 0xDEADBEEFu);
+        CU_ASSERT_EQUAL(*last,  0xCAFEF00Du);
+    }
 
     /*
      * Deliberately NOT libos_destroy_image() here, unlike the other launch
@@ -134,6 +157,12 @@ static void test_libc_shim_works_from_ring3(void) {
  * put back.
  */
 int libc_shim_probe_suite_cleanup(void) {
+    /* The probe acquired the framebuffer binding (via libos_fb_map()) under
+     * LIBC_SHIM_PROBE_TEST_OWNER and never released it -- nothing in
+     * production calls exo_exit() here either. Released explicitly, the
+     * same way page_map_suite_cleanup() does, so a suite running after this
+     * one does not find the framebuffer still held. */
+    fb_binding_release(LIBC_SHIM_PROBE_TEST_OWNER);
     libos_test_teardown_owner(LIBC_SHIM_PROBE_TEST_OWNER);
     if (saved_libos_pml4 != 0)
         vmm_bind_address_space(PAGE_OWNER_LIBOS, saved_libos_pml4);
@@ -141,6 +170,6 @@ int libc_shim_probe_suite_cleanup(void) {
 }
 
 void suite_libc_shim_probe_tests(CU_pSuite s) {
-    CU_add_test(s, "malloc/printf/timer all work from ring 3 via syscall",
+    CU_add_test(s, "malloc/printf/timer/fb-map all work from ring 3 via syscall",
                test_libc_shim_works_from_ring3);
 }
