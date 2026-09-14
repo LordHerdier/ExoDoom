@@ -620,6 +620,38 @@ full `FILE*` interface. See `docs/syscall_spec.md` §2 for the complete audit.
 | `DG_GetKey`         | `exo_kbd_poll` dequeue                                   |
 | `DG_SetWindowTitle` | No-op (or `exo_serial_write` for debug)                  |
 
+> ✅ **SCRUM-74:** `DG_GetTicksMs` and `DG_SleepMs` are implemented, in
+> `src/doomgeneric_exo.c` — ExoDoom's doomgeneric platform file, the
+> equivalent of upstream's `doomgeneric_sdl.c`. It lives in `src/` rather than
+> `src/doom/` so the vendored tree (SCRUM-63) stays a clean drop-in on a
+> re-vendor, and it includes `doom/doomgeneric.h` for the prototypes rather
+> than restating them (which is why `build.sh`'s kernel C compile now passes
+> `-I src`). The other four callbacks are deliberately left **undefined
+> rather than stubbed** — nothing links `src/doom/` yet, so an undefined
+> reference is the honest placeholder.
+>
+> It carries the same `#ifdef EXO_KERNEL` split as `src/libos_page_alloc.c`:
+> a real ring-3 LibOS build calls the `exo_get_ticks()` stub, while the
+> kernel build reaches `exo_syscall_dispatch()` directly, because a `syscall`
+> executed from ring 0 would `sysretq` a CPL-0 caller down to CPL 3.
+> `tests/kernel/test_doomgeneric_timer_k.c` drives all five checks from ring 0.
+>
+> ⚠️ **`DG_SleepMs` spins on a counter only IRQ0 advances, so it returns only
+> with interrupts enabled.** That holds on a normal boot but **not** under
+> `-DTESTING`, where `kernel_main` deliberately performs no blanket `sti`
+> (several suites drive ring-3 faults with `RFLAGS.IF` hardcoded clear). A
+> `DG_SleepMs(n>0)` with interrupts off never returns, and would surface as a
+> CI timeout with no failing assertion — so every test that waits enables
+> interrupts for just its own wait and clears them after, as
+> `test_syscall_pit_k.c` already does. There is no internal bailout: a
+> deadline needs a second time source, and if one existed `DG_SleepMs` would
+> be using it.
+>
+> `DG_SleepMs` uses `pause`, not `hlt` — `hlt` is privileged and would `#GP`
+> in ring 3, where this is actually meant to run. The elapsed-time
+> subtraction is done in `uint32_t` so it stays correct across the counter's
+> ~49.7-day wrap, matching `kernel_sleep_ms` and Doom's own `I_GetTime`.
+
 ### Multi-application (Sprint 12)
 
 The eventual goal is **cooperative multitasking** between the Doom LibOS and a

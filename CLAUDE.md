@@ -48,6 +48,14 @@ make clean                     # rm -rf build
   selects the kernel view (numbers, shared structs, error codes) over the LibOS
   view (user-side `syscall` stubs). Test TUs get it too; the one that needs the
   LibOS view (`tests/kernel/test_exo_syscall_k.c`) `#undef`s it first.
+- The kernel C compile also passes **`-I src`** (SCRUM-74). Every other
+  `src/*.c` reaches its headers with quoted includes and is unaffected; the
+  flag is there because `src/doomgeneric_exo.c` includes
+  `doom/doomgeneric.h` for the `DG_*` prototypes rather than restating them,
+  and that header's own `#include <stdlib.h>` only finds the shim's
+  `src/stdlib.h` with `src/` on the angle-bracket path. `src/` holds no header
+  that shadows one of GCC's freestanding four (`stddef`/`stdint`/`stdarg`/
+  `limits`), so nothing is redirected that wasn't already coming from `src/`.
 - Test sources in `tests/kernel/*.c` are picked up **automatically** by
   `build.sh` when `TESTING=1` — no Makefile/build-script changes needed to add
   a test file, and that loop's own invocation stays untouched no matter what
@@ -205,6 +213,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
 | Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`; header-only: `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/types.h`, `src/sys/stat.h` |
 | Vendored Doom engine (not yet linked) | `src/doom/` |
+| doomgeneric platform layer | `src/doomgeneric_exo.c/h` (timer half: `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
 | Test framework | `src/kunit.h`, `tests/kernel/*.c`, `tests/kernel/kunit.c`, `tests/kernel/ring3_probe.s` |
 
 ### Key architectural facts worth knowing before editing

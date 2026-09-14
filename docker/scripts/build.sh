@@ -135,10 +135,19 @@ objs=(build/boot.o)
 # into the kernel and run in ring 0, so the LibOS view is the wrong default
 # there -- a stub reaching a real `syscall` with IA32_LSTAR unset would triple
 # fault.
+#
+# -I src (SCRUM-74): src/doomgeneric_exo.c is ExoDoom's doomgeneric platform
+# file, and it includes doomgeneric's own header for the DG_* prototypes
+# rather than restating them -- src/doom/doomgeneric.h in turn includes
+# <stdlib.h>, which only resolves to the shim's src/stdlib.h with src/ on the
+# angle-bracket path. Every other src/*.c reaches its headers with quoted
+# includes and is unaffected; src/ holds no header that shadows one of GCC's
+# freestanding four (stddef/stdint/stdarg/limits), so nothing is redirected
+# by this that was not already coming from src/.
 for c in src/*.c; do
   o="build/$(basename "${c%.c}.o")"
   echo "    CC $(basename "$c")"
-  x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -DEXO_KERNEL
+  x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src -DEXO_KERNEL
   objs+=("$o")
 done
 

@@ -34,6 +34,7 @@ void suite_tss_tests(CU_pSuite s);
 void suite_libos_launch_tests(CU_pSuite s);
 void suite_syscall_serial_tests(CU_pSuite s);
 void suite_syscall_pit_tests(CU_pSuite s);
+void suite_doomgeneric_timer_tests(CU_pSuite s);
 void suite_libos_main_tests(CU_pSuite s);
 void suite_libos_c_probe_tests(CU_pSuite s);
 void suite_libc_shim_probe_tests(CU_pSuite s);
@@ -196,6 +197,11 @@ int run_tests(void)
 
     s = CU_add_suite("syscall_pit", NULL, NULL);
     suite_syscall_pit_tests(s);
+
+    /* Right after syscall_pit: this suite sits directly on top of
+     * exo_get_ticks, and if that one is failing its failures explain these. */
+    s = CU_add_suite("doomgeneric_timer", NULL, NULL);
+    suite_doomgeneric_timer_tests(s);
 
     s = CU_add_suite("libos_main", NULL, libos_main_suite_cleanup);
     suite_libos_main_tests(s);
