@@ -58,22 +58,22 @@ extern uint8_t _load_start[];
 /*
  * U/S on the kernel's own map, mirroring the gate in boot.s.
  *
- * A shipped kernel maps nothing user-accessible.  A TESTING build has to,
- * because tests/kernel/ring3_probe.s executes at CPL 3 against these very
- * tables and the U/S bit is only honoured when set at every level of the walk
- * — the same reason build.sh assembles boot.s with --defsym RING3_PROBE=1.
- * Keeping the two in step matters: vmm_init() loads CR3 before run_tests(), so
- * from that point on it is *this* map the probe runs against, not boot.s's.
- *
- * The exposure is identical to the boot map's (all mapped memory readable and
- * writable from ring 3) and closes the same way: SCRUM-48 gives the LibOS its
- * own address space, SCRUM-55/-56 assert the wall.
+ * Supervisor-only in every build now (SCRUM-55). Before this, TESTING builds
+ * set KERNEL_MAP_USER to VMM_USER unconditionally, because tests/kernel/
+ * ring3_probe.s and tss_fault_probe.s execute directly against these tables
+ * at CPL 3 and predate SCRUM-48's per-LibOS address spaces -- their code was
+ * never copied into a LibOS window the way every later probe's is, so it had
+ * to be user-executable right where it links. That blanket exposure made
+ * "a LibOS can't touch kernel memory" untestable: every address space shares
+ * kernel_pml4[0] (see vmm_create_address_space's own comment below), so a
+ * fresh LibOS window saw the same open kernel range the kernel's own map did.
+ * vmm_init() now maps everything supervisor-only and separately re-exposes
+ * just those two probes' own code ranges as the sole, explicitly-scoped
+ * legacy exception (see expose_ring3_legacy_probe below) -- tightening
+ * everything else is what makes tests/kernel/test_kernel_mem_fault_k.c mean
+ * something.
  */
-#ifdef TESTING
-#define KERNEL_MAP_USER VMM_USER
-#else
 #define KERNEL_MAP_USER 0
-#endif
 
 /* Kernel data/code leaves: present, writable, and user only in test builds. */
 #define KERNEL_LEAF (VMM_PRESENT | VMM_WRITE | KERNEL_MAP_USER)
@@ -95,6 +95,19 @@ static uint32_t table_pages = 0;
 /* Set once CR3 holds our PML4.  Before that, TLB flushes are pointless (the
  * boot map is live and none of our entries are cached). */
 static int map_active = 0;
+
+#ifdef TESTING
+/*
+ * The two ring-3 probes that predate SCRUM-48 and still execute directly
+ * against the kernel's own .text rather than a copied-in LibOS window
+ * (tests/kernel/ring3_probe.s, tss_fault_probe.s) -- see KERNEL_MAP_USER's
+ * own comment above for why. Neither probe ever touches its own stack (no
+ * push/pop/call between the label pairs below), so only instruction fetch
+ * needs the U bit; their user_stack backing pages need no exposure.
+ */
+extern uint8_t ring3_probe[], ring3_probe_end[];
+extern uint8_t tss_fault_probe[], tss_fault_probe_end[];
+#endif
 
 /* ── Low-level helpers ────────────────────────────────────────────────── */
 
@@ -510,6 +523,27 @@ static int map_identity(uint64_t start, uint64_t end, uint64_t flags) {
     return vmm_map_range(start, start, end - start, flags);
 }
 
+#ifdef TESTING
+/*
+ * Re-expose exactly the two legacy ring-3 probes' own code ranges as
+ * user-executable (SCRUM-55) -- see KERNEL_MAP_USER's comment above. Reuses
+ * map_identity() itself: vaddr == paddr for kernel .text either way, and the
+ * page-vs-2MB-leaf split it already does is exactly what remapping a handful
+ * of 4 KiB pages inside the kernel image's own 4 KiB-granularity range needs.
+ */
+static int expose_ring3_legacy_probes(void) {
+    int rc = map_identity((uint64_t)(uintptr_t)ring3_probe,
+                          (uint64_t)(uintptr_t)ring3_probe_end,
+                          VMM_PRESENT | VMM_WRITE | VMM_USER);
+    if (rc != VMM_OK) {
+        return rc;
+    }
+    return map_identity((uint64_t)(uintptr_t)tss_fault_probe,
+                        (uint64_t)(uintptr_t)tss_fault_probe_end,
+                        VMM_PRESENT | VMM_WRITE | VMM_USER);
+}
+#endif
+
 /* Confirm a critical address survives the new map before CR3 is loaded.  A
  * missing kernel mapping here would otherwise present as a triple fault the
  * instruction after the CR3 write, with nothing on the wire to explain it. */
@@ -618,6 +652,21 @@ int vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb) {
             goto fail;
         }
     }
+
+#ifdef TESTING
+    /*
+     * 6. The two legacy ring-3 probes' own code, re-exposed as the sole,
+     * explicitly-scoped exception to KERNEL_MAP_USER now being supervisor-
+     * only everywhere else (SCRUM-55). Must run after every step above:
+     * expose_ring3_legacy_probes() re-flags entries those steps already
+     * created, not fresh ones.
+     */
+    rc = expose_ring3_legacy_probes();
+    if (rc != VMM_OK) {
+        serial_print("vmm: failed to expose legacy ring3 probes\n");
+        goto fail;
+    }
+#endif
 
     /* Everything the CPU touches across the CR3 write, checked while the boot
      * map is still live and a failure can still be reported. */

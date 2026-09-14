@@ -464,9 +464,17 @@ SCRUM-33.
 **Ring-3 access during tests.** `boot.s` builds the identity map without the
 U/S bit, so ring-3 code cannot execute. TESTING builds are assembled with
 `--defsym RING3_PROBE=1`, which sets U/S at every level for the probe's
-benefit. This opens all of physical memory to CPL 3 and is scoped to test
-builds for that reason; SCRUM-48 (per-LibOS page directories) and SCRUM-55/-56
-(isolation tests) close it properly.
+benefit on *that* map. It stops mattering the moment `vmm_init()` loads CR3
+onto its own map, though — nothing runs at CPL 3 before that point on any
+boot, test or otherwise — and `src/vmm.c`'s `KERNEL_MAP_USER` used to repeat
+the same blanket exposure on the map that actually matters, for the same
+reason: `tests/kernel/ring3_probe.s` and `tss_fault_probe.s` predate
+SCRUM-48's per-LibOS address spaces and execute directly against the
+kernel's own tables. SCRUM-55 closes that properly: `KERNEL_MAP_USER` is
+supervisor-only in every build now, and `vmm_init()` separately re-exposes
+just those two probes' own code ranges (`expose_ring3_legacy_probes()`) as
+the sole, explicitly-scoped legacy exception — see `tests/kernel/
+test_kernel_mem_fault_k.c`, which asserts the wall holds everywhere else.
 
 ### 3.5 Framebuffer binding (SCRUM-154)
 
