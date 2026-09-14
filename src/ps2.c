@@ -251,10 +251,14 @@ void kbd_init(void) {
      * clears the IRR, so a latched pending IRQ1 is discarded rather than
      * delivered.  Reading the byte out is what re-arms the edge.
      *
-     * kernel_main enables interrupts only after this returns, so the drain
-     * cannot race the handler.  Unmasking is pic_remap's job (it writes 0xFC,
-     * which already has IRQ1 clear); the mask write that used to live here was
-     * a no-op. */
+     * On a normal boot, kernel_main enables interrupts only after this
+     * returns, so the drain cannot race the handler -- and IRQ1 itself stays
+     * masked at the PIC until pic_unmask_irq1() runs right after this call
+     * (src/pic.c), so it cannot race even that early. This is normal-boot-tail
+     * code and never runs in a TESTING build at all (SCRUM-172): a test boot
+     * enables interrupts for other reasons -- see test_syscall_pit_k.c -- but
+     * IRQ1 stays masked for the whole run regardless, since nothing there
+     * calls kbd_init() or pic_unmask_irq1(). */
     unsigned i;
 
     for (i = 0; i < PS2_INIT_DRAIN_MAX; i++) {

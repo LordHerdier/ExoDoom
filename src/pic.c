@@ -32,9 +32,20 @@ void pic_remap() {
     outb(PIC1_DATA, ICW4_8086); io_wait();
     outb(PIC2_DATA, ICW4_8086); io_wait();
 
-    // Mask: unmask IRQ0(timer) and IRQ1(keyboard)
-    outb(PIC1_DATA, 0xFC); io_wait();
+    // Mask: unmask IRQ0 (timer) only. IRQ1 (keyboard) stays masked here --
+    // pic_remap() now runs ahead of the TESTING branch (SCRUM-172), before
+    // IRQ1's IDT vector is wired to irq1_stub, and unmasking it this early
+    // would let a stray keyboard interrupt land on idt_init()'s default_stub,
+    // which does a bare iretq with no EOI and would wedge IRQ1's in-service
+    // bit at the PIC for good. pic_unmask_irq1() unmasks it once kbd_init()
+    // has actually run -- see kernel_main and src/ps2.c's kbd_init().
+    outb(PIC1_DATA, 0xFE); io_wait();
     outb(PIC2_DATA, 0xFF); io_wait();
+}
+
+void pic_unmask_irq1(void) {
+    uint8_t mask = inb(PIC1_DATA);
+    outb(PIC1_DATA, mask & (uint8_t)~0x02);
 }
 
 void pic_send_EOI(unsigned char irq) {
