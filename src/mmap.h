@@ -24,4 +24,16 @@ typedef struct {
 void mmap_init(const struct mb2_info *info);
 const mmap_region_t *mmap_get_regions(uint32_t *count);
 
+/* The multiboot info pointer mmap_init() was called with, for callers (tests
+ * included) that need to walk tags mmap_region_t does not expose. NULL
+ * before mmap_init() has run. */
+const struct mb2_info *mmap_get_info(void);
+
+/* Physical [*start, *end) of the first GRUB-loaded module (the WAD, in this
+ * kernel's boot setup -- see grub.cfg). Returns 0 and writes *start / *end on a
+ * match, -1 if no MB2_TAG_MODULE tag is present or mmap_init() has not run.
+ * The single source of truth for "where is the WAD" — page_alloc_init() used
+ * to walk the tag list itself to answer this (SCRUM-16). */
+int mmap_find_module(uint64_t *start, uint64_t *end);
+
 #endif

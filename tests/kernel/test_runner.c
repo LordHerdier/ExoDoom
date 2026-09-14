@@ -24,6 +24,7 @@ void suite_syscall_mem_tests(CU_pSuite s);
 void suite_ownership_tests(CU_pSuite s);
 void suite_fb_binding_tests(CU_pSuite s);
 void suite_vmm_tests(CU_pSuite s);
+void suite_vmm_fb_wad_tests(CU_pSuite s);
 void suite_revoke_tests(CU_pSuite s);
 void suite_page_map_tests(CU_pSuite s);
 void suite_fault_tests(CU_pSuite s);
@@ -165,6 +166,9 @@ int run_tests(void)
 
     s = CU_add_suite("vmm", NULL, NULL);
     suite_vmm_tests(s);
+
+    s = CU_add_suite("vmm_fb_wad", NULL, NULL);
+    suite_vmm_fb_wad_tests(s);
 
     s = CU_add_suite("revoke", revoke_suite_init, revoke_suite_cleanup);
     suite_revoke_tests(s);

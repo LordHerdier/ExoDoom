@@ -5,6 +5,7 @@
 
 static mmap_region_t regions[MAX_MMAP_REGIONS];
 static uint32_t region_count = 0;
+static const struct mb2_info *saved_info = NULL;
 
 static const char* region_type_name(uint32_t type) {
     switch (type) {
@@ -18,6 +19,8 @@ static const char* region_type_name(uint32_t type) {
 }
 
 void mmap_init(const struct mb2_info *info) {
+    saved_info = info;
+
     const struct mb2_tag *tag = mb2_find_tag(info, MB2_TAG_MMAP);
     if (!tag) {
         serial_print("No multiboot2 mmap tag found\n");
@@ -67,4 +70,29 @@ const mmap_region_t* mmap_get_regions(uint32_t* count) {
         *count = region_count;
     }
     return regions;
+}
+
+const struct mb2_info *mmap_get_info(void) {
+    return saved_info;
+}
+
+int mmap_find_module(uint64_t *start, uint64_t *end) {
+    if (saved_info == NULL) {
+        return -1;
+    }
+
+    const struct mb2_tag *tag = mb2_first_tag(saved_info);
+    const uintptr_t tags_end = (uintptr_t)saved_info + saved_info->total_size;
+
+    while ((uintptr_t)tag < tags_end && tag->type != MB2_TAG_END) {
+        if (tag->type == MB2_TAG_MODULE) {
+            const struct mb2_tag_module *m = (const struct mb2_tag_module *)tag;
+            if (start != NULL) *start = m->mod_start;
+            if (end != NULL)   *end   = m->mod_end;
+            return 0;
+        }
+        tag = mb2_next_tag(tag);
+    }
+
+    return -1;
 }
