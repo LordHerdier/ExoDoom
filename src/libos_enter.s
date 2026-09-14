@@ -16,11 +16,11 @@
 .set USER_CS, 0x28 | 3
 
 /* RFLAGS for libos_enter(): bit 1 is reserved and must be set; IF stays
- * clear (SCRUM-170 tracks proving a hardware interrupt taken at CPL 3
- * switches to TSS.RSP0 correctly -- until that lands, nothing here relies
- * on it). Every fault/launch test in tests/kernel/ depends on this exact
- * value -- do not change it; add a new entry point instead, as
- * libos_enter_irq below does. */
+ * clear. SCRUM-170 proved a hardware interrupt taken at CPL 3 switches to
+ * TSS.RSP0 correctly (see libos_enter_irq below and
+ * tests/kernel/test_irq_entry_k.c), but every fault/launch test in
+ * tests/kernel/ still depends on this exact value -- do not change it; add
+ * a new entry point instead, as libos_enter_irq below does. */
 .set LAUNCH_RFLAGS, 0x002
 
 /* RFLAGS for libos_enter_irq(): same, but with IF set, so PIT/keyboard IRQs
@@ -32,16 +32,20 @@
  * exo_get_ticks() would return a frozen value forever and exo_kbd_poll()
  * would never see a keypress.
  *
- * This is the actual exercise of what SCRUM-170 asks to be verified:
+ * This is the actual exercise of what SCRUM-170 asked to be verified:
  * idt_set_gate()'s IST=0 gates mean a hardware interrupt taken at CPL 3
- * should load TSS.RSP0 exactly like the CPL-3 page-fault SCRUM-46 already
- * proved for an *exception* -- the ISR runs on the kernel stack, EOIs, and
+ * loads TSS.RSP0 exactly like the CPL-3 page-fault SCRUM-46 already proved
+ * for an *exception* -- the ISR runs on the kernel stack, EOIs, and
  * `iretq`s straight back to CPL 3, the same mechanism, just a different
- * vector. Exercised manually so far (a LibOS launched via libos_enter_irq()
- * ran a multi-second interactive loop under continuous PIT/keyboard IRQ
- * traffic with no fault) -- SCRUM-170's own acceptance criterion wants a
- * live KUnit probe analogous to tests/kernel/test_tss_k.c's page-fault one,
- * which does not exist yet; that is this ticket's remaining work. */
+ * vector. Proved live by tests/kernel/test_irq_entry_k.c, analogous to
+ * tests/kernel/test_tss_k.c's page-fault probe: a LibOS launched through
+ * this entry point busy-waits on real exo_get_ticks() advancement, and
+ * src/pit.c's irq0_handler records (TESTING builds only) the stack pointer
+ * it observed on entry, which the test checks lands inside TSS.RSP0's
+ * range. Manual, interactive evidence exists too -- a LibOS launched via
+ * this entry point ran a multi-second interactive loop under continuous
+ * PIT/keyboard IRQ traffic with no fault -- but the KUnit probe is the
+ * deterministic, CI-checked proof. */
 .set LAUNCH_RFLAGS_IRQ, 0x202
 
 .section .bss
