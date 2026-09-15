@@ -169,6 +169,29 @@ page_owner_t page_owner(void* addr) {
     return owners[index];
 }
 
+uint32_t reclaim_pages_owned(page_owner_t owner) {
+    if (bitmap == NULL || owners == NULL || total_pages == 0) {
+        return 0;
+    }
+
+    /* Context reclamation must never reclaim free or kernel-owned pages. */
+    if (owner == PAGE_OWNER_FREE || owner == PAGE_OWNER_KERNEL) {
+        return 0;
+    }
+
+    uint32_t reclaimed = 0;
+
+    for (uint32_t i = 0; i < total_pages; i++) {
+        if (bitmap_test(i) && owners[i] == owner) {
+            bitmap_clear(i);
+            owners[i] = PAGE_OWNER_FREE;
+            reclaimed++;
+        }
+    }
+
+    return reclaimed;
+}
+
 int free_page_owned(void* addr, page_owner_t owner) {
     if (bitmap == NULL || total_pages == 0) {
         serial_print("free_page: allocator not initialized\n");

@@ -4,6 +4,7 @@
 #include "memory.h"
 #include "mmap.h"
 #include "page_alloc.h"
+#include "syscall_exit.h"
 
 #include "idt.h"
 #include "pic.h"
@@ -353,6 +354,8 @@ void kernel_main(void *mb2_info_ptr) {
     // syscall_init, ahead of the TESTING branch.  fb_tag may be NULL, in which
     // case acquire reports -EXO_ENODEV rather than -EXO_ENOSYS.
     syscall_fb_init((const struct mb2_tag_framebuffer *)fb_tag);
+
+    syscall_exit_init();
 
 #ifdef TESTING
     serial_flush();

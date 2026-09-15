@@ -168,6 +168,9 @@ static void test_register_unbinds_with_null(void)
 
 static void test_ring3_syscall_preserves_registers(void)
 {
+    exo_handler_t saved_echo = exo_syscall_handler(SYS_ECHO);
+    exo_handler_t saved_escape = exo_syscall_handler(SYS_ESCAPE);
+
     exo_syscall_register(SYS_ECHO, echo_handler);
     exo_syscall_register(SYS_ESCAPE, ring3_escape);
     echo_calls = 0;
@@ -192,8 +195,8 @@ static void test_ring3_syscall_preserves_registers(void)
 
     CU_ASSERT_EQUAL(failures, 0);
 
-    exo_syscall_register(SYS_ECHO, 0);
-    exo_syscall_register(SYS_ESCAPE, 0);
+    exo_syscall_register(SYS_ECHO, saved_echo);
+    exo_syscall_register(SYS_ESCAPE, saved_escape);
 }
 
 static void test_ring3_syscall_delivers_arguments(void)
@@ -201,13 +204,17 @@ static void test_ring3_syscall_delivers_arguments(void)
     /* Runs its own excursion rather than reading what the previous test left
      * behind — an assertion that silently depends on suite ordering fails in
      * a baffling way the first time someone reorders the registrations. */
+
+    exo_handler_t saved_echo = exo_syscall_handler(SYS_ECHO);
+    exo_handler_t saved_escape = exo_syscall_handler(SYS_ESCAPE);
+
     exo_syscall_register(SYS_ECHO, echo_handler);
     exo_syscall_register(SYS_ESCAPE, ring3_escape);
 
     (void)ring3_run(ring3_probe, user_stack + sizeof(user_stack));
 
-    exo_syscall_register(SYS_ECHO, 0);
-    exo_syscall_register(SYS_ESCAPE, 0);
+    exo_syscall_register(SYS_ECHO, saved_echo);
+    exo_syscall_register(SYS_ESCAPE, saved_escape);
 
     /* The probe holds its sentinels in the argument registers across the
      * syscall, so what the handler received is a check that the entry stub's
