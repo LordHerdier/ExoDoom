@@ -802,8 +802,9 @@ void kernel_main(void *mb2_info_ptr) {
     klog(&con, 0, "Starting timer demo...");
     fbcon_write(&con, "\n");
 
+    uint32_t timer_demo_start = kernel_get_ticks_ms();
     for (int tick = 1; tick <= 9; tick++) {
-        kernel_sleep_ms(1000);
+        kernel_sleep_until_ms(timer_demo_start + (uint32_t)tick * 1000);
         uint32_t ms = kernel_get_ticks_ms();
         log_prefix(&con, ms);
         fbcon_write(&con, "uptime: ");
