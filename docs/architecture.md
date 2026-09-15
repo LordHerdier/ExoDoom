@@ -490,7 +490,7 @@ The 21 syscalls grouped by category:
 | Debug       | `exo_serial_write`                                                  | ✅ done     |
 | File I/O    | `exo_file_open/close/read/write/seek/stat/remove/rename`            | Sprint 4–5 |
 | Sound       | `exo_sound_tone`, `exo_sound_stop`                                  | Sprint 11  |
-| Scheduling  | `exo_yield`                                                         | Sprint 12  |
+| Scheduling  | `exo_yield`                                                         | ✅ done     |
 | Lifecycle   | `exo_exit`                                                          | Sprint 3   |
 
 ### 6.1 Syscall entry (implemented, SCRUM-32)
@@ -731,6 +731,83 @@ focus and the active framebuffer.
 > reason SCRUM-47/-49/-50 landed unwired: there is still only one real LibOS
 > to run on a normal boot, and `exo_yield` itself (binding a real syscall
 > number to this mechanism) is SCRUM-109's job.
+>
+> ✅ **SCRUM-109:** `exo_yield` (#19) is bound for real. `src/syscall_yield.c`'s
+> `sys_yield()` handler calls a new `context_next_ready()` (`src/context.c/h`)
+> — a round-robin scan of the context table, starting just past the calling
+> context's own slot and wrapping once — to pick a target, then hands it to
+> `context_switch_request()` exactly as the SCRUM-108 test-local `SYS_SWITCH`
+> handler did. This is deliberately the *minimum* policy the acceptance
+> criterion needs, not a real scheduler: no priority, no fairness beyond
+> plain round-robin, and `BLOCKED` contexts are simply skipped rather than
+> woken. A full scheduler (preemption, priority, wake-on-event) is still
+> SCRUM-147's job. If nothing else is `READY` — including the case where the
+> caller itself has no row in the table, the boot-time default LibOS
+> (`context_switch_request()`'s existing `CONTEXT_ENOENT` refusal) — `exo_yield`
+> is a no-op: it returns `0` and the caller carries on, since the documented
+> ABI (`docs/syscall_spec.md` §3.2 #19) has no error return.
+> `tests/kernel/test_syscall_yield_k.c` proves the acceptance criterion
+> directly through the real syscall and policy (not a test-local stand-in):
+> two real LibOS instances (`tests/kernel/yield_probe_a.s`/`_b.s`, adapted
+> from the SCRUM-108 probes to call `exo_yield()` with no argument) round-trip
+> through two real `exo_yield()` calls with register state intact, plus a
+> standalone no-op case.
+>
+> ✅ **SCRUM-110:** the first real, second LibOS a normal boot actually
+> launches — not just a test harness. `src/shell/shell_main.c` is a minimal
+> terminal: it maps the framebuffer via `libos_fb_map()` (`src/libos_fb.c`),
+> draws a text console with the same `src/fb_console.c` the kernel's own boot
+> banner uses (framebuffer-address-agnostic, so it compiles and runs
+> unmodified as compiled ring-3 code), and polls `exo_kbd_poll()` in a loop,
+> decoding `ps2_key_t` to ASCII and dispatching `help`/`clear`/`about` on
+> Enter — anything else echoes `unknown command: <line>`. `src/ps2.h`/`.c`
+> gained `KEY_0`–`KEY_9` and a handful of punctuation keys
+> (`KEY_MINUS`/`_EQUALS`/`_COMMA`/`_PERIOD`/`_SLASH`/`_SEMICOLON`) alongside
+> this so the shell has more than a letters-only command vocabulary.
+> `docker/scripts/build.sh`'s `build_ring3_link_target` mechanism (SCRUM-51/
+> -173) now runs **unconditionally**, not just under `TESTING=1` — the shell
+> blob has to exist in every build, since `kernel_main` launches it on every
+> normal boot, replacing the kernel-mode keyboard idle loop that used to sit
+> at the end of `kernel_main` — via `libos_build_image(PAGE_OWNER_LIBOS, ...)`
+> + `libos_enter_irq()` (the `_irq` entry point, not plain `libos_enter()`,
+> since the shell needs `exo_kbd_poll`/`exo_get_ticks` to see live IRQ-driven
+> state). Built as `PAGE_OWNER_LIBOS` itself — not a fresh context id —
+> because `syscall_current_context()` (`src/syscall.c`) is still hardcoded to
+> that one id in v1 (no real context switch has ever run on a normal boot),
+> so the shell's own `exo_page_map`/`exo_fb_acquire` calls only resolve into
+> the address space actually loaded in `CR3` if that is the address space
+> bound to `PAGE_OWNER_LIBOS`; `libos_build_image()` rebinds it in place,
+> replacing the placeholder binding to `vmm_kernel_pml4()` set up earlier in
+> `kernel_main` — exactly the "whole of the change needed" this section's own
+> SCRUM-48 note above anticipated. `tests/kernel/test_shell_libos_k.c` builds
+> the real embedded blob through `libos_build_image()` and checks it fits the
+> LibOS-window budget, but deliberately does not launch it: `shell_main()`
+> never calls `libos_return()` — it is a genuine, never-returning interactive
+> loop, launched once for the rest of a normal boot, not a probe — so the
+> rest of the interactive behavior (typing, backspace editing, command
+> dispatch) is verified manually via `make docker-run-kernel` rather than
+> through a scripted return path. **Not done here:** any handoff back to
+> Doom or real cooperative scheduling — Doom is still not linked into the
+> kernel at all, so `exo_yield()`'s call in the shell's idle loop is a no-op
+> exactly as documented (`docs/syscall_spec.md` §3.2 #19); Ctrl+Tab and
+> framebuffer multiplexing between two live LibOS instances are still
+> unowned, per this section's own opening paragraph.
+>
+> ⚠️ **A real GCC pitfall worth knowing before writing the next ring-3 link
+> target:** `libos_build_image()` always treats byte 0 of the linked code
+> blob as the entry point — no ELF symbol lookup, no `e_entry` — so whichever
+> function GCC's default `-ftoplevel-reorder` (on by default from `-O1` up)
+> happens to place first in the object's `.text` becomes the real entry,
+> regardless of source order. `libos_c_probe.c` and `libc_shim_probe.c` never
+> hit this because each keeps its entry function as the *only* function in
+> its own object; the SCRUM-110 shell target has several helpers alongside
+> `shell_main()` and hit it for real during development — GCC placed a small
+> helper first, so the launched context executed the helper's bytes as its
+> entry and immediately page-faulted writing into the (non-writable) code
+> region. `docker/scripts/build.sh`'s `probe_cflags` now passes
+> `-fno-toplevel-reorder` for every `build_ring3_link_target` target, fixing
+> this for good rather than leaving it as a convention for the next multi-
+> function target to rediscover.
 
 ---
 
@@ -826,5 +903,5 @@ bare-metal foundations to a playable game.
 | **Sprint 9: Playability E1M1** _(13 Jul – 27 Jul)_      | Playable first level                     | Debug and fix E1M1 rendering (walls, floors, ceilings, sprites), verify combat (shooting, enemy AI, damage, pickups, status bar), menu navigation (new game, options, difficulty, quit), performance profiling (frame time per subsystem), fix top 3 bottlenecks, verify 35 tics/sec game loop timing, test with Freedoom2 IWAD and original DOOM2.WAD                                                                                      |
 | **Sprint 10: Gameplay + Save/Load**                     | Save games                               | Ramdisk save/load (`exo_file_*`), `exo_file_remove`/`exo_file_rename`, `sscanf` for config                                                                                                                                                                                                                                                                                                                                                  |
 | **Sprint 11: Sound + Storage**                          | Audio + persistence                      | ATA PIO driver, `exo_disk_read`/`exo_disk_write`, save file persistence across reboots, PC speaker driver, Doom SFX mapping                                                                                                                                                                                                                                                                                                                 |
-| **Sprint 12: 2nd App + Context Switch**                 | Multitasking                             | Context table, `CR3` swap, `exo_yield`, shell LibOS, Ctrl+Tab hotkey, framebuffer multiplexing                                                                                                                                                                                                                                                                                                                                              |
+| **Sprint 12: 2nd App + Context Switch**                 | Multitasking                             | Context table ✅, `CR3` swap ✅, `exo_yield` ✅, shell LibOS ✅, Ctrl+Tab hotkey, framebuffer multiplexing                                                                                                                                                                                                                                                                                                                                              |
 | **Sprint 13: Harden + Compat Test**                     | Hardening                                | Regression suite, fuzz testing syscalls, test with DOOM.WAD / DOOM2.WAD / Freedoom2, performance report, code cleanup                                                                                                                                                                                                                                                                                                                       |

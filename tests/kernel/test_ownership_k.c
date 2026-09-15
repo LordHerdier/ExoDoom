@@ -97,6 +97,41 @@ static void test_kernel_page_not_reallocated(void)
     CU_ASSERT_EQUAL(free_page_checked(kp), 0);
 }
 
+static void test_reclaim_pages_for_owner(void)
+{
+    void* p1 = alloc_page_owned(PAGE_OWNER_LIBOS);
+    void* p2 = alloc_page_owned(PAGE_OWNER_LIBOS);
+    void* other = alloc_page_owned((page_owner_t)(PAGE_OWNER_LIBOS + 1));
+
+    CU_ASSERT_PTR_NOT_NULL(p1);
+    CU_ASSERT_PTR_NOT_NULL(p2);
+    CU_ASSERT_PTR_NOT_NULL(other);
+
+    CU_ASSERT_EQUAL(reclaim_pages_owned(PAGE_OWNER_LIBOS), 2);
+
+    CU_ASSERT_EQUAL(page_owner(p1), PAGE_OWNER_FREE);
+    CU_ASSERT_EQUAL(page_owner(p2), PAGE_OWNER_FREE);
+    CU_ASSERT_EQUAL(page_owner(other),
+                    (page_owner_t)(PAGE_OWNER_LIBOS + 1));
+
+    CU_ASSERT_EQUAL(
+        free_page_owned(other, (page_owner_t)(PAGE_OWNER_LIBOS + 1)),
+        PAGE_FREE_OK);
+}
+
+static void test_reclaim_never_frees_kernel_pages(void)
+{
+    void* kp = alloc_page();
+
+    CU_ASSERT_PTR_NOT_NULL(kp);
+    CU_ASSERT_EQUAL(page_owner(kp), PAGE_OWNER_KERNEL);
+
+    CU_ASSERT_EQUAL(reclaim_pages_owned(PAGE_OWNER_KERNEL), 0);
+    CU_ASSERT_EQUAL(page_owner(kp), PAGE_OWNER_KERNEL);
+
+    CU_ASSERT_EQUAL(free_page_checked(kp), 0);
+}
+
 void suite_ownership_tests(CU_pSuite s)
 {
     CU_add_test(s, "alloc stamps owner",             test_alloc_stamps_owner);
@@ -105,4 +140,9 @@ void suite_ownership_tests(CU_pSuite s)
     CU_add_test(s, "kernel page not freeable by libos",
                 test_kernel_page_not_freeable_by_libos);
     CU_add_test(s, "kernel page not reallocated",    test_kernel_page_not_reallocated);
+
+    CU_add_test(s, "reclaim pages for owner",
+            test_reclaim_pages_for_owner);
+CU_add_test(s, "reclaim never frees kernel pages",
+            test_reclaim_never_frees_kernel_pages);
 }

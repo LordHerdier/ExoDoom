@@ -22,6 +22,7 @@ void suite_exo_syscall_kview_tests(CU_pSuite s);
 void suite_exo_errno_tests(CU_pSuite s);
 void suite_syscall_tests(CU_pSuite s);
 void suite_syscall_mem_tests(CU_pSuite s);
+void suite_syscall_exit_tests(CU_pSuite s);
 void suite_ownership_tests(CU_pSuite s);
 void suite_fb_binding_tests(CU_pSuite s);
 void suite_vmm_tests(CU_pSuite s);
@@ -50,6 +51,8 @@ void suite_context_tests(CU_pSuite s);
 void suite_fb_console_tests(CU_pSuite s);
 void suite_context_switch_tests(CU_pSuite s);
 void suite_sse_tests(CU_pSuite s);
+void suite_syscall_yield_tests(CU_pSuite s);
+void suite_shell_libos_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -141,6 +144,17 @@ int sse_suite_cleanup(void);
  * cases instead of #UD-ing into an infinite loop. See test_sse_k.c. */
 int sse_suite_init(void);
 
+/* Same idea for the syscall_yield suite (SCRUM-109): same real-address-space/
+ * real-page shape as context_switch above, driven through the real bound
+ * exo_yield handler instead of a test-local stand-in. */
+int syscall_yield_suite_cleanup(void);
+
+/* Same idea for the shell_libos suite (SCRUM-110): builds the real shell
+ * blob under PAGE_OWNER_LIBOS and must restore its boot-time binding, same
+ * reasoning as libc_shim_probe_suite_init/_cleanup above. */
+int shell_libos_suite_init(void);
+int shell_libos_suite_cleanup(void);
+
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
  * above -- kept as its own suite, separate from "libos_heap"'s plain
@@ -200,6 +214,9 @@ int run_tests(void)
 
     s = CU_add_suite("syscall_mem", NULL, NULL);
     suite_syscall_mem_tests(s);
+
+    s = CU_add_suite("syscall_exit", NULL, NULL);
+    suite_syscall_exit_tests(s);
 
     s = CU_add_suite("ownership", NULL, NULL);
     suite_ownership_tests(s);
@@ -292,6 +309,13 @@ int run_tests(void)
 
     s = CU_add_suite("sse", sse_suite_init, sse_suite_cleanup);
     suite_sse_tests(s);
+
+    s = CU_add_suite("syscall_yield", NULL, syscall_yield_suite_cleanup);
+    suite_syscall_yield_tests(s);
+
+    s = CU_add_suite("shell_libos", shell_libos_suite_init,
+                     shell_libos_suite_cleanup);
+    suite_shell_libos_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

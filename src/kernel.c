@@ -4,7 +4,7 @@
 #include "memory.h"
 #include "mmap.h"
 #include "page_alloc.h"
-#include "vmm.h"
+#include "syscall_exit.h"
 
 #include "idt.h"
 #include "tss.h"
@@ -20,14 +20,29 @@
 #include "syscall_serial.h"
 #include "syscall_kbd.h"
 #include "syscall_pit.h"
+#include "syscall_yield.h"
 #include "fb_binding.h"
 #include "revoke.h"
 #include "vmm.h"
 #include "exo_syscall.h"
+#include "libos_launch.h"
+#include "shell/shell_layout.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
 extern void kbd_init();
+
+/* Embedded shell LibOS code/data blobs -- produced at build time by
+ * build_ring3_link_target's objcopy step (docker/scripts/build.sh, SCRUM-110)
+ * from src/shell/shell_main.c + src/fb.c + src/fb_console.c + src/libos_fb.c,
+ * linked and compiled without -DEXO_KERNEL at LIBOS_LAUNCH_CODE_VADDR/
+ * _DATA_VADDR. SHELL_BSS_LEN comes from the same step's generated
+ * src/shell/shell_layout.h, mirroring exactly how
+ * tests/kernel/test_libc_shim_probe_k.c consumes its own blobs. */
+extern const uint8_t _binary_shell_code_bin_start[];
+extern const uint8_t _binary_shell_code_bin_end[];
+extern const uint8_t _binary_shell_data_bin_start[];
+extern const uint8_t _binary_shell_data_bin_end[];
 
 #ifdef TESTING
 extern int run_tests(void);
@@ -637,6 +652,13 @@ void kernel_main(void *mb2_info_ptr) {
     // case acquire reports -EXO_ENODEV rather than -EXO_ENOSYS.
     syscall_fb_init((const struct mb2_tag_framebuffer *)fb_tag);
 
+    // ── Exit syscall (SCRUM-155) ────────────────────────────────────────
+    // Binds exo_exit (#20), which reclaims every page and the framebuffer
+    // binding the terminating LibOS context holds.  Same placement rule as
+    // the other syscalls: after syscall_mem_init()/syscall_fb_init(), ahead
+    // of the TESTING branch.
+    syscall_exit_init();
+
     // ── Serial syscall (SCRUM-50) ────────────────────────────────────────
     // Binds exo_serial_write (#8), the printf/fprintf shim's backend.  Same
     // placement rule as the memory and framebuffer syscalls: after
@@ -677,6 +699,13 @@ void kernel_main(void *mb2_info_ptr) {
     // kernel_get_ticks_ms(), which stays at 0 without it -- and, like the
     // other syscall *_init()s, ahead of the TESTING branch.
     syscall_pit_init();
+
+    // ── Yield syscall (SCRUM-109) ────────────────────────────────────────
+    // Binds exo_yield (#19) to context_switch_request() via the round-robin
+    // policy in context_next_ready() -- needs no other subsystem init, so
+    // placement here just follows the "after syscall_init(), ahead of the
+    // TESTING branch" rule every other syscall *_init() follows.
+    syscall_yield_init();
 
 #ifdef TESTING
     // No blanket `sti` here: several suites (fault, tss, libos_launch,
@@ -817,37 +846,67 @@ void kernel_main(void *mb2_info_ptr) {
     fbcon_write(&con, "\n");
     klog(&con, kernel_get_ticks_ms(), "Timer demo complete.");
 
-    // ── Keyboard event loop ─────────────────────────────────────────────
-    // IRQ1 only decodes scancodes and queues events; draining and printing
-    // them happens here, out of interrupt context.
-    klog(&con, kernel_get_ticks_ms(),
-         "Keyboard ready - key events are logged to serial.");
+    // ── Shell LibOS launch (SCRUM-110) ──────────────────────────────────
+    // The first real LibOS this kernel launches on a normal boot, replacing
+    // the kernel-mode keyboard loop that used to sit here. Built as
+    // PAGE_OWNER_LIBOS -- not a fresh id -- because syscall_current_context()
+    // (src/syscall.c) is hardcoded to PAGE_OWNER_LIBOS in v1 (no real context
+    // switch has ever run), so the shell's own exo_page_map/exo_fb_acquire
+    // calls (via libos_fb_map(), src/libos_fb.c) only resolve into the
+    // address space actually loaded in CR3 if that address space is the one
+    // bound to PAGE_OWNER_LIBOS. libos_build_image() rebinds PAGE_OWNER_LIBOS
+    // in place (vmm_bind_address_space() allows a rebind), replacing the
+    // placeholder binding to vmm_kernel_pml4() set up near the top of this
+    // function with the shell's own, real address space -- exactly the
+    // "whole of the change needed" docs/architecture.md's SCRUM-48 section
+    // describes.
+    klog(&con, kernel_get_ticks_ms(), "Launching shell LibOS...");
 
-    for (;;) {
-        kbd_service();
+    size_t shell_code_len = (size_t)(_binary_shell_code_bin_end -
+                                     _binary_shell_code_bin_start);
+    size_t shell_data_len = (size_t)(_binary_shell_data_bin_end -
+                                     _binary_shell_data_bin_start);
 
-        // Check the queue with interrupts off, so an IRQ1 landing between the
-        // service call and the hlt cannot leave its events sitting unread
-        // until some unrelated interrupt happens to wake the CPU. Today the
-        // 1000 Hz PIT bounds that to ~1 ms, but it becomes a real stall if the
-        // tick rate drops or the timer stops.
-        //
-        // "sti; hlt" is the safe pairing: sti leaves interrupts blocked for
-        // one more instruction, so the hlt is executed before any IRQ is
-        // recognised and a wakeup arriving in that window cannot be lost.
-        //
-        // The "memory" clobbers make the barrier explicit rather than relying
-        // on kbd_pending() being an opaque cross-TU call: without them a build
-        // that can see through it (LTO, or moving it inline) would be free to
-        // hoist the queue read out of the critical section and reintroduce the
-        // race this block closes.
-        __asm__ volatile ("cli" ::: "memory");
-
-        if (kbd_pending()) {
-            __asm__ volatile ("sti" ::: "memory");
-            continue;
+    libos_image_t shell_img;
+    int shell_build_rc = libos_build_image(PAGE_OWNER_LIBOS,
+                                           _binary_shell_code_bin_start,
+                                           shell_code_len,
+                                           _binary_shell_data_bin_start,
+                                           shell_data_len,
+                                           SHELL_BSS_LEN,
+                                           &shell_img);
+    if (shell_build_rc != VMM_OK) {
+        klog(&con, kernel_get_ticks_ms(),
+             "FATAL: shell LibOS image build failed");
+        serial_print("FATAL: libos_build_image failed for shell LibOS\n");
+        serial_flush();
+        for (;;) {
+            __asm__ volatile ("cli; hlt");
         }
+    }
 
-        __asm__ volatile ("sti; hlt" ::: "memory");
+    // vmm_switch_address_space() rather than folding this into
+    // libos_enter_irq(): same reasoning as libos_enter_irq()'s own comment
+    // (src/libos_launch.h) -- entry_vaddr/stack_top_vaddr only resolve once
+    // this address space is actually loaded in CR3.
+    if (vmm_switch_address_space(shell_img.pml4_phys) != VMM_OK) {
+        klog(&con, kernel_get_ticks_ms(),
+             "FATAL: could not switch to shell LibOS address space");
+        serial_print("FATAL: vmm_switch_address_space failed for shell LibOS\n");
+        serial_flush();
+        for (;;) {
+            __asm__ volatile ("cli; hlt");
+        }
+    }
+
+    // Does not return -- there is no `ret` on the other side of an `iretq`
+    // to CPL 3 (src/libos_launch.h's own comment on libos_enter()/
+    // libos_enter_irq()). This is legitimately the new tail of kernel_main:
+    // the shell LibOS is the rest of this boot.
+    libos_enter_irq(shell_img.entry_vaddr, shell_img.stack_top_vaddr);
+
+    // Unreachable.
+    for (;;) {
+        __asm__ volatile ("cli; hlt");
     }
 }
