@@ -269,11 +269,11 @@ static int run_fb_binding_demo(fb_console_t *con) {
     //    pages) is just ordinary page ownership for the private buffer, and
     //    run_page_map_demo() below already covers that generically.
     all &= ownership_check(con, "  real FB range still unmappable          ",
-                           fb_binding_geometry() == NULL ||
+                           fb_binding_geometry() != NULL &&
                            fb_binding_check_map(
                                fb_binding_geometry()->phys_addr,
                                syscall_current_context())
-                           != FB_MAP_ALLOW);
+                           == FB_MAP_DENY);
 
     // 3. A second, distinct context also succeeds, with its own distinct
     //    buffer -- SCRUM-112 replaced the single exclusive binding with a
