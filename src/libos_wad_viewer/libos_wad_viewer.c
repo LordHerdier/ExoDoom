@@ -30,9 +30,10 @@
  * as the outgoing side, to capture into -- so it is left behind READY but
  * resourceless, and the shell's own round-robin exo_yield() can perfectly
  * legally resume it again before src/syscall_launch.c's next `wadview`
- * launch gets around to context_destroy()ing it. The fallback loop after
- * each raw exo_syscall1() call below exists for exactly that resume, and
- * has to survive the compiler seeing it to do any good.
+ * launch gets around to context_destroy()ing it. wad_viewer_exit_or_yield()
+ * (below) is the raw stub call plus fallback loop every error/quit path
+ * here uses for exactly that resume, and has to survive the compiler
+ * seeing it to do any good.
  *
  * The one thing this LibOS cannot get through that ABI is the WAD itself --
  * v1 has no filesystem and no exo_wad_acquire syscall, so kernel_main
@@ -128,6 +129,20 @@ static void write_u32(fb_console_t *con, uint32_t val)
     int i = 10;
     while (val > 0) { buf[--i] = '0' + (val % 10); val /= 10; }
     fbcon_write(con, &buf[i]);
+}
+
+/* Every error/quit path below wants "exit, or yield forever if resumed
+ * anyway" -- see the file header comment for why that has to be the raw
+ * exo_syscall1(EXO_SYS_EXIT, ...) + a real `for(;;) { exo_yield(); }` rather
+ * than the exo_exit() convenience wrapper. Because this helper itself is the
+ * one place that does the raw stub call followed by the fallback loop, GCC's
+ * noreturn inference has nothing to prove unreachable at any of its call
+ * sites -- each one just calls this and stops, same as it would have with
+ * the inlined pair. */
+static void wad_viewer_exit_or_yield(void)
+{
+    exo_syscall1(EXO_SYS_EXIT, 0);
+    for (;;) { exo_yield(); }
 }
 
 /* ---- the "Ring 3 boot" banner ------------------------------------------ */
@@ -249,20 +264,7 @@ static void run_automap_viewer(fb_console_t *con, framebuffer_t *fb, const wad_t
                 need_redraw = 1;
             } else if (ev.key == KEY_Q || ev.key == KEY_ESC) {
                 ring3_log("ring3 wad viewer: quit, handing off to the shell\n");
-                exo_syscall1(EXO_SYS_EXIT, 0);   /* not exo_exit(): that wrapper's own
-                    * trailing for(;;){} makes everything after a call
-                    * to it provably unreachable, so GCC compiles the
-                    * fallback loop below to a bare trap instead of the
-                    * real exo_yield() it's supposed to call if this
-                    * context is ever resumed again -- calling the raw
-                    * stub directly keeps that fallback reachable. */
-                for (;;) { exo_yield(); }   /* exo_exit() cannot
-                                * context_destroy() its own row
-                                * (src/syscall_exit.c's own comment on why),
-                                * so a stray future round-robin visit back
-                                * here must cooperate by yielding again
-                                * instead of spinning forever and starving
-                                * the shell of the CPU for good. */
+                wad_viewer_exit_or_yield();
             }
         }
 
@@ -281,18 +283,7 @@ void libos_wad_viewer_main(void)
     libos_fb_t libfb;
     if (libos_fb_map(&libfb) != 0 || libfb.vaddr == NULL) {
         ring3_log("ring3 wad viewer: framebuffer map failed\n");
-        exo_syscall1(EXO_SYS_EXIT, 0);   /* not exo_exit(): that wrapper's own
-                    * trailing for(;;){} makes everything after a call
-                    * to it provably unreachable, so GCC compiles the
-                    * fallback loop below to a bare trap instead of the
-                    * real exo_yield() it's supposed to call if this
-                    * context is ever resumed again -- calling the raw
-                    * stub directly keeps that fallback reachable. */
-        for (;;) { exo_yield(); }   /* exo_exit() cannot context_destroy()
-                        * its own row (src/syscall_exit.c's own comment on why), so
-                        * a stray future round-robin visit back here must cooperate
-                        * by yielding again instead of spinning forever and
-                        * starving the shell of the CPU for good. */
+        wad_viewer_exit_or_yield();
     }
 
     framebuffer_t fb;
@@ -300,18 +291,7 @@ void libos_wad_viewer_main(void)
     if (!fb_init_bgrx8888(&fb, (uintptr_t)libfb.vaddr, libfb.pitch,
                           libfb.width, libfb.height, libfb.bpp)) {
         ring3_log("ring3 wad viewer: fb_init_bgrx8888 failed\n");
-        exo_syscall1(EXO_SYS_EXIT, 0);   /* not exo_exit(): that wrapper's own
-                    * trailing for(;;){} makes everything after a call
-                    * to it provably unreachable, so GCC compiles the
-                    * fallback loop below to a bare trap instead of the
-                    * real exo_yield() it's supposed to call if this
-                    * context is ever resumed again -- calling the raw
-                    * stub directly keeps that fallback reachable. */
-        for (;;) { exo_yield(); }   /* exo_exit() cannot context_destroy()
-                        * its own row (src/syscall_exit.c's own comment on why), so
-                        * a stray future round-robin visit back here must cooperate
-                        * by yielding again instead of spinning forever and
-                        * starving the shell of the CPU for good. */
+        wad_viewer_exit_or_yield();
     }
 
     ring3_boot_banner(&con, &fb);
@@ -325,18 +305,7 @@ void libos_wad_viewer_main(void)
         fbcon_set_color(&con, 230, 50, 50, 0, 0, 0);
         fbcon_write(&con, "ERROR: WAD parse failed.\n");
         ring3_log("ring3 wad viewer: wad_init failed\n");
-        exo_syscall1(EXO_SYS_EXIT, 0);   /* not exo_exit(): that wrapper's own
-                    * trailing for(;;){} makes everything after a call
-                    * to it provably unreachable, so GCC compiles the
-                    * fallback loop below to a bare trap instead of the
-                    * real exo_yield() it's supposed to call if this
-                    * context is ever resumed again -- calling the raw
-                    * stub directly keeps that fallback reachable. */
-        for (;;) { exo_yield(); }   /* exo_exit() cannot context_destroy()
-                        * its own row (src/syscall_exit.c's own comment on why), so
-                        * a stray future round-robin visit back here must cooperate
-                        * by yielding again instead of spinning forever and
-                        * starving the shell of the CPU for good. */
+        wad_viewer_exit_or_yield();
     }
 
     fbcon_write(&con, "WAD mapped read-only at ring 3: ");
@@ -349,18 +318,7 @@ void libos_wad_viewer_main(void)
         fbcon_set_color(&con, 230, 50, 50, 0, 0, 0);
         fbcon_write(&con, "ERROR: PLAYPAL not found.\n");
         ring3_log("ring3 wad viewer: PLAYPAL missing\n");
-        exo_syscall1(EXO_SYS_EXIT, 0);   /* not exo_exit(): that wrapper's own
-                    * trailing for(;;){} makes everything after a call
-                    * to it provably unreachable, so GCC compiles the
-                    * fallback loop below to a bare trap instead of the
-                    * real exo_yield() it's supposed to call if this
-                    * context is ever resumed again -- calling the raw
-                    * stub directly keeps that fallback reachable. */
-        for (;;) { exo_yield(); }   /* exo_exit() cannot context_destroy()
-                        * its own row (src/syscall_exit.c's own comment on why), so
-                        * a stray future round-robin visit back here must cooperate
-                        * by yielding again instead of spinning forever and
-                        * starving the shell of the CPU for good. */
+        wad_viewer_exit_or_yield();
     }
     fbcon_write(&con, "PLAYPAL palette loaded\n");
 
@@ -379,34 +337,12 @@ void libos_wad_viewer_main(void)
     if (num_maps == 0) {
         fbcon_write(&con, "No MAPxx lumps found in WAD.\n");
         ring3_log("ring3 wad viewer: no maps found\n");
-        exo_syscall1(EXO_SYS_EXIT, 0);   /* not exo_exit(): that wrapper's own
-                    * trailing for(;;){} makes everything after a call
-                    * to it provably unreachable, so GCC compiles the
-                    * fallback loop below to a bare trap instead of the
-                    * real exo_yield() it's supposed to call if this
-                    * context is ever resumed again -- calling the raw
-                    * stub directly keeps that fallback reachable. */
-        for (;;) { exo_yield(); }   /* exo_exit() cannot context_destroy()
-                        * its own row (src/syscall_exit.c's own comment on why), so
-                        * a stray future round-robin visit back here must cooperate
-                        * by yielding again instead of spinning forever and
-                        * starving the shell of the CPU for good. */
+        wad_viewer_exit_or_yield();
     }
 
     ring3_log("ring3 wad viewer: entering automap loop\n");
     run_automap_viewer(&con, &fb, &wad, num_maps);
 
     /* unreachable: run_automap_viewer never returns */
-    exo_syscall1(EXO_SYS_EXIT, 0);   /* not exo_exit(): that wrapper's own
-                    * trailing for(;;){} makes everything after a call
-                    * to it provably unreachable, so GCC compiles the
-                    * fallback loop below to a bare trap instead of the
-                    * real exo_yield() it's supposed to call if this
-                    * context is ever resumed again -- calling the raw
-                    * stub directly keeps that fallback reachable. */
-    for (;;) { exo_yield(); }   /* exo_exit() cannot context_destroy()
-                        * its own row (src/syscall_exit.c's own comment on why), so
-                        * a stray future round-robin visit back here must cooperate
-                        * by yielding again instead of spinning forever and
-                        * starving the shell of the CPU for good. */
+    wad_viewer_exit_or_yield();
 }
