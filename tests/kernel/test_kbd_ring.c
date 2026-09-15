@@ -468,6 +468,45 @@ static void test_unserviced_queue_overflows_gracefully(void)
     CU_ASSERT_EQUAL(ev.key, KEY_SPACE);
 }
 
+/* SCRUM-110: digits and basic punctuation, added so the shell LibOS has a
+ * typeable command vocabulary beyond letters. Same shape as
+ * test_press_then_release above, one make/break pair per key, spot-checking
+ * the ends and middle of the row rather than all 16 new keys individually --
+ * src/ps2.c's decoder is a flat switch, not a computed table, so there is no
+ * shared arithmetic bug that would affect one entry but not its neighbors. */
+static void test_digit_and_punctuation_scancodes(void)
+{
+    static const struct {
+        uint8_t make, brk;
+        ps2_key_t key;
+    } cases[] = {
+        { 0x02, 0x82, KEY_1 },
+        { 0x0A, 0x8A, KEY_9 },
+        { 0x0B, 0x8B, KEY_0 },
+        { 0x0C, 0x8C, KEY_MINUS },
+        { 0x0D, 0x8D, KEY_EQUALS },
+        { 0x33, 0xB3, KEY_COMMA },
+        { 0x34, 0xB4, KEY_PERIOD },
+        { 0x35, 0xB5, KEY_SLASH },
+        { 0x27, 0xA7, KEY_SEMICOLON },
+    };
+    kbd_event_t ev;
+
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        kbd_reset();
+        ps2_process_scancode(cases[i].make);
+        ps2_process_scancode(cases[i].brk);
+
+        CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
+        CU_ASSERT_EQUAL(ev.key, cases[i].key);
+        CU_ASSERT_EQUAL(ev.pressed, 1);
+
+        CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
+        CU_ASSERT_EQUAL(ev.key, cases[i].key);
+        CU_ASSERT_EQUAL(ev.pressed, 0);
+    }
+}
+
 static void test_exo_kbd_poll_matches_dequeue(void)
 {
     kbd_event_t ev;
@@ -498,5 +537,6 @@ void suite_ps2_decode_tests(CU_pSuite s)
     CU_add_test(s, "response_bytes_dropped",    test_response_bytes_queue_nothing);
     CU_add_test(s, "rapid_burst_no_drop",       test_rapid_burst_drops_nothing);
     CU_add_test(s, "overflow_graceful",         test_unserviced_queue_overflows_gracefully);
+    CU_add_test(s, "digit_punctuation_keys",    test_digit_and_punctuation_scancodes);
     CU_add_test(s, "exo_kbd_poll",              test_exo_kbd_poll_matches_dequeue);
 }
