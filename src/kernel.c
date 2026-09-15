@@ -4,7 +4,7 @@
 #include "memory.h"
 #include "mmap.h"
 #include "page_alloc.h"
-#include "vmm.h"
+#include "syscall_exit.h"
 
 #include "idt.h"
 #include "tss.h"
@@ -636,6 +636,13 @@ void kernel_main(void *mb2_info_ptr) {
     // syscall_init, ahead of the TESTING branch.  fb_tag may be NULL, in which
     // case acquire reports -EXO_ENODEV rather than -EXO_ENOSYS.
     syscall_fb_init((const struct mb2_tag_framebuffer *)fb_tag);
+
+    // ── Exit syscall (SCRUM-155) ────────────────────────────────────────
+    // Binds exo_exit (#20), which reclaims every page and the framebuffer
+    // binding the terminating LibOS context holds.  Same placement rule as
+    // the other syscalls: after syscall_mem_init()/syscall_fb_init(), ahead
+    // of the TESTING branch.
+    syscall_exit_init();
 
     // ── Serial syscall (SCRUM-50) ────────────────────────────────────────
     // Binds exo_serial_write (#8), the printf/fprintf shim's backend.  Same
