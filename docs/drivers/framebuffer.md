@@ -283,11 +283,13 @@ When the cursor moves past the last row, `scroll_up_one_row` shifts the
 framebuffer contents up by 16 pixels:
 
 ```c
-// memmove the pixel data up by one character row
-uint8_t* dst = fb->addr;
-uint8_t* src = fb->addr + 16 * fb->pitch;
-uint32_t len = (fb->height - 16) * fb->pitch;
-for (uint32_t i = 0; i < len; i++) dst[i] = src[i];
+// memmove the pixel data up by one character row, whole 32-bit pixels at a
+// time (SCRUM-162) -- the framebuffer is always 32bpp, so pitch/len are
+// always a multiple of 4 and there is no leftover tail to special-case.
+uint32_t* dst = (uint32_t*)fb->addr;
+uint32_t* src = (uint32_t*)(fb->addr + 16 * fb->pitch);
+uint32_t len_px = ((fb->height - 16) * fb->pitch) / 4;
+for (uint32_t i = 0; i < len_px; i++) dst[i] = src[i];
 
 // Clear the newly exposed bottom row
 fb_fill_rect(fb, 0, fb->height - 16, fb->width, 16,
@@ -296,7 +298,8 @@ fb_fill_rect(fb, 0, fb->height - 16, fb->width, 16,
 
 This is a direct pixel copy rather than a `memmove` call (no libc in
 freestanding mode). The copy direction (low to high addresses) is correct for
-upward scrolling since `dst < src`.
+upward scrolling since `dst < src`. Before SCRUM-162 this copied one `uint8_t`
+at a time; see §9 below for the measured cost of that and the word-wise fix.
 
 ### Control characters
 
@@ -481,11 +484,23 @@ This means screen tearing is possible during fast updates. For Doom's 35
 tics/sec game loop on a 60 Hz display this is not a severe issue, but a future
 optimisation could add a back-buffer and `memcpy` on `DG_DrawFrame`.
 
-**Scrolling is slow.** `scroll_up_one_row` copies `(768 - 16) * pitch ≈ 3 MB` of
-pixel data every time the text console scrolls. At serial-debug speeds
-(relatively infrequent output) this is fine. If the console is used for
-high-frequency output, consider a circular buffer approach that tracks a virtual
-top-of-screen offset instead of physically moving pixels.
+**Scrolling used to be byte-wise slow (SCRUM-162).** `scroll_up_one_row`
+copies `(768 - 16) * pitch ≈ 3 MB` of pixel data every time the text console
+scrolls. Measured with `kernel_get_ticks_ms()` around the copy on a normal
+QEMU boot (18 forced scrolls from the boot banner/mmap dump/self-check
+output): the pre-SCRUM-162 byte-at-a-time copy cost **4-7 ms per scrolled
+line**, matching the ticket's original estimate and the direct cause of the
+boot timer demo's cadence drift diagnosed in SCRUM-163 (`kernel_sleep_ms(1000)`
+iterations that print-then-scroll cost ~1006 ms, not 1000). SCRUM-162 switched
+the copy to whole 32-bit pixels (§"Scrolling" above), the same wide-store
+idiom `fb_clear`/`fb_fill_rect` already use; the identical measurement
+afterward dropped to **0-2 ms per scrolled line** — roughly a 3-4x
+improvement, consistent with trading 4 MMIO stores/pixel for 1. It is still
+`(768 - 16) * pitch` of uncached MMIO traffic every scroll — a circular
+buffer that tracks a virtual top-of-screen offset instead of physically
+moving pixels remains the option if high-frequency output ever needs more
+headroom than a wide-store loop buys — but the per-scroll cost is no longer
+dominated by single-byte stores.
 
 **Framebuffer is active in the boot path.** The framebuffer is initialised early
 in `kernel_main` (before interrupts) and displays the boot banner, BIOS memory
