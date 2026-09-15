@@ -20,9 +20,12 @@ Derived from static analysis of
 3. [Exokernel syscall specification](#3-exokernel-syscall-specification)
    - [3.1 Calling convention](#31-syscall-calling-convention)
    - [3.2 Syscall table](#32-syscall-table)
+   - [3.2a Error codes](#32a-error-codes-scrum-57)
    - [3.3 Secure binding & resource ownership](#33-secure-binding--resource-ownership)
    - [3.4 Entry path](#34-entry-path-scrum-32)
    - [3.5 Framebuffer binding](#35-framebuffer-binding-scrum-154)
+   - [3.6 Revocation & repossession](#36-revocation--repossession-scrum-156)
+   - [3.7 Address-space mapping](#37-address-space-mapping-scrum-35)
 4. [Architectural decision: file I/O strategy](#4-architectural-decision-file-io-strategy)
 5. [Memory allocation pattern](#5-memory-allocation-pattern)
 6. [Sound architecture](#6-sound-architecture)
@@ -58,9 +61,36 @@ internally by the engine.
 
 ## 2. Complete libc dependency audit
 
-The following is an exhaustive list of every standard C library function called
-by doomgeneric's 82 core source files, with call counts from static grep
-analysis. This determines what the freestanding libc shim must provide.
+> ⚠️ **Superseded by [`docs/libc_audit.md`](libc_audit.md) (SCRUM-72).** This
+> section is kept for its per-family design notes, but **its status column and
+> call counts are no longer authoritative.** They came from static grep over
+> "doomgeneric's 82 core source files", which counts text rather than reachable
+> calls and covers a file set wider than what `src/doom/` actually vendors (79
+> `.c` files). The SCRUM-72 audit instead derives the list from the linker —
+> `nm -u` over the compiled objects minus what Doom defines itself — which
+> cannot count a call inside `#if ORIGCODE`, miss one made through a macro, or
+> include a file that was never vendored.
+>
+> Concrete corrections that follow from that:
+>
+> - **`strerror` is listed below with 4 calls. It has zero.** Nothing under
+>   `src/doom/` calls it, and no object references it. It does not need
+>   implementing.
+> - **`memcmp` and `memmove` are not referenced either** — both are implemented
+>   and correct, but Doom never reaches them (`memmove`'s two call sites are in
+>   a dehacked branch GCC proves dead, since `DEH_String(x)` is `#define`d to
+>   `(x)`).
+> - **`strcasecmp`/`strncasecmp` are marked Todo below; both have been
+>   implemented** in `src/string.c` since SCRUM-11's follow-up.
+> - Call counts differ throughout — e.g. `strlen` is 56 occurrences in the
+>   vendored tree, not 64; `strdup` is 9, not 16.
+>
+> Use `docs/libc_audit.md` and its `libc_audit.csv` for status. Use this
+> section for the "why" notes per family.
+
+The following is a list of standard C library functions called by
+doomgeneric, with call counts from static grep analysis. This was the original
+basis for what the freestanding libc shim must provide.
 
 ### 2.1 `string.h` — all required, no shortcuts
 
@@ -96,21 +126,77 @@ analysis. This determines what the freestanding libc shim must provide.
 > config parsing, string handling, and the screen buffer allocation. The libc
 > `malloc` must work but does not need to be high-performance.
 
-| Function  | Calls    | Notes                                                                                         |
-| --------- | -------- | --------------------------------------------------------------------------------------------- |
-| `free`    | 153      | Most calls are `Z_Free` (internal zone). ~20 are direct libc `free()`.                        |
-| `exit`    | 31       | Called on fatal errors. Implement as halt loop.                                               |
-| `malloc`  | 21       | One 6 MiB zone alloc + ~20 small allocs (strings, paths, structs).                            |
-| `abs`     | 30       | Integer absolute value. Trivial macro.                                                        |
-| `atoi`    | 14       | String to integer. Used for config/command-line parsing.                                      |
-| `atof`    | 2        | String to float. Used only for mouse acceleration config. Can return `1.0` as stub.           |
-| `atexit`  | 4        | Register cleanup functions. Implement as linked list (Doom already does this via `I_AtExit`). |
-| `getenv`  | 3        | Returns `DOOMWADPATH`/`DOOMWADDIR`. Return `NULL` — WAD is a multiboot module.                |
-| `system`  | 13       | All behind `#ifdef` guards (Zenity error boxes). Stub as `return -1`.                         |
-| `realloc` | 3        | Resize allocation. Implement as `malloc` + `memcpy` + `free`.                                 |
-| `calloc`  | 2        | `malloc` + `memset(0)`. Trivial wrapper.                                                      |
-| `abort`   | 2        | Abnormal termination. Implement as halt loop.                                                 |
-| `qsort`   | 0 direct | Not called directly but may be pulled in. Implement a simple quicksort.                       |
+> ✅ **Sprint 3 (SCRUM-30):** `malloc`, `free`, `realloc`, `atoi`, `abs`,
+> `rand`/`srand` and `qsort` are implemented in `src/stdlib.c` and merged.
+> `malloc`/`free`/`realloc` allocate no pool of their own — which allocator
+> they forward to depends on which side of the kernel/LibOS build split
+> compiles them (SCRUM-51): `kmalloc`/`kfree`/`krealloc` (`src/memory.c` →
+> `src/heap.c`, SCRUM-25) under `-DEXO_KERNEL` (the kernel itself, and every
+> `tests/kernel/*.c` suite), `libos_heap_alloc`/`_free`/`_realloc`
+> (`src/libos_heap.c`, SCRUM-38) otherwise — the ring-3 LibOS link target
+> `tests/kernel/libc_shim_probe/` builds. Remaining: `exit`, `abort`,
+> `atexit`, `getenv`, `system`, `calloc`, `atof`.
+
+| Function  | Calls    | Status  | Notes                                                                                         |
+| --------- | -------- | ------- | --------------------------------------------------------------------------------------------- |
+| `free`    | 153      | ✅ Done | Most calls are `Z_Free` (internal zone). ~20 are direct libc `free()`.                        |
+| `exit`    | 31       | ⬜ Todo | Called on fatal errors. Implement as halt loop. Pairs with `exo_exit` (#20).                  |
+| `malloc`  | 21       | ✅ Done | One 6 MiB zone alloc + ~20 small allocs (strings, paths, structs).                            |
+| `abs`     | 30       | ✅ Done | Integer absolute value. `abs(INT_MIN)` negates in unsigned arithmetic rather than being UB.   |
+| `atoi`    | 14       | ✅ Done | String to integer. Used for config/command-line parsing. Saturates instead of wrapping.       |
+| `atof`    | 2        | ⬜ Todo | String to float. Used only for mouse acceleration config. Can return `1.0` as stub.           |
+| `atexit`  | 4        | ⬜ Todo | Register cleanup functions. Implement as linked list (Doom already does this via `I_AtExit`). |
+| `getenv`  | 3        | ⬜ Todo | Returns `DOOMWADPATH`/`DOOMWADDIR`. Return `NULL` — WAD is a multiboot module.                |
+| `system`  | 13       | ⬜ Todo | All behind `#ifdef` guards (Zenity error boxes). Stub as `return -1`.                         |
+| `realloc` | 3        | ✅ Done | Resize allocation. `heap_realloc` grows in place when the next block is free.                 |
+| `calloc`  | 2        | ⬜ Todo | `malloc` + `memset(0)`. Trivial wrapper.                                                      |
+| `abort`   | 2        | ⬜ Todo | Abnormal termination. Implement as halt loop.                                                 |
+| `qsort`   | 0 direct | ✅ Done | Not called directly but may be pulled in. Median-of-three quicksort, three-way partition.     |
+| `rand`    | 0 direct | ✅ Done | Not in the vendored core either, but part of the same header. C-standard reference LCG.       |
+| `srand`   | 0 direct | ✅ Done | Seeds `rand`; the sequence for a given seed is fixed and asserted in the test suite.          |
+
+Call counts above are from the original 82-file doomgeneric analysis. For
+reference, the same grep over the vendored subset in `src/doom/` (175 files)
+finds `abs` 30, `malloc` 18, `free` 15, `atoi` 9, `realloc` 1, `calloc` 1, and
+no direct `rand`/`srand`/`qsort` at all.
+
+**Implementation notes (SCRUM-30).** Three choices in `src/stdlib.c` are worth
+knowing before changing it:
+
+- **`qsort` cannot copy its pivot.** Element size is a runtime value and there
+  is no scratch buffer, so the pivot is compared in place: median-of-three
+  parks it at `lo` and only `[lo+1, hi]` is partitioned, which means no swap
+  can move it out from under the comparisons.
+- **`qsort` recurses into the smaller partition only** and loops on the larger,
+  bounding stack depth at O(log n). The kernel stack is 16 KiB; a quicksort
+  recursing on both sides would overrun it on a sorted input long before
+  finishing. Measured depth at n = 1,000,000 is 18 against a log₂ n of 20.
+- **`qsort` partitions three ways, and that is not an optimisation**
+  (SCRUM-171). The original two-way Hoare partition scanned with
+  `cmp(i, lo) <= 0` / `cmp(j, lo) >= 0`, so both pointers ran over keys equal
+  to the pivot instead of stopping on them; every partition of an input with
+  few distinct values then split n-1/0, which is O(n²). The Bentley–McIlroy
+  partition in place of it stops each scan on an equal key, parks it at the
+  end that scan came from, and rotates both equal runs into the middle with
+  two block swaps, where they are already in final position and are excluded
+  from both recursions. Comparison counts at n = 200,000:
+
+  | Input shape  | Two-way (before) | Three-way (after) | Change    |
+  | ------------ | ---------------: | ----------------: | --------- |
+  | sorted       |        3,167,247 |         3,167,247 | —         |
+  | reverse      |        3,167,247 |         3,167,247 | —         |
+  | random       |        4,020,100 |         3,211,413 | 1.25× fewer |
+  | ten distinct |    1,704,561,308 |           680,505 | 2,505× fewer |
+  | two distinct |   15,064,643,549 |           300,153 | 50,190× fewer |
+  | all-equal    |   20,000,299,963 |           200,001 | 100,001× fewer |
+
+  All-equal input is now a single O(n) partition pass; k distinct values cost
+  O(n log k). `tests/kernel/test_stdlib_k.c` guards this with comparison-count
+  budgets rather than wall-clock times, since the count is a property of the
+  algorithm and is identical on the host and under QEMU.
+- **`rand` is pinned to `uint32_t`.** The C standard's reference LCG is
+  specified over a 32-bit accumulator; a 64-bit one silently produces a
+  different sequence. Seed 1 must yield 16838, 5758, 10113, …
 
 ### 2.3 `stdio.h` — the hardest category
 
@@ -209,15 +295,18 @@ requirements of doomgeneric, the libc shim, and the LibOS infrastructure. Each
 syscall is mapped to the Doom feature that requires it.
 
 > **This section has a C counterpart:** `src/exo_syscall.h` (SCRUM-24) declares
-> the numbers as `EXO_SYS_*`, the shared argument structs, the `EXO_E*` error
-> codes, and one inline stub per syscall. It is the same interface expressed in
-> C, and the two must be changed together — this document stays the source of
-> truth for *what* each syscall does. Kernel sources are compiled with
-> `-DEXO_KERNEL`, which suppresses the user-side stubs; the LibOS includes it
-> plainly. The define comes from the compiler command line rather than a
-> per-file `#define` because `#pragma once` would make a `#define` placed after
-> any transitive include of the header silently ineffective. `tests/kernel/test_exo_syscall_k.c` asserts the header still agrees
-> with §3.1 and §3.2.
+> the numbers as `EXO_SYS_*`, the shared argument structs, and one inline stub
+> per syscall; the `EXO_E*` error codes live in `src/exo_errno.h` (SCRUM-57),
+> which `exo_syscall.h` includes so existing users see no difference. Together
+> they are the same interface expressed in C, and the two must be changed
+> together — this document stays the source of truth for *what* each syscall
+> does. Kernel sources are compiled with `-DEXO_KERNEL`, which suppresses the
+> user-side stubs; the LibOS includes it plainly. The define comes from the
+> compiler command line rather than a per-file `#define` because `#pragma once`
+> would make a `#define` placed after any transitive include of the header
+> silently ineffective. `tests/kernel/test_exo_syscall_k.c` asserts the header
+> still agrees with §3.1 and §3.2; `tests/kernel/test_exo_errno_k.c` does the
+> same for §3.2a.
 
 ### 3.1 Syscall calling convention
 
@@ -257,13 +346,13 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | -- | ----------------------------------- | ----------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 0  | `exo_page_alloc()`                  | Memory      | ✅     | Allocate one 4K physical page. Returns physical address, or `-ENOMEM`. Bound to the dispatcher (SCRUM-34).                                                                        |
 | 1  | `exo_page_free(paddr)`              | Memory      | ✅     | Free a physical page. Bound to the dispatcher (SCRUM-34); currently `0` or `-EINVAL`. **Ownership-checked (§3.3)** — will return `-EPERM` unless the caller owns `paddr` once the page ownership table (SCRUM-152) lands.                  |
-| 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ⬜     | Map physical page at virtual address in caller's page directory. `flags`: `EXO_PAGE_READ`/`WRITE`/`USER`/`EXEC`. `EXEC` is defined now, while the flag word is still unpublished, so that non-executable data mappings are expressible once `EFER.NXE` is enabled — adding it later would mean renumbering. `READ` is not representable on x86 (present implies readable) and is accepted but ignored. **Ownership-checked (§3.3):** `paddr` must be owned by the caller (or be the framebuffer the caller has acquired); mapping kernel-owned or another LibOS's pages returns `-EPERM`. Returns `0` or `-EINVAL`/`-EFAULT`/`-EPERM`. Sprint 2 (SCRUM-15, -16), enforcement SCRUM-153.                                                                                                                       |
-| 3  | `exo_page_unmap(vaddr)`             | Memory      | ⬜     | Unmap a virtual page. Only unmaps a mapping the caller owns. Returns `0` or `-EINVAL`/`-EPERM`. Sprint 2 (enforcement SCRUM-153).                                                                                                                                              |
-| 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ✅     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct and **record the caller as the framebuffer owner (secure binding, §3.3, §3.5)**. LibOS then calls `exo_page_map` to map it — that map requires FB ownership. Released on `exo_exit`. Used by `DG_Init`. Returns `0` (including a re-acquire by the current owner), `-EBUSY` if another LibOS holds the FB, `-EFAULT` for an unusable `info_out`, or `-ENODEV` on a machine the bootloader gave no framebuffer. Implemented in SCRUM-154 (`src/syscall_fb.c`, `src/fb_binding.c`); the LibOS-side mapping of the returned range still waits on SCRUM-16/-35. |
-| 5  | `exo_get_ticks()`                   | Timer       | ✅     | Return `uint32_t` milliseconds since boot. Zero arguments. Used by `DG_GetTicksMs` and `DG_SleepMs`. Kernel-side PIT + `kernel_get_ticks_ms()` done (SCRUM-9, -10).                                                                                                            |
-| 6  | `exo_kbd_poll(event_out)`           | Input       | 🔄     | Dequeue next keyboard event into `event_out` struct `{uint8_t pressed; uint8_t key; uint8_t modifiers; uint8_t reserved}`. `key` is a decoded `ps2_key_t` index (`KEY_A`, `KEY_ESC`, …), not a raw PS/2 scancode — the kernel's scancode decoder runs before the event is queued. `modifiers` is the `EXO_MOD_*` shift/ctrl/alt mask sampled when the event was queued, so a chord decodes correctly even if the modifier is released before the LibOS polls — Doom binds shift (run), ctrl (fire) and alt (strafe). Returns `1` if event available, `0` if empty. Prerequisite: IRQ1 handler (SCRUM-13, In Progress) + scancode table (SCRUM-14, In Progress). Ring buffer planned Sprint 2 (SCRUM-18). |
+| 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ✅     | Map physical page at virtual address in caller's address space. `flags`: `EXO_PAGE_READ`/`WRITE`/`USER`/`EXEC`. `EXEC` is accepted and ignored until `EFER.NXE` is enabled; `READ` is not representable on x86 (present implies readable) and is accepted and ignored. **Ownership-checked (§3.3):** `paddr` must be owned by the caller (or be the framebuffer the caller has acquired), and `vaddr` must lie in the LibOS window `[EXO_USER_VA_BASE, EXO_USER_VA_END)` — §3.7. Returns `0`, `-EINVAL` (misaligned address, unknown flag bit), `-EPERM` (window or ownership) or `-ENOMEM` (no page for an intermediate page table). Implemented in SCRUM-35 (`src/syscall_mem.c`, `src/vmm.c`), enforcement SCRUM-153. |
+| 3  | `exo_page_unmap(vaddr)`             | Memory      | ✅     | Unmap a virtual page; the physical page stays allocated (`exo_page_free` returns it). Only unmaps a mapping of a page the caller owns, holds the FB binding for, or that belongs to nobody — §3.7. Returns `0`, `-EINVAL` (misaligned, or nothing mapped there), `-EPERM` or `-ENOMEM`. Implemented in SCRUM-35, enforcement SCRUM-153. |
+| 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ✅     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct and **record the caller as the framebuffer owner (secure binding, §3.3, §3.5)**. LibOS then calls `exo_page_map` to map it — that map requires FB ownership. Released on `exo_exit`. Used by `DG_Init`. Returns `0` (including a re-acquire by the current owner), `-EBUSY` if another LibOS holds the FB, `-EFAULT` if `[info_out, info_out + sizeof(exo_fb_info_t))` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` (SCRUM-54, same `exo_range_in_user_window` check #8 uses), or `-ENODEV` on a machine the bootloader gave no framebuffer. Implemented in SCRUM-154 (`src/syscall_fb.c`, `src/fb_binding.c`); the LibOS-side mapping of the returned range still waits on SCRUM-16/-35. |
+| 5  | `exo_get_ticks()`                   | Timer       | ✅     | Return `uint32_t` milliseconds since boot. Zero arguments. Never fails. Used by `DG_GetTicksMs` and `DG_SleepMs`. Kernel-side PIT + `kernel_get_ticks_ms()` done (SCRUM-9, -10); bound to the dispatcher in SCRUM-172 (`src/syscall_pit.c`) — `pic_remap()`/IRQ0/`pit_init()` moved ahead of the `TESTING` branch in `kernel_main` so ticks advance during a test boot too. |
+| 6  | `exo_kbd_poll(event_out)`           | Input       | ✅     | Dequeue next keyboard event into `event_out` struct `{uint8_t pressed; uint8_t key; uint8_t modifiers; uint8_t reserved}`. `key` is a decoded `ps2_key_t` index (`KEY_A`, `KEY_ESC`, …), not a raw PS/2 scancode — the kernel's scancode decoder runs before the event is queued. `modifiers` is the `EXO_MOD_*` shift/ctrl/alt mask sampled when the event was queued, so a chord decodes correctly even if the modifier is released before the LibOS polls — Doom binds shift (run), ctrl (fire) and alt (strafe). Returns `1` if event available, `0` if empty, `-EXO_EFAULT` if `event_out` isn't entirely inside the LibOS window. No ownership to check — the keyboard isn't acquired/released like the framebuffer. Bound in `src/syscall_kbd.c` (SCRUM-39) on top of the IRQ1 handler + scancode table (SCRUM-13/-14) and ring buffer (SCRUM-18), all now done. |
 | 7  | `exo_mouse_poll(state_out)`         | Input       | ⬜     | Write accumulated mouse state `{int16_t dx; int16_t dy; uint8_t buttons; uint8_t reserved}` to `state_out`, then reset accumulators. `reserved` is zeroed by the kernel and keeps the struct a fixed 6 bytes. Returns `0`. Prerequisite: PS/2 mouse init (SCRUM-19, Sprint 2).                                                                                            |
-| 8  | `exo_serial_write(buf, len)`        | Debug       | ⬜     | Write `len` bytes from `buf` to COM1. Returns bytes written. Used by `printf`/`fprintf` shim. Validates `buf` is in user address space. Kernel serial driver exists; syscall gate not yet wired. `printf` shim planned Sprint 2 (SCRUM-20).                                    |
+| 8  | `exo_serial_write(buf, len)`        | Debug       | ✅     | Write `len` bytes from `buf` to COM1. Returns `len` on success (COM1 is a busy-wait UART; there is no partial write), `-EFAULT` if `[buf, buf+len)` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)`, `-EINVAL` if `len` exceeds 4096 (`SERIAL_WRITE_MAX_LEN`) — the whole call runs with interrupts off (`syscall`'s FMASK clears IF), so an uncapped write would stall the machine for as long as COM1 takes to drain it. `len == 0` always succeeds regardless of `buf`. No ownership to check — COM1 is not acquired/released the way the framebuffer is, just a channel every LibOS may write to. Implemented in SCRUM-50 (`src/syscall_serial.c`). `printf` now routes through it for the ring-3 LibOS build (SCRUM-51, `src/stdio.c`, gated on `#ifdef EXO_KERNEL`); `fprintf` is still unimplemented (§2.3).                                    |
 | 9  | `exo_file_open(path, mode)`         | File I/O    | ⬜     | Open a file on the ramdisk/ATA filesystem. `mode`: `0`=read, `1`=write, `2`=read+write. Returns file descriptor (≥ 0) or negative error. Used by `fopen` shim.                                                                                                                 |
 | 10 | `exo_file_close(fd)`                | File I/O    | ⬜     | Close file descriptor. Returns `0` or `-EBADF`. Used by `fclose` shim.                                                                                                                                                                                                         |
 | 11 | `exo_file_read(fd, buf, count)`     | File I/O    | ⬜     | Read up to `count` bytes from `fd` into `buf`. Returns bytes read, `0` at EOF, or negative error. Used by `fread` shim.                                                                                                                                                        |
@@ -279,6 +368,57 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 
 **Total: 21 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking.
+
+### 3.2a Error codes (SCRUM-57)
+
+`src/exo_errno.h` is the canonical definition; this table is the canonical
+*documentation* of it — one place instead of the per-handler comments
+scattered across `syscall_mem.c`/`syscall_fb.c`/`syscall_kbd.c`/
+`syscall_serial.c`. Change one, update the other, the same rule §3's own
+intro states for `exo_syscall.h`.
+
+Every value matches the Linux errno number of the same name, and — not by
+coincidence — `src/errno.h`'s value for the unprefixed name: nothing wires
+an `EXO_E*` return into libc's `errno` yet (`docs/libc_audit.md`), but
+keeping the numbering identical means that wiring, when it happens, is a
+pass-through rather than a translation table.
+
+| Code | Value | Meaning | Emitted today by |
+| --- | --- | --- | --- |
+| `EXO_EPERM` | 1 | Operation not permitted for this LibOS | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3) |
+| `EXO_ENOENT` | 2 | No such file | not yet — reserved for `exo_file_*` (#9-16) |
+| `EXO_EBADF` | 9 | Bad file descriptor | not yet — reserved for `exo_file_*` |
+| `EXO_ENOMEM` | 12 | Out of physical pages / heap | `exo_page_alloc` (#0), `exo_page_map` (#2, no page for an intermediate table), `exo_page_unmap` (#3, split requires a page) |
+| `EXO_EACCES` | 13 | Permission denied | not yet bound to a handler |
+| `EXO_EFAULT` | 14 | Pointer argument outside the caller's address space | `exo_fb_acquire` (#4), `exo_kbd_poll` (#6), `exo_serial_write` (#8) |
+| `EXO_EBUSY` | 16 | Resource held by another LibOS | `exo_fb_acquire` (#4) |
+| `EXO_EEXIST` | 17 | File already exists | not yet — reserved for `exo_file_open`/`exo_file_rename` |
+| `EXO_ENODEV` | 19 | The hardware resource does not exist on this machine | `exo_fb_acquire` (#4, no framebuffer) |
+| `EXO_ENOTDIR` | 20 | Not a directory | not yet — reserved for `exo_file_*` |
+| `EXO_EISDIR` | 21 | Is a directory | not yet — reserved for `exo_file_*` |
+| `EXO_EINVAL` | 22 | Malformed or out-of-range argument | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3), `exo_serial_write` (#8, `len` over `SERIAL_WRITE_MAX_LEN`) |
+| `EXO_ENFILE` | 23 | System-wide open-file table full | not yet — reserved for `exo_file_open` |
+| `EXO_EMFILE` | 24 | Per-context file descriptor table full | not yet — reserved for `exo_file_open` |
+| `EXO_EFBIG` | 27 | File too large | not yet — reserved for `exo_file_write` |
+| `EXO_ENOSPC` | 28 | Ramdisk full | not yet — reserved for `exo_file_write` |
+| `EXO_ESPIPE` | 29 | Seek on a non-seekable descriptor | not yet — reserved for `exo_file_seek` |
+| `EXO_EROFS` | 30 | Write attempted on a read-only filesystem | not yet — reserved for `exo_file_write` (e.g. a memory-mapped WAD reader, §4.1) |
+| `EXO_ENOSYS` | 38 | Syscall number not implemented, or out of range | `exo_syscall_dispatch` (`src/syscall.c`) for every unbound number — #7, #9-20 today |
+
+**"0 on success" is the default, not a universal rule.** Four bound syscalls
+document a positive success value instead of `0`, because the value itself
+*is* the answer the caller asked for, not a status flag:
+
+| Syscall | Success return | Why not `0` |
+| --- | --- | --- |
+| `exo_page_alloc` (#0) | the allocated page's physical address | the caller needs the address; a separate out-parameter would be one more pointer to fault-check |
+| `exo_get_ticks` (#5) | milliseconds since boot | the syscall's entire purpose is returning this number |
+| `exo_kbd_poll` (#6) | `1` if an event was dequeued, `0` if the queue was empty | "queue empty" is not a failure — it is the expected steady state between keystrokes |
+| `exo_serial_write` (#8) | bytes written (`len`, since COM1 never partially writes) | mirrors POSIX `write()`; `0` would be indistinguishable from "wrote nothing" |
+
+Every other bound syscall (`exo_page_free`, `exo_page_map`, `exo_page_unmap`,
+`exo_fb_acquire`) returns exactly `0` on success, matching the acceptance
+criterion literally.
 
 ### 3.3 Secure binding & resource ownership
 
@@ -313,10 +453,14 @@ resource:
   its pages, releases the framebuffer, closes its files (SCRUM-155).
 
 **Revocation.** The kernel additionally reserves the right to *revoke* a
-granted resource (the exokernel "repossession" model). For the single-app v1
-demo the policy is trivial (revocation happens only via `exo_exit`), but the
-mechanism and its ownership-table bookkeeping exist so multi-LibOS scheduling
-(§7 / epic SCRUM-147) can reclaim resources from a running LibOS (SCRUM-156).
+granted resource — the exokernel "repossession" model, and the half of the
+bargain that makes generous grants safe: the kernel never has to refuse a
+request out of fear that it can never get the resource back. The mechanism and
+its ownership-table bookkeeping are in place (SCRUM-156, `src/revoke.c`); for
+the single-app v1 demo the *policy* is trivial — nothing asks for a resource
+back on the boot path, and reclamation happens only when a context exits. §3.6
+is the design note: the full protocol, what exists today, and what SCRUM-147
+adds.
 
 **Testing.** `tests/kernel/test_ownership_k.c` asserts a context cannot
 map/free a page it does not own and that framebuffer acquisition is mutually
@@ -365,11 +509,52 @@ not `boot.s`'s boot stack, which the kernel may already be nested on.
 
 The outgoing user `RSP` is parked in a single global, so **the path is not
 reentrant**. That is safe today only because `FMASK` clears `IF` and there is
-one CPU. When SCRUM-107 introduces multiple LibOS contexts this becomes
-`swapgs` plus a per-CPU block reached through `IA32_KERNEL_GS_BASE`.
+one CPU. SCRUM-107 added the context table that *tracks* multiple LibOS
+contexts (`src/context.c/h` — id, page dir, saved registers, state); SCRUM-108
+adds the actual switch (`context_switch_request()` + `src/context_switch.s`'s
+`context_switch_tail`, spliced into this file's epilogue right after
+`exo_syscall_dispatch()` returns), but deliberately does **not** fix this
+reentrancy gap the "real" way. It instead stages the outgoing/incoming
+context's state through this same single global at each switch boundary —
+still correct, because `FMASK` clears `IF` for the whole syscall/switch window
+and this kernel targets exactly one CPU, so no second entry can interleave —
+rather than the full `swapgs` + per-CPU block (`IA32_KERNEL_GS_BASE`) rework
+this note used to point at. That full rework is tracked as SCRUM-176, needed
+once SCRUM-127 (preemptive, IRQ-driven switching) wants to trigger a switch
+from inside an interrupt handler with `IF` set — the one case SCRUM-108's
+staged fix does not cover. One consequence worth flagging for the next
+reader: `RCX`/`R11` are caller-saved in the C ABI, so by the time
+`context_switch_tail` runs (after `exo_syscall_dispatch()` and whatever C it
+called), the *live* `RCX`/`R11` no longer hold the outgoing context's ring-3
+`RIP`/`RFLAGS` — `context_switch_tail` reads them back from the stack slots
+this stub's own prologue pushed instead; see that file's comment.
 
-No TSS is involved: `syscall` never consults `TSS.RSP0`. SCRUM-46 is needed
-before ring-3 code can take an *interrupt*, not before it can make a syscall.
+No TSS is involved: `syscall` never consults `TSS.RSP0` — SCRUM-46's TSS
+matters to ring-3 code taking an *interrupt or exception*, not to it making a
+syscall. `src/tss.c`'s `tss_init()` loads one anyway (called from
+`kernel_main` right after `idt_init()`), because every gate `idt_init()`
+installs has `IST=0`, and a CPL 3 → CPL 0 exception with `IST=0` loads its
+stack from `TSS.RSP0` regardless of whether anything ever calls `syscall`.
+Without it, a fault taken at CPL 3 has no valid stack to build its frame on
+and triple-faults — see the page-fault bullet under §3.7 below.
+
+**Port I/O is walled off as a side effect of a correctly-sized TSS
+(SCRUM-56).** `tss_init()` sets `tss.iomap_base = sizeof(struct tss64)`,
+pointing one byte past the segment limit. Nothing in `boot.s`/`libos_enter.s`
+ever raises `RFLAGS.IOPL` above 0 either, so a ring-3 `IN`/`OUT` fails both
+ways at once: CPL(3) > IOPL(0) traps regardless, and even if IOPL were
+raised, "no I/O permission bitmap" would still deny it. The trap lands on
+vector 13 (#GP), which `gpf_stub`/`gp_fault_handler` (`src/isr.s`/`src/fault.c`)
+now report the same way `pf_stub`/`page_fault_handler` report a page fault —
+sharing the same `exception_frame_t` and the same TESTING-only
+`fault_set_hook()` resume mechanism, rather than the old `error_stub`, which
+discarded the error code and `iretq`'d straight back into the same faulting
+instruction forever. `tests/kernel/test_port_io_fault_k.c` (with
+`tests/kernel/port_io_fault_probe.s`) launches a real LibOS address space via
+`libos_build_image()`, executes `outb %al, $0x80` at CPL 3, and asserts the
+hook fired exactly once, at CPL 3, before the probe resumed past the
+instruction and returned normally through `libos_return()` — proving the
+kernel is the only path to hardware, not just documenting that it should be.
 
 **Register preservation.** The stub saves all 14 registers it must return
 intact — the six argument registers included, not merely the SysV callee-saved
@@ -396,9 +581,17 @@ SCRUM-33.
 **Ring-3 access during tests.** `boot.s` builds the identity map without the
 U/S bit, so ring-3 code cannot execute. TESTING builds are assembled with
 `--defsym RING3_PROBE=1`, which sets U/S at every level for the probe's
-benefit. This opens all of physical memory to CPL 3 and is scoped to test
-builds for that reason; SCRUM-48 (per-LibOS page directories) and SCRUM-55/-56
-(isolation tests) close it properly.
+benefit on *that* map. It stops mattering the moment `vmm_init()` loads CR3
+onto its own map, though — nothing runs at CPL 3 before that point on any
+boot, test or otherwise — and `src/vmm.c`'s `KERNEL_MAP_USER` used to repeat
+the same blanket exposure on the map that actually matters, for the same
+reason: `tests/kernel/ring3_probe.s` and `tss_fault_probe.s` predate
+SCRUM-48's per-LibOS address spaces and execute directly against the
+kernel's own tables. SCRUM-55 closes that properly: `KERNEL_MAP_USER` is
+supervisor-only in every build now, and `vmm_init()` separately re-exposes
+just those two probes' own code ranges (`expose_ring3_legacy_probes()`) as
+the sole, explicitly-scoped legacy exception — see `tests/kernel/
+test_kernel_mem_fault_k.c`, which asserts the wall holds everywhere else.
 
 ### 3.5 Framebuffer binding (SCRUM-154)
 
@@ -446,15 +639,250 @@ through `exo_page_map`.
 
 **Reclaim.** `fb_binding_release(who)` drops the binding if `who` holds it and
 is a no-op otherwise, so reclamation can call it unconditionally for a context
-that may never have acquired. This is the hook SCRUM-155's `exo_exit` calls
-when tearing a context down, and the mechanism half of the revocation model
-(SCRUM-156). Until SCRUM-155 binds `#20`, nothing calls it on the boot path: a
-LibOS that exits without releasing keeps the binding for the rest of the boot.
+that may never have acquired. It is the *voluntary* return in §3.6's protocol;
+the kernel-driven form is `fb_binding_reclaim(who)`, which does the same thing
+and reports whether there was anything to take. `revoke_all()` (`src/revoke.h`)
+is what SCRUM-155's `exo_exit` calls to reclaim the framebuffer alongside the
+context's pages. Until SCRUM-155 binds `#20`, nothing calls it on the boot
+path: a LibOS that exits without releasing keeps the binding for the rest of
+the boot.
 
 **No locking.** Syscalls run with `IF` cleared by `IA32_FMASK` (§3.4) and the
 entry path is single-threaded, so the read-modify-write in
 `fb_binding_acquire()` cannot be interleaved. Preemptive multi-LibOS
 scheduling (SCRUM-147) invalidates that assumption and will need a lock here.
+
+### 3.6 Revocation & repossession (SCRUM-156)
+
+§3.3 states that the kernel may take a granted resource back. This section is
+the design note for how — the protocol in full, what of it exists today, and
+what the multi-LibOS work still has to add. Implemented in `src/revoke.c` (the
+protocol), `src/page_alloc.c` and `src/fb_binding.c` (the per-resource
+mechanisms), and tested in `tests/kernel/test_revoke_k.c`.
+
+**Why an exokernel needs this.** Secure binding answers "may this LibOS touch
+this resource?". Revocation answers the question that makes binding *safe to
+be generous with*: having granted a resource, can the kernel get it back? Aegis
+calls this **repossession**, and without it every grant is permanent, so the
+kernel has to hedge — hand out less than it could, or refuse a request it
+cannot later undo. With it, the kernel can give a LibOS everything that is idle
+and take back what it needs later. That is the property SCRUM-147's scheduler
+depends on: two LibOSes cannot share one framebuffer and one pool of pages
+unless the kernel can move a resource from one to the other.
+
+**The protocol.** Three phases, deliberately in this order — the kernel asks
+before it takes, because a LibOS that gets to choose *when* it gives a page
+back can flush the state it holds there first:
+
+| Phase | Call | What it does |
+| --- | --- | --- |
+| 1. Request | `revoke_request(who, res)` | Marks the resource in the ownership table. Nothing else changes: the owner keeps it and keeps using it. |
+| 2. Comply | the LibOS's own `exo_page_free`, or releasing the framebuffer | The ordinary return path. The mark disappears with the binding. |
+| 3. Force | `revoke_force(who, res)`, or `revoke_all(who)` | The kernel takes what was not returned. |
+
+A request can also be taken back — `revoke_withdraw(who, res)` — for the case
+where the demand that prompted it is satisfied elsewhere. A mark that outlives
+its reason turns the next sweep into a seizure nobody asked for.
+
+**The mark is an ask, not a seizure.** This is the property everything else
+rests on, and both mechanisms enforce it:
+
+- A marked page keeps its owner. `page_owner()` still names the context,
+  `free_page_owned()` still lets that context (and only that context) free it,
+  and SCRUM-153's `exo_page_map` will still map it.
+- A marked framebuffer binding is still held. `fb_binding_check_map()` still
+  answers `FB_MAP_ALLOW` for its owner, so a LibOS asked for the screen can
+  finish the frame it is drawing before handing it over.
+
+If the mark revoked permission the moment it landed, phase 2 would be
+unimplementable — there would be nothing left for the LibOS to return.
+
+**Where the mark lives.** In the ownership table, per §3.3's rule that the
+table is the single source of truth about who holds what:
+
+- **Pages** — the top bit of the 16-bit owner tag (`PAGE_OWNER_REVOKED`,
+  `0x8000`); the low 15 bits still name the owner, leaving 32,766 context ids
+  for SCRUM-147. Keeping it *in* the tag is what makes compliance free:
+  `free_page_owned()` resets the tag to `PAGE_OWNER_FREE`, clearing owner and
+  mark in one store, so a LibOS that returns a marked page leaves nothing to
+  reconcile. Every ownership comparison in `page_alloc.c` masks the bit off
+  first — a raw tag compare would read a page under revocation as belonging to
+  nobody, and answer `-EPERM` to its own owner.
+- **Framebuffer** — a flag beside the single binding in `src/fb_binding.c`,
+  cleared by release, reclaim and re-publication. There is one binding to
+  describe, so a flag reads better than a masked id at every comparison.
+
+**Forced reclamation is scoped to the context it names.** `revoke_force(who,
+res)` and `revoke_all(who)` take a resource only if `who` still holds it. When
+the context no longer does — it complied, or the resource has since been
+granted to somebody else — the call returns `REVOKE_RETURNED` and touches
+nothing. Without that scoping, "revoke" would be a syscall-free way to free a
+peer's memory, which is the exact hole §3.3 exists to close.
+
+**Neither sentinel id is a revocable context.** `PAGE_OWNER_KERNEL` and
+`PAGE_OWNER_FREE` are refused by *every* page entry point — `page_revoke_mark`,
+`page_revoke_clear` and `page_reclaim` through their shared
+`owned_page_index()`, and `page_reclaim_all` through its own guard. The refusal
+has to come *before* the ownership compare, because each id would otherwise
+pass it: `FREE` matches the tag of every free page, and `KERNEL` matches every
+reserved one. A single-resource path that skipped this would let
+`page_reclaim(kp, PAGE_OWNER_KERNEL)` hand the page bitmap, the owner table or
+the kernel image back to the pool and leave the kernel's own `free_page()` to
+double-free it — a sweep guard alone is not enough when the force path can name
+the same id one page at a time.
+
+**The repossession record.** `revoke_record()` returns the running counts —
+asked, withdrawn, forced, returned, pages reclaimed, framebuffers reclaimed.
+It is Aegis's repossession vector reduced to what a single-LibOS kernel can act
+on: the evidence for whether asking is working, which is the input a real
+revocation *policy* needs. Machine-wide today because there is one LibOS;
+SCRUM-147 makes it a field of the context structure.
+
+`returned` is the count to read with care. It means "the force step found
+nothing to take", which under the protocol is the LibOS having complied — but
+it also counts a force whose target had since moved to another context, or one
+that named a context which never held the resource. After the fact those are
+indistinguishable from the ownership table alone, because a satisfied request
+leaves no trace by design (§ the mark clearing with the tag). Good enough as
+evidence that asking is working; a policy that acted on the number would first
+need per-request state to tell the cases apart.
+
+**What exists today, and what does not.** The mechanism is complete; the policy
+is trivial on purpose:
+
+- Nothing on the boot path asks for a resource back. The self-check in
+  `kernel_main` walks the whole protocol on a scratch page and the framebuffer,
+  which is why it appears in the boot log at all.
+- `exo_exit` (`#20`) is not bound yet — that is SCRUM-155, and `revoke_all()`
+  is the hook it calls. Until then a LibOS that exits keeps its pages and the
+  screen for the rest of the boot.
+- **There is no upcall.** Phase 1 marks the resource but cannot *tell* the
+  LibOS, because there is no path from the kernel into LibOS code yet. That is
+  where Aegis posts to the LibOS's repossession handler, and it is the piece
+  SCRUM-147 must add before phase 2 can happen for any reason other than a
+  LibOS coincidentally freeing the page. Until then, request-then-force is a
+  well-defined sequence with a zero-length wait in the middle.
+- **No deadline.** A real protocol gives the LibOS a bounded time to comply
+  before the kernel forces the issue. With no upcall there is nothing to time,
+  so the deadline arrives with the upcall.
+- **One ABA window.** A context that returns a marked page and immediately
+  allocates the same frame again gets a fresh, unmarked tag — but a
+  `revoke_force` still in flight for that address would find the context
+  holding it and take it. Harmless in v1, where force only runs from a context
+  that is exiting; SCRUM-147 closes it by generation-stamping the tag.
+
+**No locking**, for the same reason as §3.5, and with a sharper caveat: under
+preemption the lock has to span the whole mark-then-reclaim sequence, not each
+half, or a resource can change hands between the two.
+
+---
+
+### 3.7 Address-space mapping (SCRUM-35)
+
+§3.3 says a LibOS may only map pages it owns. This section is how the mapping
+itself works — the half of `exo_page_map` that is mechanism rather than policy.
+Implemented in `src/vmm.c` (the walker) and `src/syscall_mem.c` (the rule),
+tested in `tests/kernel/test_vmm_k.c` and `tests/kernel/test_page_map_k.c`.
+
+**What the LibOS is actually editing.** `boot.s` builds one 4 GiB identity map
+out of 2 MiB pages and enables paging (SCRUM-15). There is exactly one address
+space, and it is the one the kernel is running in: until each LibOS gets its
+own PML4 (SCRUM-48), `exo_page_map` edits the kernel's page tables. Two rules
+make that safe:
+
+- **The LibOS window.** `vaddr` must lie in
+  `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[64 TiB, 128 TiB)`, and anything
+  else is `-EPERM`. Ownership answers *which physical page*; the window answers
+  *where*, and both questions have to be asked — a LibOS must not be able to
+  install a page it legitimately owns over kernel text.
+
+  **Why the base is 64 TiB and not 4 GiB.** The kernel map is an *identity* map
+  (`vmm_init`, SCRUM-15): every byte of usable RAM is mapped at a virtual
+  address equal to its physical one. A window that begins below the top of
+  physical memory therefore overlaps live kernel mappings. A 4 GiB base looked
+  correct against `boot.s`'s 4 GiB map and was wrong the moment SCRUM-15 began
+  mapping all usable RAM: on an 8 GiB machine, `exo_page_map` in the window hit
+  `VMM_EEXIST` (the address was already taken) and `exo_page_unmap` cheerfully
+  unmapped the kernel's own RAM, because that page is unallocated and so
+  `PAGE_OWNER_FREE`. The base has to be an address physical memory cannot
+  reach; `syscall_mem_init()` checks that against the multiboot map at boot and
+  warns rather than assuming it, and
+  `tests/kernel/test_page_map_k.c:test_window_is_clear_of_kernel_mappings`
+  asserts both the invariant and its observable consequence.
+- **Page tables are kernel-owned.** Intermediate PDPT/PD/PT pages come from
+  `alloc_page()`, i.e. `PAGE_OWNER_KERNEL`, so a LibOS cannot hand the page
+  describing its own address space back to the PMM with `exo_page_free` and
+  then watch the kernel write into a page somebody else now owns.
+
+**Splitting 2 MiB pages.** A mapping request is 4 KiB granular and the boot map
+is not, so a `vaddr` covered by a 2 MiB page is handled by first replacing that
+page with a 512-entry PT reproducing it exactly — same physical range, same
+flags — and only then editing the one entry. The other 511 mappings survive
+untouched, which is what lets the kernel keep running while its own identity
+map is being edited under it. A split allocates, which is why even
+`exo_page_unmap` can answer `-ENOMEM`. TLB maintenance follows the same shape:
+`invlpg` for an ordinary change, a full CR3 reload after a split, because the
+stale entry there is a 2 MiB translation rather than the single page `invlpg`
+names.
+
+**Replacing and removing a mapping.** Mapping over an existing mapping is
+allowed — it is how a LibOS moves a window over physical memory — but the page
+being displaced must be one the caller could have unmapped itself, or "map over
+it" would be a way around `exo_page_unmap`'s check. That check is deliberately
+one notch looser than the check on the page being *installed*: what it refuses
+is a page that currently belongs to somebody else, not every page the caller
+could not map. Dropping a mapping changes an address space, not a page, so it
+cannot hurt the page's owner, and two cases make the looser rule necessary:
+
+- A page owned by **nobody** — §3.2 #3 lets a LibOS free a page that is still
+  mapped, and it must then be able to clean up the mapping it left behind.
+- **Framebuffer memory the caller no longer holds** — a LibOS that acquires the
+  framebuffer, maps it, and then loses the binding (to revocation, §3.6, or to
+  its own release) would otherwise be stuck with an address it can neither
+  unmap nor reuse for the rest of its life.
+
+A page belonging to the kernel or to another context is still refused.
+
+**What is deliberately not done yet.**
+
+- **No NX.** `EFER.NXE` is not enabled, so every mapping is executable and
+  `EXO_PAGE_EXEC` is accepted and ignored. The flag exists in the ABI now so
+  that enabling NXE later is a kernel change rather than a renumbering.
+- **No page-table reclamation.** An intermediate table that becomes empty is
+  kept. Walking a table on every unmap to discover it is empty costs more than
+  the page is worth at v1 scale; the bound is one PT per 2 MiB of address space
+  a LibOS has ever touched.
+- **No per-LibOS address space.** With one PML4, the window is what separates a
+  LibOS from the kernel, and nothing separates two LibOSes from each other:
+  they would share the window and could unmap each other's mappings of unowned
+  pages. SCRUM-48 makes `vmm.c`'s implicit "current PML4" a parameter, at which
+  point the window becomes a per-context policy rather than a global one.
+- **The kernel does not know where a context mapped anything.** Nothing records
+  a context's mappings, so nothing can tear them down: `exo_page_free` leaves a
+  live PTE pointing at a page the PMM may hand to somebody else, and
+  repossessing the framebuffer (§3.6) clears the binding while the old holder's
+  mapping keeps writing to the screen. Both need per-context tracking that
+  neither SCRUM-48's address spaces nor SCRUM-47's launch mechanism add —
+  those two make a LibOS's mappings reachable and exercisable from ring 3 at
+  all, but nothing has recorded what one has mapped yet.
+- **No quota on page tables.** Every level `vmm.c` allocates is a
+  `PAGE_OWNER_KERNEL` page that no sweep reclaims, and a caller can walk the
+  128 TiB window installing one mapping per 2 MiB to consume them without
+  bound. Harmless while the only caller is the kernel itself; a per-context
+  quota is required before ring 3 can reach it.
+- **A page fault reports, from either ring, but nothing recovers.**
+  SCRUM-17 put a real handler on vector 14: an access to an unmapped address
+  now yields CR2, the decoded error code, the faulting RIP and the live
+  mapping state on COM1 instead of a silent loop in `error_stub`. A CPL 3 →
+  CPL 0 exception needs `TSS.RSP0`; SCRUM-46 loads a TSS with a valid one, so
+  a ring-3 fault reaches the handler and reports instead of triple-faulting
+  (`tests/kernel/test_tss_k.c` drives one for real, and
+  `tests/kernel/test_libos_launch_k.c` drives one from a genuine, separate
+  LibOS address space rather than the kernel's own). What is still missing is
+  policy on top of that report: the handler halts either way today.
+  Terminating a faulting LibOS and reclaiming its resources instead still
+  needs building, now that SCRUM-47/48 supply the address space and launch
+  mechanism it would act on.
 
 ---
 

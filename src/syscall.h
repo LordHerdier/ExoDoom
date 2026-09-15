@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "page_alloc.h"   /* page_owner_t — the resource ownership tag type */
+#include "exo_syscall.h"  /* EXO_USER_VA_BASE/END — the LibOS mapping window */
 
 /*
  * syscall.h — kernel side of the exokernel syscall ABI (SCRUM-32).
@@ -72,8 +73,37 @@ extern void syscall_entry(void);
 /*
  * The owner tag of the context currently executing a syscall — what resource
  * handlers stamp on pages they hand out (exo_page_alloc) and check on pages
- * they operate on (exo_page_free, and SCRUM-153+ map/unmap).  v1 has a single
- * LibOS, so this is a constant (PAGE_OWNER_LIBOS); it is the hook the SCRUM-147
- * scheduler will make return the running context's id.
+ * they operate on (exo_page_free, and SCRUM-153+ map/unmap).  Returns
+ * context_current() (src/context.h) — PAGE_OWNER_LIBOS until the first
+ * SCRUM-108 context_switch_request() ever succeeds, matching v1's
+ * single-LibOS default exactly, and the real running context id afterward.
  */
 page_owner_t syscall_current_context(void);
+
+/*
+ * Is [base, base+len) entirely inside the LibOS mapping window
+ * [EXO_USER_VA_BASE, EXO_USER_VA_END)? Shared by every handler that takes a
+ * LibOS pointer (syscall_serial.c's buf/len, syscall_fb.c's info_out with
+ * len = sizeof(the struct)) so the bounds check itself has one home instead
+ * of being re-derived per call site. A lone vaddr with no length
+ * (exo_page_map/-unmap) stays syscall_mem.c's own in_user_window() — folding
+ * a `len` of 0 into that check would be a needless behavior change for
+ * callers that never had one to pass.
+ *
+ * `len == 0` is trivially in-window regardless of `base`: an empty
+ * read/write can't touch memory outside it. Otherwise `base` itself must be
+ * in range, and `base + len` must neither wrap past the top of a 64-bit
+ * range nor land past EXO_USER_VA_END — both checked rather than assumed,
+ * since `len` is caller-controlled and otherwise unbounded.
+ */
+static inline int exo_range_in_user_window(uint64_t base, uint64_t len)
+{
+    if (len == 0)
+        return 1;
+
+    if (base < EXO_USER_VA_BASE || base >= EXO_USER_VA_END)
+        return 0;
+
+    uint64_t end = base + len;
+    return end >= base && end <= EXO_USER_VA_END;
+}

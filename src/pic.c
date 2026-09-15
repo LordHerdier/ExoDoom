@@ -32,9 +32,30 @@ void pic_remap() {
     outb(PIC1_DATA, ICW4_8086); io_wait();
     outb(PIC2_DATA, ICW4_8086); io_wait();
 
-    // Mask: unmask IRQ0(timer) and IRQ1(keyboard)
-    outb(PIC1_DATA, 0xFC); io_wait();
+    // Mask: unmask IRQ0 (timer) only. IRQ1 (keyboard) stays masked here --
+    // pic_remap() now runs ahead of the TESTING branch (SCRUM-172), before
+    // IRQ1's IDT vector is wired to irq1_stub, and unmasking it this early
+    // would let a stray keyboard interrupt land on idt_init()'s default_stub,
+    // which does a bare iretq with no EOI and would wedge IRQ1's in-service
+    // bit at the PIC for good. pic_unmask_irq(1) unmasks it once kbd_init()
+    // has actually run -- see kernel_main and src/ps2.c's kbd_init().
+    outb(PIC1_DATA, 0xFE); io_wait();
     outb(PIC2_DATA, 0xFF); io_wait();
+}
+
+// Unmask one IRQ line (0-15) at whichever PIC owns it, leaving every other
+// line's mask bit alone -- a read-modify-write against the live mask, not a
+// hardcoded byte, so a caller unmasking IRQ n cannot accidentally re-mask
+// some other IRQ pic_remap() or an earlier pic_unmask_irq() call already
+// enabled. General on purpose, not IRQ1-specific: pic_remap() only ever
+// unmasks IRQ0 up front (see above) and leaves every other line, master or
+// slave, for its own owner to unmask once it actually has an IDT vector
+// wired -- IRQ1/kbd_init() is just the first caller.
+void pic_unmask_irq(unsigned char irq) {
+    uint16_t port = (irq < 8) ? PIC1_DATA : PIC2_DATA;
+    uint8_t bit = (uint8_t)(1u << (irq % 8));
+    uint8_t mask = inb(port);
+    outb(port, mask & (uint8_t)~bit);
 }
 
 void pic_send_EOI(unsigned char irq) {

@@ -7,6 +7,7 @@
 #include "syscall_exit.h"
 
 #include "idt.h"
+#include "tss.h"
 #include "pic.h"
 #include "pit.h"
 #include "ps2.h"
@@ -16,7 +17,12 @@
 #include "syscall.h"
 #include "syscall_mem.h"
 #include "syscall_fb.h"
+#include "syscall_serial.h"
+#include "syscall_kbd.h"
+#include "syscall_pit.h"
 #include "fb_binding.h"
+#include "revoke.h"
+#include "vmm.h"
 #include "exo_syscall.h"
 
 extern void irq0_stub();
@@ -201,19 +207,35 @@ static int ownership_check(fb_console_t *con, const char *label, int ok) {
 #define DEMO_OTHER_LIBOS ((page_owner_t)(PAGE_OWNER_LIBOS + 1))
 
 static int run_fb_binding_demo(fb_console_t *con) {
-    exo_fb_info_t info = { 0, 0, 0, 0, 0, { 0, 0, 0 } };
     int all = 1;
 
     klog(con, 0, "Framebuffer binding self-check (SCRUM-154):");
 
+    // exo_fb_acquire's info_out is bounds-checked against the LibOS window
+    // (SCRUM-54), same as exo_serial_write's buf — a kernel-stack local no
+    // longer qualifies, so this demo maps a scratch page the same way
+    // run_page_map_demo() does, at a VA of its own well clear of that one's.
+    const uint64_t scratch = EXO_USER_VA_BASE + 0x38000000ULL;
+    int64_t scratch_p = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
+    int64_t scratch_map = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, scratch,
+                                               (uint64_t)scratch_p,
+                                               EXO_PAGE_WRITE, 0, 0, 0);
+    if (scratch_p <= 0 || scratch_map != 0) {
+        klog(con, 0, "  scratch mapping for info_out failed, skipping\n");
+        return 0;
+    }
+
+    exo_fb_info_t *info = (exo_fb_info_t *)(uintptr_t)scratch;
+    *info = (exo_fb_info_t){ 0, 0, 0, 0, 0, { 0, 0, 0 } };
+
     // 1. Acquire binds the framebuffer to the calling context.
     int64_t r_acq = exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE,
-                                         (uint64_t)(uintptr_t)&info,
+                                         (uint64_t)(uintptr_t)info,
                                          0, 0, 0, 0, 0);
     log_prefix(con, 0);
     fbcon_write(con, "  exo_fb_acquire -> phys 0x");
     fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
-    fbcon_write_hex64(con, info.phys_addr);
+    fbcon_write_hex64(con, info->phys_addr);
     fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
     fbcon_write(con, "\n");
     all &= ownership_check(con, "  framebuffer bound to LibOS              ",
@@ -223,11 +245,11 @@ static int run_fb_binding_demo(fb_console_t *con) {
     // 2. The owner may map framebuffer pages; nobody else may (SCRUM-153 asks
     //    fb_binding_check_map before consulting per-page ownership).
     all &= ownership_check(con, "  owner may map FB pages                  ",
-                           fb_binding_check_map(info.phys_addr,
+                           fb_binding_check_map(info->phys_addr,
                                                 syscall_current_context())
                            == FB_MAP_ALLOW);
     all &= ownership_check(con, "  foreign FB map rejected (EPERM)         ",
-                           fb_binding_check_map(info.phys_addr,
+                           fb_binding_check_map(info->phys_addr,
                                                 DEMO_OTHER_LIBOS)
                            == FB_MAP_DENY);
 
@@ -235,7 +257,7 @@ static int run_fb_binding_demo(fb_console_t *con) {
     fb_binding_release(syscall_current_context());
     fb_binding_acquire(DEMO_OTHER_LIBOS);
     int64_t r_busy = exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE,
-                                          (uint64_t)(uintptr_t)&info,
+                                          (uint64_t)(uintptr_t)info,
                                           0, 0, 0, 0, 0);
     all &= ownership_check(con, "  second acquirer rejected (EBUSY)        ",
                            r_busy == -EXO_EBUSY);
@@ -245,6 +267,183 @@ static int run_fb_binding_demo(fb_console_t *con) {
     all &= ownership_check(con, "  release frees the binding               ",
                            fb_binding_owner() == PAGE_OWNER_FREE);
 
+    (void)exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, scratch, 0, 0, 0, 0, 0);
+    (void)exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)scratch_p,
+                               0, 0, 0, 0, 0);
+
+    return all;
+}
+
+// ── Resource revocation self-check (SCRUM-156) ────────────────────────────
+//
+// The third leg of the model: what the kernel granted, the kernel can take
+// back.  Walks the protocol in docs/syscall_spec.md §3.6 — request, comply,
+// force, sweep — on a real page and on the framebuffer, and leaves nothing
+// bound and nothing allocated, so the console below keeps the screen.
+
+static int run_revocation_demo(fb_console_t *con) {
+    int all = 1;
+
+    klog(con, 0, "Resource revocation self-check (SCRUM-156):");
+
+    // 1. The request is an ask, not a seizure: the page stays the owner's and
+    //    stays usable.  Side effects are sequenced before the assertion so a
+    //    failing step cannot short-circuit the ones that clean up after it.
+    void *p = alloc_page_owned(DEMO_OTHER_LIBOS);
+    revoke_res_t res = revoke_res_page((uint64_t)(uintptr_t)p);
+    int marked = (p != NULL) && revoke_request(DEMO_OTHER_LIBOS, res) == REVOKE_OK;
+    all &= ownership_check(con, "  request marks, owner keeps the page     ",
+                           marked && revoke_pending(res) &&
+                           page_owner(p) == DEMO_OTHER_LIBOS);
+
+    // 2. Compliance: the owner returns a marked page through the ordinary free
+    //    path, and the mark goes with it.
+    int complied = free_page_owned(p, DEMO_OTHER_LIBOS) == PAGE_FREE_OK;
+    all &= ownership_check(con, "  owner returns it, mark clears           ",
+                           complied && !revoke_pending(res));
+    all &= ownership_check(con, "  force then finds nothing to take        ",
+                           revoke_force(DEMO_OTHER_LIBOS, res) == REVOKE_RETURNED);
+
+    // 3. A LibOS that ignores the ask loses the page anyway.
+    void *kept = alloc_page_owned(DEMO_OTHER_LIBOS);
+    revoke_res_t kres = revoke_res_page((uint64_t)(uintptr_t)kept);
+    int forced = (kept != NULL) &&
+                 revoke_force(DEMO_OTHER_LIBOS, kres) == REVOKE_OK;
+    all &= ownership_check(con, "  ignored request is forced              ",
+                           forced && page_owner(kept) == PAGE_OWNER_FREE);
+
+    // 4. Revocation is scoped to the context it names: reclaiming for one
+    //    LibOS must never free a page another one holds.
+    void *peer = alloc_page_owned(syscall_current_context());
+    revoke_res_t pres = revoke_res_page((uint64_t)(uintptr_t)peer);
+    int spared = (peer != NULL) &&
+                 revoke_force(DEMO_OTHER_LIBOS, pres) == REVOKE_RETURNED &&
+                 page_owner(peer) == syscall_current_context();
+    all &= ownership_check(con, "  peer's page left alone                  ", spared);
+    (void)free_page_owned(peer, syscall_current_context());
+
+    // 5. The v1 policy: exo_exit's sweep (SCRUM-155) takes every page the
+    //    context holds plus the framebuffer, in one call.
+    (void)alloc_page_owned(DEMO_OTHER_LIBOS);
+    (void)alloc_page_owned(DEMO_OTHER_LIBOS);
+    fb_binding_acquire(DEMO_OTHER_LIBOS);
+    uint32_t swept = revoke_all(DEMO_OTHER_LIBOS);
+    all &= ownership_check(con, "  exit sweep reclaims pages + screen      ",
+                           swept == 3 &&
+                           page_count_owned(DEMO_OTHER_LIBOS) == 0 &&
+                           fb_binding_owner() == PAGE_OWNER_FREE);
+
+    // 6. And the kernel's own pages are not sweepable by anyone.
+    uint32_t kernel_pages = page_count_owned(PAGE_OWNER_KERNEL);
+    all &= ownership_check(con, "  kernel pages are not revocable          ",
+                           revoke_all(PAGE_OWNER_KERNEL) == 0 &&
+                           page_count_owned(PAGE_OWNER_KERNEL) == kernel_pages);
+
+    const revoke_record_t *rec = revoke_record();
+    log_prefix(con, 0);
+    fbcon_write(con, "  repossession record: ");
+    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
+    fbcon_write_u32(con, rec->requested);
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, " asked, ");
+    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
+    fbcon_write_u32(con, rec->returned);
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, " returned, ");
+    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
+    fbcon_write_u32(con, rec->forced);
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, " taken\n");
+
+    return all;
+}
+
+// ── Address-space mapping self-check (SCRUM-35 / -153) ────────────────────
+//
+// The fourth resource operation: a LibOS builds its own address space, one
+// page at a time, out of pages it owns — and cannot build it out of anything
+// else.  Runs on the real exo_page_map / exo_page_unmap dispatch path and
+// leaves the address space exactly as it found it.
+
+static int run_page_map_demo(fb_console_t *con) {
+    int all = 1;
+
+    klog(con, 0, "Address-space mapping self-check (SCRUM-35):");
+
+    // A scratch virtual address in the LibOS window, well clear of the
+    // kernel's identity map.
+    const uint64_t scratch = EXO_USER_VA_BASE + 0x30000000ULL;
+
+    // exo_page_map installs `scratch` in the caller's *registered* address
+    // space (src/syscall_mem.c's caller_pml4(), SCRUM-48) — today that is
+    // vmm_kernel_pml4() itself (kernel_main binds it that way until SCRUM-47
+    // gives the LibOS a real one), but this demo runs at ring 0 without ever
+    // switching CR3, so it must resolve the same root the syscall used
+    // rather than assume it is whichever tree happens to be loaded.
+    uint64_t root_phys = vmm_address_space_for(syscall_current_context());
+    uint64_t *root = (uint64_t *)(uintptr_t)root_phys;
+
+    // 1. A page the caller owns can be mapped where the caller asks, and the
+    //    mapping is real: it resolves to the right physical frame, and a
+    //    write through that frame's identity-mapped address (always safe —
+    //    the kernel's own map covers every page it owns, regardless of which
+    //    root exo_page_map used) is visible there afterwards.
+    int64_t p = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
+    int64_t r_map = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, scratch, (uint64_t)p,
+                                         EXO_PAGE_READ | EXO_PAGE_WRITE, 0, 0, 0);
+    log_prefix(con, 0);
+    fbcon_write(con, "  exo_page_map 0x");
+    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
+    fbcon_write_hex64(con, (uint64_t)p);
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, " -> 0x");
+    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
+    fbcon_write_hex64(con, scratch);
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, "\n");
+
+    if (p > 0 && r_map == 0)
+        *(volatile uint64_t *)(uintptr_t)p = 0x5CA1AB1E5CA1AB1EULL;
+
+    uint64_t resolved = 0;
+    all &= ownership_check(con, "  owned page mapped and writable         ",
+                           p > 0 && r_map == 0 && root != NULL &&
+                           vmm_translate_in(root, scratch, &resolved, NULL) == VMM_OK &&
+                           resolved == (uint64_t)p &&
+                           *(volatile uint64_t *)(uintptr_t)p
+                               == 0x5CA1AB1E5CA1AB1EULL);
+
+    // 2. Another context's page is not mappable — the hole SCRUM-153 closes.
+    void *theirs = alloc_page_owned(DEMO_OTHER_LIBOS);
+    int64_t r_foreign = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, scratch,
+                                             (uint64_t)(uintptr_t)theirs,
+                                             EXO_PAGE_WRITE, 0, 0, 0);
+    // The NULL check is what makes this a test of foreign-page rejection: on
+    // an exhausted pool `theirs` is 0, page_owner(0) answers PAGE_OWNER_FREE,
+    // and the -EPERM below would be earned by an unowned address instead.
+    all &= ownership_check(con, "  foreign page not mappable (EPERM)      ",
+                           theirs != NULL && r_foreign == -EXO_EPERM);
+    (void)free_page_owned(theirs, DEMO_OTHER_LIBOS);
+
+    // 3. Nor is the kernel's own memory, however the caller came by the
+    //    address: the LibOS window starts above the identity map.
+    int64_t r_low = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, 0x200000ULL,
+                                         (uint64_t)p, EXO_PAGE_WRITE, 0, 0, 0);
+    all &= ownership_check(con, "  kernel address refused (EPERM)         ",
+                           r_low == -EXO_EPERM);
+
+    // 4. Unmapping removes the mapping and leaves the page allocated, which is
+    //    what makes exo_page_free a separate call.
+    int64_t r_unmap = exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, scratch,
+                                           0, 0, 0, 0, 0);
+    uint64_t gone = 0;
+    all &= ownership_check(con, "  unmap removes only the mapping         ",
+                           r_unmap == 0 && root != NULL &&
+                           vmm_translate_in(root, scratch, &gone, NULL) == VMM_ENOENT &&
+                           page_owner((void *)(uintptr_t)p)
+                               == syscall_current_context());
+
+    (void)exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)p, 0, 0, 0, 0, 0);
     return all;
 }
 
@@ -281,6 +480,8 @@ static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
                            r_dbl == -EXO_EINVAL);
 
     all &= run_fb_binding_demo(con);
+    all &= run_page_map_demo(con);
+    all &= run_revocation_demo(con);
 
     // Visible status swatch, top-right corner: green = enforced, red = broken.
     const uint32_t sw = 24;
@@ -288,6 +489,15 @@ static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
         if (all) fb_fill_rect(fb, fb->width - sw - 8, 8, sw, sw, 80, 210, 80);
         else     fb_fill_rect(fb, fb->width - sw - 8, 8, sw, sw, 230, 50, 50);
     }
+
+    /* Say it on serial as well as on screen.  The self-checks are the only
+     * thing that exercises these syscalls on a *normal* boot -- the KUnit suite
+     * runs in a TESTING build with different page tables -- and a verdict that
+     * exists only as pixels cannot be checked by CI, by a script, or by anyone
+     * who is not looking at the screen at the time. */
+    serial_print(all ? "ownership self-check: ENFORCED\n"
+                     : "ownership self-check: BROKEN\n");
+    serial_flush();
 
     log_prefix(con, 0);
     fbcon_write(con, "Resource ownership enforcement: ");
@@ -299,6 +509,20 @@ static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
         fbcon_write(con, "BROKEN\n");
     }
     fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+}
+
+// ── PIC/PIT boot narration (SCRUM-172) ──────────────────────────────────────
+//
+// pic_remap()/idt_set_gate(32)/pit_init() themselves run early in
+// kernel_main, ahead of the TESTING branch (see that call site) -- long
+// before the framebuffer console they'd narrate to exists. This function is
+// the one place that narration text lives; kernel_main calls it once, later,
+// once `con` exists, instead of restating the same two lines inline at that
+// distant call site where nothing but a comment would keep them in sync with
+// what actually ran.
+static void log_pic_pit_ready(fb_console_t *con) {
+    klog(con, 0, "PIC remapped (IRQs -> vectors 0x20-0x2F)");
+    klog(con, 0, "PIT initialized at 1000 Hz (IRQ0 -> vector 0x20)");
 }
 
 // ── Kernel entry ──────────────────────────────────────────────────────────
@@ -332,8 +556,66 @@ void kernel_main(void *mb2_info_ptr) {
 
     // ── Memory subsystem ────────────────────────────────────────────────
     memory_init();
+
+    // ── IDT (SCRUM-17) ──────────────────────────────────────────────────
+    // As early as serial allows, and well ahead of the TESTING branch.  The
+    // point is the vector-14 handler: everything below this line -- the PMM,
+    // the page tables, the syscall init, the test suite itself -- gets a
+    // serial diagnostic on a page fault instead of a silent loop back into
+    // the faulting instruction.
+    //
+    // Safe this early for exactly one reason: IF is clear.  The CPU comes out
+    // of boot.s with interrupts disabled and nothing calls `sti` before
+    // pic_remap() a short way below (SCRUM-172 moved it up from the
+    // normal-boot tail), so no hardware IRQ can arrive in between.  Do
+    // NOT rely on the PIC being masked here -- the BIOS typically leaves
+    // IRQ0/IRQ1 unmasked, and until pic_remap() they still land on vectors
+    // 8-15, where vector 8's error_stub would pop an error code the PIC never
+    // pushed.  Anything added between here and pic_remap() must leave IF
+    // alone.
+    idt_init();
+
+    // ── TSS (SCRUM-46) ───────────────────────────────────────────────────
+    // Every gate idt_init() just installed has IST=0, so a CPL 3 -> CPL 0
+    // exception loads its stack from TSS.RSP0. Without a TSS loaded, TR is
+    // null and that load itself faults -- straight to #GP, then #DF, then a
+    // triple fault, before any handler runs. Depends on nothing but static
+    // storage, so it goes in immediately after idt_init() and, like it,
+    // ahead of the TESTING branch: the ring-3 fault tests need it, and nothing
+    // reaches ring 3 to exercise it before that (SCRUM-47) on a normal boot.
+    tss_init();
+
     // ── Page allocator (SCRUM-7) ───────────────────────────────────────
     page_alloc_init(mb);
+
+    // ── Kernel page tables (SCRUM-15) ───────────────────────────────────
+    // Replaces boot.s's blanket 4 GB identity map with tables built from PMM
+    // pages that describe only what the kernel has: low memory, the kernel
+    // image and bump pool, usable RAM (WAD module included) and the
+    // framebuffer aperture.  Needs the PMM, so it sits after page_alloc_init;
+    // ahead of the TESTING branch because run_tests() -- the ring-3 probe
+    // included -- then runs against this map rather than the boot one.
+    //
+    // On failure CR3 is untouched and the boot map stays live, so the kernel
+    // keeps running (degraded, still on the boot map) and says so.
+    if (vmm_init(mb, (const struct mb2_tag_framebuffer *)fb_tag) != VMM_OK) {
+        serial_print("WARN: vmm_init failed; continuing on the boot map\n");
+    } else {
+        // ── LibOS address-space registry (SCRUM-48) ─────────────────────
+        // v1 has one LibOS and no ring-3 entry yet (SCRUM-47), so it still
+        // runs on the kernel's own map rather than a private one from
+        // vmm_create_address_space(). Binding it here is what lets
+        // syscall_mem.c's exo_page_map/-unmap resolve "the caller's address
+        // space" through the registry unconditionally, instead of a
+        // fallback path that only SCRUM-47 would ever exercise. Once a real
+        // LibOS address space exists, replacing this bind with
+        // vmm_create_address_space() + vmm_bind_address_space() is the whole
+        // of the change needed here.
+        if (vmm_bind_address_space(PAGE_OWNER_LIBOS, vmm_kernel_pml4()) != VMM_OK) {
+            serial_print("WARN: vmm_bind_address_space failed; "
+                         "exo_page_map/-unmap will report -EXO_EINVAL\n");
+        }
+    }
 
     // ── Syscall entry (SCRUM-32) ────────────────────────────────────────
     // Programs EFER.SCE/STAR/LSTAR/FMASK so the `syscall` instruction has a
@@ -355,9 +637,65 @@ void kernel_main(void *mb2_info_ptr) {
     // case acquire reports -EXO_ENODEV rather than -EXO_ENOSYS.
     syscall_fb_init((const struct mb2_tag_framebuffer *)fb_tag);
 
+    // ── Exit syscall (SCRUM-155) ────────────────────────────────────────
+    // Binds exo_exit (#20), which reclaims every page and the framebuffer
+    // binding the terminating LibOS context holds.  Same placement rule as
+    // the other syscalls: after syscall_mem_init()/syscall_fb_init(), ahead
+    // of the TESTING branch.
     syscall_exit_init();
 
+    // ── Serial syscall (SCRUM-50) ────────────────────────────────────────
+    // Binds exo_serial_write (#8), the printf/fprintf shim's backend.  Same
+    // placement rule as the memory and framebuffer syscalls: after
+    // syscall_init, ahead of the TESTING branch.
+    syscall_serial_init();
+
+    // ── Keyboard syscall (SCRUM-39) ───────────────────────────────────────
+    // Binds exo_kbd_poll (#6) to the kernel's existing keyboard ring
+    // (src/ps2.c/h, src/kbd_ring.c/h) -- the same ring the ring-0 automap
+    // demo already drains directly, now also reachable from ring 3. Same
+    // placement rule as the other syscalls: after syscall_init, ahead of
+    // the TESTING branch. Harmless before kbd_init() runs (below, in the
+    // normal-boot tail): the ring is simply empty until then, and nothing
+    // calls this handler during a TESTING build.
+    syscall_kbd_init();
+
+    // ── PIC / PIT (SCRUM-172) ────────────────────────────────────────────
+    // Moved ahead of the TESTING branch, same reasoning as tss_init() for
+    // SCRUM-46: exo_get_ticks (#5) needs a live, advancing tick count to
+    // prove itself from ring 3, and pit_init()/IRQ0 previously ran only in
+    // the normal-boot tail below, well after a TESTING build has already
+    // exited. IRQ1/keyboard wiring (idt_set_gate(33), kbd_init(),
+    // pic_unmask_irq(1)) stays in the tail -- nothing under TESTING touches
+    // the keyboard, and pic_remap() now leaves IRQ1 masked at the PIC
+    // precisely so a stray one arriving before kbd_init() runs cannot reach
+    // idt_init()'s default_stub, whose bare iretq sends no EOI and would
+    // wedge IRQ1's in-service bit for good (see src/pic.c).
+    //
+    // log_pic_pit_ready() (defined just above, ahead of kernel_main) is
+    // where this gets narrated to the console -- later in this same
+    // function, once one exists.
+    pic_remap();
+    idt_set_gate(32, (uintptr_t)irq0_stub);
+    pit_init(1000);
+
+    // ── Timer syscall (SCRUM-172) ────────────────────────────────────────
+    // Binds exo_get_ticks (#5). After pit_init() -- the handler reports
+    // kernel_get_ticks_ms(), which stays at 0 without it -- and, like the
+    // other syscall *_init()s, ahead of the TESTING branch.
+    syscall_pit_init();
+
 #ifdef TESTING
+    // No blanket `sti` here: several suites (fault, tss, libos_launch,
+    // libos_main) drive a real ring-3 fault on purpose with RFLAGS.IF
+    // hardcoded clear (tests/kernel/ring3_probe.s, src/libos_enter.s), and
+    // their hook-driven resume (src/fault.c's test_hook) `iretq`s with that
+    // same saved RFLAGS -- so IF ends up clear again after any of them runs,
+    // no matter what it was set to here. A single early `sti` would only be
+    // true until the first such suite, which is worse than not claiming it at
+    // all. The one test that needs ticks to actually advance
+    // (tests/kernel/test_syscall_pit_k.c) enables interrupts for just its own
+    // wait instead.
     serial_flush();
     qemu_exit((uint32_t)run_tests());
 #endif
@@ -424,24 +762,43 @@ void kernel_main(void *mb2_info_ptr) {
     fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
     fbcon_write(&con, "\n");
 
+    // ── Kernel page tables (SCRUM-15) ───────────────────────────────────
+    log_prefix(&con, 0);
+    if (vmm_is_active()) {
+        fbcon_write(&con, "Kernel page tables: PML4 @ 0x");
+        fbcon_set_color(&con, 100, 180, 255, 0, 0, 0);
+        fbcon_write_hex64(&con, vmm_kernel_pml4());
+        fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
+        fbcon_write(&con, " (");
+        fbcon_write_u32(&con, vmm_table_pages());
+        fbcon_write(&con, " table pages from the PMM)\n");
+    } else {
+        fbcon_set_color(&con, 230, 50, 50, 0, 0, 0);
+        fbcon_write(&con, "Kernel page tables: FAILED - running on the boot map\n");
+        fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
+    }
+
     // ── Page ownership self-check (SCRUM-152) ───────────────────────────────
     fbcon_write(&con, "\n");
     run_ownership_demo(&con, &fb);
     fbcon_write(&con, "\n");
 
-    // ── IDT / PIC / PIT / PS2 ─────────────────────────────────────���────
-    idt_init();
+    // ── IDT / PIC / PIT / PS2 ───────────────────────────────────────────
+    // The IDT is already loaded -- idt_init() runs far above, ahead of the
+    // TESTING branch, so a fault anywhere in early boot lands in the page
+    // fault handler rather than looping (SCRUM-17).
     klog(&con, 0, "IDT initialized (256 entries)");
 
-    pic_remap();
-    klog(&con, 0, "PIC remapped (IRQs -> vectors 0x20-0x2F)");
-
-    idt_set_gate(32, (uintptr_t)irq0_stub);
-    pit_init(1000);
-    klog(&con, 0, "PIT initialized at 1000 Hz (IRQ0 -> vector 0x20)");
+    // pic_remap()/idt_set_gate(32)/pit_init() already ran above, ahead of
+    // the TESTING branch (SCRUM-172) -- see that call site's own comment.
+    log_pic_pit_ready(&con);
 
     idt_set_gate(33, (uintptr_t)irq1_stub);
     kbd_init();
+    // Only now is IRQ1 unmasked at the PIC (src/pic.c) -- the vector is
+    // wired to irq1_stub and kbd_init() has drained any stale byte, so a
+    // keyboard interrupt landing right after this has somewhere real to go.
+    pic_unmask_irq(1);
     klog(&con, 0, "PS/2 keyboard initialized (IRQ1 -> vector 0x21)");
 
     __asm__ volatile ("sti");
@@ -452,8 +809,9 @@ void kernel_main(void *mb2_info_ptr) {
     klog(&con, 0, "Starting timer demo...");
     fbcon_write(&con, "\n");
 
+    uint32_t timer_demo_start = kernel_get_ticks_ms();
     for (int tick = 1; tick <= 9; tick++) {
-        kernel_sleep_ms(1000);
+        kernel_sleep_until_ms(timer_demo_start + (uint32_t)tick * 1000);
         uint32_t ms = kernel_get_ticks_ms();
         log_prefix(&con, ms);
         fbcon_write(&con, "uptime: ");

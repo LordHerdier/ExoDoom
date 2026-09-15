@@ -35,11 +35,12 @@ static int64_t sys_fb_acquire(uint64_t info_out, uint64_t a2, uint64_t a3,
 {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
 
-    /* All the validation available today: the identity map means every
-     * address a LibOS can name is writable, so a NULL check is the only
-     * mistake the kernel can catch.  Real user-range validation arrives with
-     * per-context address spaces (SCRUM-48, spec §3.2). */
-    if (info_out == 0)
+    /* Same LibOS-window bounds check exo_serial_write uses (src/syscall.h) —
+     * a kernel address here is otherwise indistinguishable from a real one:
+     * the map is an identity map, so every kernel address is present and
+     * writable, and without this check the kernel would fill a caller-chosen
+     * 24 bytes of its own memory on request (SCRUM-54). */
+    if (!exo_range_in_user_window(info_out, sizeof(exo_fb_info_t)))
         return -EXO_EFAULT;
 
     switch (fb_binding_acquire(syscall_current_context())) {

@@ -6,10 +6,11 @@
 /*
  * fb_binding.c — the framebuffer ownership table (SCRUM-154).
  *
- * State is three module-static values: the geometry the kernel published at
- * boot, the page-aligned physical extent derived from it once, and the current
- * owner.  A single owner slot is all v1 needs; the multi-LibOS future
- * (SCRUM-147) changes who can be in the slot, not the shape of the table.
+ * State is the geometry the kernel published at boot, the page-aligned
+ * physical extent derived from it once, the current owner, and (SCRUM-156)
+ * whether the kernel has asked that owner to give the framebuffer back.  A
+ * single owner slot is all v1 needs; the multi-LibOS future (SCRUM-147)
+ * changes who can be in the slot, not the shape of the table.
  *
  * No locking.  Syscalls run with interrupts masked (IA32_FMASK clears IF, see
  * src/syscall.c) and the entry path is single-threaded by construction, so the
@@ -25,15 +26,21 @@ static uint64_t      fb_page_base;   /* first FB page, page-aligned  */
 static uint64_t      fb_page_end;    /* one past the last FB page    */
 static int           fb_present;
 static page_owner_t  fb_owner = PAGE_OWNER_FREE;
+/* SCRUM-156: the kernel has asked fb_owner for the framebuffer back.  A
+ * separate flag rather than a bit in fb_owner (the page table's trick) because
+ * there is exactly one binding to describe, and a flag reads better than a
+ * masked id everywhere the owner is compared. */
+static int           fb_revoke_marked;
 
 int fb_binding_init(const fb_geometry_t *geom)
 {
     /* Any re-publish drops the binding: the resource being described is not
      * the one the previous owner acquired. */
-    fb_present   = 0;
-    fb_owner     = PAGE_OWNER_FREE;
-    fb_page_base = 0;
-    fb_page_end  = 0;
+    fb_present       = 0;
+    fb_owner         = PAGE_OWNER_FREE;
+    fb_revoke_marked = 0;
+    fb_page_base     = 0;
+    fb_page_end      = 0;
 
     if (geom == NULL)
         return FB_BIND_ENODEV;
@@ -92,13 +99,60 @@ int fb_binding_acquire(page_owner_t who)
 
 void fb_binding_release(page_owner_t who)
 {
-    if (who != PAGE_OWNER_FREE && fb_owner == who)
-        fb_owner = PAGE_OWNER_FREE;
+    /* The voluntary return, and the compliance half of the revocation
+     * protocol: dropping the binding drops the mark with it. */
+    (void)fb_binding_reclaim(who);
 }
 
 page_owner_t fb_binding_owner(void)
 {
     return fb_present ? fb_owner : PAGE_OWNER_FREE;
+}
+
+/* ---- Revocation / repossession (SCRUM-156) ------------------------------- */
+
+/* Does `who` hold the framebuffer?  PAGE_OWNER_FREE never does — it is the
+ * "unheld" sentinel, and without this check reclaiming on its behalf would
+ * match an already-free binding and report a phantom success. */
+static int holds_binding(page_owner_t who)
+{
+    return who != PAGE_OWNER_FREE && fb_binding_owner() == who;
+}
+
+int fb_binding_revoke_mark(page_owner_t who)
+{
+    if (!holds_binding(who))
+        return FB_REVOKE_ENOENT;
+
+    fb_revoke_marked = 1;
+    return FB_REVOKE_OK;
+}
+
+int fb_binding_revoke_clear(page_owner_t who)
+{
+    if (!holds_binding(who))
+        return FB_REVOKE_ENOENT;
+
+    fb_revoke_marked = 0;
+    return FB_REVOKE_OK;
+}
+
+int fb_binding_revoke_pending(void)
+{
+    /* An unheld framebuffer is never pending: reclaim and release both clear
+     * the flag, but the guard keeps the answer true even if a future path
+     * forgets to. */
+    return fb_binding_owner() != PAGE_OWNER_FREE && fb_revoke_marked;
+}
+
+int fb_binding_reclaim(page_owner_t who)
+{
+    if (!holds_binding(who))
+        return FB_REVOKE_ENOENT;
+
+    fb_owner         = PAGE_OWNER_FREE;
+    fb_revoke_marked = 0;
+    return FB_REVOKE_OK;
 }
 
 int fb_binding_contains(uint64_t paddr)

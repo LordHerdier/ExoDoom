@@ -12,6 +12,7 @@
 4. [Phase 1 — Multiboot mmap parsing](#4-phase-1--multiboot-mmap-parsing)
 5. [Phase 2 — Bump allocator](#5-phase-2--bump-allocator)
 6. [Phase 3 — Bitmap page allocator](#6-phase-3--bitmap-page-allocator)
+6b. [Kernel heap](#6b-kernel-heap-scrum-25)
 7. [Phase 4 — Virtual memory and paging](#7-phase-4--virtual-memory-and-paging)
 8. [Phase 5 — LibOS heap](#8-phase-5--libos-heap)
 9. [Doom memory requirements](#9-doom-memory-requirements)
@@ -30,13 +31,16 @@ progressively builds up the infrastructure needed to hand Doom a working
 Phase 1  mmap_init()       Parse multiboot memory map → usable/reserved regions
 Phase 2  memory_init()     Bump allocator from &_bss_end → used for early boot allocs
 Phase 3  page_alloc_init()        Bitmap page allocator (alloc_page / free_page) [Sprint 1]
-Phase 4  vmm_init()        Enable paging, build page tables, exo_page_* syscalls [Sprint 2]
+Phase 3b kmalloc/heap_alloc()     Kernel heap, first-fit, backed by alloc_page [SCRUM-25]
+Phase 4  vmm_init()        Kernel page tables from PMM pages + exo_page_map/-unmap [SCRUM-15/-35]
 Phase 5  LibOS heap        first-fit allocator backed by exo_page_alloc [Sprint 3]
 ```
 
-At no point does the kernel use a general-purpose heap for itself. Internal
-kernel structures (IDT, bitmap, page directory) are allocated from the bump
-allocator during boot and never freed.
+The two structures that bootstrap the PMM itself (the bitmap, the owner
+table) are allocated from the bump allocator during boot and never freed;
+page tables come from the PMM directly once it is up. Every other kernel
+allocation past that point goes through the kernel heap (§6b) — `kmalloc()`
+routes to it automatically once the PMM is live.
 
 ---
 
@@ -222,10 +226,13 @@ void* kmalloc(size_t size) {
 | ------------------------ | -------------------------------------- | ------------ |
 | PMM bitmap (Phase 3)     | `total_pages / 8` bytes, rounded to 4K | `page_alloc_init()` |
 | Page owner table (SCRUM-152) | `total_pages * 2` bytes, rounded to 4K | `page_alloc_init()` |
-| Page tables (Phase 4)    | 4K per table (512 × 8-byte entries)    | `vmm_init()` |
 
-After Phase 4 (paging enabled), `kmalloc` is retired. All further kernel
-allocations go through `alloc_page` directly.
+After Phase 3, this bump path is retired for everything except the two
+allocations above — `page_alloc_init()` needs it to bootstrap the PMM before
+`alloc_page()` exists to serve anyone else. Every later `kmalloc()` call
+routes to the kernel heap instead (§6b, SCRUM-25); page tables `vmm_init()`
+builds still come from `alloc_page()` directly (4K each, `PAGE_OWNER_KERNEL`),
+bypassing the heap the same way they always have.
 
 ---
 
@@ -262,6 +269,12 @@ void   free_page(void* phys_addr);    // free a KERNEL page; detect + log double
 void*        alloc_page_owned(page_owner_t owner);        // stamp owner on the page
 int          free_page_owned(void* phys_addr, page_owner_t owner); // owner-checked free
 page_owner_t page_owner(void* phys_addr);                 // query a page's owner
+
+// Revocation API (SCRUM-156) — see "Revocation mark" below.
+int          page_revoke_mark(void* phys_addr, page_owner_t owner);  // ask for it back
+int          page_revoke_pending(void* phys_addr);        // is it marked?
+int          page_reclaim(void* phys_addr, page_owner_t owner);      // take it back
+uint32_t     page_reclaim_all(page_owner_t owner);        // sweep a whole context
 ```
 
 (`alloc_page` / `free_page_checked` are thin `PAGE_OWNER_KERNEL` wrappers over
@@ -311,6 +324,9 @@ static page_owner_t* owners;        // owners[i] tags page i
 #define PAGE_OWNER_FREE    0        // not allocated
 #define PAGE_OWNER_KERNEL  1        // reserved kernel memory / kernel-internal alloc
 #define PAGE_OWNER_LIBOS   2        // a LibOS context id (v1 uses this single id)
+
+#define PAGE_OWNER_REVOKED 0x8000   // revocation mark (SCRUM-156), see below
+#define PAGE_OWNER_ID_MASK 0x7FFF   // the owner id is the low 15 bits
 ```
 
 - The table is `kmalloc`'d right after the bitmap in `page_alloc_init` and
@@ -339,6 +355,58 @@ the same tag in `exo_page_map`/`exo_page_unmap` is SCRUM-153; framebuffer
 binding is SCRUM-154; reclaiming a terminating context's pages on `exo_exit` is
 SCRUM-155.
 
+### Revocation mark (SCRUM-156)
+
+The ownership table answers *who holds this page*. Revocation adds one more
+state to it: **the kernel has asked for this page back**. The mark is the top
+bit of the tag, so it costs no extra memory and no second array:
+
+```c
+owners[i] = PAGE_OWNER_LIBOS | PAGE_OWNER_REVOKED;   // asked for, still owned
+```
+
+The low 15 bits still name the owner, which is the whole point — a page under
+revocation is *still that context's page* until the kernel takes it, so it stays
+readable, writable, freeable by its owner and (SCRUM-153) mappable. Two
+consequences for anyone editing `page_alloc.c`:
+
+- **Every ownership comparison masks the bit off first** (the file's
+  `owner_id()` helper). A raw tag compare would read a marked page as owned by
+  a context nobody can name, and `free_page_owned()` would answer `-EPERM` to
+  the page's own owner — making it impossible for a LibOS to comply with the
+  request it was just handed.
+- **Compliance is free.** `free_page_owned()` resets the tag to
+  `PAGE_OWNER_FREE`, which clears owner and mark in one store, so a returned
+  page leaves no revocation state to reconcile.
+
+The entry points, all of which resolve the address and check ownership through
+one shared helper so a reclaim can never apply a looser rule than the mark did:
+
+```c
+int      page_revoke_mark(void* addr, page_owner_t owner);    // phase 1: ask
+int      page_revoke_clear(void* addr, page_owner_t owner);   // withdraw the ask
+int      page_revoke_pending(void* addr);                     // is it marked?
+int      page_reclaim(void* addr, page_owner_t owner);        // phase 3: take it
+uint32_t page_reclaim_all(page_owner_t owner);                // sweep one context
+uint32_t page_count_owned(page_owner_t owner);                // accounting
+```
+
+`page_reclaim` returns `PAGE_REVOKE_ENOENT` — not success — when `owner` no
+longer holds the page, so a reclaim can never free a frame that has since been
+handed to another context.
+
+`PAGE_OWNER_KERNEL` and `PAGE_OWNER_FREE` are refused as the *holder* argument
+by all four: `page_reclaim_all` guards them directly, and the other three
+through the shared `owned_page_index()`. The check must precede the ownership
+compare, since each id would otherwise pass it — `FREE` matches every free
+page's tag and `KERNEL` every reserved page's. Miss it on the single-page path
+and `page_reclaim(kp, PAGE_OWNER_KERNEL)` returns the bitmap, this owner table
+or the kernel image to the pool, and the kernel's own `free_page()` then
+double-frees it.
+
+The protocol that sequences these — and the framebuffer's equivalent — lives in
+`src/revoke.c`; `docs/syscall_spec.md` §3.6 is the design note.
+
 ### Page accounting (QEMU `-m 256M`)
 
 ```
@@ -353,10 +421,154 @@ Available to alloc: ~62,064  (~242 MiB)
 
 ---
 
+## 6b. Kernel heap (SCRUM-25)
+
+**Files:** `src/heap.c`, `src/heap.h`, `src/memory.c` **Status:** ✅ Done
+**Called from:** `kmalloc`/`kfree`/`krealloc` (`src/memory.c`), once the PMM is
+live
+
+### What it does
+
+A first-fit, segmented free-list allocator backed by `alloc_page()`. This is
+the kernel-internal heap (Sprint 3) — distinct from the LibOS-side heap in
+§8 below, which is Sprint 4 and backed by the `exo_page_alloc` syscall instead
+of a direct PMM call.
+
+`kmalloc()`'s original bump-pointer behavior (§5) is still used for the two
+allocations `page_alloc_init()` makes to bootstrap the PMM itself (the bitmap
+and the owner table) — the heap can't serve those because it depends on
+`alloc_page()`, which isn't usable until that bootstrap finishes. Once
+`page_alloc_is_live()` is true, `kmalloc()` hands off to `heap_alloc()`
+instead, and `kfree()`/`krealloc()` become available. A pointer into the bump
+region is permanent kernel infrastructure and is refused by `kfree`/`krealloc`
+rather than freed.
+
+### Segments
+
+A "segment" is one run of physically contiguous pages. `alloc_page()` scans
+its bitmap forward from index 0, so pages come back adjacent as long as
+nothing lower has since been freed — true for a heap that only ever grows,
+but not guaranteed once page-freeing lands elsewhere, so segment growth
+checks contiguity explicitly: a non-adjacent page starts a new segment
+instead of assuming one. First-fit search walks every block in every
+segment; a block's `size` never spans a segment boundary, and coalescing
+only ever merges blocks within the same segment (its `next`/`prev` pointers
+never cross one). A segment's own bookkeeping lives in the first bytes of its
+first page, immediately followed by that page's first block header — no
+separate metadata allocator is needed to bootstrap it.
+
+### Properties
+
+- Allocations are 16-byte aligned; the acceptance criterion ("aligned
+  pointers") this ticket was written against.
+- `heap_alloc` grows the heap one page at a time via `alloc_page()` and
+  retries the first-fit search, so a multi-page allocation triggers several
+  growth-and-retry passes rather than one bulk reservation — simple and
+  correct, not throughput-optimized; revisit if profiling later shows it
+  matters.
+- `heap_free` coalesces with both neighbours in the same segment.
+- Freed pages are never returned to the PMM (no segment ever shrinks) — out
+  of scope for SCRUM-25's acceptance criteria; a future ticket if heap
+  fragmentation or memory pressure makes it worth the complexity of partial-
+  segment frees.
+- A single-page segment can get stranded: its first block is only
+  `4096 - 32 - 32 = 4032` bytes, so a request above that can never be served
+  from a segment created to satisfy it. This happens when `alloc_page()`
+  hands back a page that isn't contiguous with `heap_growth_cursor`, which
+  becomes routine once `exo_page_free`/revoke start returning low pages to
+  the PMM. Since segments are never freed (see above), a stranded segment
+  stays stranded — self-limiting (growth just keeps retrying until it finds
+  a contiguous run) rather than a hang, but a slow waste of memory.
+- Not thread/interrupt-safe — no locking, consistent with the rest of the
+  allocator stack (`page_alloc.c` has none either); fine while allocation
+  only ever happens from kernel code running with a single execution
+  context.
+
+### Accounting and the stress audit (SCRUM-27)
+
+`heap_get_stats()` fills a `heap_stats_t` by walking every block of every
+segment, and `heap_report("label")` prints one line of it to COM1. There are
+no running counters behind them — the walk is O(blocks), so both belong in
+boot diagnostics and tests, never in an allocation path.
+
+Every byte count is **payload**, excluding block headers, which makes
+`total_bytes` deliberately not invariant: splitting a block carves a new
+header out of it and costs `sizeof(block_t)` of payload, and coalescing the
+two gives exactly that back. A snapshot is therefore only meaningful next to a
+snapshot of a comparable state. `used_bytes`/`used_blocks` are the exception —
+split and coalesce never move them — which is why a leak check keys on those
+and not on `free_bytes` whenever the heap may have grown in between.
+
+`tests/kernel/test_heap_stress_k.c` is the audit built on it. Two shapes of
+load, each breaking something different:
+
+- **churn** — 10,000 alloc/free cycles over a 128-slot rolling working set, so
+  every free has live neighbours on both sides. This is what leans on
+  split/coalesce and the free-list bookkeeping.
+- **peak** — 10,000 blocks live *simultaneously* (varied sizes, 8–3719 bytes,
+  weighted small), then freed in a scattered order via a stride coprime with
+  the count. This is what forces repeated `heap_grow_one_page()` and then
+  proves coalescing reassembles the heap instead of leaving fragments.
+
+Both run twice from one PRNG seed, so the second pass replays the first byte
+for byte. That is what makes "consistent free memory before and after"
+checkable at all: the first pass is a **warm-up** that lets the heap reach its
+high-water mark, and the second must then fit entirely inside it. Comparing
+across the *first* pass would only measure growth, which is not a leak.
+
+Observed under QEMU `-m 256M`:
+
+```
+heap[before]:        free=28416    used=0 total=28416    blocks=4/0 seg=4 pages=7
+heap[after warm-up]: free=4218624  used=0 total=4218624  blocks=4/0 seg=4 pages=1030
+heap[after]:         free=4218624  used=0 total=4218624  blocks=4/0 seg=4 pages=1030
+free delta across measured pass = 0 bytes, pages taken = 0
+```
+
+Four free blocks across four segments, before and after — 20,000 allocations
+leave the free list exactly as they found it, with no fragmentation and no
+page taken that the warm-up had not already paid for.
+
+Two notes for anyone changing the load:
+
+- The size mix tops out at 3719 bytes on purpose, under the 4032 a freshly
+  created single-page segment has to offer. A larger request cannot be served
+  by a segment created to satisfy it, so if `alloc_page()` ever returned
+  non-contiguous pages, `heap_alloc()`'s growth loop would keep taking pages
+  until the PMM ran dry — the stranded-segment case in **Properties** above.
+  Multi-page allocations are covered separately by `test_heap_k.c`.
+- The suite is the most expensive one in the run (~2.5 s of the ~6 s QEMU
+  boot). CI kills QEMU at 30 s; see `docs/testing.md`.
+
+### The libc face: `malloc`/`free`/`realloc` (SCRUM-30)
+
+`src/stdlib.c` gives this heap its standard-library names. `malloc` is
+`kmalloc`, `free` is `kfree`, `realloc` is `krealloc` — thin forwarding
+functions with no pool, no bookkeeping and no policy of their own, so
+everything above about alignment, coalescing and growth applies unchanged to
+code that calls `malloc`.
+
+Two consequences worth keeping in mind:
+
+- **`malloc` before `page_alloc_init()` returns permanent memory.** `kmalloc`
+  bump-allocates until the PMM is live, and `kfree` refuses a pointer into
+  that bump region with a serial warning rather than corrupting the PMM
+  bitmap or owner table (see §5). Nothing on the boot path does this today —
+  Doom's allocations all happen long after the PMM comes up — but it is the
+  one ordering rule the wrappers inherit.
+- **There is exactly one heap right now, shared by kernel and LibOS.** The
+  v1 LibOS still runs on the kernel's own address space (SCRUM-47), so its
+  `malloc` and the kernel's `kmalloc` hand out from the same free lists. §8
+  is where that stops being true.
+
+---
+
 ## 7. Phase 4 — Virtual memory and paging
 
-**Files:** `src/vmm.c`, `src/vmm.h` _(planned — SCRUM-15, SCRUM-16, SCRUM-17)_
-**Status:** ⬜ Sprint 2
+**Files:** `src/vmm.c`, `src/vmm.h`, `src/fault.c`, `src/fault.h`
+**Status:** ✅ Done (SCRUM-15 — kernel page tables; SCRUM-35 —
+`exo_page_map`/`exo_page_unmap` on top of them; SCRUM-17 — page fault handler);
+SCRUM-16 (per-region permissions, WAD read-only) still to do
 
 ### Overview
 
@@ -378,7 +590,18 @@ offset is 21 bits, giving 512 × 2 MB = 1 GB per PD.
 
 `CR3` holds the physical address of the PML4. Writing `CR3` flushes the TLB.
 
-### Current boot-time mapping (done in boot.s trampoline)
+### Two maps, in order
+
+There are two identity maps in the boot, and it matters which one is live:
+
+1. **The boot map** (`boot.s`, described next) — a static 4 GB map in `.bss`
+   that exists only to get long mode running.
+2. **The kernel map** (`vmm_init()`, SCRUM-15) — built from PMM pages once the
+   allocator is up, and loaded into `CR3` in `kernel_main` before the `TESTING`
+   branch. From that point on it is the map everything runs against, the ring-3
+   probe included.
+
+### Boot-time mapping (done in boot.s trampoline)
 
 The trampoline builds a 4 GB identity map before entering long mode:
 
@@ -410,36 +633,134 @@ somehow acquired the U/S bit fails the build rather than shipping, and a test
 kernel that lost it fails loudly instead of triple-faulting into an
 unexplained CI timeout. Do not delete those symbols; the check depends on them.
 
-The consequence is blunt: in a test build, all 4 GB of the identity map is
-readable and writable from CPL 3, including kernel text and the page tables
-themselves. There is no isolation to speak of yet. That is precisely the hole
-the refinement below closes, and it is gated to test builds so a shipped kernel
-never carries it. SCRUM-48 gives each LibOS its own page directory; SCRUM-55
-and SCRUM-56 then assert that a LibOS faults on kernel memory and on port I/O.
+The consequence is blunt: in a test build, all 4 GB of *this* map — the boot
+map `boot.s` builds to reach long mode, live only until `vmm_init()` replaces
+it — is readable and writable from CPL 3, including kernel text and the page
+tables themselves. That is harmless in practice: nothing ever executes at
+CPL 3 against the boot map, since `vmm_init()` loads its own `CR3` before
+`run_tests()` runs. The map that actually matters is the kernel map below,
+and SCRUM-55 tightens *that* one back to supervisor-only — see its own
+section.
 
-### Future refinement (Sprint 2+)
+### The kernel map (`vmm_init`, SCRUM-15)
 
-`vmm_init()` will build proper 4K page tables with correct permissions:
+The boot map is a scaffold, not an address space. It is static (its tables are
+`.bss`, not pages the PMM knows about, so nothing can be mapped or unmapped at
+runtime), blanket (4 GB of address space, most of which does not exist), and
+uniform (one permission for everything). `vmm_init(mb, fb)` replaces it with
+tables built from `alloc_page()` pages and loads `CR3` with the result.
 
-1. **Identity map the kernel** with read/write, not user-accessible
-2. **Map the framebuffer** as present + read/write
-3. **Map the WAD module** as read-only
-4. Remove the blanket 4 GB identity map and map only what is needed
+What it maps, all identity (virtual == physical), in this order:
 
-After this, the MMU will enforce page permissions per region.
+| Region | Granularity | Why |
+| --- | --- | --- |
+| `0x1000`–`0x100000` | 4 KiB | low memory; BIOS/VGA structures |
+| `_load_start` → `memory_base_address()` | 4 KiB | kernel image + bump pool (the PMM bitmap and owner table live here) |
+| every `MB2_MMAP_AVAILABLE` region | 2 MiB where aligned, else 4 KiB | the PMM pool — page tables included — the WAD module, and normally the multiboot info |
+| the multiboot info struct | 4 KiB | firmware may place it outside a usable region, and the kernel reads it after the switch |
+| `fb->addr` → `+ pitch × height` | 2 MiB / 4 KiB | the framebuffer sits in the PCI MMIO hole above RAM, so no mmap region covers it — without this the console dies the instant `CR3` is loaded |
+
+Two deliberate omissions:
+
+- **Page 0 is left unmapped.** A NULL dereference faults instead of silently
+  reading the interrupt vector table. That fault is still fatal — SCRUM-17
+  turned it into a reported halt (CR2, error code, faulting RIP) rather than a
+  silent loop, but there is nothing to recover *to* until a LibOS exists to
+  terminate.
+- **No `NX`.** Bit 63 is reserved while `EFER.NXE` is clear and faults the
+  walk. Enabling NXE and marking non-text mappings NX belongs with the
+  per-section permissions in SCRUM-16.
+
+On QEMU `-m 256M` with a 1024×768 framebuffer the whole map costs **8 pages
+(32 KiB)** of PMM memory — one PML4, one PDPT, two PDs, and four page tables
+for the 4 KiB regions; the 254 MB of RAM above 2 MB is 2 MiB leaves. The count
+is printed to serial and to the boot console (`vmm_table_pages()`).
+
+Tables are allocated with `alloc_page()`, i.e. `PAGE_OWNER_KERNEL`, so a LibOS
+calling `exo_page_free` on one gets `-EXO_EPERM` (SCRUM-152). That is not
+incidental: page tables are the one resource where a stray free is
+unrecoverable.
+
+#### U/S again: the kernel map is supervisor-only in every build (SCRUM-55)
+
+`vmm.c`'s `KERNEL_MAP_USER` used to mirror `boot.s`'s blanket `-DTESTING`
+gate — the reasoning above applied to the kernel map too, because
+`tests/kernel/ring3_probe.s` and `tss_fault_probe.s` predate SCRUM-48's
+per-LibOS address spaces and execute directly against the kernel's own
+tables rather than a copied-in LibOS window the way every later probe does.
+That made real isolation untestable: `vmm_create_address_space()` shares
+`kernel_pml4[0]` with every address space it builds (see "Address spaces
+beyond the kernel's own" below), so a fresh LibOS window saw the *same*
+open kernel range the kernel's own map did.
+
+SCRUM-55 closes it. `KERNEL_MAP_USER` is `0` unconditionally now, and
+`vmm_init()` separately calls `expose_ring3_legacy_probes()` (`src/vmm.c`)
+to re-flag just those two probes' own code ranges — not their stacks, since
+neither probe ever pushes to one — as the sole, explicitly-scoped exception.
+Everything else the kernel map covers, `tests/kernel/test_kernel_mem_fault_k.c`
+now asserts is genuinely off-limits: a real LibOS address space built via
+`libos_build_image()` takes a *protection* `#PF` (present, not not-present)
+reading or writing `_load_start`, the kernel image's own base.
+`tests/kernel/test_vmm_k.c` asserts both halves — ordinary kernel text is
+supervisor-only, and the two named legacy probes are the only exception.
+
+#### API
+
+```c
+int  vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb);
+int  vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags);
+int  vmm_map_range(uint64_t vaddr, uint64_t paddr, uint64_t size, uint64_t flags);
+int  vmm_unmap_page(uint64_t vaddr);
+int  vmm_translate(uint64_t vaddr, uint64_t *paddr_out, uint64_t *flags_out);
+uint64_t vmm_kernel_pml4(void);
+uint32_t vmm_table_pages(void);
+```
+
+Status codes are ABI-agnostic like the PMM's (`VMM_OK`, `VMM_ENOMEM`,
+`VMM_EINVAL`, `VMM_EEXIST`, `VMM_ENOENT`); the syscall layer maps them to
+`EXO_E*` when SCRUM-153 exposes mapping to a LibOS.
+
+Three behaviours worth knowing before building on this:
+
+- **`vmm_map_page` splits 2 MiB leaves on demand.** Mapping a single 4 KiB page
+  inside a bulk-mapped region replaces the leaf with a page table describing
+  the same 512 pages, then edits the one entry — the neighbours keep their
+  mappings. This is what lets `exo_page_map` (SCRUM-153) hand a LibOS one page
+  out of a region the kernel mapped in bulk.
+- **Remapping is idempotent, repointing is refused.** Mapping an address that
+  already resolves to the same physical page succeeds (and updates flags);
+  pointing it somewhere else returns `VMM_EEXIST`. Unmap first if that is what
+  you meant.
+- **Empty page tables are not reclaimed** on unmap. Proving all 512 entries are
+  clear on every unmap costs more than the page is worth for a map that is
+  built once; per-LibOS address spaces tear down whole trees instead
+  (SCRUM-155).
+
+`vmm_init` verifies that the kernel text, the current stack, the PML4, the
+multiboot info and the framebuffer all translate correctly **before** writing
+`CR3`, and on failure leaves the boot map live and returns an error, so a
+missing mapping surfaces as a serial diagnostic rather than a triple fault with
+nothing on the wire.
+
+### Still to come (SCRUM-16, SCRUM-48)
+
+1. Per-section kernel permissions: `.text` read-execute, `.rodata` read-only,
+   everything else NX (needs `EFER.NXE`).
+2. The WAD module mapped read-only.
+3. Per-LibOS address spaces: a second PML4 with the kernel half shared.
 
 ### Exokernel syscalls
 
-Once paging is refined and a LibOS address space exists, three syscalls expose
-page management to the LibOS:
+Three syscalls expose page management to the LibOS, implemented in
+`src/syscall_mem.c` on top of the primitives above (SCRUM-34, SCRUM-35):
 
 ```c
 // Allocate one 4K physical page; returns physical address or -ENOMEM
 int64_t exo_page_alloc(void);
 
-// Map a physical page at a virtual address in the caller's PML4
-// flags: PAGE_PRESENT | PAGE_WRITE | PAGE_USER
-int64_t exo_page_map(uint64_t vaddr, uint64_t paddr, uint64_t flags);
+// Map a physical page at a virtual address in the caller's address space
+// flags: EXO_PAGE_READ | EXO_PAGE_WRITE | EXO_PAGE_USER | EXO_PAGE_EXEC
+int64_t exo_page_map(uint64_t vaddr, uint64_t paddr, uint32_t flags);
 
 // Unmap a virtual page (does not free the physical page)
 int64_t exo_page_unmap(uint64_t vaddr);
@@ -447,6 +768,18 @@ int64_t exo_page_unmap(uint64_t vaddr);
 
 `exo_page_free` frees the physical page back to the PMM without unmapping it —
 the LibOS is expected to call `exo_page_unmap` first.
+
+Both mapping calls are ownership-checked (SCRUM-153) — `exo_page_map` refuses
+any `paddr` the caller neither owns nor holds the framebuffer binding for — and both confine `vaddr`
+to the **LibOS window**, `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[64 TiB,
+128 TiB)`. While there is one address space shared with the kernel, a LibOS
+that owns a page must still be unable to install it over kernel text; anything
+outside the window is `-EXO_EPERM`.
+
+The base is 64 TiB rather than something closer because §7's map is an
+*identity* map — every usable RAM region is mapped at `vaddr == paddr`, so any
+window starting below the top of physical memory overlaps kernel mappings. See
+`docs/syscall_spec.md` §3.7.
 
 ### LibOS address space
 
@@ -456,32 +789,77 @@ user-accessible) so that syscall entry doesn't require a separate PML4 switch.
 The LibOS's own code, heap, and stack live in the lower virtual address range.
 The full 64-bit virtual address space provides ample room for separation.
 
-### Page fault handler (SCRUM-17)
+### Page fault handler (SCRUM-17) ✅
 
-Vector 14 (page fault) must be handled before paging refinement begins. On a
-fault, the CPU pushes an error code and the faulting address is in `CR2`. The
-handler should:
+Vector 14 is handled by `pf_stub` (`src/isr.s`) → `page_fault_handler()`
+(`src/fault.c`). The stub saves all 15 GPRs in the layout `exception_frame_t`
+describes, hands the frame to C, and the handler reports to COM1 and halts:
 
-1. Print the faulting virtual address (`CR2`), error code, and `RIP` to serial.
-2. Determine if it is a kernel fault (fatal — halt) or a LibOS fault (terminate
-   the LibOS, log the fault).
+```
+=== PAGE FAULT (#PF, vector 14) ===
+  cr2:       0x0000400000005000
+  error:     0x0000000000000002  (not-present write supervisor)
+  rip:       0x0000000000202BC1
+  cs:rsp:    0x0000000000000008:0x0000000000222F10
+  rflags:    0x0000000000010087
+  mapping:   none (no present entry along the walk)
+  context:   ring 0 (kernel) -- fatal
+=== halted ===
+```
 
-> ⚠️ **Open issue:** The current `default_stub` in `isr.s` does a bare `iretq`
-> and cannot handle error-code-pushing exceptions (SCRUM-135). A dedicated
-> `error_stub` must be installed on vector 14 before paging refinement begins.
+Three things are worth knowing about it:
+
+- **The `mapping:` line walks the live tables** via `vmm_translate()`. That is
+  what separates "faulted at X" from "faulted at X, which is unmapped" and from
+  "…which is mapped, but supervisor-only" — the distinction that decides
+  whether a future ring-3 fault is a missing mapping or a protection failure
+  (SCRUM-48/55/56).
+- **`idt_init()` now runs early**, right after `memory_init()` and above the
+  `TESTING` branch, so a fault during `page_alloc_init()`, `vmm_init()` or the
+  test suite is reported rather than looped on.
+- **Ring-3 faults reach it now, but nothing acts on the report yet.** The
+  handler classifies by the saved `CS`'s CPL and prints which ring faulted.
+  Before SCRUM-46, this arm was dead code: no TSS was loaded anywhere in the
+  kernel, and with `idt_set_gate` leaving `IST` at 0, a fault taken at CPL 3
+  had no `RSP0` to switch to — the CPU raised `#GP`, then `#DF`, needing the
+  same stack switch, and the machine triple-faulted before `pf_stub` ran.
+  `src/tss.c`'s `tss_init()` now loads a TSS with a valid `RSP0`
+  (`tests/kernel/test_tss_k.c` drives a real CPL-3 fault to prove it), and
+  SCRUM-47's `src/libos_launch.c/h` launches real ring-3 code on its own
+  address space rather than the kernel's, so the arm is exercised for real
+  (`tests/kernel/test_libos_launch_k.c`). Terminating the faulting LibOS
+  through `revoke_all()` instead of just reporting and halting is still
+  unbuilt policy on top.
+
+Not covered, for the same reason: a fault taken on a corrupt or unmapped stack
+still double-faults, because the handler runs on whatever stack was live. The
+recursion guard catches the ordinary case — a fault raised while reporting a
+fault — but cannot rescue a bad `RSP`.
 
 ---
 
 ## 8. Phase 5 — LibOS heap
 
-**Files:** LibOS source _(planned — SCRUM-25, SCRUM-26, SCRUM-37, SCRUM-38)_
-**Status:** ⬜ Sprint 3
+**Files:** `src/libos_page_alloc.c/h` (SCRUM-37, ✅ Done);
+`src/libos_heap.c/h` (SCRUM-38, ✅ Done)
+**Status:** ✅ Sprint 3, both layers done
 
 ### Design
 
 The LibOS heap is a **first-fit free-list allocator** that grows by requesting
 pages from the kernel via `exo_page_alloc`. It lives entirely in user space —
 the kernel has no knowledge of it beyond handing out physical pages.
+
+> **What `malloc` does depends on which build it's compiled into (SCRUM-51).**
+> `src/stdlib.c`'s `malloc`/`free`/`realloc` are gated on `#ifdef EXO_KERNEL` —
+> the kernel heap (§6b) when defined (every kernel `.c` compile, and every
+> `tests/kernel/*.c` suite compiled through the shared loop), this allocator
+> (`libos_heap_alloc`/`_free`/`_realloc`) when not. The "not" case is the ring-3
+> LibOS link target `tests/kernel/libc_shim_probe/` builds (see CLAUDE.md and
+> `docs/architecture.md` §7) — the same target SCRUM-173 introduced for a
+> single throwaway probe function, now also carrying the real
+> `src/stdlib.c`/`src/stdio.c`/`src/string.c`/`src/ctype.c`. `libos_page_alloc.c`
+> itself is gated the same way — see the next paragraph, updated by SCRUM-51.
 
 ```
 LibOS malloc(size):
@@ -496,6 +874,85 @@ blocks to reduce fragmentation.
 
 `realloc(ptr, size)` is implemented as `malloc(size)` + `memcpy` + `free(ptr)` —
 no in-place resize for the initial implementation.
+
+### SCRUM-37: `libos_page_alloc`/`libos_page_free`
+
+The page-granularity layer above is done: `libos_page_alloc()` calls
+`EXO_SYS_PAGE_ALLOC` then `EXO_SYS_PAGE_MAP` to place the new page at a fresh
+virtual address in `[LIBOS_HEAP_VADDR_BASE, LIBOS_HEAP_VADDR_BASE +
+LIBOS_PAGE_ALLOC_MAX_PAGES * 0x1000)` — 16 MiB of window starting 16 MiB into
+the LibOS window, clear of the fixed `libos_launch` region — and
+`libos_page_free()` reverses it (`EXO_SYS_PAGE_UNMAP` then
+`EXO_SYS_PAGE_FREE`). A small parallel array tracks each slot's physical
+page (mirroring `page_alloc.c`'s own bitmap-PMM shape, one entry per page
+rather than per byte), with a LIFO free list so returned slots are reused
+before the high-water mark grows further.
+
+**Which call convention it uses now depends on which build it's compiled
+into, the same `#ifdef EXO_KERNEL` gate as `malloc` above (SCRUM-51).** Under
+`EXO_KERNEL` it still calls `exo_syscall_dispatch()` directly rather than the
+inline `syscall`-instruction stubs in `exo_syscall.h`: those stubs return via
+`sysretq`, which *unconditionally* forces CPL 3 — `src/syscall_entry.s` spells
+this out: "the CPU does not consult RCX/R11 for anything but RIP and RFLAGS."
+`syscall` itself doesn't care what privilege level issued it, but there is no
+matching leniency on the way out: code that must resume at CPL 0 after the
+call — this file, when linked into the kernel binary for its own SCRUM-37/-38
+unit tests — silently drops to ring 3 for everything that runs afterward if
+it uses the real stub. This was found the hard way: an earlier version of
+this file called the stubs directly unconditionally, and the very next KUnit
+suite after it hung the whole run past the 30s CI ceiling instead of failing
+cleanly. Calling `exo_syscall_dispatch()` is a plain C call with no CPL
+transition, and is the same convention `test_syscall_mem_k.c` and
+`test_syscall_serial_k.c` already use to test a handler from kernel context —
+it proves the same handler-side behavior (ownership stamps, page-table
+effects, error codes) without the hazard.
+
+Under the ring-3 LibOS link target (NOT `EXO_KERNEL`), this file now calls
+the real inline stubs — `exo_page_alloc()`/`exo_page_free()`/`exo_page_map()`/
+`exo_page_unmap()` — because the hazard above no longer applies: code compiled
+for that target already runs at CPL 3 (it got there via `libos_enter()`), so
+a stub's `sysretq` keeps it exactly where it already was. This is what SCRUM-51
+actually needed the SCRUM-173 link target *for*: proving `malloc` works from
+ring 3 through a real `syscall`, not through an in-process call dressed up to
+look like one. One consequence worth knowing: `exo_page_map`'s handler resolves
+"the caller's address space" via `syscall_current_context()`
+(`src/syscall.c`), hardcoded in v1 to the single id `PAGE_OWNER_LIBOS` — so
+anything exercising this path from a *real* ring-3 syscall must be launched
+under that exact id, not a distinct per-test sentinel, or the mapping lands in
+the kernel's own page tables instead of the address space actually loaded in
+CR3. `tests/kernel/test_libc_shim_probe_k.c` is the first suite that matters
+for, and its own comment (and `tests/kernel/libos_test_common.h`'s) explains
+the save/restore dance that keeps this from disturbing every other suite,
+which still expects `PAGE_OWNER_LIBOS` bound to the kernel's own map.
+
+### SCRUM-38: `libos_heap`
+
+The byte-granularity layer on top is also done: `src/libos_heap.c` is
+`src/heap.c`'s first-fit, segmented free-list algorithm verbatim, with the
+page source swapped for `libos_page_alloc()` (SCRUM-37) in place of
+`alloc_page()`. The one other substitution is what "contiguous" means for
+segment growth: `heap.c` checks *physical* adjacency between successive
+`alloc_page()` calls, this file checks *virtual* adjacency between
+successive `libos_page_alloc()` calls — sound because nothing (this file
+included) ever calls `libos_page_free()` in steady state, so growth only
+ever bumps the page allocator's high-water mark forward. Like `heap.c`,
+segments here never shrink: a freed block stays in its segment's free list
+rather than the underlying page going back to `libos_page_alloc()`.
+
+`libos_heap_alloc`/`_free`/`_realloc` and the `libos_heap_get_stats`/
+`_report` accounting pair mirror `heap.c`'s API 1:1 under new names —
+deliberately not a shared engine with `heap.c`, since that file is
+hard-wired to `alloc_page()` and parameterizing it over a page source is
+more refactor than either ticket needs. `tests/kernel/test_libos_heap_k.c`
+mirrors `test_heap_k.c`'s correctness suite plus a scaled-down version of
+`test_heap_stress_k.c`'s churn+peak, warm-up+measured leak audit (500
+ops/blocks instead of 10,000 — each page grow here costs two real
+dispatcher round trips through `libos_page_alloc()` rather than one
+bitmap-scan `alloc_page()` call, so the load is sized down against
+`docs/testing.md`'s 30s CI ceiling rather than reused unchanged). Measured
+at 500/500: a single 51-page segment, zero fragmentation, zero pages taken
+between the warm-up and measured passes — the virtual-contiguity assumption
+above held throughout.
 
 ### Sizing
 

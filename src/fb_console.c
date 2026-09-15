@@ -138,11 +138,20 @@ static void scroll_up_one_row(fb_console_t* con) {
     uint8_t* src = fb->addr + scroll_px * bytes_per_row;
     uint32_t len = (fb->height - scroll_px) * bytes_per_row;
 
+    // The framebuffer is always 32bpp (fb_init_bgrx8888 rejects anything
+    // else), so bytes_per_row -- and therefore len -- is always a multiple
+    // of 4. Move whole pixels instead of bytes: at 1024x768x32 this copy is
+    // ~3 MB of uncached framebuffer MMIO, and a byte-at-a-time loop cost
+    // 5-7 ms per scrolled line (SCRUM-162).
+    uint32_t* dst32 = (uint32_t*)dst;
+    uint32_t* src32 = (uint32_t*)src;
+    uint32_t  len_px = len / 4;
+
     // simple memmove (overlapping safe)
-    if (src > dst) {
-        for (uint32_t i = 0; i < len; i++) dst[i] = src[i];
+    if (src32 > dst32) {
+        for (uint32_t i = 0; i < len_px; i++) dst32[i] = src32[i];
     } else {
-        for (uint32_t i = len; i > 0; i--) dst[i-1] = src[i-1];
+        for (uint32_t i = len_px; i > 0; i--) dst32[i-1] = src32[i-1];
     }
 
     // Clear bottom 16px

@@ -14,20 +14,139 @@ void suite_smoke_tests   (CU_pSuite s);
 void suite_string_tests  (CU_pSuite s);
 void suite_ctype_tests   (CU_pSuite s);
 void suite_stdio_tests   (CU_pSuite s);
+void suite_stdlib_tests  (CU_pSuite s);
 void suite_kbd_ring_tests(CU_pSuite s);
 void suite_ps2_decode_tests(CU_pSuite s);
 void suite_exo_syscall_tests(CU_pSuite s);
 void suite_exo_syscall_kview_tests(CU_pSuite s);
+void suite_exo_errno_tests(CU_pSuite s);
 void suite_syscall_tests(CU_pSuite s);
 void suite_syscall_mem_tests(CU_pSuite s);
 void suite_syscall_exit_tests(CU_pSuite s);
 void suite_ownership_tests(CU_pSuite s);
 void suite_fb_binding_tests(CU_pSuite s);
+void suite_vmm_tests(CU_pSuite s);
+void suite_vmm_fb_wad_tests(CU_pSuite s);
+void suite_revoke_tests(CU_pSuite s);
+void suite_page_map_tests(CU_pSuite s);
+void suite_fault_tests(CU_pSuite s);
+void suite_heap_tests(CU_pSuite s);
+void suite_heap_stress_tests(CU_pSuite s);
+void suite_tss_tests(CU_pSuite s);
+void suite_libos_launch_tests(CU_pSuite s);
+void suite_syscall_serial_tests(CU_pSuite s);
+void suite_syscall_kbd_tests(CU_pSuite s);
+void suite_syscall_pit_tests(CU_pSuite s);
+void suite_doomgeneric_timer_tests(CU_pSuite s);
+void suite_libos_main_tests(CU_pSuite s);
+void suite_libos_c_probe_tests(CU_pSuite s);
+void suite_libc_shim_probe_tests(CU_pSuite s);
+void suite_libos_page_alloc_tests(CU_pSuite s);
+void suite_libos_heap_tests(CU_pSuite s);
+void suite_libos_heap_stress_tests(CU_pSuite s);
+void suite_port_io_fault_tests(CU_pSuite s);
+void suite_kernel_mem_fault_tests(CU_pSuite s);
+void suite_irq_entry_tests(CU_pSuite s);
+void suite_context_tests(CU_pSuite s);
+void suite_fb_console_tests(CU_pSuite s);
+void suite_context_switch_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
 int fb_binding_suite_init(void);
 int fb_binding_suite_cleanup(void);
+
+/* Same idea for the revocation suite: it borrows the framebuffer and allocates
+ * pages under a second context id, and must leave neither behind (SCRUM-156). */
+int revoke_suite_init(void);
+int revoke_suite_cleanup(void);
+
+/* The page-map suite borrows the framebuffer binding and a second context id
+ * to prove what they refuse; it must leave neither behind (SCRUM-35). */
+int page_map_suite_cleanup(void);
+
+/* The fault suite installs a TESTING-only page-fault hook; leaving one
+ * installed would make a later genuine fault resume into a stale label
+ * instead of reporting (SCRUM-17). */
+int fault_suite_cleanup(void);
+
+/* The heap stress suite (SCRUM-27) runs its whole 2-pass, 20,000-allocation
+ * load in suite init so the tests below can each make one independent claim
+ * about the same run.  It allocates nothing that outlives init and so needs
+ * no cleanup. */
+int heap_stress_suite_init(void);
+
+/* Same idea for the TSS suite: it installs the fault hook and a SYS_ESCAPE
+ * handler around its live ring-3 fault test (SCRUM-46). */
+int tss_suite_cleanup(void);
+
+/* Same idea for the libos_launch suite: it installs the fault hook, a
+ * SYS_LIBOS_RETURN handler, and a real address space around its live
+ * ring-3 launch test (SCRUM-47). */
+int libos_launch_suite_cleanup(void);
+
+/* Same idea for the libos_main suite: it installs the fault hook, a
+ * SYS_LIBOS_RETURN handler, and a real address space around its live
+ * ring-3 entry-framework test (SCRUM-50). */
+int libos_main_suite_cleanup(void);
+
+/* Same idea for the libos_c_probe suite: it installs the fault hook, a
+ * SYS_LIBOS_RETURN handler, and a real address space around its live
+ * compiled-ring-3 test (SCRUM-173). */
+int libos_c_probe_suite_cleanup(void);
+
+/* Same idea for the libc_shim_probe suite: it installs the fault hook, a
+ * SYS_LIBOS_RETURN handler, and a real address space around its live
+ * compiled-libc-shim-in-ring-3 test (SCRUM-51). Its init additionally saves
+ * PAGE_OWNER_LIBOS's boot-time address-space binding, which cleanup restores
+ * -- see test_libc_shim_probe_k.c's own comment on why this suite (alone)
+ * has to. */
+int libc_shim_probe_suite_init(void);
+int libc_shim_probe_suite_cleanup(void);
+
+/* Same idea for the port_io_fault suite: it installs the fault hook, a
+ * SYS_LIBOS_RETURN handler, and a real address space around its live
+ * ring-3 port-I/O trap test (SCRUM-56). */
+int port_io_fault_suite_cleanup(void);
+
+/* Same idea for the kernel_mem_fault suite: it installs the fault hook, a
+ * SYS_LIBOS_RETURN handler, and a real address space around its live
+ * ring-3 kernel-memory-fault test (SCRUM-55). */
+int kernel_mem_fault_suite_cleanup(void);
+
+/* Same idea for the irq_entry suite: it installs the fault hook, a
+ * SYS_LIBOS_RETURN handler, and a real address space around its live
+ * ring-3 hardware-interrupt test (SCRUM-170). */
+int irq_entry_suite_cleanup(void);
+
+/* The context suite (SCRUM-107) creates real address spaces via
+ * vmm_create_address_space() and hands them to context_create(); a failed
+ * assertion mid-test could leave one bound with no test left to destroy it,
+ * so cleanup sweeps every context this suite's tests could have created. */
+int context_suite_cleanup(void);
+
+/* Same idea for the context_switch suite (SCRUM-108), extended with
+ * page_reclaim_all(): unlike the context suite above, these contexts have
+ * real code/data/stack pages mapped into them, not just a bare PML4. */
+int context_switch_suite_cleanup(void);
+
+/* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
+ * allocation load in suite init, same reasoning as heap_stress_suite_init
+ * above -- kept as its own suite, separate from "libos_heap"'s plain
+ * correctness tests, so those run against a pristine allocator instead of
+ * one this load has already warmed up. It allocates nothing that outlives
+ * init and so needs no cleanup. It must run after "libos_page_alloc": its
+ * segment-growth contiguity assumption depends on that suite's last test,
+ * test_slot_table_exhaustion (tests/kernel/test_libos_page_alloc_k.c),
+ * having reset libos_page_alloc back to a clean, empty state as its final
+ * action. */
+int libos_heap_stress_suite_init(void);
+
+/* The fb_console suite (SCRUM-162) runs scroll_up_one_row() against a
+ * synthetic, RAM-backed framebuffer rather than the real MMIO one -- init
+ * allocates the backing page, cleanup frees it. */
+int fb_console_suite_init(void);
+int fb_console_suite_cleanup(void);
 
 int run_tests(void)
 {
@@ -47,6 +166,9 @@ int run_tests(void)
     s = CU_add_suite("stdio",  NULL, NULL);
     suite_stdio_tests(s);
 
+    s = CU_add_suite("stdlib", NULL, NULL);
+    suite_stdlib_tests(s);
+
     s = CU_add_suite("kbd_ring", NULL, NULL);
     suite_kbd_ring_tests(s);
 
@@ -58,6 +180,9 @@ int run_tests(void)
 
     s = CU_add_suite("exo_syscall_kview", NULL, NULL);
     suite_exo_syscall_kview_tests(s);
+
+    s = CU_add_suite("exo_errno", NULL, NULL);
+    suite_exo_errno_tests(s);
 
     s = CU_add_suite("syscall", NULL, NULL);
     suite_syscall_tests(s);
@@ -74,6 +199,88 @@ int run_tests(void)
     s = CU_add_suite("fb_binding", fb_binding_suite_init,
                      fb_binding_suite_cleanup);
     suite_fb_binding_tests(s);
+
+    s = CU_add_suite("vmm", NULL, NULL);
+    suite_vmm_tests(s);
+
+    s = CU_add_suite("vmm_fb_wad", NULL, NULL);
+    suite_vmm_fb_wad_tests(s);
+
+    s = CU_add_suite("revoke", revoke_suite_init, revoke_suite_cleanup);
+    suite_revoke_tests(s);
+
+    s = CU_add_suite("page_map", NULL, page_map_suite_cleanup);
+    suite_page_map_tests(s);
+
+    s = CU_add_suite("fault", NULL, fault_suite_cleanup);
+    suite_fault_tests(s);
+
+    s = CU_add_suite("heap", NULL, NULL);
+    suite_heap_tests(s);
+
+    s = CU_add_suite("heap_stress", heap_stress_suite_init, NULL);
+    suite_heap_stress_tests(s);
+
+    s = CU_add_suite("tss", NULL, tss_suite_cleanup);
+    suite_tss_tests(s);
+
+    s = CU_add_suite("libos_launch", NULL, libos_launch_suite_cleanup);
+    suite_libos_launch_tests(s);
+
+    s = CU_add_suite("syscall_serial", NULL, NULL);
+    suite_syscall_serial_tests(s);
+
+    s = CU_add_suite("syscall_kbd", NULL, NULL);
+    suite_syscall_kbd_tests(s);
+
+    s = CU_add_suite("syscall_pit", NULL, NULL);
+    suite_syscall_pit_tests(s);
+
+    /* Right after syscall_pit: this suite sits directly on top of
+     * exo_get_ticks, and if that one is failing its failures explain these. */
+    s = CU_add_suite("doomgeneric_timer", NULL, NULL);
+    suite_doomgeneric_timer_tests(s);
+
+    s = CU_add_suite("libos_main", NULL, libos_main_suite_cleanup);
+    suite_libos_main_tests(s);
+
+    s = CU_add_suite("libos_c_probe", NULL, libos_c_probe_suite_cleanup);
+    suite_libos_c_probe_tests(s);
+
+    s = CU_add_suite("libc_shim_probe", libc_shim_probe_suite_init,
+                     libc_shim_probe_suite_cleanup);
+    suite_libc_shim_probe_tests(s);
+
+    /* No cleanup: the suite's last test (test_slot_table_exhaustion) resets
+     * src/libos_page_alloc.c's static state to empty as its final action,
+     * which "libos_heap_stress" below relies on -- keep this suite
+     * immediately before it. */
+    s = CU_add_suite("libos_page_alloc", NULL, NULL);
+    suite_libos_page_alloc_tests(s);
+
+    s = CU_add_suite("libos_heap", NULL, NULL);
+    suite_libos_heap_tests(s);
+
+    s = CU_add_suite("libos_heap_stress", libos_heap_stress_suite_init, NULL);
+    suite_libos_heap_stress_tests(s);
+
+    s = CU_add_suite("port_io_fault", NULL, port_io_fault_suite_cleanup);
+    suite_port_io_fault_tests(s);
+
+    s = CU_add_suite("kernel_mem_fault", NULL, kernel_mem_fault_suite_cleanup);
+    suite_kernel_mem_fault_tests(s);
+
+    s = CU_add_suite("irq_entry", NULL, irq_entry_suite_cleanup);
+    suite_irq_entry_tests(s);
+
+    s = CU_add_suite("context", NULL, context_suite_cleanup);
+    suite_context_tests(s);
+
+    s = CU_add_suite("fb_console", fb_console_suite_init, fb_console_suite_cleanup);
+    suite_fb_console_tests(s);
+
+    s = CU_add_suite("context_switch", NULL, context_switch_suite_cleanup);
+    suite_context_switch_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

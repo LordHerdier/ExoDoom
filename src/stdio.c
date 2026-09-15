@@ -8,7 +8,13 @@
  */
 
 #include "stdio.h"
+
+#ifdef EXO_KERNEL
 #include "serial.h"
+#else
+#include "exo_syscall.h"
+#endif
+
 #include <stdint.h>
 
 /* Local strlen so the core has no dependency on src/string.c and stays usable
@@ -185,6 +191,8 @@ int kvprintf(void (*emit)(int c, void *ctx), void *ctx,
     return count;
 }
 
+#ifdef EXO_KERNEL
+
 static void serial_emit(int c, void *ctx)
 {
     (void)ctx;
@@ -202,15 +210,80 @@ int printf(const char *fmt, ...)
     return n;
 }
 
+#else /* !EXO_KERNEL — the ring-3 LibOS link target (SCRUM-51/-173) */
+
+/*
+ * printf here has no direct line to COM1 — src/serial.c is kernel-only,
+ * unreachable (and, once EFER.NXE lands, unmapped) from ring 3. The only
+ * channel is exo_serial_write() (#8, src/exo_syscall.h), a real `syscall`
+ * instruction. Buffering the whole formatted line and flushing it in one
+ * call, rather than one exo_serial_write per byte the way the kernel-side
+ * sink does, is not just an optimization: it is what "printf works through
+ * the syscall instruction" (this ticket's acceptance criterion) means in
+ * practice — one syscall per printf(), not thousands.
+ *
+ * SERIAL_EMIT_BUF_LEN is well under SERIAL_WRITE_MAX_LEN (4096,
+ * src/syscall_serial.h — not included here, since that header is
+ * kernel-only) so a single flush never needs to split. A format string
+ * longer than the buffer flushes early and keeps accumulating, so output is
+ * never dropped, only split across more than one syscall.
+ */
+#define SERIAL_EMIT_BUF_LEN 480
+
+typedef struct {
+    char   buf[SERIAL_EMIT_BUF_LEN];
+    size_t len;
+} serial_emit_ctx_t;
+
+static void serial_emit_flush(serial_emit_ctx_t *ctx)
+{
+    if (ctx->len == 0)
+        return;
+    exo_serial_write(ctx->buf, ctx->len);
+    ctx->len = 0;
+}
+
+static void serial_emit(int c, void *raw_ctx)
+{
+    serial_emit_ctx_t *ctx = raw_ctx;
+    if (ctx->len == SERIAL_EMIT_BUF_LEN)
+        serial_emit_flush(ctx);
+    ctx->buf[ctx->len++] = (char)c;
+}
+
+int printf(const char *fmt, ...)
+{
+    serial_emit_ctx_t ctx = { .len = 0 };
+    va_list ap;
+    va_start(ap, fmt);
+    int n = kvprintf(serial_emit, &ctx, fmt, ap);
+    va_end(ap);
+    serial_emit_flush(&ctx);
+    return n;
+}
+
+#endif /* EXO_KERNEL */
+
 int putchar(int c)
 {
+#ifdef EXO_KERNEL
     serial_putc((char)c);
+#else
+    char ch = (char)c;
+    exo_serial_write(&ch, 1);
+#endif
     return c;
 }
 
 int puts(const char *s)
 {
+#ifdef EXO_KERNEL
     serial_print(s);
     serial_putc('\n');
+#else
+    /* Reuse printf's own sink so a long `s` still only costs one flush per
+     * SERIAL_EMIT_BUF_LEN, same as printf() itself. */
+    printf("%s\n", s);
+#endif
     return 0;
 }

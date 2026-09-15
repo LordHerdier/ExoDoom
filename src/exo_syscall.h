@@ -1,5 +1,10 @@
 #pragma once
+
+#ifndef __ASSEMBLER__
 #include <stdint.h>
+#endif
+
+#include "exo_errno.h"
 
 /*
  * exo_syscall.h — ExoDoom exokernel syscall ABI (SCRUM-24).
@@ -11,8 +16,9 @@
  * Both sides include this header:
  *
  *   - The kernel builds with EXO_KERNEL defined and gets only the numbers, the
- *     shared argument structs, and the error codes — it must not see the
- *     user-side stubs, which would issue a `syscall` against itself.  The
+ *     shared argument structs, and the error codes (exo_errno.h) — it must
+ *     not see the user-side stubs, which would issue a `syscall` against
+ *     itself.  The
  *     define comes from -DEXO_KERNEL on the kernel compiler command line in
  *     docker/scripts/build.sh, not from a #define in each file: with #pragma
  *     once, a #define placed after any transitive include of this header would
@@ -43,6 +49,16 @@
  * individual handlers land across Sprints 3-5.  The header exists so the
  * kernel dispatcher and the LibOS libc shim (SCRUM-51) agree on the ABI
  * before either is written.
+ *
+ * A third audience as of SCRUM-50: bare assembly test probes (the .s files
+ * under tests/kernel) that need a syscall number or a LibOS-window constant
+ * without hardcoding it a second time. docker/scripts/build.sh preprocesses
+ * those files with the C preprocessor (`-x assembler-with-cpp`, which
+ * predefines `__ASSEMBLER__`) before handing them to `as`, so every typedef,
+ * struct and function prototype below that an assembler cannot parse is
+ * wrapped in `#ifndef __ASSEMBLER__` — only the #define numbers survive into
+ * assembly text. Keep that wrapping intact when adding new C-only content
+ * here.
  */
 
 /* ---- Syscall numbers (docs/syscall_spec.md §3.2) ------------------------ */
@@ -83,23 +99,9 @@
 
 /* ---- Error codes -------------------------------------------------------- */
 /*
- * Returned negated in RAX: a syscall that fails with EXO_ENOMEM returns
- * -EXO_ENOMEM.  Values match the Linux errno numbers of the same names so a
- * later libc errno.h can pass them through unmodified.  Prefixed because the
- * libc shim will define the unprefixed names for Doom (Sprint 3).
+ * Moved to exo_errno.h (SCRUM-57) — included above, alongside <stdint.h>, so
+ * every existing user of exo_syscall.h keeps seeing EXO_E* without change.
  */
-#define EXO_EPERM     1   /* operation not permitted for this LibOS       */
-#define EXO_ENOENT    2   /* no such file                                 */
-#define EXO_EBADF     9   /* bad file descriptor                          */
-#define EXO_ENOMEM   12   /* out of physical pages / heap                 */
-#define EXO_EACCES   13   /* permission denied                            */
-#define EXO_EFAULT   14   /* pointer argument outside caller address space */
-#define EXO_EBUSY    16   /* resource held by another LibOS (framebuffer) */
-#define EXO_ENODEV   19   /* the hardware resource does not exist here     */
-#define EXO_EINVAL   22   /* malformed or out-of-range argument           */
-#define EXO_EMFILE   24   /* file descriptor table full                   */
-#define EXO_ENOSPC   28   /* ramdisk full                                 */
-#define EXO_ENOSYS   38   /* syscall number not implemented               */
 
 /* ---- Argument constants ------------------------------------------------- */
 
@@ -115,6 +117,31 @@
 #define EXO_PAGE_WRITE  (1u << 1)
 #define EXO_PAGE_USER   (1u << 2)
 #define EXO_PAGE_EXEC   (1u << 3)
+
+/*
+ * The virtual address window a LibOS may map into (docs/syscall_spec.md §3.7).
+ *
+ * exo_page_map / exo_page_unmap accept a `vaddr` in [BASE, END) and answer
+ * -EXO_EPERM anywhere else.  The window exists because the kernel and the
+ * LibOS share one address space until SCRUM-48: a mapping syscall edits the
+ * page tables the kernel runs on, so ownership of a *physical* page must not
+ * become a licence to install it over kernel text.
+ *
+ * The base is 64 TiB, and the reason it is not lower is worth stating plainly,
+ * because the obvious choice is wrong: the kernel map is an *identity* map
+ * (vmm_init, SCRUM-15), so every byte of usable RAM is mapped at a virtual
+ * address equal to its physical one.  A window that starts below the top of
+ * physical memory therefore overlaps real kernel mappings — on a machine with
+ * 8 GiB of RAM, a window at 4 GiB lands squarely inside mapped memory, where
+ * exo_page_map can map nothing (the address is already taken) and, worse,
+ * exo_page_unmap would happily unmap the kernel's own RAM.  64 TiB is chosen
+ * to be unreachable by physical memory on any machine this kernel will ever
+ * see, and syscall_mem_init() asserts that at boot rather than trusting it.
+ *
+ * END is the top of the lower canonical half, leaving a 64 TiB window.
+ */
+#define EXO_USER_VA_BASE  0x0000400000000000ULL
+#define EXO_USER_VA_END   0x0000800000000000ULL
 
 /* exo_file_open modes (docs/syscall_spec.md §3.2 #9) */
 #define EXO_O_RDONLY    0
@@ -133,6 +160,7 @@
  * everything is little-endian x86_64 and the sizes are asserted below.
  */
 
+#ifndef __ASSEMBLER__
 /* exo_fb_acquire(info_out) — #4 */
 typedef struct {
     uint64_t phys_addr;   /* framebuffer base, physical; LibOS maps it itself */
@@ -142,6 +170,7 @@ typedef struct {
     uint8_t  bpp;         /* bits per pixel; 32 (BGRX8888) on QEMU today      */
     uint8_t  reserved[3]; /* zeroed by the kernel                             */
 } exo_fb_info_t;
+#endif /* __ASSEMBLER__ */
 
 /* Modifier bits in exo_kbd_event_t.modifiers.  Sampled when the event was
  * queued, so a chord reads correctly even if the modifier is released before
@@ -171,13 +200,16 @@ typedef struct {
  * `key` is that struct's `key` — but the two are not the same type: this one
  * carries a trailing reserved byte and is ABI, while the kernel struct is free
  * to grow.  The #6 handler converts field by field rather than casting. */
+#ifndef __ASSEMBLER__
 typedef struct {
     uint8_t pressed;      /* 1 = key down, 0 = key up            */
     uint8_t key;          /* decoded ps2_key_t index             */
     uint8_t modifiers;    /* EXO_MOD_* mask held when queued     */
     uint8_t reserved;     /* zeroed by the kernel                */
 } exo_kbd_event_t;
+#endif /* __ASSEMBLER__ */
 
+#ifndef __ASSEMBLER__
 /* exo_mouse_poll(state_out) — #7.  Deltas accumulate in the kernel between
  * calls and are reset to zero by each poll; buttons are a level, not a delta. */
 typedef struct {
@@ -191,6 +223,7 @@ typedef struct {
 _Static_assert(sizeof(exo_fb_info_t)     == 24, "exo_fb_info_t layout is ABI");
 _Static_assert(sizeof(exo_kbd_event_t)   ==  4, "exo_kbd_event_t layout is ABI");
 _Static_assert(sizeof(exo_mouse_state_t) ==  6, "exo_mouse_state_t layout is ABI");
+#endif /* __ASSEMBLER__ */
 
 #ifndef EXO_KERNEL
 
@@ -310,15 +343,21 @@ static inline int64_t exo_page_free(uint64_t paddr)
 }
 
 /* #2 — map paddr at vaddr in the caller's address space.  flags is a mask of
- * EXO_PAGE_*.  0, -EXO_EINVAL or -EXO_EFAULT. */
+ * EXO_PAGE_*.  Ownership-checked (docs/syscall_spec.md §3.3): paddr must be a
+ * page the caller owns, or framebuffer memory it has acquired.  Returns 0,
+ * -EXO_EINVAL (misaligned address or unknown flag bit), -EXO_EPERM (vaddr
+ * outside [EXO_USER_VA_BASE, EXO_USER_VA_END), or a paddr the caller does not
+ * own) or -EXO_ENOMEM (no page left for an intermediate page table). */
 static inline int64_t exo_page_map(uint64_t vaddr, uint64_t paddr,
                                    uint32_t flags)
 {
     return exo_syscall3(EXO_SYS_PAGE_MAP, vaddr, paddr, (uint64_t)flags);
 }
 
-/* #3 — remove the mapping at vaddr.  0 or -EXO_EINVAL.  Does not free the
- * underlying page; call exo_page_free for that. */
+/* #3 — remove the mapping at vaddr.  Does not free the underlying page; call
+ * exo_page_free for that.  Returns 0, -EXO_EINVAL (misaligned vaddr, or
+ * nothing mapped there), -EXO_EPERM (vaddr outside the window, or the mapping
+ * is of a page belonging to the kernel or another LibOS) or -EXO_ENOMEM. */
 static inline int64_t exo_page_unmap(uint64_t vaddr)
 {
     return exo_syscall1(EXO_SYS_PAGE_UNMAP, vaddr);

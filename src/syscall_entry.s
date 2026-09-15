@@ -42,10 +42,15 @@
  *
  * A single global, not a per-CPU slot, which makes this path non-reentrant:
  * it is safe only because FMASK clears IF (so no interrupt can arrive and
- * issue its own syscall) and there is one CPU.  The upgrade path when
- * SCRUM-107 introduces multiple LibOS contexts is `swapgs` plus a per-CPU
- * block reached through IA32_KERNEL_GS_BASE; that is the only reason the
- * kernel would need a GS base at all.
+ * issue its own syscall) and there is one CPU. SCRUM-108's context switch
+ * (below) stages the outgoing context's state through this same global
+ * rather than fixing that -- see its own comment and context.h's top
+ * comment for why that is safe today and what still owes the real fix
+ * (SCRUM-176: `swapgs` plus a per-CPU block reached through
+ * IA32_KERNEL_GS_BASE).
+ *
+ * .global so src/context_switch.s can read it directly by name -- see that
+ * file's context_switch_tail.
  *
  * Placed *below* the stack buffer deliberately.  Putting it immediately after
  * syscall_stack_end would leave it abutting the end the stack actually grows
@@ -53,6 +58,7 @@
  * reasoning, and it would stop being safe the moment anything adjusted the
  * stack top. */
 .align 8
+.global saved_user_rsp
 saved_user_rsp:
     .skip 8
 
@@ -70,6 +76,8 @@ syscall_stack_top:
 
 .global syscall_entry
 .extern exo_syscall_dispatch
+.extern context_switch_pending
+.extern context_switch_tail
 
 syscall_entry:
     /* Swap stacks.  Both of these are %rip-relative memory operands, so
@@ -129,7 +137,31 @@ syscall_entry:
 
     call exo_syscall_dispatch
     /* RAX now holds the value the caller sees; it is the one register we are
-     * allowed to change, so it is left alone from here on. */
+     * allowed to change, so it is left alone from here on -- except on the
+     * context-switch exit below, which discards it (see that comment). */
+
+    /* SCRUM-108: if context.c's context_switch_request() armed a switch
+     * during the call just made, jump to context_switch_tail
+     * (src/context_switch.s) instead of the ordinary restore+sysretq
+     * epilogue below. RBX/RBP/R12-R15 (the outgoing context's callee-saved
+     * GPRs, restored by exo_syscall_dispatch()'s own SysV return) and
+     * saved_user_rsp (its RSP, parked in memory above) are still exactly
+     * what context_switch_tail needs live/in memory -- but RCX/R11 (its
+     * ring-3 RIP/RFLAGS) are NOT: they are caller-saved in the C ABI, so
+     * exo_syscall_dispatch()/context_switch_request() are free to clobber
+     * them, which is exactly why they were pushed onto this stack frame
+     * above in the first place. context_switch_tail reads the *pushed*
+     * copies back off this same stack via %rsp-relative offsets (see its
+     * own SAVED_RCX_OFF/SAVED_R11_OFF) rather than trusting the live
+     * registers -- do not "simplify" this by reading %rcx/%r11 directly on
+     * that path. RAX (dispatch's return value) is deliberately discarded on
+     * this path: the outgoing context resumes later through its own saved
+     * RIP, not through this call's return value. */
+    cmpq $0, context_switch_pending(%rip)
+    je   1f
+    movq $0, context_switch_pending(%rip)
+    jmp  context_switch_tail
+1:
 
     addq $16, %rsp      /* drop the stacked argument and its padding */
 

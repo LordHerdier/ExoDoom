@@ -49,6 +49,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       grub-pc-bin \
       grub-common \
       ca-certificates \
+      curl \
+      unzip \
       libmpc3 \
       libgmp10 \
       libmpfr6 \

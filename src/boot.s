@@ -61,6 +61,7 @@ pd3:    .skip 4096              /* 3 GB – 4 GB  */
 
 .section .rodata
 .align 16
+.global gdt64
 gdt64:
     .quad 0                         /* 0x00: null descriptor              */
 
@@ -100,6 +101,20 @@ gdt64:
 
     /* 0x28: 64-bit user code — L=1, D=0, P=1, DPL=3, type=exec/read     */
     .quad 0x00AFFA000000FFFF
+
+    /*
+     * 0x30: TSS descriptor (SCRUM-46).  A 64-bit TSS descriptor is a system
+     * descriptor, twice the width of the code/data descriptors above — it
+     * occupies this slot *and* the one at 0x38, base+limit spread across
+     * both quads (Intel SDM 3A §7.2.3).  The two are left zeroed here
+     * because the descriptor encodes the TSS structure's address, which
+     * this file has no way to know — src/tss.c's tss_init() patches both
+     * quads at runtime (see gdt64 being .global above) and then `ltr`s the
+     * selector.  Until tss_init() runs, TR is null and any exception taken
+     * at CPL 3 triple-faults for want of an RSP0 to switch to.
+     */
+    .quad 0x0000000000000000   /* 0x30: low half   */
+    .quad 0x0000000000000000   /* 0x38: high half  */
 gdt64_end:
 
 gdt64_ptr:

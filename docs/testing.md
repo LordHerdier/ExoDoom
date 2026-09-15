@@ -44,6 +44,20 @@ end.
 greps the serial output for `ALL TESTS PASSED` and fails the job if that
 string is absent or if `TESTS FAILED` is present.
 
+### Time budget
+
+Both `docker-test` and `docker-ci` run QEMU under `timeout 30`. The whole
+suite currently boots and finishes in roughly 6 seconds, so there is ample
+headroom — but it is a hard ceiling, and a suite that blows through it looks
+like a *truncated serial log*, not like a failure: the grep for
+`ALL TESTS PASSED` simply finds nothing and CI reports the completion signal
+as missing.
+
+The expensive suite is `heap_stress` (SCRUM-27), at about 2.5 seconds: it runs
+20,000 allocations against a first-fit allocator whose search is O(live
+blocks). If you add load there, re-measure rather than assuming the headroom
+is still there.
+
 ---
 
 ## Writing tests
@@ -145,8 +159,14 @@ TESTS FAILED: 1 test(s) failed
 
 | Setting | Value |
 |---------|-------|
-| `KUNIT_MAX_SUITES` | 16 |
+| `KUNIT_MAX_SUITES` | 32 |
 | `KUNIT_MAX_TESTS_PER_SUITE` | 64 |
 | `KUNIT_NAME_LEN` | 64 bytes |
 
 These can be increased in `src/kunit.h` if needed.
+
+⚠️ **Exceeding them fails silently.** `CU_add_suite` returns `NULL` at the
+ceiling, `CU_add_test(NULL, ...)` quietly does nothing, and the run still ends
+in `ALL TESTS PASSED` — with an entire suite missing from the output. If a
+suite you registered does not appear in the serial log, check the count here
+before debugging anything else.
