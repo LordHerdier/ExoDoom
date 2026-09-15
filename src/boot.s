@@ -121,6 +121,17 @@ gdt64_ptr:
     .short gdt64_end - gdt64 - 1   /* limit                              */
     .quad  gdt64                    /* base (64-bit)                      */
 
+/*
+ * MXCSR's architectural power-on value (Intel SDM 1 §10.2.3): round-to-
+ * nearest, flush-to-zero and denormals-are-zero off, and all six SIMD
+ * floating-point exceptions *masked*.  Loaded by _start64 -- see the
+ * ldmxcsr there for why inheriting whatever firmware left is not good
+ * enough once CR4.OSXMMEXCPT is set.
+ */
+.align 4
+mxcsr_init:
+    .long 0x00001F80
+
 
 /* ── 32-bit entry point ──────────────────────────────────────────────── */
 
@@ -269,6 +280,87 @@ _start64:
 
     /* Set up 64-bit stack */
     mov $stack_top, %rsp
+
+    /*
+     * ── Enable SSE (SCRUM-177) ────────────────────────────────────────
+     *
+     * Doom needs SSE and cannot be talked out of it: the x86_64 SysV ABI
+     * returns `float` in %xmm0, so src/doom/m_config.c's
+     * M_GetFloatVariable() has no SSE-free encoding at all (-msoft-float
+     * and -mfpmath=387 both still hit the ABI).  docker/scripts/build-doom.sh
+     * therefore drops -mno-sse for the engine, which additionally lets GCC
+     * inline struct copies and zeroing as movaps/movdqa/pxor across the whole
+     * of it -- roughly 143 instructions on top of the 18 that are actual
+     * float arithmetic.  Both classes #UD identically without the bits below.
+     *
+     * What the CPU wants before an SSE instruction will execute at all
+     * (Intel SDM 3A §13.1.4, "Initialization of the SSE Extensions"):
+     *
+     *   CR0.EM = 0   Emulation off.  EM=1 means "no FPU, trap it all to
+     *                software" and raises #UD on every SSE instruction --
+     *                this is the bit that would fault Doom on its first
+     *                float.
+     *   CR0.MP = 1   Monitor coprocessor.  Only changes how WAIT/FWAIT reads
+     *                TS, but MP=1 with EM=0 is the documented "a real FPU is
+     *                present" pair.
+     *   CR0.TS = 0   No pending lazy-FPU switch.  Already 0 out of reset and
+     *                nothing here ever sets it (this kernel has no lazy
+     *                switch scheme), so clearing it states the invariant
+     *                rather than fixing anything: leave TS set and the first
+     *                SSE instruction takes #NM instead of running.
+     *   CR0.NE = 1   Report x87 errors as #MF (vector 16) instead of through
+     *                the legacy FERR#/IRQ13 pin, which nothing in this kernel
+     *                wires up.
+     *   CR4.OSFXSR = 1      The OS is prepared to manage FXSAVE/FXRSTOR-shaped
+     *                       state, and SSE instructions are enabled.
+     *   CR4.OSXMMEXCPT = 1  An unmasked SIMD FP exception arrives as #XM
+     *                       (vector 19) rather than as #UD.
+     *
+     * This sits in the 64-bit half rather than next to the CR4.PAE write in
+     * the 32-bit stub on purpose: long mode is already active here, and
+     * AMD64 *requires* SSE2 and FXSAVE/FXRSTOR of any CPU able to enter it.
+     * "Does this CPU have SSE?" is therefore already answered by the far jump
+     * that got us to this label, which is why there is no CPUID gate below --
+     * a check that cannot fail is not a check.
+     *
+     * None of the kernel's own objects use any of this: build.sh keeps
+     * -mno-sse -mno-sse2 -mno-mmx on every src/*.c, which is precisely why
+     * neither syscall_entry.s nor isr.s saves any FPU/XMM state.  See
+     * docs/syscall_spec.md §3.4a for that decision, the invariant it rests
+     * on, and what would invalidate it.
+     */
+.set CR0_MP,         (1 << 1)
+.set CR0_EM,         (1 << 2)
+.set CR0_TS,         (1 << 3)
+.set CR0_NE,         (1 << 5)
+.set CR4_OSFXSR,     (1 << 9)
+.set CR4_OSXMMEXCPT, (1 << 10)
+
+    mov  %cr0, %rax
+    and  $~(CR0_EM | CR0_TS), %rax
+    or   $(CR0_MP | CR0_NE), %rax
+    mov  %rax, %cr0
+
+    mov  %cr4, %rax
+    or   $(CR4_OSFXSR | CR4_OSXMMEXCPT), %rax
+    mov  %rax, %cr4
+
+    /*
+     * Put x87 and SSE into a known control state instead of inheriting
+     * whatever GRUB left behind.  Both must come *after* the CR0 write
+     * above: fninit itself raises #NM while TS is set and #UD while EM is.
+     *
+     * The ldmxcsr is not housekeeping.  MXCSR's six exception-mask bits are
+     * all set out of reset, but with OSXMMEXCPT now on, an *unmasked* SIMD
+     * exception would be delivered on vector 19 -- where idt_init()
+     * (src/idt.c) leaves default_stub, a bare `iretq` that returns to the
+     * faulting instruction and so faults forever.  Loading the architectural
+     * default makes that vector unreachable rather than trusting firmware
+     * not to have touched MXCSR.  Anything that later unmasks a SIMD
+     * exception owes vector 19 a real handler first.
+     */
+    fninit
+    ldmxcsr mxcsr_init(%rip)
 
     /* EDI already holds the MB2 info pointer from the 32-bit stub.
        Zero-extend it to RDI (upper 32 bits already 0 from mov in 32-bit). */

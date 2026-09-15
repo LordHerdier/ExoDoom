@@ -325,9 +325,14 @@ int context_switch_request(page_owner_t to_id);
  * than always at slot 0 is what makes repeated yields cycle through every
  * READY context instead of always landing on the same one.
  *
- * Returns the next READY id, or PAGE_OWNER_FREE (0) if `current` names no
- * row in this table (e.g. the boot-time default LibOS) or no other context
- * is READY -- either way, "nothing to switch to" for the caller.
+ * Returns the next READY id, or PAGE_OWNER_FREE (0) if no context in the
+ * table is READY. If `current` names no row in this table (e.g. the
+ * boot-time default LibOS), the scan simply starts at slot 0 instead of
+ * just past `current`'s slot -- that alone does not make this return
+ * PAGE_OWNER_FREE if some other context is READY. Callers that do not
+ * route through context_switch_request()'s own from/to validation should
+ * not assume a non-PAGE_OWNER_FREE result names a context that can
+ * actually be switched away from.
  */
 page_owner_t context_next_ready(page_owner_t current);
 

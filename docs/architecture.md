@@ -237,6 +237,13 @@ Key details:
 - GRUB passes the MB2 info struct address in `%ebx`. The trampoline saves it in
   `%edi`, which is zero-extended to `%rdi` — the first argument register in the
   System V AMD64 ABI.
+- The 64-bit half of the trampoline (`_start64`) also **enables SSE** before
+  calling `kernel_main` (SCRUM-177): CR0.EM/TS cleared, CR0.MP/NE and
+  CR4.OSFXSR/OSXMMEXCPT set, `MXCSR` loaded with `0x1F80`. It sits in the
+  64-bit half rather than beside the CR4.PAE write because long mode is
+  already active there, and AMD64 requires SSE2/FXSAVE of any CPU that can
+  enter it — so no CPUID check is needed or present. See `docs/syscall_spec.md`
+  §3.4a.
 - The Multiboot 2 info struct uses a **tag-based format**. Tags are iterated
   with `mb2_find_tag()` to locate the framebuffer (type 8), memory map (type 6),
   and modules (type 3).
@@ -582,19 +589,29 @@ full `FILE*` interface. See `docs/syscall_spec.md` §2 for the complete audit.
 > inside `W_Init`. `docs/libc_audit.md` (SCRUM-72) is the per-function,
 > per-call-site list of what is still owed.
 >
-> ⚠️ **Doom requires SSE, and the kernel does not enable it.** The x86_64 SysV
-> ABI returns `float` in `xmm0`, so `m_config.c`'s `M_GetFloatVariable()`
-> cannot compile under the kernel's `-mno-sse` — no flag combination avoids
-> this (`-msoft-float` and `-mfpmath=387` both still hit the ABI). The doom
-> compile pass therefore drops `-mno-sse`; the kernel build keeps it and is
-> unaffected (no `src/*.c` uses a float). But `src/boot.s` sets only CR4.PAE —
-> never CR4.OSFXSR/OSXMMEXCPT, never clearing CR0.EM — so the first SSE
-> instruction any of these objects executes raises `#UD` today. Only 4 objects
+> ✅ **SCRUM-177: SSE is enabled.** Doom requires it and cannot be compiled
+> without it — the x86_64 SysV ABI returns `float` in `xmm0`, so
+> `m_config.c`'s `M_GetFloatVariable()` has no SSE-free encoding (`-msoft-float`
+> and `-mfpmath=387` both still hit the ABI). The doom compile pass drops
+> `-mno-sse`; the kernel build keeps it and is unaffected (no `src/*.c` uses a
+> float). `src/boot.s`'s `_start64` now clears CR0.EM/CR0.TS, sets
+> CR0.MP/CR0.NE and CR4.OSFXSR/CR4.OSXMMEXCPT, and loads `MXCSR` with the
+> architectural default `0x1F80`, all before `kernel_main` runs. Only 4 objects
 > hold float arithmetic (18 instructions), but allowing SSE also lets GCC
-> inline struct copies with `movaps`/`movdqa`/`pxor` engine-wide (~143 more),
-> and both need the same bits set. **No ticket owns enabling SSE or deciding
-> whether XMM state must be saved across the syscall/interrupt paths**; it is a
-> hard prerequisite for running any of this.
+> inline struct copies with `movaps`/`movdqa`/`pxor` engine-wide (~143 more);
+> both classes needed the same bits, and `tests/kernel/test_sse_k.c` covers
+> both, in ring 0 and from a ring-3 LibOS.
+>
+> **FPU/XMM state is deliberately not saved across the syscall or interrupt
+> paths**, and that is a recorded decision rather than an omission: the kernel
+> is compiled `-mno-sse -mno-sse2 -mno-mmx` and its hand-written assembly
+> touches only general-purpose registers, so it is *incapable* of modifying a
+> LibOS's XMM/MXCSR/x87 state — an invariant the ring-3 tests check against a
+> real syscall and a real IRQ0 taken at CPL 3, rather than one this paragraph
+> merely asserts. It holds only while exactly one ring-3 context exists;
+> **a real scheduler must add `fxsave`/`fxrstor` to `context_switch.s`.** Full
+> reasoning and the list of what would invalidate it: `docs/syscall_spec.md`
+> §3.4a.
 
 > ✅ **SCRUM-51:** `malloc`/`free`/`realloc` and `printf` now go through the
 > real `syscall` instruction, not a kernel function call, when compiled for
@@ -849,7 +866,7 @@ The entire toolchain runs inside Docker. No host cross-compiler is required.
 
 - `-mno-red-zone` — mandatory; without it, interrupt handlers corrupt the 128-byte red zone below RSP
 - `-mcmodel=small` — code/data assumed in lower 2 GB
-- `-mno-sse -mno-sse2 -mno-mmx` — prevents GCC from emitting SIMD instructions (avoids needing to save/restore XMM state in ISRs)
+- `-mno-sse -mno-sse2 -mno-mmx` — prevents GCC from emitting SIMD instructions **into kernel objects**, which is what makes it safe for the syscall and interrupt paths not to save XMM state (SCRUM-177; see `docs/syscall_spec.md` §3.4a — dropping this flag breaks that invariant). SSE itself *is* enabled in `boot.s` for the Doom objects, which are compiled without it by `docker/scripts/build-doom.sh`.
 
 **Key make targets:**
 

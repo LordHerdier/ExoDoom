@@ -50,6 +50,7 @@ void suite_irq_entry_tests(CU_pSuite s);
 void suite_context_tests(CU_pSuite s);
 void suite_fb_console_tests(CU_pSuite s);
 void suite_context_switch_tests(CU_pSuite s);
+void suite_sse_tests(CU_pSuite s);
 void suite_syscall_yield_tests(CU_pSuite s);
 void suite_shell_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
@@ -136,6 +137,17 @@ int context_switch_suite_cleanup(void);
 /* Same idea for the context_launch_rebind suite (SCRUM-178): its contexts
  * are also launched with real code/data/stack pages mapped in. */
 int context_launch_rebind_suite_cleanup(void);
+
+/* Same idea for the sse suite (SCRUM-177): its two ring-3 cases each build a
+ * real address space and install the fault hook and a SYS_LIBOS_RETURN
+ * handler around a live launch, and the second of them leaves irq0_handler's
+ * recorded entry RSP set. */
+int sse_suite_cleanup(void);
+
+/* The sse suite reads CR0/CR4 in init, before any of its cases executes an
+ * SSE instruction, so a kernel built without the enable block fails those
+ * cases instead of #UD-ing into an infinite loop. See test_sse_k.c. */
+int sse_suite_init(void);
 
 /* Same idea for the syscall_yield suite (SCRUM-109): same real-address-space/
  * real-page shape as context_switch above, driven through the real bound
@@ -299,6 +311,9 @@ int run_tests(void)
 
     s = CU_add_suite("context_switch", NULL, context_switch_suite_cleanup);
     suite_context_switch_tests(s);
+
+    s = CU_add_suite("sse", sse_suite_init, sse_suite_cleanup);
+    suite_sse_tests(s);
 
     s = CU_add_suite("syscall_yield", NULL, syscall_yield_suite_cleanup);
     suite_syscall_yield_tests(s);

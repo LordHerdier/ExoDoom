@@ -37,12 +37,11 @@ mkdir -p build/doom
 #   editing vendored source, which SCRUM-63 exists to avoid.
 #
 #   So Doom needs SSE, and that is a real finding rather than a build-script
-#   convenience. IT IS NOT YET SATISFIED AT RUNTIME: src/boot.s sets only
-#   CR4.PAE — it never sets CR4.OSFXSR (bit 9) or CR4.OSXMMEXCPT (bit 10), nor
-#   clears CR0.EM — so the first SSE instruction any of these objects executes
-#   raises #UD today. Enabling SSE, and deciding whether XMM state has to be
-#   saved across the syscall and interrupt paths, is a prerequisite for running
-#   this code that no ticket owns yet; see docs/libc_audit.md sec5.
+#   convenience. IT IS SATISFIED AT RUNTIME as of SCRUM-177: src/boot.s's
+#   _start64 clears CR0.EM/CR0.TS, sets CR0.MP/CR0.NE and
+#   CR4.OSFXSR/CR4.OSXMMEXCPT, and loads MXCSR = 0x1F80, before kernel_main
+#   runs. tests/kernel/test_sse_k.c proves an SSE instruction executes and is
+#   correct, in ring 0 and from a ring-3 LibOS.
 #
 #   The footprint is larger than the four floats suggest. Only 4 of the 79
 #   objects contain float arithmetic at all (g_game, m_config, p_setup,
@@ -51,7 +50,10 @@ mkdir -p build/doom
 #   engine (~143 more). Both classes need the same CR4/CR0 bits set.
 #
 # The kernel's own build keeps -mno-sse and is untouched by any of this: no
-# src/*.c uses a float, and the kernel saves no FPU state.
+# src/*.c uses a float, and the kernel saves no FPU state. That second half is
+# now load-bearing rather than incidental -- it is exactly why syscall_entry.s
+# and isr.s need no fxsave (docs/syscall_spec.md sec3.4a). Dropping -mno-sse
+# from the *kernel's* CFLAGS, as opposed to this file's, would break that.
 CFLAGS=(-std=gnu99 -ffreestanding -O2 -Wall -Wextra -mno-red-zone -mcmodel=small -mno-mmx -I src/doom -I src)
 
 pass=0

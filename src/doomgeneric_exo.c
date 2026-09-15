@@ -89,8 +89,9 @@ uint32_t DG_GetTicksMs(void)
  * `pause` rather than `hlt`: hlt is privileged, so it would #GP the moment
  * this runs where it is actually meant to run, in ring 3. pause is legal at
  * any CPL, encodes as `rep nop` (F3 90) so it degrades to a plain nop on
- * anything that doesn't know it, and needs none of the SSE state that is not
- * enabled yet (see docs/libc_audit.md sec5) despite its SSE2-era name.
+ * anything that doesn't know it, and touches no SSE state at all despite its
+ * SSE2-era name -- so it was safe here even before SCRUM-177 enabled SSE, and
+ * is unaffected by it now.
  *
  * ── Precondition: the clock has to be running ──────────────────────────
  *
