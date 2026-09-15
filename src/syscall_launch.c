@@ -10,6 +10,7 @@
 #include "page_alloc.h"
 #include "vmm.h"
 #include "fb_binding.h"
+#include "revoke.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -23,6 +24,19 @@ extern const uint8_t _binary_libos_wad_viewer_code_bin_start[];
 extern const uint8_t _binary_libos_wad_viewer_code_bin_end[];
 extern const uint8_t _binary_libos_wad_viewer_data_bin_start[];
 extern const uint8_t _binary_libos_wad_viewer_data_bin_end[];
+
+/* The most recently launched viewer's context id, or PAGE_OWNER_FREE if
+ * none is live. `wadview` quits by idling forever (src/libos_wad_viewer/
+ * libos_wad_viewer.c's Q/Esc handler) rather than tearing itself down --
+ * there is no exit/return syscall for a LibOS to relinquish its own
+ * context -- so without this, a second `wadview` would context_create() a
+ * *third* context alongside the shell and the still-idling first viewer,
+ * eventually exhausting CONTEXT_MAX (3), and would leave the first
+ * viewer's framebuffer binding held forever, since only whoever currently
+ * holds it can be released (see below) and the first viewer never runs
+ * again to release it itself. Reclaiming the previous viewer's context up
+ * front, every time `wadview` runs, keeps exactly one at a time alive. */
+static page_owner_t last_viewer_id = PAGE_OWNER_FREE;
 
 /* #21 -- build and switch to the WAD/flat/automap viewer as a second, real
  * LibOS context, invoked from the shell's `wadview` command
@@ -41,6 +55,17 @@ static int64_t sys_launch_wad_viewer(uint64_t a1, uint64_t a2, uint64_t a3,
                                      uint64_t a4, uint64_t a5, uint64_t a6)
 {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+
+    /* Reclaim the previous viewer's context (pages + framebuffer binding,
+     * whichever it still holds) before creating a new one -- see
+     * last_viewer_id's own comment. context_lookup() guards against a
+     * stale id from a viewer some other path already tore down. */
+    if (last_viewer_id != PAGE_OWNER_FREE &&
+       context_lookup(last_viewer_id) != NULL) {
+        revoke_all(last_viewer_id);
+        context_destroy(last_viewer_id);
+    }
+    last_viewer_id = PAGE_OWNER_FREE;
 
     uint64_t wad_start, wad_end;
     if (mmap_find_module(&wad_start, &wad_end) != 0) {
@@ -107,18 +132,21 @@ static int64_t sys_launch_wad_viewer(uint64_t a1, uint64_t a2, uint64_t a3,
      * never see a PIT or keyboard IRQ land. */
     context_prime_irq(viewer_id, img.entry_vaddr, img.stack_top_vaddr);
 
-    /* The shell already holds the framebuffer binding from its own
-     * libos_fb_map() call at startup (src/shell/shell_main.c) -- exo_fb_
-     * acquire is exclusive (src/fb_binding.c, SCRUM-154), so the viewer's
-     * own libos_fb_map() would get -EXO_EBUSY without this. Only the
-     * *binding* is released, not the shell's own already-established
-     * page-table mapping (fb_binding_release() never touches page tables),
-     * so the shell keeps rendering to its existing framebuffer pointer
-     * uninterrupted once it is switched back to -- it never calls
-     * libos_fb_map() a second time, so it never notices the binding moved.
-     * Done last, right before the point of no return: every earlier
-     * failure path above keeps the shell's binding intact. */
-    fb_binding_release(context_current());
+    /* Whoever currently holds the framebuffer binding -- the shell, from
+     * its own libos_fb_map() call at startup (src/shell/shell_main.c), on
+     * the very first `wadview`; nobody, on a later one, since the reclaim
+     * at the top of this function already released it from the previous
+     * viewer -- must give it up before this one can exo_fb_acquire() it
+     * (exclusive, src/fb_binding.c, SCRUM-154). fb_binding_owner() rather
+     * than assuming the caller: the caller is always the shell, but the
+     * *holder* is not, once a second `wadview` runs. Only the binding is
+     * released, not the holder's own already-established page-table
+     * mapping (fb_binding_release() never touches page tables), so the
+     * shell keeps rendering to its existing framebuffer pointer
+     * uninterrupted once it is switched back to. Done last, right before
+     * the point of no return: every earlier failure path above leaves
+     * whoever holds the binding untouched. */
+    fb_binding_release(fb_binding_owner());
 
     /* Succeeds because the caller (the shell) has a real context_t row of
      * its own -- see src/kernel.c's SCRUM-178 refactor of the shell launch.
@@ -130,6 +158,11 @@ static int64_t sys_launch_wad_viewer(uint64_t a1, uint64_t a2, uint64_t a3,
         context_destroy(viewer_id);
         return -EXO_EINVAL;
     }
+
+    /* Only now, on the success path -- everything above that fails instead
+     * destroys viewer_id itself and returns with last_viewer_id still
+     * PAGE_OWNER_FREE from the top of this function. */
+    last_viewer_id = viewer_id;
 
     return 0;
 }
