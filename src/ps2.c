@@ -159,6 +159,22 @@ static ps2_key_t ps2_translate_scancode(uint8_t scancode) {
         case 0x44: return KEY_F10;
         case 0x57: return KEY_F11;
         case 0x58: return KEY_F12;
+        case 0x02: return KEY_1;
+        case 0x03: return KEY_2;
+        case 0x04: return KEY_3;
+        case 0x05: return KEY_4;
+        case 0x06: return KEY_5;
+        case 0x07: return KEY_6;
+        case 0x08: return KEY_7;
+        case 0x09: return KEY_8;
+        case 0x0A: return KEY_9;
+        case 0x0B: return KEY_0;
+        case 0x0C: return KEY_MINUS;
+        case 0x0D: return KEY_EQUALS;
+        case 0x33: return KEY_COMMA;
+        case 0x34: return KEY_PERIOD;
+        case 0x35: return KEY_SLASH;
+        case 0x27: return KEY_SEMICOLON;
         default:    return KEY_UNKNOWN;
     }
 }
@@ -216,6 +232,22 @@ static const char* ps2_key_name(ps2_key_t key) {
         case KEY_F10:         return "KEY_F10";
         case KEY_F11:         return "KEY_F11";
         case KEY_F12:         return "KEY_F12";
+        case KEY_0:           return "KEY_0";
+        case KEY_1:           return "KEY_1";
+        case KEY_2:           return "KEY_2";
+        case KEY_3:           return "KEY_3";
+        case KEY_4:           return "KEY_4";
+        case KEY_5:           return "KEY_5";
+        case KEY_6:           return "KEY_6";
+        case KEY_7:           return "KEY_7";
+        case KEY_8:           return "KEY_8";
+        case KEY_9:           return "KEY_9";
+        case KEY_MINUS:       return "KEY_MINUS";
+        case KEY_EQUALS:      return "KEY_EQUALS";
+        case KEY_COMMA:       return "KEY_COMMA";
+        case KEY_PERIOD:      return "KEY_PERIOD";
+        case KEY_SLASH:       return "KEY_SLASH";
+        case KEY_SEMICOLON:   return "KEY_SEMICOLON";
         default:              return "KEY_UNKNOWN";
     }
 }
