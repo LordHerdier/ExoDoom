@@ -203,6 +203,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Memory (mmap parse, bump allocator, bitmap PMM) | `src/mmap.c/h`, `src/memory.c/h`, `src/page_alloc.c/h` |
 | Virtual memory (kernel page tables, map/unmap/translate) | `src/vmm.c/h` |
 | Ring-3 LibOS launch (image build, CR3 switch, `iretq`) | `src/libos_launch.c/h`, `src/libos_enter.s` |
+| Process/context table (id, page dir, saved registers, state) | `src/context.c/h` |
 | Interrupts (IDT/PIC/ISR, TSS, page-fault diagnostics) | `src/idt.c/h`, `src/pic.c/h`, `src/isr.s`, `src/io.h`, `src/tss.c/h`, `src/fault.c/h` |
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
@@ -433,6 +434,30 @@ convention and calls it from `kernel_main` instead of a test harness.
     syscall/interrupt paths, is an unowned prerequisite for running any of it.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
+- **The context table (SCRUM-107, `src/context.c/h`) tracks live LibOS
+  contexts, but nothing switches between them yet.** `context_create()` binds
+  a caller-built address space to a fresh `page_owner_t` id via
+  `vmm_bind_address_space()` — the page-dir binding itself stays in `vmm.c`'s
+  own per-context registry rather than being duplicated, so there's one
+  source of truth for which PML4 a context runs on; `context_t` adds the
+  saved-register area and scheduling state (`READY`/`RUNNING`/`BLOCKED`)
+  that registry never had a field for. `CONTEXT_MAX == VMM_MAX_ADDRESS_SPACES`
+  (4). The register save area is inert — `libos_enter.s`/`syscall_entry.s`
+  still each carry their own single global saved-RSP slot, unchanged by this
+  ticket; making that reentrant (`swapgs` + per-CPU, per
+  `docs/syscall_spec.md` §3.4) and performing a real switch is SCRUM-108's
+  job, and nothing here is wired into `kernel_main`'s normal boot tail.
+- **`tests/kernel/kunit.h`'s `KUNIT_MAX_SUITES` had been silently exceeded on
+  `main` before SCRUM-107** — 36 suites were registered against a 32-slot
+  table, so `CU_add_suite` was returning `NULL` past the cap and 4 suites
+  (`libos_heap_stress`, `port_io_fault`, `kernel_mem_fault`, `irq_entry`)
+  were never actually running, with `ALL TESTS PASSED` still printing
+  because a suite `CU_add_suite` refuses just runs zero tests, not an error
+  — exactly the silent-failure mode the constant's own comment warns about.
+  Raised to 48 alongside landing the context suite (the 37th) that tripped
+  over it; **if `make docker-test`'s suite count looks lower than
+  `test_runner.c`'s `CU_add_suite` call count, this is why — check the
+  ceiling before assuming every suite ran.**
 - Sprint status/roadmap and current in-flight Jira stories are tracked in
   `docs/architecture.md` §10 — check it for what's actually in progress vs.
   planned before assuming a subsystem is finished.

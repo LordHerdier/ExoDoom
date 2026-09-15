@@ -21,8 +21,16 @@
  * CU_add_suite returns NULL once it is reached, CU_add_test(NULL, ...) is a
  * no-op, and the run still prints ALL TESTS PASSED with the whole suite
  * silently missing.  Raised from 16 to 32 when the fault suite (SCRUM-17)
- * took the last slot. */
-#define KUNIT_MAX_SUITES          32
+ * took the last slot, and from 32 to 48 under SCRUM-107: the 32 cap had
+ * already been silently exceeded on main by the time this ticket started --
+ * 36 suites were registered in tests/kernel/test_runner.c against a 32 slot
+ * table, so libos_heap_stress, port_io_fault, kernel_mem_fault and
+ * irq_entry (the four most recently added, landing after the fault suite
+ * took slot 32) were never actually running, with "ALL TESTS PASSED" still
+ * printing because that is exactly the silent failure mode this comment
+ * already warned about. Discovered because the new context suite (37th)
+ * hit it too. */
+#define KUNIT_MAX_SUITES          48
 #define KUNIT_MAX_TESTS_PER_SUITE 64
 #define KUNIT_NAME_LEN            64
 

@@ -509,8 +509,12 @@ not `boot.s`'s boot stack, which the kernel may already be nested on.
 
 The outgoing user `RSP` is parked in a single global, so **the path is not
 reentrant**. That is safe today only because `FMASK` clears `IF` and there is
-one CPU. When SCRUM-107 introduces multiple LibOS contexts this becomes
-`swapgs` plus a per-CPU block reached through `IA32_KERNEL_GS_BASE`.
+one CPU. SCRUM-107 added the context table that *tracks* multiple LibOS
+contexts (`src/context.c/h` — id, page dir, saved registers, state) but does
+not switch between them; this reentrancy fix is still owed once something
+actually runs two contexts concurrently through this path — SCRUM-108's
+job — and becomes `swapgs` plus a per-CPU block reached through
+`IA32_KERNEL_GS_BASE`.
 
 No TSS is involved: `syscall` never consults `TSS.RSP0` — SCRUM-46's TSS
 matters to ring-3 code taking an *interrupt or exception*, not to it making a
