@@ -286,6 +286,30 @@ echo "[2c/7] Build shell LibOS (SCRUM-110)"
 build_ring3_link_target shell src/shell "" \
   src/shell/shell_main.c src/fb.c src/fb_console.c src/libos_fb.c
 
+echo "[2d/7] Build WAD/flat/automap viewer LibOS (SCRUM-178)"
+# Same reasoning and same mechanism as the shell step just above: built
+# UNCONDITIONALLY and ahead of step 3's C compile loop, because
+# src/syscall_launch.c (the kernel-side #21 handler that launches this
+# LibOS from the shell's "wadview" command) #includes the generated
+# src/libos_wad_viewer/libos_wad_viewer_layout.h this call produces.
+# src/libos_wad_viewer/ is its own subdirectory for the same reason
+# src/shell/ is: step 3's plain `src/*.c` glob below must never compile
+# libos_wad_viewer.c with -DEXO_KERNEL.
+#
+# src/wad.c/src/flat.c/src/automap.c are the engine (WAD parsing, flat
+# texture blitting, automap line rendering); src/fb.c/src/fb_console.c/
+# src/libos_fb.c are the same framebuffer/text-console/mapping code the
+# shell target above already links in unmodified. libos_wad_viewer.c MUST
+# come first in this list --
+# see build_ring3_link_target's own comment on why source order determines
+# entry_vaddr (this target also carries the
+# __attribute__((section(".text.entry"))) belt-and-suspenders fix its own
+# top comment describes, for the same reason the shell target's comment
+# gives for keeping shell_main() textually first too).
+build_ring3_link_target libos_wad_viewer src/libos_wad_viewer "" \
+  src/libos_wad_viewer/libos_wad_viewer.c src/wad.c src/flat.c src/automap.c \
+  src/fb.c src/fb_console.c src/libos_fb.c
+
 echo "[3/7] Compile C sources"
 
 # -DEXO_KERNEL selects the kernel view of src/exo_syscall.h (numbers, shared

@@ -23,6 +23,8 @@ bool fb_init_bgrx8888(framebuffer_t* fb, uintptr_t addr, uint32_t pitch, uint32_
 // Basic drawing
 void fb_clear(framebuffer_t* fb, uint8_t r, uint8_t g, uint8_t b);
 void fb_fill_rect(framebuffer_t* fb, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t r, uint8_t g, uint8_t b);
+void fb_put_pixel(framebuffer_t* fb, int32_t x, int32_t y, uint8_t r, uint8_t g, uint8_t b);
+void fb_draw_line(framebuffer_t* fb, int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint8_t r, uint8_t g, uint8_t b);
 
 // Visual tests
 void fb_test_color_sanity(framebuffer_t* fb);

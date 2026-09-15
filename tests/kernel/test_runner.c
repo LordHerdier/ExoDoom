@@ -51,6 +51,7 @@ void suite_fb_console_tests(CU_pSuite s);
 void suite_context_switch_tests(CU_pSuite s);
 void suite_syscall_yield_tests(CU_pSuite s);
 void suite_shell_libos_tests(CU_pSuite s);
+void suite_context_launch_rebind_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -130,6 +131,10 @@ int context_suite_cleanup(void);
  * page_reclaim_all(): unlike the context suite above, these contexts have
  * real code/data/stack pages mapped into them, not just a bare PML4. */
 int context_switch_suite_cleanup(void);
+
+/* Same idea for the context_launch_rebind suite (SCRUM-178): its contexts
+ * are also launched with real code/data/stack pages mapped in. */
+int context_launch_rebind_suite_cleanup(void);
 
 /* Same idea for the syscall_yield suite (SCRUM-109): same real-address-space/
  * real-page shape as context_switch above, driven through the real bound
@@ -297,6 +302,10 @@ int run_tests(void)
     s = CU_add_suite("shell_libos", shell_libos_suite_init,
                      shell_libos_suite_cleanup);
     suite_shell_libos_tests(s);
+
+    s = CU_add_suite("context_launch_rebind", NULL,
+                     context_launch_rebind_suite_cleanup);
+    suite_context_launch_rebind_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

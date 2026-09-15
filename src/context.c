@@ -154,17 +154,42 @@ uint64_t context_pml4(page_owner_t id) {
     return vmm_address_space_for(id);
 }
 
-int context_prime(page_owner_t id, uint64_t entry_vaddr, uint64_t stack_top_vaddr) {
+static int context_prime_with_rflags(page_owner_t id, uint64_t entry_vaddr,
+                                     uint64_t stack_top_vaddr, uint64_t rflags) {
     context_t *slot = find_slot(id);
     if (slot == NULL) {
         return CONTEXT_ENOENT;
     }
     slot->regs.rip = entry_vaddr;
     slot->regs.rsp = stack_top_vaddr;
-    slot->regs.rflags = LIBOS_LAUNCH_RFLAGS;
+    slot->regs.rflags = rflags;
     /* Callee-saved GPRs stay whatever context_create()'s memset left them
      * (0) -- a fresh launch has no caller-established values to restore. */
     return CONTEXT_OK;
+}
+
+int context_prime(page_owner_t id, uint64_t entry_vaddr, uint64_t stack_top_vaddr) {
+    return context_prime_with_rflags(id, entry_vaddr, stack_top_vaddr,
+                                     LIBOS_LAUNCH_RFLAGS);
+}
+
+/* Same as context_prime(), but seeds RFLAGS.IF set (LIBOS_LAUNCH_RFLAGS_IRQ)
+ * so the first context_switch_tail resume into this context lands with
+ * hardware interrupts live -- for a context whose ring-3 code needs
+ * exo_get_ticks()/exo_kbd_poll() to see real IRQ-driven state from the
+ * moment it starts running, the same reason src/libos_launch.h's
+ * libos_enter_irq() exists alongside plain libos_enter(). context_prime()
+ * alone is correct for a context that will only ever be resumed via a later
+ * switch (its RFLAGS at that point are whatever was captured live from the
+ * context that switches into it for the first time via exo_yield or
+ * similar) -- this variant exists because context_switch_tail is *also* how
+ * a never-before-run context gets its very first entry when it is reached
+ * via context_switch_request() rather than a direct libos_enter_irq() call
+ * (SCRUM-178: the WAD viewer, launched this way from the shell's `wadview`
+ * command rather than kernel_main). */
+int context_prime_irq(page_owner_t id, uint64_t entry_vaddr, uint64_t stack_top_vaddr) {
+    return context_prime_with_rflags(id, entry_vaddr, stack_top_vaddr,
+                                     LIBOS_LAUNCH_RFLAGS_IRQ);
 }
 
 /* PAGE_OWNER_LIBOS: the same single-LibOS default src/syscall.c's

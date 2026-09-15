@@ -220,6 +220,19 @@ uint64_t context_pml4(page_owner_t id);
 int context_prime(page_owner_t id, uint64_t entry_vaddr, uint64_t stack_top_vaddr);
 
 /*
+ * Same as context_prime(), but seeds RFLAGS.IF set (LIBOS_LAUNCH_RFLAGS_IRQ,
+ * src/libos_launch.h) instead -- for a context whose ring-3 code needs
+ * exo_get_ticks()/exo_kbd_poll() to see real IRQ-driven state from the
+ * moment its very first context_switch_tail resume lands, the same reason
+ * libos_enter_irq() exists alongside plain libos_enter() (SCRUM-178: the WAD
+ * viewer, launched via context_switch_request() from the shell's `wadview`
+ * command rather than a direct libos_enter_irq() call from kernel_main).
+ *
+ * Returns CONTEXT_OK, or CONTEXT_ENOENT if `id` names no live context.
+ */
+int context_prime_irq(page_owner_t id, uint64_t entry_vaddr, uint64_t stack_top_vaddr);
+
+/*
  * The currently RUNNING context's id -- PAGE_OWNER_LIBOS until the first
  * context_switch_request() ever succeeds, matching the single-LibOS default
  * src/syscall.c's syscall_current_context() already returned before this
