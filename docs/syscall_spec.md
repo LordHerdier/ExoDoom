@@ -510,11 +510,24 @@ not `boot.s`'s boot stack, which the kernel may already be nested on.
 The outgoing user `RSP` is parked in a single global, so **the path is not
 reentrant**. That is safe today only because `FMASK` clears `IF` and there is
 one CPU. SCRUM-107 added the context table that *tracks* multiple LibOS
-contexts (`src/context.c/h` — id, page dir, saved registers, state) but does
-not switch between them; this reentrancy fix is still owed once something
-actually runs two contexts concurrently through this path — SCRUM-108's
-job — and becomes `swapgs` plus a per-CPU block reached through
-`IA32_KERNEL_GS_BASE`.
+contexts (`src/context.c/h` — id, page dir, saved registers, state); SCRUM-108
+adds the actual switch (`context_switch_request()` + `src/context_switch.s`'s
+`context_switch_tail`, spliced into this file's epilogue right after
+`exo_syscall_dispatch()` returns), but deliberately does **not** fix this
+reentrancy gap the "real" way. It instead stages the outgoing/incoming
+context's state through this same single global at each switch boundary —
+still correct, because `FMASK` clears `IF` for the whole syscall/switch window
+and this kernel targets exactly one CPU, so no second entry can interleave —
+rather than the full `swapgs` + per-CPU block (`IA32_KERNEL_GS_BASE`) rework
+this note used to point at. That full rework is tracked as SCRUM-176, needed
+once SCRUM-127 (preemptive, IRQ-driven switching) wants to trigger a switch
+from inside an interrupt handler with `IF` set — the one case SCRUM-108's
+staged fix does not cover. One consequence worth flagging for the next
+reader: `RCX`/`R11` are caller-saved in the C ABI, so by the time
+`context_switch_tail` runs (after `exo_syscall_dispatch()` and whatever C it
+called), the *live* `RCX`/`R11` no longer hold the outgoing context's ring-3
+`RIP`/`RFLAGS` — `context_switch_tail` reads them back from the stack slots
+this stub's own prologue pushed instead; see that file's comment.
 
 No TSS is involved: `syscall` never consults `TSS.RSP0` — SCRUM-46's TSS
 matters to ring-3 code taking an *interrupt or exception*, not to it making a

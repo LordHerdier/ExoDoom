@@ -7,30 +7,28 @@
  * this exists as a separate thing from the probe rather than reusing it.
  */
 
+#include "libos_launch.h"
+
 .code64
 
-/* Selectors from the GDT in src/boot.s. sysretq's arithmetic pins these
- * values for the syscall return path; iretq does not require it, but using
- * anything else here would be needless inconsistency. */
-.set USER_SS, 0x20 | 3
-.set USER_CS, 0x28 | 3
-
-/* RFLAGS for libos_enter(): bit 1 is reserved and must be set; IF stays
- * clear. SCRUM-170 proved a hardware interrupt taken at CPL 3 switches to
- * TSS.RSP0 correctly (see libos_enter_irq below and
- * tests/kernel/test_irq_entry_k.c), but every fault/launch test in
- * tests/kernel/ still depends on this exact value -- do not change it; add
- * a new entry point instead, as libos_enter_irq below does. */
-.set LAUNCH_RFLAGS, 0x002
-
-/* RFLAGS for libos_enter_irq(): same, but with IF set, so PIT/keyboard IRQs
- * keep landing (on TSS.RSP0, then back to CPL 3 via their own iretq) for as
- * long as the launched context runs. Needed by any LibOS whose ring-3 code
- * relies on exo_get_ticks() actually advancing or exo_kbd_poll() actually
- * seeing input while it runs -- with IF clear (LAUNCH_RFLAGS above) neither
- * IRQ0 nor IRQ1 can ever be recognised once `iretq` drops to ring 3, so
- * exo_get_ticks() would return a frozen value forever and exo_kbd_poll()
- * would never see a keypress.
+/* Selectors and RFLAGS values now shared with src/context_switch.s
+ * (SCRUM-108) via LIBOS_LAUNCH_USER_SS/_CS/_RFLAGS/_RFLAGS_IRQ in
+ * src/libos_launch.h -- see that header's comment for why one definition
+ * replaces what used to be a private `.set` here. SCRUM-170 proved a
+ * hardware interrupt taken at CPL 3 switches to TSS.RSP0 correctly (see
+ * libos_enter_irq below and tests/kernel/test_irq_entry_k.c), but every
+ * fault/launch test in tests/kernel/ still depends on LIBOS_LAUNCH_RFLAGS's
+ * exact value for libos_enter() -- do not change it; add a new entry point
+ * instead, as libos_enter_irq below does.
+ *
+ * LIBOS_LAUNCH_RFLAGS_IRQ keeps PIT/keyboard IRQs landing (on TSS.RSP0, then
+ * back to CPL 3 via their own iretq) for as long as the launched context
+ * runs. Needed by any LibOS whose ring-3 code relies on exo_get_ticks()
+ * actually advancing or exo_kbd_poll() actually seeing input while it runs
+ * -- with IF clear (LIBOS_LAUNCH_RFLAGS above) neither IRQ0 nor IRQ1 can
+ * ever be recognised once `iretq` drops to ring 3, so exo_get_ticks() would
+ * return a frozen value forever and exo_kbd_poll() would never see a
+ * keypress.
  *
  * This is the actual exercise of what SCRUM-170 asked to be verified:
  * idt_set_gate()'s IST=0 gates mean a hardware interrupt taken at CPL 3
@@ -46,7 +44,10 @@
  * this entry point ran a multi-second interactive loop under continuous
  * PIT/keyboard IRQ traffic with no fault -- but the KUnit probe is the
  * deterministic, CI-checked proof. */
-.set LAUNCH_RFLAGS_IRQ, 0x202
+.set USER_SS, LIBOS_LAUNCH_USER_SS
+.set USER_CS, LIBOS_LAUNCH_USER_CS
+.set LAUNCH_RFLAGS, LIBOS_LAUNCH_RFLAGS
+.set LAUNCH_RFLAGS_IRQ, LIBOS_LAUNCH_RFLAGS_IRQ
 
 .section .bss
 .align 8
@@ -54,6 +55,34 @@ libos_saved_rsp:
     .quad 0
 
 .section .text
+
+/*
+ * void libos_iretq_enter(uint64_t entry_rip, uint64_t user_rsp,
+ *                         uint64_t rflags);
+ * Arguments arrive in RDI, RSI, RDX per the SysV ABI.
+ *
+ * The one place that builds a ring-3 iretq frame (SS/RSP/RFLAGS/CS/RIP,
+ * LIBOS_LAUNCH_USER_SS/_CS) and executes it. libos_enter/libos_enter_irq
+ * below jump here after pushing their own callee-saved GPRs and loading
+ * RDI/RSI/RDX from their arguments/RFLAGS constant; src/context_switch.s's
+ * context_switch_tail jumps here too, after restoring the incoming
+ * context's callee-saved GPRs and loading RDI/RSI/RDX (and, uniquely to
+ * that caller, RAX -- see its own comment) from context_regs_t. One
+ * definition of the frame shape instead of three that could drift apart.
+ * Never returns to its caller in the ordinary sense; whoever jumps here has
+ * already arranged how control comes back (libos_return(), or a future
+ * context switch away).
+ */
+.global libos_iretq_enter
+libos_iretq_enter:
+    /* An iretq frame is the only way into a lower privilege level: the CPU
+     * pops RIP, CS, RFLAGS, RSP and SS, and the CPL comes from the CS RPL. */
+    pushq $USER_SS
+    pushq %rsi                  /* user RSP */
+    pushq %rdx                  /* RFLAGS */
+    pushq $USER_CS
+    pushq %rdi                  /* user RIP */
+    iretq
 
 /*
  * uint64_t libos_enter(uint64_t entry_vaddr, uint64_t stack_top_vaddr);
@@ -74,14 +103,10 @@ libos_enter:
     push %r15
     movq %rsp, libos_saved_rsp(%rip)
 
-    /* An iretq frame is the only way into a lower privilege level: the CPU
-     * pops RIP, CS, RFLAGS, RSP and SS, and the CPL comes from the CS RPL. */
-    pushq $USER_SS
-    pushq %rsi                  /* user RSP = stack_top_vaddr */
-    pushq $LAUNCH_RFLAGS
-    pushq $USER_CS
-    pushq %rdi                  /* user RIP = entry_vaddr */
-    iretq
+    movq $LAUNCH_RFLAGS, %rdx    /* entry_vaddr (%rdi), stack_top_vaddr
+                                  * (%rsi) already sit where
+                                  * libos_iretq_enter expects them. */
+    jmp libos_iretq_enter
 
 /*
  * uint64_t libos_enter_irq(uint64_t entry_vaddr, uint64_t stack_top_vaddr);
@@ -102,12 +127,8 @@ libos_enter_irq:
     push %r15
     movq %rsp, libos_saved_rsp(%rip)
 
-    pushq $USER_SS
-    pushq %rsi                  /* user RSP = stack_top_vaddr */
-    pushq $LAUNCH_RFLAGS_IRQ
-    pushq $USER_CS
-    pushq %rdi                  /* user RIP = entry_vaddr */
-    iretq
+    movq $LAUNCH_RFLAGS_IRQ, %rdx
+    jmp libos_iretq_enter
 
 /*
  * int64_t libos_return(uint64_t result, ...);

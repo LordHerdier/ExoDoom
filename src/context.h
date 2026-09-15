@@ -1,6 +1,7 @@
 #ifndef CONTEXT_H
 #define CONTEXT_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "page_alloc.h"   /* page_owner_t */
@@ -20,19 +21,29 @@
  * SCRUM-108 (context switch: save/restore register state + CR3 swap) needs
  * a home for and doesn't have one today.
  *
- * What this ticket does NOT do: an actual context switch. context_regs_t is
- * a fixed save area, not wired to anything yet -- libos_enter.s and
- * syscall_entry.s still each keep their own single global saved-RSP slot,
- * which both that file's and docs/syscall_spec.md's STAR/LSTAR/FMASK
- * section already flag as the thing that has to become a per-CPU
- * (`swapgs`-based) slot once two contexts are ever live *concurrently*
- * through the syscall/launch path -- that rework, and actually performing a
- * switch, is SCRUM-108's job. This ticket's acceptance is narrower: the
- * kernel can track 2+ LibOS contexts' id/page-dir/registers/state at once,
- * proven by tests/kernel/test_context_k.c. Nothing here is wired into
- * kernel_main's normal boot tail either, for the same reason libos_launch.h
- * gives for SCRUM-47/-49/-50 landing unwired: there is still only one real
- * LibOS to run on a normal boot.
+ * SCRUM-107's acceptance was narrower than a real switch: the kernel can
+ * track 2+ LibOS contexts' id/page-dir/registers/state at once, proven by
+ * tests/kernel/test_context_k.c. context_regs_t was a fixed save area
+ * nothing wrote to.
+ *
+ * SCRUM-108 (this ticket) adds the switch itself: context_prime() seeds a
+ * never-run context's regs with an initial iretq frame, and
+ * context_switch_request() + src/context_switch.s do the save-outgoing /
+ * swap-CR3 / restore-incoming work, spliced into src/syscall_entry.s's tail.
+ * Deliberately NOT done here: the full `swapgs` + per-CPU
+ * (IA32_KERNEL_GS_BASE) rework docs/syscall_spec.md §3.4 and
+ * src/libos_launch.h's libos_enter() comment both describe. This ticket's
+ * switch instead stages outgoing/incoming state through the same single
+ * globals (syscall_entry.s's saved_user_rsp, read via live RCX/R11/RBX/RBP/
+ * R12-R15 immediately after `call exo_syscall_dispatch` returns) that were
+ * already there -- correct because IA32_FMASK clears IF for the whole
+ * syscall/switch window and this kernel targets exactly one CPU, so no
+ * second entry can interleave. The full swapgs rework is deferred to
+ * SCRUM-176, needed once SCRUM-127 (preemptive, IRQ-driven switching) wants
+ * to switch context from inside an interrupt handler with IF set. Nothing
+ * here is wired into kernel_main's normal boot tail either, for the same
+ * reason libos_launch.h gives for SCRUM-47/-49/-50 landing unwired: there
+ * is still only one real LibOS launched on a normal boot.
  */
 
 typedef enum {
@@ -46,9 +57,25 @@ typedef enum {
  * Saved integer register state for one context. Mirrors exactly what
  * src/libos_enter.s pushes/needs to resume a launched context: the six
  * callee-saved GPRs it pushes onto the kernel stack before iretq, plus the
- * three an iretq/syscall frame itself carries (RSP, RIP, RFLAGS). A future
- * SCRUM-108 switch fills this in on the way out of a context and restores
- * it on the way back in -- nothing here does either yet.
+ * three an iretq/syscall frame itself carries (RSP, RIP, RFLAGS).
+ * context_prime() fills this in with a synthesized "first launch" frame;
+ * src/context_switch.s fills it in for real on the way out of a context
+ * (from live RCX/R11/saved_user_rsp/RBX/RBP/R12-R15, all still valid
+ * immediately after exo_syscall_dispatch() returns -- see context.h's top
+ * comment) and restores it on the way back in via iretq.
+ *
+ * Deliberately NOT the full 14-register set src/syscall_entry.s preserves
+ * for an ordinary (non-switching) syscall: rdi/rsi/rdx/r10/r8/r9 are SysV
+ * caller-saved at the C call site (exo_yield()) that triggers a switch, so
+ * a context resumed after one needs only the callee-saved set plus
+ * rsp/rip/rflags to satisfy that call's own ABI contract. rax is the one
+ * caller-saved register that DOES need to survive the round trip: it is
+ * exo_yield()'s own return value (docs/syscall_spec.md's "RAX=return"
+ * convention), so whatever a resumed context finds in RAX after
+ * context_switch_tail's iretq becomes the yield call's apparent result. A
+ * primed (context_prime(), never-run) context relies on context_create()'s
+ * memset leaving this 0, matching exo_yield()'s "returns 0 when
+ * rescheduled" contract for a context's very first resume.
  */
 typedef struct {
     uint64_t rsp;
@@ -60,7 +87,36 @@ typedef struct {
     uint64_t r13;
     uint64_t r14;
     uint64_t r15;
+    uint64_t rax;
 } context_regs_t;
+
+/* src/context_switch.s hardcodes these field offsets (no C compiler
+ * available to it to compute them) -- these guards make a layout change to
+ * context_regs_t a compile error there instead of a silent register
+ * corruption at runtime. Keep in sync with CTX_REGS_OFF_* in
+ * src/context_switch.s if this struct ever changes. */
+_Static_assert(offsetof(context_regs_t, rsp) == 0,
+                "context_switch.s hardcodes context_regs_t.rsp's offset");
+_Static_assert(offsetof(context_regs_t, rip) == 8,
+                "context_switch.s hardcodes context_regs_t.rip's offset");
+_Static_assert(offsetof(context_regs_t, rflags) == 16,
+                "context_switch.s hardcodes context_regs_t.rflags's offset");
+_Static_assert(offsetof(context_regs_t, rbx) == 24,
+                "context_switch.s hardcodes context_regs_t.rbx's offset");
+_Static_assert(offsetof(context_regs_t, rbp) == 32,
+                "context_switch.s hardcodes context_regs_t.rbp's offset");
+_Static_assert(offsetof(context_regs_t, r12) == 40,
+                "context_switch.s hardcodes context_regs_t.r12's offset");
+_Static_assert(offsetof(context_regs_t, r13) == 48,
+                "context_switch.s hardcodes context_regs_t.r13's offset");
+_Static_assert(offsetof(context_regs_t, r14) == 56,
+                "context_switch.s hardcodes context_regs_t.r14's offset");
+_Static_assert(offsetof(context_regs_t, r15) == 64,
+                "context_switch.s hardcodes context_regs_t.r15's offset");
+_Static_assert(offsetof(context_regs_t, rax) == 72,
+                "context_switch.s hardcodes context_regs_t.rax's offset");
+_Static_assert(sizeof(context_regs_t) == 80,
+                "context_switch.s hardcodes sizeof(context_regs_t)");
 
 typedef struct {
     page_owner_t     id;
@@ -147,6 +203,81 @@ int context_set_state(page_owner_t id, context_state_t state);
  * kept here so a caller working purely in context_t terms need not reach
  * into vmm.h), or 0 if `id` names no live context. */
 uint64_t context_pml4(page_owner_t id);
+
+/*
+ * Seed a never-run context's saved register state with an initial iretq
+ * frame -- entry_vaddr/stack_top_vaddr/LIBOS_LAUNCH_RFLAGS, matching
+ * exactly what libos_enter() would push for a fresh launch (see
+ * src/libos_launch.h). Must be called on a context_create()-fresh
+ * (CONTEXT_STATE_READY, zeroed regs) context before it is ever named as a
+ * context_switch_request() target -- context_switch_tail
+ * (src/context_switch.s) always resumes via this same iretq-frame shape,
+ * whether primed here or captured by a previous switch, and cannot tell the
+ * two apart (nor does it need to).
+ *
+ * Returns CONTEXT_OK, or CONTEXT_ENOENT if `id` names no live context.
+ */
+int context_prime(page_owner_t id, uint64_t entry_vaddr, uint64_t stack_top_vaddr);
+
+/*
+ * The currently RUNNING context's id -- PAGE_OWNER_LIBOS until the first
+ * context_switch_request() ever succeeds, matching the single-LibOS default
+ * src/syscall.c's syscall_current_context() already returned before this
+ * ticket. Not necessarily a live row in this table: the boot-time default
+ * LibOS is bound directly in vmm.c's registry (see this header's top
+ * comment), not through context_create().
+ */
+page_owner_t context_current(void);
+
+/*
+ * Declare `id` the currently RUNNING context, without touching any
+ * context_t's state field or arming a switch. For a caller that is about to
+ * libos_enter() `id` directly rather than reach it via
+ * context_switch_request() -- the seam a first dispatch (this ticket's own
+ * test, and eventually kernel_main's boot tail once SCRUM-147 wires a real
+ * scheduler in) uses before the very first switch of a context's life, when
+ * there is no "previous" context for context_switch_request() to switch
+ * away from. Does not validate `id` against this table: the boot-time
+ * default (PAGE_OWNER_LIBOS, never context_create()'d) is a legitimate
+ * value too -- see context_current()'s own comment.
+ */
+void context_set_current(page_owner_t id);
+
+/*
+ * Request a switch away from the current context to `to_id`. Validates
+ * `to_id` names a live CONTEXT_STATE_READY context and that the current
+ * context (context_current()) names a live row in this table -- the
+ * boot-time default LibOS does not, since it was never context_create()'d,
+ * so switching away from it is refused rather than silently corrupting a
+ * table slot that does not exist.
+ *
+ * On success: flips the current context to CONTEXT_STATE_READY and `to_id`
+ * to CONTEXT_STATE_RUNNING, updates context_current(), and arms
+ * context_switch_pending so src/syscall_entry.s takes the
+ * context_switch_tail exit instead of its normal pop+sysretq epilogue the
+ * next time exo_syscall_dispatch() returns to it -- the actual register
+ * capture/CR3 swap/restore happens there (src/context_switch.s), not here;
+ * this call only decides and records that it will.
+ *
+ * Returns CONTEXT_OK, or CONTEXT_ENOENT if `to_id` is not a live READY
+ * context or the current context has no row in this table.
+ */
+int context_switch_request(page_owner_t to_id);
+
+/* ── src/context_switch.s / src/syscall_entry.s interface ─────────────────
+ *
+ * Raw externs, not part of this header's C API -- context_switch_request()
+ * is. Nonzero context_switch_pending, set by context_switch_request(), tells
+ * syscall_entry.s to jump to context_switch_tail (src/context_switch.s)
+ * instead of its normal epilogue; that routine reads
+ * context_switch_out_regs/_in_regs/_in_pml4 (also set by
+ * context_switch_request()) to do the actual save/CR3-swap/restore. See
+ * src/context_switch.s's own comment for the register-capture invariants
+ * this depends on. */
+extern uint64_t context_switch_pending;
+extern context_regs_t *context_switch_out_regs;
+extern context_regs_t *context_switch_in_regs;
+extern uint64_t context_switch_in_pml4;
 
 #define CONTEXT_OK      0
 #define CONTEXT_ENOMEM  (-1)

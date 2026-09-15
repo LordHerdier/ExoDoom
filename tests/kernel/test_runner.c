@@ -48,6 +48,7 @@ void suite_kernel_mem_fault_tests(CU_pSuite s);
 void suite_irq_entry_tests(CU_pSuite s);
 void suite_context_tests(CU_pSuite s);
 void suite_fb_console_tests(CU_pSuite s);
+void suite_context_switch_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -122,6 +123,11 @@ int irq_entry_suite_cleanup(void);
  * assertion mid-test could leave one bound with no test left to destroy it,
  * so cleanup sweeps every context this suite's tests could have created. */
 int context_suite_cleanup(void);
+
+/* Same idea for the context_switch suite (SCRUM-108), extended with
+ * page_reclaim_all(): unlike the context suite above, these contexts have
+ * real code/data/stack pages mapped into them, not just a bare PML4. */
+int context_switch_suite_cleanup(void);
 
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
@@ -268,6 +274,9 @@ int run_tests(void)
 
     s = CU_add_suite("fb_console", fb_console_suite_init, fb_console_suite_cleanup);
     suite_fb_console_tests(s);
+
+    s = CU_add_suite("context_switch", NULL, context_switch_suite_cleanup);
+    suite_context_switch_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

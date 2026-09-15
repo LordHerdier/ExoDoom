@@ -674,16 +674,46 @@ focus and the active framebuffer.
 > `tests/kernel/test_context_k.c` proves the acceptance criterion directly:
 > 2+ real contexts, each on its own address space, tracked simultaneously.
 >
-> What this ticket does **not** do: an actual context switch. The register
-> save area is a fixed slot nothing writes to yet — `libos_enter.s` and
-> `syscall_entry.s` still each keep their own single global saved-RSP, which
-> both that file's own comment and `docs/syscall_spec.md` §3.4 flag as needing
-> to become a per-CPU (`swapgs`-based) slot once two contexts are ever
-> genuinely live *concurrently* through the syscall/launch path — that
-> rework, and performing a real switch, is SCRUM-108's job. Nothing here is
-> wired into `kernel_main`'s normal boot tail either, for the same reason
-> SCRUM-47/-49/-50 landed unwired: there is still only one real LibOS to run
-> on a normal boot.
+> What this ticket does **not** do: an actual context switch — that is
+> SCRUM-108, below.
+>
+> ✅ **SCRUM-108:** the switch itself. `context_prime()` seeds a never-run
+> context's `context_regs_t` with an initial `iretq` frame
+> (`entry_vaddr`/`stack_top_vaddr`/`LIBOS_LAUNCH_RFLAGS`); `context_switch_
+> request(to_id)` validates `to_id` is a live `READY` context, flips the
+> outgoing/incoming states, and arms a pending-switch flag read by
+> `src/syscall_entry.s`. That file's epilogue, right after
+> `exo_syscall_dispatch()` returns, checks the flag and — only when a switch
+> was requested — jumps to `context_switch_tail` (`src/context_switch.s`)
+> instead of its ordinary pop+`sysretq` restore: it captures the outgoing
+> context's callee-saved GPRs (live, restored by the C call ABI) and
+> `RCX`/`RFLAGS`/`RSP` (from the kernel stack slots `syscall_entry.s` itself
+> pushed — **not** live registers, since `RCX`/`R11` are caller-saved in the
+> C ABI and get clobbered by the C call chain in between; see
+> `context_switch.s`'s own comment), swaps `CR3`, and `iretq`s into the
+> incoming context's saved frame — the same shape `libos_enter()` builds for
+> a fresh launch, whether the target was primed or is resuming from a
+> previous switch-out. `tests/kernel/test_context_switch_k.c` proves the
+> acceptance criterion directly: two real LibOS instances (`context_switch_
+> probe_a.s`/`_b.s`) ping-pong through a test-local `EXO_SYS_YIELD` borrow,
+> and callee-saved register values seeded before the first switch read back
+> correctly after two hops and a resume.
+>
+> **Deliberately not done here:** the full `swapgs` + per-CPU
+> (`IA32_KERNEL_GS_BASE`) rework `docs/syscall_spec.md` §3.4 and
+> `src/libos_launch.h`'s `libos_enter()` comment both describe for
+> `syscall_entry.s`'s `saved_user_rsp` and `libos_enter.s`'s
+> `libos_saved_rsp`. This ticket's switch instead stages state through those
+> same single globals at each switch boundary — correct because
+> `IA32_FMASK` clears `IF` for the whole syscall/switch window and this
+> kernel targets exactly one CPU, so no second entry can interleave. The
+> full rework is SCRUM-176, needed once SCRUM-127 (preemptive, IRQ-driven
+> switching) wants to switch context from inside an interrupt handler with
+> `IF` set — the scenario this ticket's minimal fix does not cover. Nothing
+> here is wired into `kernel_main`'s normal boot tail either, for the same
+> reason SCRUM-47/-49/-50 landed unwired: there is still only one real LibOS
+> to run on a normal boot, and `exo_yield` itself (binding a real syscall
+> number to this mechanism) is SCRUM-109's job.
 
 ---
 
