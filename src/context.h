@@ -264,6 +264,27 @@ void context_set_current(page_owner_t id);
  */
 int context_switch_request(page_owner_t to_id);
 
+/*
+ * Round-robin scheduling policy for exo_yield (SCRUM-109, src/syscall_yield.c)
+ * -- context_switch_request() above deliberately has no opinion on *which*
+ * context to switch to; this is that opinion, kept to the minimum the
+ * yield acceptance criterion needs rather than a real scheduler (priority,
+ * fairness across BLOCKED contexts, etc. is SCRUM-147's job).
+ *
+ * Scans this table starting just after `current`'s own slot (found the same
+ * way context_switch_request() finds it) and wrapping once around, returning
+ * the first CONTEXT_STATE_READY id found. `current`'s own slot is never
+ * matched: a context making this call is CONTEXT_STATE_RUNNING, not READY,
+ * so no self-exclusion check is needed. Starting just past `current` rather
+ * than always at slot 0 is what makes repeated yields cycle through every
+ * READY context instead of always landing on the same one.
+ *
+ * Returns the next READY id, or PAGE_OWNER_FREE (0) if `current` names no
+ * row in this table (e.g. the boot-time default LibOS) or no other context
+ * is READY -- either way, "nothing to switch to" for the caller.
+ */
+page_owner_t context_next_ready(page_owner_t current);
+
 /* ── src/context_switch.s / src/syscall_entry.s interface ─────────────────
  *
  * Raw externs, not part of this header's C API -- context_switch_request()

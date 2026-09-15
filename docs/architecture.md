@@ -483,7 +483,7 @@ The 21 syscalls grouped by category:
 | Debug       | `exo_serial_write`                                                  | ✅ done     |
 | File I/O    | `exo_file_open/close/read/write/seek/stat/remove/rename`            | Sprint 4–5 |
 | Sound       | `exo_sound_tone`, `exo_sound_stop`                                  | Sprint 11  |
-| Scheduling  | `exo_yield`                                                         | Sprint 12  |
+| Scheduling  | `exo_yield`                                                         | ✅ done     |
 | Lifecycle   | `exo_exit`                                                          | Sprint 3   |
 
 ### 6.1 Syscall entry (implemented, SCRUM-32)
@@ -714,6 +714,29 @@ focus and the active framebuffer.
 > reason SCRUM-47/-49/-50 landed unwired: there is still only one real LibOS
 > to run on a normal boot, and `exo_yield` itself (binding a real syscall
 > number to this mechanism) is SCRUM-109's job.
+>
+> ✅ **SCRUM-109:** `exo_yield` (#19) is bound for real. `src/syscall_yield.c`'s
+> `sys_yield()` handler calls a new `context_next_ready()` (`src/context.c/h`)
+> — a round-robin scan of the context table, starting just past the calling
+> context's own slot and wrapping once — to pick a target, then hands it to
+> `context_switch_request()` exactly as the SCRUM-108 test-local `SYS_SWITCH`
+> handler did. This is deliberately the *minimum* policy the acceptance
+> criterion needs, not a real scheduler: no priority, no fairness beyond
+> plain round-robin, and `BLOCKED` contexts are simply skipped rather than
+> woken. A full scheduler (preemption, priority, wake-on-event) is still
+> SCRUM-147's job. If nothing else is `READY` — including the case where the
+> caller itself has no row in the table, the boot-time default LibOS
+> (`context_switch_request()`'s existing `CONTEXT_ENOENT` refusal) — `exo_yield`
+> is a no-op: it returns `0` and the caller carries on, since the documented
+> ABI (`docs/syscall_spec.md` §3.2 #19) has no error return.
+> `tests/kernel/test_syscall_yield_k.c` proves the acceptance criterion
+> directly through the real syscall and policy (not a test-local stand-in):
+> two real LibOS instances (`tests/kernel/yield_probe_a.s`/`_b.s`, adapted
+> from the SCRUM-108 probes to call `exo_yield()` with no argument) round-trip
+> through two real `exo_yield()` calls with register state intact, plus a
+> standalone no-op case. Still not wired into `kernel_main`'s normal boot
+> tail, for the same reason as everything else in this section: there is
+> still only one real LibOS launched on a normal boot to yield from.
 
 ---
 
