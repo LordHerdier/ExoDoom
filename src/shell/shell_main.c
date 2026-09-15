@@ -210,7 +210,17 @@ static void shell_run_command(fb_console_t *con, const char *line) {
          * on exo_launch_wad_viewer()) -- a negative return here means the
          * launch failed before ever switching away, not that the viewer
          * ran and came back. */
-        if (exo_launch_wad_viewer() < 0) {
+        int64_t rc = exo_launch_wad_viewer();
+        if (rc == 0) {
+            /* The viewer draws over this whole physical framebuffer (there
+             * is no compositor yet -- docs/architecture.md's Sprint 12
+             * roadmap tracks that separately), so on a real round trip the
+             * shell's own screen is gone by the time it resumes here.
+             * Clearing and letting the caller's shell_print_prompt() redraw
+             * is what makes "back at the shell" a clean, stable screen
+             * instead of a new prompt drawn over stale automap pixels. */
+            fbcon_clear(con);
+        } else {
             fbcon_write(con, shell_wadview_fail_text);
         }
     } else {

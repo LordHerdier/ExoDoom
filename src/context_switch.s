@@ -1,13 +1,14 @@
 /*
- * context_switch.s — the asm half of the context switch (SCRUM-108).
+ * context_switch.s — the asm half of the context switch (SCRUM-108, extended
+ * by SCRUM-178 to also carry rdi/rsi/rdx/r10/r8/r9 -- see context.h's own
+ * comment on context_regs_t for why).
  *
  * context_switch_tail is reached by a `jmp` from src/syscall_entry.s,
  * spliced in right after `call exo_syscall_dispatch` returns, in place of
  * that file's normal pop+sysretq epilogue -- taken only when
  * src/context.c's context_switch_request() armed context_switch_pending
  * during the call just made. See context.h's top comment for the overall
- * design and why context_regs_t only needs the SysV callee-saved set plus
- * rsp/rip/rflags.
+ * design.
  *
  * At the point this is reached, the outgoing context's saved state is
  * available, but not all of it in live registers:
@@ -39,7 +40,23 @@
  *                        layout's offsets -- see the comment there for the
  *                        exact derivation, and keep both in sync with
  *                        syscall_entry.s's push order if it ever changes.
+ *   RDI/RSI/RDX/R10/R8/R9 -- also NOT live-safe, for the same reason as
+ *                        RCX/R11: SysV caller-saved, so ordinary C between
+ *                        here and the syscall entry is free to clobber them.
+ *                        Also read back off the same pushed stack slots
+ *                        (SAVED_RDI_OFF etc. below) rather than trusted live.
  */
+
+#include "libos_launch.h"   /* LIBOS_LAUNCH_USER_SS/_CS -- the same constants
+                             * src/libos_enter.s's libos_iretq_enter uses to
+                             * build its iretq frame; this file builds its
+                             * own copy of that same frame shape below rather
+                             * than jumping to libos_iretq_enter, so it needs
+                             * them directly too -- see the incoming-side
+                             * comment for why. */
+
+.set USER_SS, LIBOS_LAUNCH_USER_SS
+.set USER_CS, LIBOS_LAUNCH_USER_CS
 
 .code64
 
@@ -56,6 +73,12 @@
 .set CTX_REGS_OFF_R14,    56
 .set CTX_REGS_OFF_R15,    64
 .set CTX_REGS_OFF_RAX,    72
+.set CTX_REGS_OFF_RDI,    80
+.set CTX_REGS_OFF_RSI,    88
+.set CTX_REGS_OFF_RDX,    96
+.set CTX_REGS_OFF_R10,    104
+.set CTX_REGS_OFF_R8,     112
+.set CTX_REGS_OFF_R9,     120
 
 /* Offsets from %rsp, valid only right where context_switch_tail is entered
  * (via `jmp`, right after `call exo_syscall_dispatch` returns, before that
@@ -64,9 +87,16 @@
  * r9) followed by `subq $8, %rsp; push %r9` for the stacked 6th argument --
  * 128 bytes total between the first push (rcx, deepest/highest address) and
  * the current %rsp. rcx is the 1st push (128 - 8 = 120 bytes above %rsp);
- * r11 is the 2nd (128 - 16 = 112). */
+ * r11 is the 2nd (128 - 16 = 112); rdi/rsi/rdx/r10/r8/r9 are the 9th-14th
+ * (128 - 72 = 56, then 48, 40, 32, 24, 16). */
 .set SAVED_RCX_OFF, 120
 .set SAVED_R11_OFF, 112
+.set SAVED_RDI_OFF, 56
+.set SAVED_RSI_OFF, 48
+.set SAVED_RDX_OFF, 40
+.set SAVED_R10_OFF, 32
+.set SAVED_R8_OFF,  24
+.set SAVED_R9_OFF,  16
 
 .section .text
 
@@ -75,7 +105,6 @@
 .extern context_switch_in_regs
 .extern context_switch_in_pml4
 .extern saved_user_rsp
-.extern libos_iretq_enter
 
 context_switch_tail:
     /* Capture the outgoing context. RAX at this point holds
@@ -102,6 +131,29 @@ context_switch_tail:
     movq %r14, CTX_REGS_OFF_R14(%rax)
     movq %r15, CTX_REGS_OFF_R15(%rax)
 
+    /* SCRUM-178: the six argument registers docs/syscall_spec.md's ABI
+     * promises survive an ordinary syscall untouched -- read straight off
+     * the same pushed stack slots syscall_entry.s's own non-switching
+     * epilogue restores them from (SAVED_*_OFF above), via %rcx as scratch
+     * (dead here: already consumed into CTX_REGS_OFF_RIP above, and not
+     * needed again). Without this, compiled C that keeps a value live in
+     * one of these across a `syscall` -- exactly what exo_syscall.h's
+     * clobber list entitles it to do -- sees it corrupted the moment that
+     * particular call happens to trigger a real switch instead of an
+     * ordinary return. */
+    movq SAVED_RDI_OFF(%rsp), %rcx
+    movq %rcx, CTX_REGS_OFF_RDI(%rax)
+    movq SAVED_RSI_OFF(%rsp), %rcx
+    movq %rcx, CTX_REGS_OFF_RSI(%rax)
+    movq SAVED_RDX_OFF(%rsp), %rcx
+    movq %rcx, CTX_REGS_OFF_RDX(%rax)
+    movq SAVED_R10_OFF(%rsp), %rcx
+    movq %rcx, CTX_REGS_OFF_R10(%rax)
+    movq SAVED_R8_OFF(%rsp), %rcx
+    movq %rcx, CTX_REGS_OFF_R8(%rax)
+    movq SAVED_R9_OFF(%rsp), %rcx
+    movq %rcx, CTX_REGS_OFF_R9(%rax)
+
     /* Swap address spaces. Safe to do here, before loading the incoming
      * context's own registers below: kernel memory (this code, these
      * globals, saved_user_rsp) lives under the shared PML4[0] link every
@@ -111,13 +163,7 @@ context_switch_tail:
     movq context_switch_in_pml4(%rip), %rax
     movq %rax, %cr3
 
-    /* Restore the incoming context's callee-saved GPRs, then hand off to
-     * libos_iretq_enter (src/libos_enter.s) to build the iretq frame from
-     * its saved RIP/RSP/RFLAGS -- the same routine libos_enter()/
-     * libos_enter_irq() use for a fresh launch, whether this context was
-     * primed (context_prime()) or is resuming from a previous switch-out
-     * captured above. One definition of the frame shape, not a second copy
-     * here. */
+    /* Restore the incoming context's callee-saved GPRs. */
     movq context_switch_in_regs(%rip), %rax
     movq CTX_REGS_OFF_RBX(%rax), %rbx
     movq CTX_REGS_OFF_RBP(%rax), %rbp
@@ -126,13 +172,37 @@ context_switch_tail:
     movq CTX_REGS_OFF_R14(%rax), %r14
     movq CTX_REGS_OFF_R15(%rax), %r15
 
-    movq CTX_REGS_OFF_RIP(%rax), %rdi
-    movq CTX_REGS_OFF_RSP(%rax), %rsi
-    movq CTX_REGS_OFF_RFLAGS(%rax), %rdx
+    /* Build the iretq frame directly (the same SS/RSP/RFLAGS/CS/RIP shape
+     * src/libos_enter.s's libos_iretq_enter builds) by pushing straight from
+     * the incoming context_regs_t via memory operands, rather than routing
+     * through libos_iretq_enter as before SCRUM-178: that routine takes
+     * entry/stack/rflags in RDI/RSI/RDX, which would collide with restoring
+     * *this* context's own real RDI/RSI/RDX below -- one shared definition
+     * of the frame shape was worth it when RAX was the only extra register
+     * in play, but pushing from memory here keeps every argument register
+     * free for its actual restore instead of needing to stage it around a
+     * borrowed calling convention. */
+    pushq $USER_SS
+    pushq CTX_REGS_OFF_RSP(%rax)
+    pushq CTX_REGS_OFF_RFLAGS(%rax)
+    pushq $USER_CS
+    pushq CTX_REGS_OFF_RIP(%rax)
+
+    /* SCRUM-178: restore the incoming context's own argument registers --
+     * see the outgoing-side capture above and context.h's context_regs_t
+     * comment for why this matters. Safe to do now: the values just pushed
+     * above already came off %rax via memory operands, so RDI/RSI/RDX/R10/
+     * R8/R9 have been free scratch (unused) since the callee-saved restores
+     * finished. */
+    movq CTX_REGS_OFF_RDI(%rax), %rdi
+    movq CTX_REGS_OFF_RSI(%rax), %rsi
+    movq CTX_REGS_OFF_RDX(%rax), %rdx
+    movq CTX_REGS_OFF_R10(%rax), %r10
+    movq CTX_REGS_OFF_R8(%rax),  %r8
+    movq CTX_REGS_OFF_R9(%rax),  %r9
 
     /* RAX itself is loaded last, from the incoming context's own saved
      * value -- see the outgoing-side comment above. Must happen after every
-     * CTX_REGS_OFF_*(%rax) read above, since this clobbers the pointer;
-     * libos_iretq_enter never touches RAX, so it rides through to iretq. */
+     * CTX_REGS_OFF_*(%rax) read above, since this clobbers the pointer. */
     movq CTX_REGS_OFF_RAX(%rax), %rax
-    jmp libos_iretq_enter
+    iretq

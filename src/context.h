@@ -64,17 +64,32 @@ typedef enum {
  * immediately after exo_syscall_dispatch() returns -- see context.h's top
  * comment) and restores it on the way back in via iretq.
  *
- * Deliberately NOT the full 14-register set src/syscall_entry.s preserves
- * for an ordinary (non-switching) syscall: rdi/rsi/rdx/r10/r8/r9 are SysV
- * caller-saved at the C call site (exo_yield()) that triggers a switch, so
- * a context resumed after one needs only the callee-saved set plus
- * rsp/rip/rflags to satisfy that call's own ABI contract. rax is the one
+ * Also carries rdi/rsi/rdx/r10/r8/r9 (SCRUM-178) -- captured from the exact
+ * same syscall_entry.s stack slots src/syscall_entry.s's own ordinary
+ * (non-switching) epilogue restores them from. An earlier version of this
+ * struct left these out on the theory that they are SysV caller-saved at
+ * the C call site (exo_yield()) that triggers a switch, so a resumed
+ * context only needs the callee-saved set to satisfy that call's own ABI
+ * contract -- true for the *compiler's* obligations at that one call site,
+ * but docs/syscall_spec.md's actual promise is stronger than the SysV ABI:
+ * "the kernel must preserve every other register, argument registers
+ * included" (src/exo_syscall.h's own top comment), which is what lets
+ * compiled C keep a value live in one of these across a `syscall` and reuse
+ * it on the next loop iteration (src/exo_syscall.h's exo_syscall0() clobber
+ * list only names rcx/r11/memory, matching that promise). SCRUM-178's WAD
+ * viewer is the first real-world case: `for (;;) { exo_yield(); }`, with
+ * the syscall number loaded into a register once outside the loop by GCC's
+ * ordinary loop-invariant hoisting, corrupted on the very first resume
+ * after an actual switch (as opposed to exo_yield()'s fast no-op path,
+ * which never leaves the ordinary sysretq epilogue and so never lost
+ * anything) -- see tests/kernel/test_context_switch_k.c's own new coverage
+ * for the regression this guards against. rax is, and was already, the one
  * caller-saved register that DOES need to survive the round trip: it is
  * exo_yield()'s own return value (docs/syscall_spec.md's "RAX=return"
  * convention), so whatever a resumed context finds in RAX after
  * context_switch_tail's iretq becomes the yield call's apparent result. A
  * primed (context_prime(), never-run) context relies on context_create()'s
- * memset leaving this 0, matching exo_yield()'s "returns 0 when
+ * memset leaving every field 0, matching exo_yield()'s "returns 0 when
  * rescheduled" contract for a context's very first resume.
  */
 typedef struct {
@@ -88,6 +103,12 @@ typedef struct {
     uint64_t r14;
     uint64_t r15;
     uint64_t rax;
+    uint64_t rdi;
+    uint64_t rsi;
+    uint64_t rdx;
+    uint64_t r10;
+    uint64_t r8;
+    uint64_t r9;
 } context_regs_t;
 
 /* src/context_switch.s hardcodes these field offsets (no C compiler
@@ -115,7 +136,19 @@ _Static_assert(offsetof(context_regs_t, r15) == 64,
                 "context_switch.s hardcodes context_regs_t.r15's offset");
 _Static_assert(offsetof(context_regs_t, rax) == 72,
                 "context_switch.s hardcodes context_regs_t.rax's offset");
-_Static_assert(sizeof(context_regs_t) == 80,
+_Static_assert(offsetof(context_regs_t, rdi) == 80,
+                "context_switch.s hardcodes context_regs_t.rdi's offset");
+_Static_assert(offsetof(context_regs_t, rsi) == 88,
+                "context_switch.s hardcodes context_regs_t.rsi's offset");
+_Static_assert(offsetof(context_regs_t, rdx) == 96,
+                "context_switch.s hardcodes context_regs_t.rdx's offset");
+_Static_assert(offsetof(context_regs_t, r10) == 104,
+                "context_switch.s hardcodes context_regs_t.r10's offset");
+_Static_assert(offsetof(context_regs_t, r8) == 112,
+                "context_switch.s hardcodes context_regs_t.r8's offset");
+_Static_assert(offsetof(context_regs_t, r9) == 120,
+                "context_switch.s hardcodes context_regs_t.r9's offset");
+_Static_assert(sizeof(context_regs_t) == 128,
                 "context_switch.s hardcodes sizeof(context_regs_t)");
 
 typedef struct {
