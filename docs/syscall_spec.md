@@ -349,7 +349,7 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 1  | `exo_page_free(paddr)`              | Memory      | ✅     | Free a physical page. Bound to the dispatcher (SCRUM-34); currently `0` or `-EINVAL`. **Ownership-checked (§3.3)** — will return `-EPERM` unless the caller owns `paddr` once the page ownership table (SCRUM-152) lands.                  |
 | 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ✅     | Map physical page at virtual address in caller's address space. `flags`: `EXO_PAGE_READ`/`WRITE`/`USER`/`EXEC`. `EXEC` is accepted and ignored until `EFER.NXE` is enabled; `READ` is not representable on x86 (present implies readable) and is accepted and ignored. **Ownership-checked (§3.3):** `paddr` must be owned by the caller (or be the framebuffer the caller has acquired), and `vaddr` must lie in the LibOS window `[EXO_USER_VA_BASE, EXO_USER_VA_END)` — §3.7. Returns `0`, `-EINVAL` (misaligned address, unknown flag bit), `-EPERM` (window or ownership) or `-ENOMEM` (no page for an intermediate page table). Implemented in SCRUM-35 (`src/syscall_mem.c`, `src/vmm.c`), enforcement SCRUM-153. |
 | 3  | `exo_page_unmap(vaddr)`             | Memory      | ✅     | Unmap a virtual page; the physical page stays allocated (`exo_page_free` returns it). Only unmaps a mapping of a page the caller owns, holds the FB binding for, or that belongs to nobody — §3.7. Returns `0`, `-EINVAL` (misaligned, or nothing mapped there), `-EPERM` or `-ENOMEM`. Implemented in SCRUM-35, enforcement SCRUM-153. |
-| 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ✅     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct and **record the caller as the framebuffer owner (secure binding, §3.3, §3.5)**. LibOS then calls `exo_page_map` to map it — that map requires FB ownership. Released on `exo_exit`. Used by `DG_Init`. Returns `0` (including a re-acquire by the current owner), `-EBUSY` if another LibOS holds the FB, `-EFAULT` if `[info_out, info_out + sizeof(exo_fb_info_t))` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` (SCRUM-54, same `exo_range_in_user_window` check #8 uses), or `-ENODEV` on a machine the bootloader gave no framebuffer. Implemented in SCRUM-154 (`src/syscall_fb.c`, `src/fb_binding.c`); the LibOS-side mapping of the returned range still waits on SCRUM-16/-35. |
+| 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ✅     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct, backed by a **private, RAM-backed virtual framebuffer sized to the real framebuffer's geometry — not the real hardware framebuffer itself** (multiplexing, SCRUM-112, §3.3, §3.5). Every context gets its own on request; there is no exclusivity and no `-EBUSY` anymore. LibOS then calls `exo_page_map` to map it — an ordinary owned-page mapping, not a binding check. Freed (the pages) when the terminating context's pages are reclaimed, and (the directory entry) explicitly on `exo_exit` / forced revocation. Used by `DG_Init`. Returns `0` (including a re-acquire by the current owner, which re-fills the struct with the *same* buffer), `-EFAULT` if `[info_out, info_out + sizeof(exo_fb_info_t))` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` (SCRUM-54, same `exo_range_in_user_window` check #8 uses), `-ENOMEM` if no contiguous run of pages that size is free, or `-ENODEV` on a machine the bootloader gave no framebuffer. Implemented in SCRUM-154 (`src/syscall_fb.c`, `src/fb_binding.c`) and replaced by SCRUM-112 (`src/fb_shadow.c`); what actually reaches the screen is decided independently by `src/fb_compositor.c`, which composites whichever context is `context_current()` onto the real hardware framebuffer on a throttled PIT tick (`src/pit.c`). |
 | 5  | `exo_get_ticks()`                   | Timer       | ✅     | Return `uint32_t` milliseconds since boot. Zero arguments. Never fails. Used by `DG_GetTicksMs` and `DG_SleepMs`. Kernel-side PIT + `kernel_get_ticks_ms()` done (SCRUM-9, -10); bound to the dispatcher in SCRUM-172 (`src/syscall_pit.c`) — `pic_remap()`/IRQ0/`pit_init()` moved ahead of the `TESTING` branch in `kernel_main` so ticks advance during a test boot too. |
 | 6  | `exo_kbd_poll(event_out)`           | Input       | ✅     | Dequeue next keyboard event into `event_out` struct `{uint8_t pressed; uint8_t key; uint8_t modifiers; uint8_t reserved}`. `key` is a decoded `ps2_key_t` index (`KEY_A`, `KEY_ESC`, …), not a raw PS/2 scancode — the kernel's scancode decoder runs before the event is queued. `modifiers` is the `EXO_MOD_*` shift/ctrl/alt mask sampled when the event was queued, so a chord decodes correctly even if the modifier is released before the LibOS polls — Doom binds shift (run), ctrl (fire) and alt (strafe). Returns `1` if event available, `0` if empty, `-EXO_EFAULT` if `event_out` isn't entirely inside the LibOS window. No ownership to check — the keyboard isn't acquired/released like the framebuffer. Bound in `src/syscall_kbd.c` (SCRUM-39) on top of the IRQ1 handler + scancode table (SCRUM-13/-14) and ring buffer (SCRUM-18), all now done. |
 | 7  | `exo_mouse_poll(state_out)`         | Input       | ⬜     | Write accumulated mouse state `{int16_t dx; int16_t dy; uint8_t buttons; uint8_t reserved}` to `state_out`, then reset accumulators. `reserved` is zeroed by the kernel and keeps the struct a fixed 6 bytes. Returns `0`. Prerequisite: PS/2 mouse init (SCRUM-19, Sprint 2).                                                                                            |
@@ -389,10 +389,10 @@ pass-through rather than a translation table.
 | `EXO_EPERM` | 1 | Operation not permitted for this LibOS | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3) |
 | `EXO_ENOENT` | 2 | No such file | not yet — reserved for `exo_file_*` (#9-16) |
 | `EXO_EBADF` | 9 | Bad file descriptor | not yet — reserved for `exo_file_*` |
-| `EXO_ENOMEM` | 12 | Out of physical pages / heap | `exo_page_alloc` (#0), `exo_page_map` (#2, no page for an intermediate table), `exo_page_unmap` (#3, split requires a page) |
+| `EXO_ENOMEM` | 12 | Out of physical pages / heap | `exo_page_alloc` (#0), `exo_page_map` (#2, no page for an intermediate table), `exo_page_unmap` (#3, split requires a page), `exo_fb_acquire` (#4, no contiguous run free for the virtual framebuffer, SCRUM-112) |
 | `EXO_EACCES` | 13 | Permission denied | not yet bound to a handler |
 | `EXO_EFAULT` | 14 | Pointer argument outside the caller's address space | `exo_fb_acquire` (#4), `exo_kbd_poll` (#6), `exo_serial_write` (#8) |
-| `EXO_EBUSY` | 16 | Resource held by another LibOS | `exo_fb_acquire` (#4) |
+| `EXO_EBUSY` | 16 | Resource held by another LibOS | not currently returned by any bound handler — `exo_fb_acquire` (#4) returned this pre-SCRUM-112, when the framebuffer was a single exclusive binding rather than a private buffer per caller |
 | `EXO_EEXIST` | 17 | File already exists | not yet — reserved for `exo_file_open`/`exo_file_rename` |
 | `EXO_ENODEV` | 19 | The hardware resource does not exist on this machine | `exo_fb_acquire` (#4, no framebuffer) |
 | `EXO_ENOTDIR` | 20 | Not a directory | not yet — reserved for `exo_file_*` |
@@ -444,12 +444,18 @@ resource:
   start as "operation not permitted for this LibOS"). This closes the hole
   where a LibOS could pass an arbitrary `paddr` to `exo_page_map` and reach
   kernel or peer memory (SCRUM-153).
-- `exo_fb_acquire` binds the framebuffer to one LibOS at a time (`-EBUSY`
-  otherwise); mapping FB physical pages requires holding that binding
-  (SCRUM-154, §3.5). Framebuffer pages need a table of their own rather than
-  the PMM's owner tags, because MMIO sits outside the usable-RAM region the
-  page allocator manages — `page_owner()` reports `FREE` for every one of
-  them, so the generic check above cannot speak for them.
+- `exo_fb_acquire` used to bind the *real* framebuffer to one LibOS at a time
+  (`-EBUSY` otherwise, SCRUM-154). SCRUM-112 (framebuffer multiplexing)
+  replaced that: every caller now gets its own private, RAM-backed virtual
+  framebuffer (`src/fb_shadow.c`), allocated from ordinary PMM pages and
+  mapped like any other owned page — no exclusivity, no binding to check.
+  `src/fb_binding.c`'s binding table still exists and still guards the *real*
+  framebuffer's physical range (`fb_binding_check_map()`, below) — nothing
+  ever calls `fb_binding_acquire()` from the syscall path anymore, so that
+  range is now permanently unmappable by any LibOS, full stop. What actually
+  reaches the screen is `src/fb_compositor.c`: it copies whichever context is
+  `context_current()`'s virtual framebuffer onto the real one on a throttled
+  PIT tick (`src/pit.c`), independent of who has acquired what.
 - `exo_exit` **reclaims** all bindings held by the terminating context — frees
   its pages, releases the framebuffer, closes its files (SCRUM-155).
 
@@ -724,6 +730,32 @@ the boot.
 entry path is single-threaded, so the read-modify-write in
 `fb_binding_acquire()` cannot be interleaved. Preemptive multi-LibOS
 scheduling (SCRUM-147) invalidates that assumption and will need a lock here.
+
+> ✅ **SCRUM-112 (framebuffer multiplexing):** everything above this note
+> still describes `fb_binding.c` accurately as a *module* — it is unchanged
+> — but `exo_fb_acquire` (`src/syscall_fb.c`) no longer calls into it.
+> "Establish" is now `src/fb_shadow.c`: every context gets its own private,
+> RAM-backed virtual framebuffer, sized to the real framebuffer's published
+> geometry and allocated via a new contiguous-run primitive
+> (`alloc_pages_contig_owned()`, `src/page_alloc.c`) rather than a binding —
+> no exclusivity, no `-EXO_EBUSY`, every caller can hold one simultaneously.
+> "Enforce" (`fb_binding_check_map()`) is unchanged and still gates the
+> *real* framebuffer's physical range, which is now permanently unheld
+> (`fb_binding_owner()` stays `PAGE_OWNER_FREE`) since nothing acquires it
+> anymore — the real framebuffer is unmappable by any LibOS, full stop.
+> "Reclaim" for the virtual framebuffer is `fb_shadow_release()`, called from
+> the same two places `fb_binding_release()`/`fb_binding_reclaim()` already
+> were (`exo_exit`, `revoke_all()`) — it only drops `fb_shadow.c`'s own
+> directory entry; the underlying pages are ordinary pages owned by the
+> context, already covered by `page_reclaim_all()`'s existing generic sweep.
+> What decides what is actually *visible*: `src/fb_compositor.c` copies
+> whichever context is `context_current()`'s virtual framebuffer onto the
+> real one on a throttled PIT tick (`src/pit.c`'s `irq0_handler()`,
+> ~60&nbsp;Hz) — "foreground" is simply "the context currently running,"
+> with no separate state, matching the cooperative model where exactly one
+> context executes at a time. A future preemptive scheduler or a true
+> Ctrl+Tab hotkey that changes focus independent of execution would need to
+> give "foreground" its own state; neither exists yet.
 
 ### 3.6 Revocation & repossession (SCRUM-156)
 

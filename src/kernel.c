@@ -23,6 +23,7 @@
 #include "syscall_yield.h"
 #include "syscall_launch.h"
 #include "fb_binding.h"
+#include "fb_shadow.h"
 #include "revoke.h"
 #include "vmm.h"
 #include "exo_syscall.h"
@@ -245,7 +246,9 @@ static int run_fb_binding_demo(fb_console_t *con) {
     exo_fb_info_t *info = (exo_fb_info_t *)(uintptr_t)scratch;
     *info = (exo_fb_info_t){ 0, 0, 0, 0, 0, { 0, 0, 0 } };
 
-    // 1. Acquire binds the framebuffer to the calling context.
+    // 1. Acquire hands the calling context its own private virtual
+    //    framebuffer (SCRUM-112) -- it no longer touches fb_binding at all,
+    //    so fb_binding_owner() stays unheld throughout this demo.
     int64_t r_acq = exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE,
                                          (uint64_t)(uintptr_t)info,
                                          0, 0, 0, 0, 0);
@@ -255,34 +258,43 @@ static int run_fb_binding_demo(fb_console_t *con) {
     fbcon_write_hex64(con, info->phys_addr);
     fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
     fbcon_write(con, "\n");
-    all &= ownership_check(con, "  framebuffer bound to LibOS              ",
+    all &= ownership_check(con, "  private FB buffer allocated             ",
                            r_acq == 0 &&
-                           fb_binding_owner() == syscall_current_context());
-
-    // 2. The owner may map framebuffer pages; nobody else may (SCRUM-153 asks
-    //    fb_binding_check_map before consulting per-page ownership).
-    all &= ownership_check(con, "  owner may map FB pages                  ",
-                           fb_binding_check_map(info->phys_addr,
-                                                syscall_current_context())
-                           == FB_MAP_ALLOW);
-    all &= ownership_check(con, "  foreign FB map rejected (EPERM)         ",
-                           fb_binding_check_map(info->phys_addr,
-                                                DEMO_OTHER_LIBOS)
-                           == FB_MAP_DENY);
-
-    // 3. With another context holding it, acquire answers -EXO_EBUSY.
-    fb_binding_release(syscall_current_context());
-    fb_binding_acquire(DEMO_OTHER_LIBOS);
-    int64_t r_busy = exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE,
-                                          (uint64_t)(uintptr_t)info,
-                                          0, 0, 0, 0, 0);
-    all &= ownership_check(con, "  second acquirer rejected (EBUSY)        ",
-                           r_busy == -EXO_EBUSY);
-
-    // 4. Reclamation (what SCRUM-155's exo_exit will do) frees it again.
-    fb_binding_release(DEMO_OTHER_LIBOS);
-    all &= ownership_check(con, "  release frees the binding               ",
                            fb_binding_owner() == PAGE_OWNER_FREE);
+
+    // 2. The real framebuffer's own physical range is still guarded by
+    //    fb_binding_check_map() -- nobody holds that binding anymore (see
+    //    1.), so it denies everyone now, this context included. What
+    //    SCRUM-153 originally proved here (an owner may map its own FB
+    //    pages) is just ordinary page ownership for the private buffer, and
+    //    run_page_map_demo() below already covers that generically.
+    all &= ownership_check(con, "  real FB range still unmappable          ",
+                           fb_binding_geometry() == NULL ||
+                           fb_binding_check_map(
+                               fb_binding_geometry()->phys_addr,
+                               syscall_current_context())
+                           != FB_MAP_ALLOW);
+
+    // 3. A second, distinct context also succeeds, with its own distinct
+    //    buffer -- SCRUM-112 replaced the single exclusive binding with a
+    //    private buffer per caller, so there is no exclusivity left to
+    //    demonstrate here the way there used to be.
+    exo_fb_info_t other_info;
+    int r_other = fb_shadow_acquire(DEMO_OTHER_LIBOS, &other_info);
+    all &= ownership_check(con, "  second acquirer also succeeds           ",
+                           r_other == FB_SHADOW_OK &&
+                           other_info.phys_addr != info->phys_addr);
+
+    // 4. Reclamation (what SCRUM-155's exo_exit does) frees both buffers
+    //    again, so the compositor (src/fb_compositor.c) has nothing stale
+    //    left to composite once this demo is done -- unlike
+    //    fb_binding_release(), this now has a real, visible effect, so it
+    //    is not optional cleanup the way the scratch-page unmap below
+    //    always was.
+    fb_shadow_release(syscall_current_context());
+    fb_shadow_release(DEMO_OTHER_LIBOS);
+    (void)reclaim_pages_owned(syscall_current_context());
+    (void)reclaim_pages_owned(DEMO_OTHER_LIBOS);
 
     (void)exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, scratch, 0, 0, 0, 0, 0);
     (void)exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)scratch_p,

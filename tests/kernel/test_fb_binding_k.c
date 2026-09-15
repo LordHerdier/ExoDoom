@@ -1,16 +1,21 @@
 /*
- * test_fb_binding_k.c — framebuffer secure binding (SCRUM-154).
+ * test_fb_binding_k.c — framebuffer secure binding (SCRUM-154), fb_binding.c
+ * itself.
  *
- * The framebuffer is the second resource to get an owner tag, after physical
- * pages (SCRUM-152 / test_ownership_k.c).  These tests cover the three halves
- * of the binding named in docs/syscall_spec.md §3.3:
- *
- *   establish — exo_fb_acquire records the caller as owner and answers
- *               -EXO_EBUSY to anyone else;
- *   enforce   — fb_binding_check_map, the permission gate SCRUM-153's
- *               exo_page_map consults before mapping a physical page;
- *   reclaim   — fb_binding_release, the hook SCRUM-155's exo_exit calls, after
- *               which a different context can acquire.
+ * SCRUM-112 stopped exo_fb_acquire from ever calling fb_binding_acquire():
+ * every caller now gets its own private virtual framebuffer
+ * (src/fb_shadow.c, test_fb_shadow_k.c) instead of exclusive access to the
+ * real one, so the real binding is permanently unheld in normal operation.
+ * fb_binding.c's establish/enforce/reclaim API is otherwise unchanged and
+ * still exactly what fb_binding_check_map() (SCRUM-153's exo_page_map gate)
+ * relies on to keep the real framebuffer unmappable by any LibOS — these
+ * tests exercise that API directly (fb_binding_acquire/_release/_check_map)
+ * rather than through the syscall, which is the only thing that changed:
+ * they are defense-in-depth coverage of the module itself now, not of what
+ * exo_fb_acquire does with it. The handful of tests that *did* exercise
+ * establish/reclaim through the real exo_fb_acquire dispatch were rewritten
+ * for the new contract (no more -EXO_EBUSY, no more binding taken) rather
+ * than removed outright.
  *
  * Most tests install a synthetic geometry rather than using the machine's real
  * framebuffer, so the address arithmetic is exact and the assertions do not
@@ -30,6 +35,7 @@
 
 #include "kunit.h"
 #include "fb_binding.h"
+#include "fb_shadow.h"
 #include "page_alloc.h"
 #include "syscall.h"
 #include "exo_syscall.h"
@@ -85,6 +91,16 @@ int fb_binding_suite_cleanup(void)
     /* Put the real framebuffer back and drop any binding the tests took, so a
      * normal boot continues with the screen unowned. */
     fb_binding_init(boot_had_fb ? &boot_geometry : (const fb_geometry_t *)0);
+
+    /* SCRUM-112: several tests below now call do_fb_acquire(), which
+     * allocates a real shadow framebuffer (hundreds of PMM pages) owned by
+     * whichever id acquired it. Drop the directory entries and return the
+     * pages, so a later suite's own allocations are not competing with
+     * leftover multi-hundred-page runs this suite made. */
+    fb_shadow_release(syscall_current_context());
+    fb_shadow_release(OTHER_LIBOS);
+    (void)reclaim_pages_owned(syscall_current_context());
+    (void)reclaim_pages_owned(OTHER_LIBOS);
 
     exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, SCRATCH_INFO_VA, 0, 0, 0, 0, 0);
     exo_syscall_dispatch(EXO_SYS_PAGE_FREE, scratch_paddr, 0, 0, 0, 0, 0);
@@ -143,10 +159,12 @@ static void test_boot_published_the_framebuffer(void)
     CU_ASSERT_NOT_EQUAL(boot_geometry.bpp, 0);
 }
 
-/* ── Establish ───────────────────────────────────────────────────────────── */
+/* ── Establish (SCRUM-112: now fb_shadow.c's job, not a binding) ──────────── */
 
-/* Acquire hands back the published geometry and records the caller as owner. */
-static void test_acquire_binds_and_describes(void)
+/* Acquire hands back the published geometry, backed by the caller's own
+ * private buffer rather than the real framebuffer — so the real binding
+ * stays unheld, and the returned phys_addr is not the real FB's base. */
+static void test_acquire_describes_a_private_buffer(void)
 {
     install_test_fb();
     CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
@@ -155,9 +173,11 @@ static void test_acquire_binds_and_describes(void)
     *info = (exo_fb_info_t){ 0, 0, 0, 0, 0, { 0xAA, 0xBB, 0xCC } };
 
     CU_ASSERT_EQUAL(do_fb_acquire(info), 0);
-    CU_ASSERT_EQUAL(fb_binding_owner(), syscall_current_context());
 
-    CU_ASSERT_EQUAL(info->phys_addr, TEST_FB_BASE);
+    /* Nobody ever acquires the real binding anymore (src/syscall_fb.c). */
+    CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
+
+    CU_ASSERT_NOT_EQUAL(info->phys_addr, TEST_FB_BASE);
     CU_ASSERT_EQUAL(info->width,     TEST_FB_WIDTH);
     CU_ASSERT_EQUAL(info->height,    TEST_FB_HEIGHT);
     CU_ASSERT_EQUAL(info->pitch,     TEST_FB_PITCH);
@@ -168,22 +188,39 @@ static void test_acquire_binds_and_describes(void)
     CU_ASSERT_EQUAL(info->reserved[0], 0);
     CU_ASSERT_EQUAL(info->reserved[1], 0);
     CU_ASSERT_EQUAL(info->reserved[2], 0);
+
+    fb_shadow_release(syscall_current_context());
+    (void)reclaim_pages_owned(syscall_current_context());
 }
 
-/* A framebuffer already held by another LibOS is -EXO_EBUSY, and the failed
- * acquire leaves the incumbent in place. */
-static void test_second_acquirer_is_ebusy(void)
+/* A second, distinct caller no longer gets -EXO_EBUSY: SCRUM-112 replaced
+ * the single exclusive binding with a private buffer per caller. Simulating
+ * "someone else already has one" via a direct fb_shadow_acquire() (the real
+ * dispatch path always runs as this suite's one syscall_current_context())
+ * proves the second acquirer still succeeds, with its own distinct
+ * buffer. */
+static void test_second_acquirer_also_succeeds(void)
 {
     install_test_fb();
-    CU_ASSERT_EQUAL(fb_binding_acquire(OTHER_LIBOS), FB_BIND_OK);
 
-    CU_ASSERT_EQUAL(do_fb_acquire(scratch_info()), -EXO_EBUSY);
-    CU_ASSERT_EQUAL(fb_binding_owner(), OTHER_LIBOS);
+    exo_fb_info_t other_info;
+    CU_ASSERT_EQUAL(fb_shadow_acquire(OTHER_LIBOS, &other_info), FB_SHADOW_OK);
+
+    exo_fb_info_t *info = scratch_info();
+    CU_ASSERT_EQUAL(do_fb_acquire(info), 0);
+
+    CU_ASSERT_NOT_EQUAL(info->phys_addr, other_info.phys_addr);
+    CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
+
+    fb_shadow_release(OTHER_LIBOS);
+    (void)reclaim_pages_owned(OTHER_LIBOS);
+    fb_shadow_release(syscall_current_context());
+    (void)reclaim_pages_owned(syscall_current_context());
 }
 
-/* Re-acquiring what you already hold is not "another LibOS holds it": it
- * succeeds and re-fills the struct, so a LibOS re-running DG_Init is not
- * locked out of its own screen. */
+/* Re-acquiring is idempotent: it succeeds and re-fills the struct with the
+ * *same* buffer, so a LibOS re-running DG_Init is not handed a fresh, empty
+ * surface it has to redraw from scratch. */
 static void test_owner_may_reacquire(void)
 {
     install_test_fb();
@@ -196,7 +233,9 @@ static void test_owner_may_reacquire(void)
     CU_ASSERT_EQUAL(do_fb_acquire(info), 0);
 
     CU_ASSERT_EQUAL(info->phys_addr, first_phys_addr);
-    CU_ASSERT_EQUAL(fb_binding_owner(), syscall_current_context());
+
+    fb_shadow_release(syscall_current_context());
+    (void)reclaim_pages_owned(syscall_current_context());
 }
 
 /* A bad info_out is rejected before the binding is taken — otherwise a caller
@@ -379,29 +418,32 @@ static void test_extent_is_page_granular(void)
 
 /* ── Reclaim ─────────────────────────────────────────────────────────────── */
 
-/* SCRUM-155's exo_exit calls this: after the owner is torn down the screen is
- * free and a different LibOS can take it.  A LibOS that dies holding the
- * framebuffer must not lock the display for the rest of the boot. */
+/* fb_binding.c's own release/re-acquire mechanics, exercised directly
+ * (SCRUM-112: nothing in the normal exo_fb_acquire path takes this binding
+ * anymore, so there is no longer a real caller to route this through — see
+ * this file's header comment). Kept as coverage of the module itself: it is
+ * still what fb_binding_check_map() denies against, and still what
+ * SCRUM-155's exo_exit calls unconditionally. */
 static void test_release_lets_another_context_acquire(void)
 {
     install_test_fb();
-    CU_ASSERT_EQUAL(fb_binding_acquire(OTHER_LIBOS), FB_BIND_OK);
+    page_owner_t me = syscall_current_context();
 
-    exo_fb_info_t *info = scratch_info();
-    CU_ASSERT_EQUAL(do_fb_acquire(info), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(fb_binding_acquire(OTHER_LIBOS), FB_BIND_OK);
+    CU_ASSERT_EQUAL(fb_binding_acquire(me), FB_BIND_EBUSY);
 
     fb_binding_release(OTHER_LIBOS);
     CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
 
-    CU_ASSERT_EQUAL(do_fb_acquire(info), 0);
-    CU_ASSERT_EQUAL(info->phys_addr, TEST_FB_BASE);
-    CU_ASSERT_EQUAL(fb_binding_owner(), syscall_current_context());
+    CU_ASSERT_EQUAL(fb_binding_acquire(me), FB_BIND_OK);
+    CU_ASSERT_EQUAL(fb_binding_owner(), me);
 
     /* And the new owner can map it, which the previous one no longer can. */
-    CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, syscall_current_context()),
-                    FB_MAP_ALLOW);
+    CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, me), FB_MAP_ALLOW);
     CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, OTHER_LIBOS),
                     FB_MAP_DENY);
+
+    fb_binding_release(me);
 }
 
 /* Release is scoped to the owner: reclaiming context A must not hand away the
@@ -426,10 +468,10 @@ void suite_fb_binding_tests(CU_pSuite s)
 {
     CU_add_test(s, "boot published the framebuffer",
                 test_boot_published_the_framebuffer);
-    CU_add_test(s, "acquire binds and describes",
-                test_acquire_binds_and_describes);
-    CU_add_test(s, "second acquirer gets EBUSY",
-                test_second_acquirer_is_ebusy);
+    CU_add_test(s, "acquire describes a private buffer",
+                test_acquire_describes_a_private_buffer);
+    CU_add_test(s, "second acquirer also succeeds",
+                test_second_acquirer_also_succeeds);
     CU_add_test(s, "owner may re-acquire", test_owner_may_reacquire);
     CU_add_test(s, "null info faults without binding",
                 test_null_info_faults_without_binding);

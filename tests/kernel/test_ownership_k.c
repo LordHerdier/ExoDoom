@@ -119,6 +119,56 @@ static void test_reclaim_pages_for_owner(void)
         PAGE_FREE_OK);
 }
 
+/* alloc_pages_contig_owned() (SCRUM-112): a multi-page run, physically
+ * contiguous, all stamped owned by the caller. */
+static void test_alloc_pages_contig_owned_basic(void)
+{
+    void* base = alloc_pages_contig_owned(PAGE_OWNER_LIBOS, 4);
+    CU_ASSERT_PTR_NOT_NULL(base);
+
+    uintptr_t p = (uintptr_t)base;
+    for (uint32_t i = 0; i < 4; i++) {
+        CU_ASSERT_EQUAL(page_owner((void*)(p + i * 4096)), PAGE_OWNER_LIBOS);
+    }
+
+    for (uint32_t i = 0; i < 4; i++) {
+        CU_ASSERT_EQUAL(
+            free_page_owned((void*)(p + i * 4096), PAGE_OWNER_LIBOS),
+            PAGE_FREE_OK);
+    }
+}
+
+/* count == 0 is refused rather than treated as a zero-length success --
+ * there is no page to point the caller at. */
+static void test_alloc_pages_contig_owned_zero_count(void)
+{
+    CU_ASSERT_PTR_NULL(alloc_pages_contig_owned(PAGE_OWNER_LIBOS, 0));
+}
+
+/* An allocation that does not fit around an already-taken page must skip
+ * past it rather than returning a run that overlaps it. */
+static void test_alloc_pages_contig_owned_skips_holes(void)
+{
+    void* hole = alloc_page_owned(PAGE_OWNER_LIBOS);
+    CU_ASSERT_PTR_NOT_NULL(hole);
+
+    void* run = alloc_pages_contig_owned(OTHER_LIBOS, 3);
+    CU_ASSERT_PTR_NOT_NULL(run);
+
+    uintptr_t hp = (uintptr_t)hole;
+    uintptr_t rp = (uintptr_t)run;
+    for (uint32_t i = 0; i < 3; i++) {
+        CU_ASSERT_NOT_EQUAL(rp + i * 4096, hp);
+    }
+
+    CU_ASSERT_EQUAL(free_page_owned(hole, PAGE_OWNER_LIBOS), PAGE_FREE_OK);
+    for (uint32_t i = 0; i < 3; i++) {
+        CU_ASSERT_EQUAL(
+            free_page_owned((void*)(rp + i * 4096), OTHER_LIBOS),
+            PAGE_FREE_OK);
+    }
+}
+
 static void test_reclaim_never_frees_kernel_pages(void)
 {
     void* kp = alloc_page();
@@ -143,6 +193,13 @@ void suite_ownership_tests(CU_pSuite s)
 
     CU_add_test(s, "reclaim pages for owner",
             test_reclaim_pages_for_owner);
-CU_add_test(s, "reclaim never frees kernel pages",
+    CU_add_test(s, "reclaim never frees kernel pages",
             test_reclaim_never_frees_kernel_pages);
+
+    CU_add_test(s, "alloc_pages_contig_owned basic run",
+            test_alloc_pages_contig_owned_basic);
+    CU_add_test(s, "alloc_pages_contig_owned rejects zero count",
+            test_alloc_pages_contig_owned_zero_count);
+    CU_add_test(s, "alloc_pages_contig_owned skips a taken page",
+            test_alloc_pages_contig_owned_skips_holes);
 }
