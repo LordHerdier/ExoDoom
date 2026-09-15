@@ -98,6 +98,23 @@
 #define LIBOS_LAUNCH_MAX_DATA_PAGES 16
 #define LIBOS_LAUNCH_GUARD_PAGES    1
 
+/* Selectors and RFLAGS values shared between src/libos_enter.s and
+ * src/context_switch.s (SCRUM-108): both build an iretq frame into the same
+ * ring-3 code/data segments, and a context resumed after a switch must use
+ * the exact same RFLAGS a fresh libos_enter() launch would have used
+ * (context_prime() seeds it) -- one shared definition rather than two
+ * private `.set`s that could drift apart. See src/boot.s's GDT for where
+ * 0x20/0x28 come from and docs/syscall_spec.md §3.4 for why the layout is
+ * fixed.
+ *
+ * LIBOS_LAUNCH_RFLAGS: IF clear, bit 1 (reserved, must be set) -- every
+ * existing fault/launch test depends on this exact value for libos_enter().
+ * LIBOS_LAUNCH_RFLAGS_IRQ: same, with IF set, for libos_enter_irq(). */
+#define LIBOS_LAUNCH_USER_SS      (0x20 | 3)
+#define LIBOS_LAUNCH_USER_CS      (0x28 | 3)
+#define LIBOS_LAUNCH_RFLAGS       0x002
+#define LIBOS_LAUNCH_RFLAGS_IRQ   0x202
+
 #define LIBOS_LAUNCH_CODE_VADDR  (EXO_USER_VA_BASE + 0x1000ULL)
 #define LIBOS_LAUNCH_DATA_VADDR  (LIBOS_LAUNCH_CODE_VADDR + \
                                   LIBOS_LAUNCH_MAX_CODE_PAGES * 0x1000ULL)

@@ -73,9 +73,10 @@ extern void syscall_entry(void);
 /*
  * The owner tag of the context currently executing a syscall — what resource
  * handlers stamp on pages they hand out (exo_page_alloc) and check on pages
- * they operate on (exo_page_free, and SCRUM-153+ map/unmap).  v1 has a single
- * LibOS, so this is a constant (PAGE_OWNER_LIBOS); it is the hook the SCRUM-147
- * scheduler will make return the running context's id.
+ * they operate on (exo_page_free, and SCRUM-153+ map/unmap).  Returns
+ * context_current() (src/context.h) — PAGE_OWNER_LIBOS until the first
+ * SCRUM-108 context_switch_request() ever succeeds, matching v1's
+ * single-LibOS default exactly, and the real running context id afterward.
  */
 page_owner_t syscall_current_context(void);
 

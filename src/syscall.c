@@ -1,4 +1,5 @@
 #include "syscall.h"
+#include "context.h"
 #include "exo_syscall.h"
 #include "msr.h"
 
@@ -50,9 +51,11 @@ static exo_handler_t handlers[EXO_SYS_COUNT];
 
 page_owner_t syscall_current_context(void)
 {
-    /* Single-LibOS v1: every ring-3 caller is the same context.  SCRUM-147
-     * (multi-LibOS scheduling) will replace this with the running context id. */
-    return PAGE_OWNER_LIBOS;
+    /* context_current() (src/context.h) defaults to PAGE_OWNER_LIBOS until
+     * the first SCRUM-108 context_switch_request() ever succeeds, so this
+     * matches v1's single-LibOS behavior exactly until something actually
+     * switches. */
+    return context_current();
 }
 
 void syscall_init(void)
