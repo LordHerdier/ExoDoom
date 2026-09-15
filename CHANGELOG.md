@@ -1,5 +1,84 @@
 # Changelog
 
+## 2026-09-14 to 2026-09-15
+
+Sixteen PRs landed on `main` in this window (#65–#80). The doom port gate
+went from "2/79 compiles" to a full compile pass with float/SSE support, a
+real process/context table and context switch landed alongside the first
+two scheduling-adjacent syscalls (`exo_yield`, `exo_exit` resource
+reclamation), and the boot demo grew a minimal terminal/shell LibOS that
+launches the WAD/flat/automap viewer interactively instead of it being a
+fixed boot-time sequence.
+
+### Added
+
+- **Process/context table** (SCRUM-107, #73) — `src/context.c/h`:
+  `context_create()` binds a caller-built address space to a fresh
+  `page_owner_t` id via `vmm_bind_address_space()`, and adds the saved-register
+  area and scheduling state (`READY`/`RUNNING`/`BLOCKED`) the VMM's own
+  registry never had a field for. `CONTEXT_MAX == VMM_MAX_ADDRESS_SPACES` (4).
+- **Real context switch** (SCRUM-108, #75) — `src/context_switch.s`: saves and
+  restores general-purpose registers and swaps CR3 between two live contexts,
+  built on top of the context table above.
+- **`exo_yield` syscall** (SCRUM-109, #76) — cooperative switching between
+  contexts through the context-switch primitive.
+- **LibOS resource reclamation on exit** (SCRUM-155, #77) — `src/syscall_exit.c/h`:
+  `exo_exit` now calls `revoke_all()` so a context's pages (and framebuffer
+  binding, if held) are reclaimed instead of leaking for the rest of boot.
+- **Minimal terminal/shell LibOS** (SCRUM-110, #78) — replaces the fixed
+  boot-time demo sequence in `kernel_main` with an interactive shell LibOS
+  that launches other demos on request.
+- **WAD/flat/automap viewer forward-ported into the shell** (SCRUM-178, #80) —
+  `src/automap.c/h` plus companion flat/WAD viewer code, now launched as a
+  shell command instead of running unconditionally at boot.
+- **SSE enabled in the kernel** (SCRUM-177, #79) — `src/boot.s`'s `_start64`
+  clears CR0.EM/CR0.TS, sets CR0.MP/CR0.NE and CR4.OSFXSR/CR4.OSXMMEXCPT, and
+  loads `MXCSR = 0x1F80` before `kernel_main`, which is what Doom's
+  `M_GetFloatVariable()` needs (`float` returns in `xmm0` under the SysV
+  ABI) — the doom pass also drops `-mno-sse`, while the kernel build keeps it
+  since no kernel `.c` file touches a float. Proven from ring 0 and ring 3 by
+  `tests/kernel/test_sse_k.c`.
+- **All 79 vendored `src/doom/` files now compile** (SCRUM-64, #66), up from
+  2/79 — overwhelmingly missing headers (`<strings.h>` alone stopped 66 of
+  them), not bad vendored source; `docker/scripts/build-doom.sh` now exits
+  non-zero on any regression and CI runs it as a gate.
+- **libc audit of every function Doom calls** (SCRUM-72, #67) —
+  `docs/libc_audit.md`/`.csv` plus `docs/gen_libc_audit.py`: per-function,
+  per-call-site table of what's real, stubbed, or still owed.
+- **`DG_GetTicksMs` / `DG_SleepMs`** (SCRUM-74, #68) — `src/doomgeneric_exo.c`:
+  the timer half of the doomgeneric platform layer, built on `exo_get_ticks`.
+- **`exo_kbd_poll` (#6) bound** (SCRUM-39, #69) — `src/syscall_kbd.c/h`: wires
+  the keyboard event ring into the syscall gate.
+- **Hardware interrupts at CPL 3 verified to switch to `TSS.RSP0`**
+  (SCRUM-170, #70) — `tests/kernel/irq_entry_probe.s`: a real IRQ0 taken while
+  running ring-3 LibOS code is proven to land on the kernel stack, not the
+  interrupted ring-3 one.
+- **`exo_errno.h`** (SCRUM-57, #71) — syscall error codes extracted out of
+  `exo_syscall.h` into their own header, documented in `docs/syscall_spec.md`.
+
+### Fixed
+
+- **Timer demo drift** (SCRUM-163, #72) — `src/sleep.c/h`: corrected
+  accumulation error in the sleep/timing demo path.
+- **`fb_console` scroll now moves whole 32-bit pixels, not bytes**
+  (SCRUM-162, #74) — off-by-shift in the scroll routine that could tear or
+  misalign rows; new `test_fb_console_k.c` suite covers it.
+- **SCRUM-16 + SCRUM-36 formally landed on `main`** (#65) — the framebuffer/WAD
+  mapping accessor and LibOS-side `libos_fb_map()` helper documented in the
+  prior entry merged to `main` in this window.
+
+### Documentation
+
+- `docs/architecture.md` and `docs/syscall_spec.md` updated for the process/
+  context table, context switch, `exo_yield`, resource reclamation, the
+  terminal/shell LibOS, and SSE enablement.
+- `CLAUDE.md` kept current with the doom-compile gate, SSE rationale, and the
+  new context/scheduling subsystem.
+
+### Contributors
+
+Charlie Whittleman, Bryan Simpson, Charlotte, carlitodavis.
+
 ## 2026-09-08 to 2026-09-14
 
 Covers the past week of work on the `demo`/`main` branches: the virtual memory
