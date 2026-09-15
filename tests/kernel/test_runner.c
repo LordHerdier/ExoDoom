@@ -51,6 +51,7 @@ void suite_context_tests(CU_pSuite s);
 void suite_fb_console_tests(CU_pSuite s);
 void suite_context_switch_tests(CU_pSuite s);
 void suite_syscall_yield_tests(CU_pSuite s);
+void suite_shell_libos_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -135,6 +136,12 @@ int context_switch_suite_cleanup(void);
  * real-page shape as context_switch above, driven through the real bound
  * exo_yield handler instead of a test-local stand-in. */
 int syscall_yield_suite_cleanup(void);
+
+/* Same idea for the shell_libos suite (SCRUM-110): builds the real shell
+ * blob under PAGE_OWNER_LIBOS and must restore its boot-time binding, same
+ * reasoning as libc_shim_probe_suite_init/_cleanup above. */
+int shell_libos_suite_init(void);
+int shell_libos_suite_cleanup(void);
 
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
@@ -290,6 +297,10 @@ int run_tests(void)
 
     s = CU_add_suite("syscall_yield", NULL, syscall_yield_suite_cleanup);
     suite_syscall_yield_tests(s);
+
+    s = CU_add_suite("shell_libos", shell_libos_suite_init,
+                     shell_libos_suite_cleanup);
+    suite_shell_libos_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

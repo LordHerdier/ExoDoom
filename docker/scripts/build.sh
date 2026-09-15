@@ -124,55 +124,33 @@ fi
 
 echo "    identity map is $want_desc (link=0x${pt_link: -2} leaf=0x${pt_leaf: -2})"
 
-echo "[3/7] Compile C sources"
 objs=(build/boot.o)
 
-# -DEXO_KERNEL selects the kernel view of src/exo_syscall.h (numbers, shared
-# structs and error codes, no user-side `syscall` stubs).  It lives here rather
-# than in a per-file #define so it is guaranteed to precede every transitive
-# include of the header in a kernel TU -- a #define after the first include
-# would be too late.  tests/kernel/*.c gets it too (see below): those TUs link
-# into the kernel and run in ring 0, so the LibOS view is the wrong default
-# there -- a stub reaching a real `syscall` with IA32_LSTAR unset would triple
-# fault.
-#
-# -I src (SCRUM-74): src/doomgeneric_exo.c is ExoDoom's doomgeneric platform
-# file, and it includes doomgeneric's own header for the DG_* prototypes
-# rather than restating them -- src/doom/doomgeneric.h in turn includes
-# <stdlib.h>, which only resolves to the shim's src/stdlib.h with src/ on the
-# angle-bracket path. Every other src/*.c reaches its headers with quoted
-# includes and is unaffected; src/ holds no header that shadows one of GCC's
-# freestanding four (stddef/stdint/stdarg/limits), so nothing is redirected
-# by this that was not already coming from src/.
-for c in src/*.c; do
-  o="build/$(basename "${c%.c}.o")"
-  echo "    CC $(basename "$c")"
-  x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src -DEXO_KERNEL
-  objs+=("$o")
-done
+probe_cflags=("${CFLAGS[@]/-mcmodel=small/-mcmodel=large}" -fno-toplevel-reorder)
 
-# Assemble every other src/*.s.  boot.s is excluded because it is handled
-# above with its own flags; everything else (isr.s, syscall_entry.s, ...) is
-# picked up automatically, the same way src/*.c is.
-#
-# Run through the C preprocessor first (`-x assembler-with-cpp`, same as the
-# tests/kernel/*.s loop below), rather than handed to `as` directly (SCRUM-108):
-# libos_enter.s and context_switch.s #include libos_launch.h so both share
-# LIBOS_LAUNCH_RFLAGS/_USER_SS/_USER_CS with the C side instead of a
-# hand-copied literal that can drift from it, the same reason the test-probe
-# loop already does this. A file with nothing to include still assembles
-# fine: cpp with no macros used is a no-op.
-for s in src/*.s; do
-  [[ "$s" == "src/boot.s" ]] && continue
-  pp="build/$(basename "${s%.s}.pp.s")"
-  o="build/$(basename "${s%.s}.o")"
-  echo "    AS $(basename "$s")"
-  x86_64-elf-gcc -E -P -x assembler-with-cpp -I src -DEXO_KERNEL "$s" -o "$pp"
-  x86_64-elf-as "$pp" -o "$o"
-  objs+=("$o")
-done
-
-probe_cflags=("${CFLAGS[@]/-mcmodel=small/-mcmodel=large}")
+# -fno-toplevel-reorder: libos_build_image() always treats byte 0 of the
+# code blob as the entry point -- no ELF symbol lookup, no e_entry, just the
+# base address (see its own comment in src/libos_launch.h and
+# build_ring3_link_target's $4 doc below). ld places each *object file's*
+# .text contiguously in command-line order, but WITHIN one object, GCC's
+# default -ftoplevel-reorder (on by default from -O1 up) is free to emit
+# top-level definitions -- static functions included -- in any order it
+# finds convenient for code locality, regardless of source order. Discovered
+# the hard way building the SCRUM-110 shell target: a second, small static
+# helper compiled to a standalone function (not inlined, since it had two
+# call sites) ended up placed by GCC *before* shell_main() in the object's
+# .text, even with shell_main() written first in the source -- so the
+# launched context executed that helper's bytes as its entry and immediately
+# page-faulted on an early write into the (non-writable) code region.
+# -fno-toplevel-reorder is the actual, verified fix (confirmed via
+# `x86_64-elf-nm -n` on the linked .elf showing the entry function's symbol
+# at the lowest address after adding this flag) -- an earlier attempt with
+# -fno-reorder-functions alone did NOT fix it, since that flag governs a
+# different, profile-guided hot/cold partitioning pass, not this one.
+# libos_c_probe.c and libc_shim_probe.c never hit this because each keeps
+# its entry function as the ONLY function in its own object; this flag lifts
+# that as a hard requirement for every ring-3 link target instead of relying
+# on each new one to rediscover it independently.
 
 # Compile+link one ring-3 link target at its real, final ring-3 addresses
 # (LIBOS_LAUNCH_CODE_VADDR/_DATA_VADDR) rather than copied there afterward
@@ -184,6 +162,13 @@ probe_cflags=("${CFLAGS[@]/-mcmodel=small/-mcmodel=large}")
 # kernel's own mcmodel=small: that model only supports symbols in the first
 # 2 GB, and LIBOS_LAUNCH_CODE_VADDR sits inside the 64 TiB LibOS window
 # (EXO_USER_VA_BASE, src/exo_syscall.h), nowhere near it.
+#
+# Defined here, ahead of step 3's C compile loop below, rather than after it
+# as originally written: SCRUM-110's shell target (called immediately below)
+# must be built and its src/shell/shell_layout.h generated *before*
+# src/kernel.c compiles, since that file #includes it -- unlike
+# libos_c_probe/libc_shim_probe (called further down, inside the TESTING=1
+# block), which nothing in step 3 depends on.
 #
 #   $1        name      -- link target name; also its entry symbol
 #                          (${name}_main), its bss symbols
@@ -274,6 +259,79 @@ build_ring3_link_target() {
       "${name}_data.bin" "${name}_data_blob.o" )
   objs+=("build/${name}_code_blob.o" "build/${name}_data_blob.o")
 }
+
+echo "[2c/7] Build shell LibOS (SCRUM-110)"
+# Unlike libos_c_probe/libc_shim_probe (built further down, inside the
+# TESTING=1 block), this target is built UNCONDITIONALLY, and ahead of step
+# 3's C compile loop -- because kernel_main() launches it on every normal
+# boot (src/kernel.c), not just under a test harness, and src/kernel.c
+# itself #includes the generated src/shell/shell_layout.h this call
+# produces. Same build_ring3_link_target mechanism otherwise:
+# src/shell/shell_main.c is its own subdirectory (like src/doom/)
+# specifically so step 3's plain `src/*.c` glob below never sees it -- it
+# must be compiled once, without -DEXO_KERNEL, for the real ring-3 syscall
+# stubs, not twice (kernel view + LibOS view) the way every ordinary
+# src/*.c file is.
+#
+# src/fb.c and src/fb_console.c are pulled in unmodified -- both are
+# already framebuffer-address-agnostic freestanding C with no EXO_KERNEL
+# gate, so the same text console logic src/kernel.c's own boot banner uses
+# now also runs as compiled ring-3 code against the shell's own mapped
+# framebuffer. src/libos_fb.c (SCRUM-36) composes
+# exo_fb_acquire()/exo_page_map() into the single libos_fb_map() call
+# shell_main.c uses to get that mapping.
+#
+# shell_main.c MUST come first in this list -- see build_ring3_link_target's
+# own comment on why source order determines entry_vaddr.
+build_ring3_link_target shell src/shell "" \
+  src/shell/shell_main.c src/fb.c src/fb_console.c src/libos_fb.c
+
+echo "[3/7] Compile C sources"
+
+# -DEXO_KERNEL selects the kernel view of src/exo_syscall.h (numbers, shared
+# structs and error codes, no user-side `syscall` stubs).  It lives here rather
+# than in a per-file #define so it is guaranteed to precede every transitive
+# include of the header in a kernel TU -- a #define after the first include
+# would be too late.  tests/kernel/*.c gets it too (see below): those TUs link
+# into the kernel and run in ring 0, so the LibOS view is the wrong default
+# there -- a stub reaching a real `syscall` with IA32_LSTAR unset would triple
+# fault.
+#
+# -I src (SCRUM-74): src/doomgeneric_exo.c is ExoDoom's doomgeneric platform
+# file, and it includes doomgeneric's own header for the DG_* prototypes
+# rather than restating them -- src/doom/doomgeneric.h in turn includes
+# <stdlib.h>, which only resolves to the shim's src/stdlib.h with src/ on the
+# angle-bracket path. Every other src/*.c reaches its headers with quoted
+# includes and is unaffected; src/ holds no header that shadows one of GCC's
+# freestanding four (stddef/stdint/stdarg/limits), so nothing is redirected
+# by this that was not already coming from src/.
+for c in src/*.c; do
+  o="build/$(basename "${c%.c}.o")"
+  echo "    CC $(basename "$c")"
+  x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src -DEXO_KERNEL
+  objs+=("$o")
+done
+
+# Assemble every other src/*.s.  boot.s is excluded because it is handled
+# above with its own flags; everything else (isr.s, syscall_entry.s, ...) is
+# picked up automatically, the same way src/*.c is.
+#
+# Run through the C preprocessor first (`-x assembler-with-cpp`, same as the
+# tests/kernel/*.s loop below), rather than handed to `as` directly (SCRUM-108):
+# libos_enter.s and context_switch.s #include libos_launch.h so both share
+# LIBOS_LAUNCH_RFLAGS/_USER_SS/_USER_CS with the C side instead of a
+# hand-copied literal that can drift from it, the same reason the test-probe
+# loop already does this. A file with nothing to include still assembles
+# fine: cpp with no macros used is a no-op.
+for s in src/*.s; do
+  [[ "$s" == "src/boot.s" ]] && continue
+  pp="build/$(basename "${s%.s}.pp.s")"
+  o="build/$(basename "${s%.s}.o")"
+  echo "    AS $(basename "$s")"
+  x86_64-elf-gcc -E -P -x assembler-with-cpp -I src -DEXO_KERNEL "$s" -o "$pp"
+  x86_64-elf-as "$pp" -o "$o"
+  objs+=("$o")
+done
 
 if [[ "${TESTING:-0}" == "1" ]]; then
   echo "[3b/7] Build LibOS C probe (SCRUM-173)"

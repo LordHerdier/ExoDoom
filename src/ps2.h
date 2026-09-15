@@ -74,6 +74,22 @@ typedef enum {
     KEY_F10,
     KEY_F11,
     KEY_F12,
+    KEY_0,
+    KEY_1,
+    KEY_2,
+    KEY_3,
+    KEY_4,
+    KEY_5,
+    KEY_6,
+    KEY_7,
+    KEY_8,
+    KEY_9,
+    KEY_MINUS,
+    KEY_EQUALS,
+    KEY_COMMA,
+    KEY_PERIOD,
+    KEY_SLASH,
+    KEY_SEMICOLON,
 } ps2_key_t;
 
 /* Modifier bits reported in kbd_event_t.modifiers */
