@@ -171,9 +171,10 @@ while `fopen` is missing.
 
 ---
 
-## 5. Prerequisite this audit surfaced: SSE is not enabled
+## 5. Prerequisite this audit surfaced: SSE — resolved by SCRUM-177
 
-Not a libc gap, but it blocks everything downstream and no ticket owns it.
+Not a libc gap, but it blocked everything downstream, and when this audit was
+written no ticket owned it. SCRUM-177 does, and it has landed.
 
 The x86_64 SysV ABI returns `float` in `xmm0`. `m_config.c`'s
 `M_GetFloatVariable()` returns a `float`, so it cannot compile under the
@@ -182,16 +183,21 @@ kernel's `-mno-sse` — and no flag combination avoids this (`-msoft-float` and
 for the Doom compile pass; the kernel build keeps it and is unaffected, since
 no `src/*.c` uses a float.
 
-**At runtime this is unsatisfied.** `src/boot.s` sets only CR4.PAE — never
-CR4.OSFXSR (bit 9) or CR4.OSXMMEXCPT (bit 10), and never clears CR0.EM — so
-the first SSE instruction any Doom object executes raises `#UD`. Only 4 of the
-79 objects contain float arithmetic (18 instructions), but allowing SSE also
-lets GCC inline struct copies with `movaps`/`movdqa`/`pxor` engine-wide
-(~143 more). Both classes need the same bits set.
+**At runtime this is now satisfied.** `src/boot.s`'s `_start64` clears CR0.EM
+(bit 2) and CR0.TS (bit 3), sets CR0.MP (bit 1), CR0.NE (bit 5), CR4.OSFXSR
+(bit 9) and CR4.OSXMMEXCPT (bit 10), and loads `MXCSR` with the architectural
+default `0x1F80` — all before `kernel_main` runs. Only 4 of the 79 objects
+contain float arithmetic (18 instructions), but allowing SSE also lets GCC
+inline struct copies with `movaps`/`movdqa`/`pxor` engine-wide (~143 more);
+both classes needed the same bits, and `tests/kernel/test_sse_k.c` exercises
+both, in ring 0 and from a ring-3 LibOS.
 
-Enabling SSE, and deciding whether XMM state must be preserved across the
-syscall and interrupt paths, is a hard prerequisite for running any of this.
-**It needs a ticket.**
+The open question that came with it — whether XMM state must be preserved
+across the syscall and interrupt paths — was answered "no, deferred", because
+the kernel is compiled `-mno-sse` and so cannot touch that state at all. The
+reasoning, the tests that enforce it, and the three things that would
+invalidate it (chief among them a second live ring-3 context) are in
+`docs/syscall_spec.md` §3.4a.
 
 ---
 
@@ -207,7 +213,7 @@ Ordered by what unblocks the most for the least effort, not by call count.
    — `kvprintf` already takes an arbitrary sink, so the sink is easy; the
    precision support is the actual work, and without it the WAD lump names
    Doom builds are wrong.
-3. **A ticket for SSE enablement** (§5) — nothing runs until this exists.
+3. ~~**A ticket for SSE enablement** (§5) — nothing runs until this exists.~~ ✅ **Done: SCRUM-177.**
 4. **`stderr`/`stdout` + `fprintf`/`vfprintf` onto serial** — 65 `fprintf`
    call sites, but almost all are `fprintf(stderr, ...)` diagnostics that need
    no file at all. Large win, small change.

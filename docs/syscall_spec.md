@@ -23,6 +23,7 @@ Derived from static analysis of
    - [3.2a Error codes](#32a-error-codes-scrum-57)
    - [3.3 Secure binding & resource ownership](#33-secure-binding--resource-ownership)
    - [3.4 Entry path](#34-entry-path-scrum-32)
+   - [3.4a FPU/SSE state across kernel entry](#34a-fpusse-state-across-kernel-entry-scrum-177)
    - [3.5 Framebuffer binding](#35-framebuffer-binding-scrum-154)
    - [3.6 Revocation & repossession](#36-revocation--repossession-scrum-156)
    - [3.7 Address-space mapping](#37-address-space-mapping-scrum-35)
@@ -592,6 +593,78 @@ supervisor-only in every build now, and `vmm_init()` separately re-exposes
 just those two probes' own code ranges (`expose_ring3_legacy_probes()`) as
 the sole, explicitly-scoped legacy exception — see `tests/kernel/
 test_kernel_mem_fault_k.c`, which asserts the wall holds everywhere else.
+
+### 3.4a FPU/SSE state across kernel entry (SCRUM-177)
+
+SSE is enabled. `src/boot.s`'s `_start64` clears `CR0.EM`/`CR0.TS`, sets
+`CR0.MP`/`CR0.NE` and `CR4.OSFXSR`/`CR4.OSXMMEXCPT`, and loads `MXCSR` with the
+architectural default `0x1F80`, before `kernel_main` runs. Doom needs this and
+cannot be compiled without it — the x86_64 SysV ABI returns `float` in `%xmm0`,
+so `m_config.c`'s `M_GetFloatVariable()` has no SSE-free encoding — and
+allowing SSE additionally lets GCC inline struct copies engine-wide as
+`movaps`/`movdqa`/`pxor`.
+
+That raises the question this section exists to answer: **neither
+`src/syscall_entry.s` nor `src/isr.s` saves any FPU, XMM or MXCSR state.** Both
+save general-purpose registers only. Once ring-3 code holds live float values,
+is that a corruption bug?
+
+**Decision: no save/restore, deferred deliberately — not overlooked.**
+
+**Why it is safe today.** The kernel cannot touch that state. Every kernel
+object is compiled `-mno-sse -mno-sse2 -mno-mmx` (`docker/scripts/build.sh`),
+so GCC never emits an instruction that names an XMM or MMX register into any
+syscall handler, IRQ handler or fault handler; and the hand-written assembly on
+those paths — `syscall_entry.s`, `isr.s`, `libos_enter.s`, `context_switch.s` —
+touches general-purpose registers exclusively. A LibOS's XMM/MXCSR/x87 state
+therefore survives kernel entry *by construction*: there is nothing on the
+other side capable of modifying it. Saving 512 bytes of `fxsave` area on every
+syscall would be spilling registers that nothing clobbers.
+
+Note the shape of that argument. It is not "the kernel happens not to use
+floats" — it is "the kernel is built such that it cannot", which is a property
+a build flag enforces and a test can check.
+
+**And it is checked.** `tests/kernel/test_sse_k.c` seeds all sixteen XMM
+registers from ring 3 with distinct patterns and verifies every one of them
+afterwards, across both paths:
+
+| Path | Probe | What forces the crossing |
+| --- | --- | --- |
+| `syscall` → `sysretq` | `tests/kernel/sse_ring3_probe.s` | calls `exo_get_ticks` (#5) with the patterns live |
+| IDT interrupt at CPL 3 | `tests/kernel/sse_irq_probe.s` | launched via `libos_enter_irq()` (RFLAGS.IF set), busy-waits until `exo_get_ticks` advances — which only IRQ0 can cause, so `irq0_stub` demonstrably ran while the patterns were live |
+
+So the invariant is enforced by CI rather than by this paragraph.
+
+**What would invalidate it.** Any one of these makes the deferral wrong, and
+the second is the one that will actually happen:
+
+1. **Dropping `-mno-sse` from the kernel's own `CFLAGS`.** GCC would
+   immediately start inlining struct copies as `movaps` inside kernel code,
+   silently clobbering `%xmm0`-`%xmm15` on every kernel entry. The doom
+   compile pass (`docker/scripts/build-doom.sh`) drops the flag for
+   `src/doom/` only; the kernel build must keep it. The XMM cases above are
+   what catch a change here.
+2. **A second live ring-3 context.** The argument above covers *the kernel*
+   clobbering XMM state; it says nothing about another LibOS doing so. The
+   moment two contexts are scheduled against each other, whichever one runs
+   second inherits the first's XMM/MXCSR/x87 registers. `context_regs_t`
+   (`src/context.h`) has no fields for any of it, and SCRUM-108's
+   `context_switch.s` saves the callee-saved GPR set and nothing more — so
+   **whoever makes the scheduler real owns adding `fxsave`/`fxrstor` (or
+   `xsave`, or a lazy `CR0.TS` scheme) to it.** v1 runs exactly one LibOS,
+   which is the whole reason this is deferrable.
+3. **A libgcc routine that uses SSE.** The kernel links `-lgcc`; today it
+   reaches only integer helpers. A future dependency on a libgcc float path
+   would breach the invariant from outside the flag's reach.
+
+**`MXCSR` and vector 19.** `CR4.OSXMMEXCPT` is set, which means an *unmasked*
+SIMD floating-point exception is delivered as `#XM` on vector 19 instead of
+`#UD`. `idt_init()` leaves `default_stub` there — a bare `iretq` that returns
+to the faulting instruction and faults again forever. `boot.s` loads `MXCSR` =
+`0x1F80`, masking all six exceptions, which makes that vector unreachable;
+`test_sse_k.c` asserts the mask bits. **Anything that unmasks a SIMD exception
+owes vector 19 a real handler first.**
 
 ### 3.5 Framebuffer binding (SCRUM-154)
 

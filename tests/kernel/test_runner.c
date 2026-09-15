@@ -49,6 +49,7 @@ void suite_irq_entry_tests(CU_pSuite s);
 void suite_context_tests(CU_pSuite s);
 void suite_fb_console_tests(CU_pSuite s);
 void suite_context_switch_tests(CU_pSuite s);
+void suite_sse_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -128,6 +129,17 @@ int context_suite_cleanup(void);
  * page_reclaim_all(): unlike the context suite above, these contexts have
  * real code/data/stack pages mapped into them, not just a bare PML4. */
 int context_switch_suite_cleanup(void);
+
+/* Same idea for the sse suite (SCRUM-177): its two ring-3 cases each build a
+ * real address space and install the fault hook and a SYS_LIBOS_RETURN
+ * handler around a live launch, and the second of them leaves irq0_handler's
+ * recorded entry RSP set. */
+int sse_suite_cleanup(void);
+
+/* The sse suite reads CR0/CR4 in init, before any of its cases executes an
+ * SSE instruction, so a kernel built without the enable block fails those
+ * cases instead of #UD-ing into an infinite loop. See test_sse_k.c. */
+int sse_suite_init(void);
 
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
@@ -277,6 +289,9 @@ int run_tests(void)
 
     s = CU_add_suite("context_switch", NULL, context_switch_suite_cleanup);
     suite_context_switch_tests(s);
+
+    s = CU_add_suite("sse", sse_suite_init, sse_suite_cleanup);
+    suite_sse_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 
