@@ -76,6 +76,17 @@ void page_alloc_init(const struct mb2_info* mb);
 // address or NULL when the pool is exhausted.
 void* alloc_page_owned(page_owner_t owner);
 
+// Allocate `count` physically *contiguous* 4K pages and stamp `owner` as the
+// owner of each.  A plain linear scan for a run of `count` consecutive free
+// bits -- nothing is marked until the whole run is confirmed free, so a
+// failed search never needs to roll anything back.  Returns the physical
+// address of the first page, or NULL if no run of that length is free
+// (including count == 0).  No separate free primitive: the pages are tagged
+// individually, same as alloc_page_owned(), so free_page_owned() one at a
+// time or the reclaim sweeps (reclaim_pages_owned()/page_reclaim_all()) free
+// them exactly like any other owned page.
+void* alloc_pages_contig_owned(page_owner_t owner, uint32_t count);
+
 // Free a page previously handed out to `owner`.  Returns PAGE_FREE_OK on
 // success (owner reset to FREE, bit cleared), PAGE_FREE_EINVAL for a bad
 // address or a double free, PAGE_FREE_EPERM when the page is allocated but

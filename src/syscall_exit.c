@@ -5,6 +5,7 @@
 #include "context.h"
 #include "exo_syscall.h"
 #include "fb_binding.h"
+#include "fb_shadow.h"
 #include "page_alloc.h"
 #include "syscall.h"
 
@@ -64,8 +65,15 @@ static int64_t sys_exit(uint64_t code, uint64_t a2, uint64_t a3,
      * Release non-page bindings before returning physical pages to the free
      * pool.  Future mapping teardown must also happen before page reclamation
      * so no surviving context retains a mapping to a recycled page.
+     *
+     * fb_binding_release() is a no-op in v1 (SCRUM-112): nothing acquires
+     * that binding from the syscall path anymore, see src/syscall_fb.c.
+     * fb_shadow_release() drops this context's virtual-framebuffer directory
+     * entry -- the underlying pages are ordinary owner-tagged pages, freed
+     * by reclaim_pages_owned() below like any other page this context held.
      */
     fb_binding_release(owner);
+    fb_shadow_release(owner);
     (void)reclaim_pages_owned(owner);
 
     /* SCRUM-178: hand off to whatever else is ready, exactly like

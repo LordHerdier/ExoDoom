@@ -1,6 +1,7 @@
 #include "revoke.h"
 
 #include "fb_binding.h"
+#include "fb_shadow.h"
 #include "page_alloc.h"
 #include "serial.h"
 
@@ -144,6 +145,13 @@ uint32_t revoke_all(page_owner_t who)
 
     record.pages_reclaimed += pages;
     record.forced          += pages;
+
+    /* Drops this context's virtual-framebuffer directory entry, if it has
+     * one (SCRUM-112) -- the underlying pages are already part of the
+     * page_reclaim_all() sweep above, since they were allocated owned by
+     * `who` like any other page. This only prevents a stale slot from
+     * outliving the context or being handed to whoever reuses its id. */
+    fb_shadow_release(who);
 
     if (fb_binding_reclaim(who) == FB_REVOKE_OK) {
         record.fb_reclaimed++;

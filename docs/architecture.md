@@ -426,22 +426,40 @@ foreground/background colour, cursor rendering, newline/carriage return/tab, and
 scrolling by `memmove`-ing the framebuffer up by 16 pixels and clearing the
 bottom row.
 
-**Secure binding (SCRUM-154, done):** `exo_fb_acquire()` returns the
-framebuffer's physical address and geometry to the LibOS *and* binds the
-framebuffer to it — one owner at a time, `-EBUSY` to anyone else, `-ENODEV` on
-a machine with no framebuffer. The binding table is `src/fb_binding.c`; the
-syscall handler is `src/syscall_fb.c`. **Future (Sprint 2):** the LibOS maps the
-returned range into its own address space via `exo_page_map`, which consults
-`fb_binding_check_map()` and refuses any caller that does not hold the binding
-(SCRUM-153). `DG_DrawFrame` will blit the 640×400 RGBA8888 `DG_ScreenBuffer`
-into this region (with format conversion, since Doom produces RGBA and the
-hardware is BGRX). One consequence still to handle: while a LibOS holds the
-framebuffer, the kernel's own `fb_console` must stop drawing to it. The
-revocation mechanism that makes handing the screen back and forth possible
-landed with SCRUM-156 (`fb_binding_reclaim`, `revoke_all`, spec §3.6); what is
-left is the policy that decides when the console yields. **Sprint 12:** Framebuffer multiplexing so
-multiple LibOS apps each get a virtual framebuffer and the kernel manages which
-is displayed.
+**Secure binding (SCRUM-154, superseded by SCRUM-112 below):**
+`exo_fb_acquire()` originally returned the framebuffer's real physical address
+and geometry to the LibOS *and* bound the framebuffer to it — one owner at a
+time, `-EBUSY` to anyone else, `-ENODEV` on a machine with no framebuffer. The
+binding table, `src/fb_binding.c`, still exists and its API is unchanged, but
+`exo_fb_acquire` (`src/syscall_fb.c`) no longer calls into it — see the
+multiplexing note just below for what replaced it. `DG_DrawFrame` will blit
+the 640×400 RGBA8888 `DG_ScreenBuffer` into the LibOS's mapped region (with
+format conversion, since Doom produces RGBA and the hardware is BGRX),
+unaffected by which mechanism handed that region out.
+
+**✅ Sprint 12: Framebuffer multiplexing (SCRUM-112).** Every context that
+calls `exo_fb_acquire()` now gets its own private, RAM-backed virtual
+framebuffer, sized to the real framebuffer's published geometry — no
+exclusivity, no `-EBUSY`; `src/fb_shadow.c` is the per-context directory,
+`alloc_pages_contig_owned()` (`src/page_alloc.c`) the allocator behind it. The
+LibOS-side flow (`exo_page_map` the returned `phys_addr`, per SCRUM-36's
+`libos_fb_map()`) is unchanged — it never notices its buffer is private RAM
+rather than real MMIO. `src/fb_compositor.c` is what makes any of it visible:
+on a throttled PIT tick (`src/pit.c`, ~60 Hz) it copies whichever context is
+`context_current()`'s virtual framebuffer onto the real hardware one.
+"Foreground" is simply "the context currently running" — no separate state,
+matching the cooperative model where exactly one context executes at a time —
+which is what makes context switches (a `wadview` launch, `exo_exit` back to
+the shell, a future `exo_yield`-driven scheduler) show the right app's own
+display state on the next tick with no extra signaling. This closes the
+consequence the old binding note above used to flag ("while a LibOS holds the
+framebuffer, the kernel's own `fb_console` must stop drawing to it"): the
+kernel's own boot-time console draws directly to the real hardware buffer
+before any LibOS launches and is never composited over, since nothing has
+acquired a virtual framebuffer yet at that point. **Not done here:** a
+Ctrl+Tab hotkey that changes which context is foreground independent of which
+one is executing — there is no scheduler yet for it to interrupt, and
+"foreground == running" has no gap for it to fill until one exists.
 
 ---
 
@@ -789,9 +807,13 @@ focus and the active framebuffer.
 > through a scripted return path. **Not done here:** any handoff back to
 > Doom or real cooperative scheduling — Doom is still not linked into the
 > kernel at all, so `exo_yield()`'s call in the shell's idle loop is a no-op
-> exactly as documented (`docs/syscall_spec.md` §3.2 #19); Ctrl+Tab and
-> framebuffer multiplexing between two live LibOS instances are still
-> unowned, per this section's own opening paragraph.
+> exactly as documented (`docs/syscall_spec.md` §3.2 #19). Ctrl+Tab is still
+> unowned. **✅ SCRUM-112:** framebuffer multiplexing between two live LibOS
+> instances is done — see §5.5's own note above; the WAD viewer this section
+> already describes launching (`wadview`, SCRUM-178) is what proved it: the
+> shell and the viewer no longer fight over the one real hardware buffer,
+> each keeps its own display state, and switching between them shows the
+> right one.
 >
 > ⚠️ **A real GCC pitfall worth knowing before writing the next ring-3 link
 > target:** `libos_build_image()` always treats byte 0 of the linked code
@@ -903,5 +925,5 @@ bare-metal foundations to a playable game.
 | **Sprint 9: Playability E1M1** _(13 Jul – 27 Jul)_      | Playable first level                     | Debug and fix E1M1 rendering (walls, floors, ceilings, sprites), verify combat (shooting, enemy AI, damage, pickups, status bar), menu navigation (new game, options, difficulty, quit), performance profiling (frame time per subsystem), fix top 3 bottlenecks, verify 35 tics/sec game loop timing, test with Freedoom2 IWAD and original DOOM2.WAD                                                                                      |
 | **Sprint 10: Gameplay + Save/Load**                     | Save games                               | Ramdisk save/load (`exo_file_*`), `exo_file_remove`/`exo_file_rename`, `sscanf` for config                                                                                                                                                                                                                                                                                                                                                  |
 | **Sprint 11: Sound + Storage**                          | Audio + persistence                      | ATA PIO driver, `exo_disk_read`/`exo_disk_write`, save file persistence across reboots, PC speaker driver, Doom SFX mapping                                                                                                                                                                                                                                                                                                                 |
-| **Sprint 12: 2nd App + Context Switch**                 | Multitasking                             | Context table ✅, `CR3` swap ✅, `exo_yield` ✅, shell LibOS ✅, Ctrl+Tab hotkey, framebuffer multiplexing                                                                                                                                                                                                                                                                                                                                              |
+| **Sprint 12: 2nd App + Context Switch**                 | Multitasking                             | Context table ✅, `CR3` swap ✅, `exo_yield` ✅, shell LibOS ✅, framebuffer multiplexing ✅ SCRUM-112, Ctrl+Tab hotkey                                                                                                                                                                                                                                                                                                                                              |
 | **Sprint 13: Harden + Compat Test**                     | Hardening                                | Regression suite, fuzz testing syscalls, test with DOOM.WAD / DOOM2.WAD / Freedoom2, performance report, code cleanup                                                                                                                                                                                                                                                                                                                       |

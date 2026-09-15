@@ -24,6 +24,7 @@
 #include "sleep.h"
 #include "pit.h"
 #include "fb_binding.h"
+#include "fb_shadow.h"
 #include "libc_shim_probe/libc_shim_probe_layout.h"
 #include "libc_shim_probe/libc_shim_probe_result.h"
 
@@ -117,18 +118,30 @@ static void test_libc_shim_works_from_ring3(void) {
     /*
      * The probe already checked its own mapped view read back what it wrote
      * (LIBC_SHIM_OK_FB); this is the independent half -- proving those bytes
-     * actually reached the framebuffer's real physical memory, not just a
-     * private copy the probe's own mapping happened to agree with itself
-     * about. The kernel's own map is a plain identity map (src/vmm.c), so
-     * the physical address IS the virtual address to read through here.
+     * actually reached real physical memory, not just a private copy the
+     * probe's own mapping happened to agree with itself about.
+     *
+     * SCRUM-112: libos_fb_map() -> exo_fb_acquire() no longer hands out the
+     * real hardware framebuffer's physical range -- it hands the caller its
+     * own private, RAM-backed buffer (src/fb_shadow.c), so the independent
+     * read is through that buffer's physical address
+     * (fb_shadow_lookup(LIBC_SHIM_PROBE_TEST_OWNER, ...)), not
+     * fb_binding_geometry()'s. The kernel's own map is still a plain
+     * identity map (src/vmm.c), so the physical address IS the virtual
+     * address to read through here, same as before.
      */
     const fb_geometry_t *geom = fb_binding_geometry();
     CU_ASSERT_PTR_NOT_NULL(geom);
-    if (geom != NULL && geom->height > 0) {
+
+    uint64_t shadow_phys;
+    int shadow_rc = fb_shadow_lookup(LIBC_SHIM_PROBE_TEST_OWNER, &shadow_phys);
+    CU_ASSERT_EQUAL(shadow_rc, 0);
+
+    if (geom != NULL && geom->height > 0 && shadow_rc == 0) {
         volatile uint32_t *first =
-            (volatile uint32_t *)(uintptr_t)geom->phys_addr;
+            (volatile uint32_t *)(uintptr_t)shadow_phys;
         volatile uint32_t *last =
-            (volatile uint32_t *)(uintptr_t)(geom->phys_addr +
+            (volatile uint32_t *)(uintptr_t)(shadow_phys +
                                   (uint64_t)geom->pitch * (geom->height - 1));
 
         CU_ASSERT_EQUAL(*first, 0xDEADBEEFu);
@@ -157,12 +170,17 @@ static void test_libc_shim_works_from_ring3(void) {
  * put back.
  */
 int libc_shim_probe_suite_cleanup(void) {
-    /* The probe acquired the framebuffer binding (via libos_fb_map()) under
-     * LIBC_SHIM_PROBE_TEST_OWNER and never released it -- nothing in
-     * production calls exo_exit() here either. Released explicitly, the
-     * same way page_map_suite_cleanup() does, so a suite running after this
-     * one does not find the framebuffer still held. */
+    /* The probe acquired a virtual framebuffer (via libos_fb_map(), SCRUM-112)
+     * under LIBC_SHIM_PROBE_TEST_OWNER and never released it -- nothing in
+     * production calls exo_exit() here either. libos_test_teardown_owner()'s
+     * page_reclaim_all() frees the underlying pages generically, but leaves
+     * fb_shadow.c's own directory entry stale (see src/fb_shadow.h's own
+     * comment on why release is a separate step from freeing the pages), so
+     * it is dropped explicitly here, the same way fb_binding_release() below
+     * always was, so a suite running after this one does not find a
+     * dangling entry pointing at pages that have since been reused. */
     fb_binding_release(LIBC_SHIM_PROBE_TEST_OWNER);
+    fb_shadow_release(LIBC_SHIM_PROBE_TEST_OWNER);
     libos_test_teardown_owner(LIBC_SHIM_PROBE_TEST_OWNER);
     if (saved_libos_pml4 != 0)
         vmm_bind_address_space(PAGE_OWNER_LIBOS, saved_libos_pml4);

@@ -54,11 +54,18 @@ void suite_sse_tests(CU_pSuite s);
 void suite_syscall_yield_tests(CU_pSuite s);
 void suite_shell_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
+void suite_fb_shadow_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
 int fb_binding_suite_init(void);
 int fb_binding_suite_cleanup(void);
+
+/* Same idea for the virtual-framebuffer suite: it swaps in a synthetic
+ * geometry and allocates real shadow buffers, and must leave neither behind
+ * (SCRUM-112). */
+int fb_shadow_suite_init(void);
+int fb_shadow_suite_cleanup(void);
 
 /* Same idea for the revocation suite: it borrows the framebuffer and allocates
  * pages under a second context id, and must leave neither behind (SCRUM-156). */
@@ -229,6 +236,10 @@ int run_tests(void)
     s = CU_add_suite("fb_binding", fb_binding_suite_init,
                      fb_binding_suite_cleanup);
     suite_fb_binding_tests(s);
+
+    s = CU_add_suite("fb_shadow", fb_shadow_suite_init,
+                     fb_shadow_suite_cleanup);
+    suite_fb_shadow_tests(s);
 
     s = CU_add_suite("vmm", NULL, NULL);
     suite_vmm_tests(s);

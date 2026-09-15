@@ -184,6 +184,38 @@ void* alloc_page(void) {
     return alloc_page_owned(PAGE_OWNER_KERNEL);
 }
 
+void* alloc_pages_contig_owned(page_owner_t owner, uint32_t count) {
+    if (bitmap == NULL || total_pages == 0 || count == 0) {
+        return NULL;
+    }
+
+    for (uint32_t start = 0; start + count <= total_pages; start++) {
+        if (bitmap_test(start)) {
+            continue;
+        }
+
+        uint32_t run = 1;
+        while (run < count && !bitmap_test(start + run)) {
+            run++;
+        }
+
+        if (run == count) {
+            for (uint32_t i = 0; i < count; i++) {
+                bitmap_set(start + i);
+                owners[start + i] = owner_id(owner);
+            }
+            return (void*)(managed_base + ((uintptr_t)start * PAGE_SIZE));
+        }
+
+        /* Skip past the whole run we just scanned -- nothing inside it can
+         * start a shorter free run than the one already ruled out. */
+        start += run;
+    }
+
+    serial_print("alloc_pages_contig: no contiguous run available\n");
+    return NULL;
+}
+
 // Resolve `addr` to a managed page index.  Returns 0 and writes *index on a
 // valid page-aligned in-range address; returns non-zero otherwise.
 static int page_index_of(void* addr, uint32_t* index) {

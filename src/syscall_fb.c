@@ -2,34 +2,41 @@
 #include "syscall.h"
 #include "exo_syscall.h"
 #include "fb_binding.h"
+#include "fb_shadow.h"
 #include "multiboot2.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 /*
- * syscall_fb.c — the exo_fb_acquire handler (SCRUM-154).
+ * syscall_fb.c — the exo_fb_acquire handler (SCRUM-154, multiplexed by
+ * SCRUM-112).
  *
- * #4 is the framebuffer's *establish* operation in the secure-binding model
- * (docs/syscall_spec.md §3.3): it hands the caller the geometry it needs to
- * drive the screen and records it as the framebuffer's owner in the same
- * breath.  Everything that enforces the binding afterwards — exo_page_map
- * (SCRUM-153) and exo_exit reclamation (SCRUM-155) — goes through
- * src/fb_binding.c rather than through this file.
+ * #4 no longer hands out the real hardware framebuffer: it hands the caller
+ * its own private, RAM-backed surface matching the real framebuffer's
+ * geometry (src/fb_shadow.c). Every context that calls this gets one, held
+ * for as long as it lives — no exclusivity, no -EXO_EBUSY, unlike the
+ * SCRUM-154 original this replaces. What actually reaches the screen is
+ * decided by src/fb_compositor.c, not by who called this; src/fb_binding.c
+ * still publishes the real framebuffer's geometry (fb_binding_geometry(),
+ * the source fb_shadow_acquire() sizes new buffers from) but its
+ * acquire/release/owner half is no longer exercised from this path — the
+ * real framebuffer is now unmappable by any LibOS, full stop.
  */
 
-/* #4 — claim the framebuffer and describe it.  Returns:
- *   0              *info_out filled, the caller now owns the framebuffer
+/* #4 — claim a private virtual framebuffer and describe it.  Returns:
+ *   0              *info_out filled with the caller's own surface
  *   -EXO_EFAULT    info_out is not a usable pointer
- *   -EXO_EBUSY     another LibOS holds it
+ *   -EXO_ENOMEM    no contiguous run of pages that size is free
  *   -EXO_ENODEV    the bootloader gave this machine no framebuffer
  *
- * The pointer is checked before the binding is taken, so a caller that passes
- * garbage does not walk away owning the screen it never received.
+ * The pointer is checked before anything is allocated, so a caller that
+ * passes garbage does not walk away owning pages it never received.
  *
- * A re-acquire by the current owner succeeds and re-fills the struct: §3.2 #4
- * makes -EXO_EBUSY the answer for "another LibOS holds it", and DG_Init
- * calling twice after a soft restart is not that. */
+ * A re-acquire by the same caller succeeds and re-fills the struct with the
+ * same buffer (fb_shadow_acquire() is idempotent per caller) — DG_Init
+ * calling twice after a soft restart gets its own surface back, not a
+ * fresh one. */
 static int64_t sys_fb_acquire(uint64_t info_out, uint64_t a2, uint64_t a3,
                               uint64_t a4, uint64_t a5, uint64_t a6)
 {
@@ -43,42 +50,13 @@ static int64_t sys_fb_acquire(uint64_t info_out, uint64_t a2, uint64_t a3,
     if (!exo_range_in_user_window(info_out, sizeof(exo_fb_info_t)))
         return -EXO_EFAULT;
 
-    switch (fb_binding_acquire(syscall_current_context())) {
-    case FB_BIND_OK:     break;
-    case FB_BIND_EBUSY:  return -EXO_EBUSY;
-    default:             return -EXO_ENODEV;
-    }
-
-    const fb_geometry_t *geom = fb_binding_geometry();
-
-    /* fb_binding_acquire() only returns FB_BIND_OK when a framebuffer is
-     * published, so geom is non-NULL here; the check keeps a future caller
-     * that reorders these two from dereferencing NULL in ring 0.  Hand the
-     * binding back rather than leaving the caller owning a screen it was told
-     * it did not get. */
-    if (geom == NULL) {
-        fb_binding_release(syscall_current_context());
-        return -EXO_ENODEV;
-    }
-
     exo_fb_info_t *out = (exo_fb_info_t *)(uintptr_t)info_out;
 
-    /* Field by field, not a struct copy: fb_geometry_t is the kernel's own
-     * view and exo_fb_info_t is ABI (src/exo_syscall.h), and they are allowed
-     * to drift apart. */
-    out->phys_addr = geom->phys_addr;
-    out->width     = geom->width;
-    out->height    = geom->height;
-    out->pitch     = geom->pitch;
-    out->bpp       = geom->bpp;
-
-    /* ABI: the kernel zeroes the padding rather than leaking whatever the
-     * LibOS left in the struct back to it as if it were kernel data. */
-    out->reserved[0] = 0;
-    out->reserved[1] = 0;
-    out->reserved[2] = 0;
-
-    return 0;
+    switch (fb_shadow_acquire(syscall_current_context(), out)) {
+    case FB_SHADOW_OK:     return 0;
+    case FB_SHADOW_ENOMEM: return -EXO_ENOMEM;
+    default:                return -EXO_ENODEV;
+    }
 }
 
 void syscall_fb_init(const struct mb2_tag_framebuffer *fb_tag)
