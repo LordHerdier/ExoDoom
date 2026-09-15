@@ -214,3 +214,21 @@ int context_switch_request(page_owner_t to_id) {
 
     return CONTEXT_OK;
 }
+
+page_owner_t context_next_ready(page_owner_t current) {
+    int start = 0;
+    for (int i = 0; i < CONTEXT_MAX; i++) {
+        if (contexts[i].state != CONTEXT_STATE_UNUSED && contexts[i].id == current) {
+            start = i + 1;
+            break;
+        }
+    }
+
+    for (int offset = 0; offset < CONTEXT_MAX; offset++) {
+        int i = (start + offset) % CONTEXT_MAX;
+        if (contexts[i].state == CONTEXT_STATE_READY) {
+            return contexts[i].id;
+        }
+    }
+    return PAGE_OWNER_FREE;
+}

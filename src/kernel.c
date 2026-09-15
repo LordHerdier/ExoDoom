@@ -20,6 +20,7 @@
 #include "syscall_serial.h"
 #include "syscall_kbd.h"
 #include "syscall_pit.h"
+#include "syscall_yield.h"
 #include "fb_binding.h"
 #include "revoke.h"
 #include "vmm.h"
@@ -684,6 +685,13 @@ void kernel_main(void *mb2_info_ptr) {
     // kernel_get_ticks_ms(), which stays at 0 without it -- and, like the
     // other syscall *_init()s, ahead of the TESTING branch.
     syscall_pit_init();
+
+    // ── Yield syscall (SCRUM-109) ────────────────────────────────────────
+    // Binds exo_yield (#19) to context_switch_request() via the round-robin
+    // policy in context_next_ready() -- needs no other subsystem init, so
+    // placement here just follows the "after syscall_init(), ahead of the
+    // TESTING branch" rule every other syscall *_init() follows.
+    syscall_yield_init();
 
 #ifdef TESTING
     // No blanket `sti` here: several suites (fault, tss, libos_launch,
