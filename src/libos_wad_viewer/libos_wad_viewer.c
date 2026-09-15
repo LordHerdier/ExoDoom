@@ -41,8 +41,11 @@
  * maps freedoom2.wad's *existing* physical pages read-only into this
  * LibOS's own address space at the fixed LIBOS_WAD_VADDR, and passes that
  * address plus the WAD's byte length in through libos_wad_params_t
- * (src/libos_wad_params.h), the only argument this LibOS receives. Nothing
- * else about the WAD parser needed to change to run here: wad_t (src/wad.h)
+ * (src/libos_wad_params.h), the only argument this LibOS receives -- as of
+ * SCRUM-175, via g_wad_params below (this TU's own first .data global,
+ * patched in place by libos_launch_patch_params(), src/libos_launch.h)
+ * rather than a WAD-viewer-specific side-channel page at a second fixed VA.
+ * Nothing else about the WAD parser needed to change to run here: wad_t (src/wad.h)
  * only ever stores offsets relative to its own `data` pointer, never an
  * absolute physical address, so src/wad.c, src/flat.c and src/automap.c link
  * into this ring-3 target and run completely unmodified.
@@ -82,15 +85,30 @@
 __attribute__((section(".text.entry")))
 void libos_wad_viewer_main(void);
 
-/* .data, not .rodata, and non-zero-initialized so it actually lands in
- * .data rather than the zero-initialized .bss a plain `= 0` global would
- * (GCC never stores real bytes for a zero initializer): this target has no
- * other mutable global, and build.sh's objcopy step cannot embed an empty
- * .data section as a blob. Same trick tests/kernel/libc_shim_probe/
- * libc_shim_probe.c's libos_c_probe_msg uses, and like that one, this also
- * proves the compiled .data region genuinely loads at LIBOS_LAUNCH_DATA_VADDR
- * -- logged over exo_serial_write below, right after libos_wad_params_t
- * (this LibOS's real payload) is read from the very same region. */
+/* g_wad_params -- SCRUM-175's generalized params-hand-off convention.
+ * src/syscall_launch.c overwrites this struct in place, via
+ * libos_launch_patch_params()/img.data_paddrs[0] (src/libos_launch.h), after
+ * libos_build_image() succeeds -- replacing an earlier version of this
+ * mechanism that hand-mapped a second page at its own fixed VA
+ * (LIBOS_WAD_PARAMS_VADDR, since removed from src/libos_wad_params.h). For
+ * that patch to land at offset 0 of this LibOS's .data blob, this must stay
+ * (a) the first global declared in this file, and (b) non-zero-initialized,
+ * so it actually lands in .data and not the zero-initialized .bss a plain
+ * `= 0` global would (GCC never stores real bytes for a zero initializer) --
+ * this file must also stay first in build.sh's source list for this target,
+ * the same requirement .text.entry placement already has (see this file's
+ * top comment), since a TU's globals land in .data in source order and ld's
+ * `*(.data)` rule then collects input sections in link order. The sentinel
+ * values below are always overwritten before this LibOS ever runs; they
+ * exist only to keep the initializer nonzero. */
+libos_wad_params_t g_wad_params = { .wad_vaddr = ~0ULL, .wad_size = ~0ULL };
+
+/* .data, not .rodata, and non-zero-initialized for the same reason as
+ * g_wad_params above -- logged over exo_serial_write below, right after
+ * g_wad_params (this LibOS's real payload) is read from the same region,
+ * to prove the compiled .data region genuinely loads at
+ * LIBOS_LAUNCH_DATA_VADDR. Same trick tests/kernel/libc_shim_probe/
+ * libc_shim_probe.c's libos_c_probe_msg uses. */
 char libos_wad_viewer_banner[] = "ring3 wad viewer: entering libos_wad_viewer_main\n";
 
 /* ---- small ring-3-only helpers (no libc shim linked into this target) -- */
@@ -296,8 +314,7 @@ void libos_wad_viewer_main(void)
 
     ring3_boot_banner(&con, &fb);
 
-    const libos_wad_params_t *params =
-        (const libos_wad_params_t *)(uintptr_t)LIBOS_WAD_PARAMS_VADDR;
+    const libos_wad_params_t *params = &g_wad_params;
 
     wad_t wad;
     if (wad_init(&wad, (const uint8_t *)(uintptr_t)params->wad_vaddr,

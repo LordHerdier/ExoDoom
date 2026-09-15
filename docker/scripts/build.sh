@@ -305,7 +305,11 @@ echo "[2d/7] Build WAD/flat/automap viewer LibOS (SCRUM-178)"
 # entry_vaddr (this target also carries the
 # __attribute__((section(".text.entry"))) belt-and-suspenders fix its own
 # top comment describes, for the same reason the shell target's comment
-# gives for keeping shell_main() textually first too).
+# gives for keeping shell_main() textually first too). The same ordering
+# also fixes this target's params struct at offset 0 of .data (SCRUM-175):
+# libos_wad_viewer.c's g_wad_params is that TU's first global, and being
+# first in this source list is what puts it first in link order too -- see
+# libos_launch_patch_params()'s comment in src/libos_launch.h.
 build_ring3_link_target libos_wad_viewer src/libos_wad_viewer "" \
   src/libos_wad_viewer/libos_wad_viewer.c src/wad.c src/flat.c src/automap.c \
   src/fb.c src/fb_console.c src/libos_fb.c

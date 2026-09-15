@@ -195,6 +195,80 @@ static void test_build_image_places_code_and_data(void) {
     libos_destroy_image(LIBOS_LAUNCH_TEST_OWNER, &img);
 }
 
+/* SCRUM-175: libos_launch_patch_params() overwrites the first `len` bytes of
+ * a built image's .data region in place -- the generalized replacement for a
+ * per-app side-channel params page. Prove it lands exactly at offset 0 of
+ * img.data_paddrs[0], and that bytes past `len` (the rest of the original
+ * `data` blob) are left untouched. */
+static void test_patch_params_overwrites_data_front(void) {
+    static const unsigned char sample_data[] = "0123456789ABCDEF";
+    static const uint32_t patch = 0xDEADBEEFu;
+    size_t code_len = (uintptr_t)&libos_launch_probe_end -
+                      (uintptr_t)&libos_launch_probe;
+
+    libos_image_t img;
+    CU_ASSERT_EQUAL(libos_build_image(LIBOS_LAUNCH_TEST_OWNER,
+                                      (const void *)&libos_launch_probe,
+                                      code_len,
+                                      sample_data, sizeof(sample_data),
+                                      0, &img),
+                   VMM_OK);
+
+    CU_ASSERT_EQUAL(libos_launch_patch_params(&img, &patch, sizeof(patch)),
+                   VMM_OK);
+
+    unsigned char *data_page = (unsigned char *)(uintptr_t)img.data_paddrs[0];
+    CU_ASSERT_EQUAL(memcmp(data_page, &patch, sizeof(patch)), 0);
+    CU_ASSERT_EQUAL(memcmp(data_page + sizeof(patch),
+                          sample_data + sizeof(patch),
+                          sizeof(sample_data) - sizeof(patch)), 0);
+
+    libos_destroy_image(LIBOS_LAUNCH_TEST_OWNER, &img);
+}
+
+/* An image built with no data/bss at all (data_pages == 0) has nothing at
+ * LIBOS_LAUNCH_DATA_VADDR to patch. */
+static void test_patch_params_rejects_no_data_region(void) {
+    size_t code_len = (uintptr_t)&libos_launch_probe_end -
+                      (uintptr_t)&libos_launch_probe;
+    static const uint32_t patch = 0xDEADBEEFu;
+
+    libos_image_t img;
+    CU_ASSERT_EQUAL(libos_build_image(LIBOS_LAUNCH_TEST_OWNER,
+                                      (const void *)&libos_launch_probe,
+                                      code_len, 0, 0, 0, &img),
+                   VMM_OK);
+
+    CU_ASSERT_EQUAL(libos_launch_patch_params(&img, &patch, sizeof(patch)),
+                   VMM_EINVAL);
+
+    libos_destroy_image(LIBOS_LAUNCH_TEST_OWNER, &img);
+}
+
+/* A patch longer than one page can never fit at img.data_paddrs[0] -- there
+ * is no second page to spill into, and libos_launch_patch_params() only ever
+ * touches the first data page. */
+static void test_patch_params_rejects_oversized_len(void) {
+    static const unsigned char sample_data[] = "0123456789ABCDEF";
+    size_t code_len = (uintptr_t)&libos_launch_probe_end -
+                      (uintptr_t)&libos_launch_probe;
+
+    libos_image_t img;
+    CU_ASSERT_EQUAL(libos_build_image(LIBOS_LAUNCH_TEST_OWNER,
+                                      (const void *)&libos_launch_probe,
+                                      code_len,
+                                      sample_data, sizeof(sample_data),
+                                      0, &img),
+                   VMM_OK);
+
+    unsigned char oversized[VMM_PAGE_SIZE + 1] = {0};
+    CU_ASSERT_EQUAL(libos_launch_patch_params(&img, oversized,
+                                              sizeof(oversized)),
+                   VMM_EINVAL);
+
+    libos_destroy_image(LIBOS_LAUNCH_TEST_OWNER, &img);
+}
+
 /* Leaves nothing behind even if an assertion above failed mid-test and
  * skipped its own cleanup -- see libos_test_common.h. Unlike the normal path
  * (libos_destroy_image, which knows exactly which pages to free), `img` is
@@ -216,4 +290,10 @@ void suite_libos_launch_tests(CU_pSuite s) {
                 test_build_image_rejects_oversized_data);
     CU_add_test(s, "build_image places code and data at fixed addresses",
                 test_build_image_places_code_and_data);
+    CU_add_test(s, "patch_params overwrites data front",
+                test_patch_params_overwrites_data_front);
+    CU_add_test(s, "patch_params rejects image with no data region",
+                test_patch_params_rejects_no_data_region);
+    CU_add_test(s, "patch_params rejects oversized len",
+                test_patch_params_rejects_oversized_len);
 }
