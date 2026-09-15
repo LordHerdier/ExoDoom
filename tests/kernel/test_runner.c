@@ -47,6 +47,7 @@ void suite_port_io_fault_tests(CU_pSuite s);
 void suite_kernel_mem_fault_tests(CU_pSuite s);
 void suite_irq_entry_tests(CU_pSuite s);
 void suite_context_tests(CU_pSuite s);
+void suite_fb_console_tests(CU_pSuite s);
 void suite_context_switch_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
@@ -139,6 +140,12 @@ int context_switch_suite_cleanup(void);
  * having reset libos_page_alloc back to a clean, empty state as its final
  * action. */
 int libos_heap_stress_suite_init(void);
+
+/* The fb_console suite (SCRUM-162) runs scroll_up_one_row() against a
+ * synthetic, RAM-backed framebuffer rather than the real MMIO one -- init
+ * allocates the backing page, cleanup frees it. */
+int fb_console_suite_init(void);
+int fb_console_suite_cleanup(void);
 
 int run_tests(void)
 {
@@ -264,6 +271,9 @@ int run_tests(void)
 
     s = CU_add_suite("context", NULL, context_suite_cleanup);
     suite_context_tests(s);
+
+    s = CU_add_suite("fb_console", fb_console_suite_init, fb_console_suite_cleanup);
+    suite_fb_console_tests(s);
 
     s = CU_add_suite("context_switch", NULL, context_switch_suite_cleanup);
     suite_context_switch_tests(s);
