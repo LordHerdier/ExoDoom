@@ -200,6 +200,17 @@ int libos_build_image(page_owner_t owner,
     return VMM_OK;
 }
 
+int libos_launch_patch_params(const libos_image_t *img,
+                              const void *params, size_t len)
+{
+    if (img->data_pages == 0 || len > VMM_PAGE_SIZE) {
+        return VMM_EINVAL;
+    }
+
+    memcpy((void *)(uintptr_t)img->data_paddrs[0], params, len);
+    return VMM_OK;
+}
+
 void libos_destroy_image(page_owner_t owner, const libos_image_t *img)
 {
     free_pages(img->code_paddrs, img->code_pages, owner);

@@ -209,6 +209,53 @@ int libos_build_image(page_owner_t owner,
                       libos_image_t *out);
 
 /*
+ * Overwrite the first `len` bytes of a successfully-built LibOS's .data
+ * region in place (SCRUM-175) -- the generalized alternative to a per-app
+ * side-channel params page (an earlier, WAD-viewer-specific version of this
+ * mechanism hand-mapped a second page at its own fixed VA; see
+ * src/syscall_launch.c's history and src/libos_wad_params.h). The convention
+ * this depends on: a LibOS app declares its own params struct as literally
+ * the first global in its own `.data` (non-zero-initialized, so it survives
+ * -- GCC never stores real bytes for a zero initializer, so a `= 0` global
+ * lands in `.bss` instead), and its translation unit is linked first for the
+ * same reason `.text.entry` placement already requires it (see
+ * tests/kernel/ring3_link_target.ld.in) -- a TU's globals land in `.data` in
+ * source order, and `ld`'s `*(.data)` rule then collects input sections in
+ * link order, so "first global in the first-linked TU" is what lands at
+ * offset 0 of the whole `.data` blob.
+ *
+ * img->data_paddrs[0] is the physical page backing that offset --
+ * identity-mapped, so the kernel writes it directly with no
+ * vmm_map_page_in() of its own, unlike the old side-channel page. Call this
+ * after libos_build_image() returns VMM_OK and before switching to or
+ * launching the image.
+ *
+ * Returns VMM_EINVAL if img->data_pages == 0 (nothing was mapped at
+ * LIBOS_LAUNCH_DATA_VADDR to patch) or len > VMM_PAGE_SIZE (a params struct
+ * spanning a page boundary would need a real multi-page copy this does not
+ * attempt -- no caller needs one yet, since every params struct so far is a
+ * handful of fields).
+ *
+ * The patched struct is NOT read-only, unlike the old per-app side-channel
+ * page it replaces (that one was deliberately mapped VMM_PRESENT|VMM_USER
+ * with no VMM_WRITE, so a stray write from the launched app would fault
+ * immediately). It cannot be here: it lives in the same VMM_WRITE region as
+ * the rest of the app's `.data`, and the whole point of this convention is
+ * one general-purpose writable region rather than a bespoke read-only page
+ * per app. This is an accepted widening, not an oversight -- a LibOS is
+ * already fully trusted with everything else in its own address space (its
+ * heap, its stack, every other `.data`/`.bss` global), so a bug in the
+ * launched app corrupting its own params struct post-launch is no different
+ * in kind from it corrupting any other piece of its own state, and the
+ * kernel was never going to catch that either way. Do not add a caller that
+ * relies on this struct staying byte-for-byte what was patched here for any
+ * security-relevant decision -- treat it as the app's own mutable state from
+ * the moment this call returns.
+ */
+int libos_launch_patch_params(const libos_image_t *img,
+                              const void *params, size_t len);
+
+/*
  * Undo a successful libos_build_image(): frees every code, data and the
  * stack page back to the PMM (free_page_owned(), since alloc_page_owned()
  * tagged them `owner`) and then vmm_destroy_address_space()s the PML4 they

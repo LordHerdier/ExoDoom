@@ -267,6 +267,33 @@ convention and calls it from `kernel_main` instead of a test harness.
   live interactive demo, not a placeholder waiting to be replaced. Read
   `docs/memory.md` §7, `docs/syscall_spec.md` §3.7 and `docs/architecture.md`
   §5.1/§6 before implementing anything in that space.
+- **SCRUM-175 generalizes two conventions every ring-3 LibOS app (the shell,
+  the WAD viewer, and every future one — SCRUM-168/169's clock/calculator,
+  eventually SCRUM-110's shell extensions) now follows, rather than each
+  reinventing its own.** First, entry-point placement:
+  `__attribute__((section(".text.entry")))` on the target's real entry
+  function, matched by `*(.text.entry)` placed first in
+  `tests/kernel/ring3_link_target.ld.in`'s `.text` block, is *the* way to
+  guarantee a target lands at `.text` offset 0 (`libos_build_image()`'s
+  `entry_vaddr`) — "list the entry file first" alone breaks the moment a
+  target has `static` helpers ahead of its entry point in source order,
+  because at `-O0` GCC does not inline `exo_syscall.h`'s `static inline`
+  syscall stubs away and they get emitted as real functions first. Second,
+  argument hand-off: a LibOS app declares its own params struct as literally
+  the first global in its own `.data` (non-zero-initialized, so it lands in
+  `.data` and not `.bss` — GCC never stores real bytes for a zero
+  initializer), and the kernel-side launcher calls
+  `libos_launch_patch_params()` (`src/libos_launch.h`/`.c`) to overwrite it
+  in place through `img->data_paddrs[0]` — a physical page the kernel
+  already has identity-mapped access to — right after `libos_build_image()`
+  succeeds. Both conventions depend on the same requirement: the target's
+  entry-point-and-params TU must be linked first in
+  `build_ring3_link_target()`'s source list, since GCC emits a TU's globals
+  into `.data` in source order and `ld`'s `*(.data)` rule then collects
+  input sections in link order. `src/libos_wad_viewer/libos_wad_viewer.c`'s
+  `g_wad_params` + `src/syscall_launch.c`'s `sys_launch_wad_viewer()` is the
+  worked example — it replaced an earlier, WAD-viewer-specific side channel
+  (a second hand-mapped page at its own fixed VA) with this general pattern.
 - **`vmm.c` mirrors boot.s's ring-3 U/S gate.** Test builds map the identity
   range user-accessible (`#ifdef TESTING`), because `vmm_init()` runs before
   `run_tests()` and the ring-3 probe executes against the kernel map. Change one

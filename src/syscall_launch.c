@@ -104,25 +104,24 @@ static int64_t sys_launch_wad_viewer(uint64_t a1, uint64_t a2, uint64_t a3,
         return -EXO_EINVAL;
     }
 
-    /* One owned page carrying libos_wad_params_t -- the only thing the
-     * viewer cannot learn through an ordinary syscall (see
-     * src/libos_wad_params.h). Mapped read-only: the viewer never writes
-     * it. */
-    void *params_page = alloc_page_owned(viewer_id);
-    if (params_page == NULL) {
-        libos_destroy_image(viewer_id, &img);
-        context_destroy(viewer_id);
-        return -EXO_ENOMEM;
-    }
-    *(libos_wad_params_t *)params_page = (libos_wad_params_t){
+    /* SCRUM-175: patch libos_wad_params_t -- the only thing the viewer
+     * cannot learn through an ordinary syscall (see src/libos_wad_params.h)
+     * -- directly into the viewer's own g_wad_params global (its first
+     * .data global) rather than hand-mapping a separate side-channel page
+     * the way an earlier version of this mechanism did. See
+     * libos_launch_patch_params()'s own comment (src/libos_launch.h) for why
+     * this is safe: it requires only that libos_wad_viewer.c stays first in
+     * build.sh's source list for this target, which it already is for
+     * .text.entry placement. Unlike the old side-channel page (mapped
+     * read-only), g_wad_params now lives in the viewer's ordinary writable
+     * .data, so the viewer itself could in principle corrupt its own
+     * wad_vaddr/wad_size after launch -- an accepted widening, not a
+     * regression the kernel needs to guard against, per that same comment. */
+    libos_wad_params_t params = {
         .wad_vaddr = LIBOS_WAD_VADDR,
         .wad_size  = wad_size,
     };
-    if (vmm_map_page_in((uint64_t *)(uintptr_t)img.pml4_phys,
-                        LIBOS_WAD_PARAMS_VADDR,
-                        (uint64_t)(uintptr_t)params_page,
-                        VMM_PRESENT | VMM_USER) != VMM_OK) {
-        free_page_owned(params_page, viewer_id);
+    if (libos_launch_patch_params(&img, &params, sizeof(params)) != VMM_OK) {
         libos_destroy_image(viewer_id, &img);
         context_destroy(viewer_id);
         return -EXO_EINVAL;
@@ -157,7 +156,6 @@ static int64_t sys_launch_wad_viewer(uint64_t a1, uint64_t a2, uint64_t a3,
      * Arms context_switch_pending; src/syscall_entry.s does the actual
      * switch once this handler returns. */
     if (context_switch_request(viewer_id) != CONTEXT_OK) {
-        free_page_owned(params_page, viewer_id);
         libos_destroy_image(viewer_id, &img);
         context_destroy(viewer_id);
         return -EXO_EINVAL;
