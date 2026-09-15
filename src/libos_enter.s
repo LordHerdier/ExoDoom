@@ -57,6 +57,34 @@ libos_saved_rsp:
 .section .text
 
 /*
+ * void libos_iretq_enter(uint64_t entry_rip, uint64_t user_rsp,
+ *                         uint64_t rflags);
+ * Arguments arrive in RDI, RSI, RDX per the SysV ABI.
+ *
+ * The one place that builds a ring-3 iretq frame (SS/RSP/RFLAGS/CS/RIP,
+ * LIBOS_LAUNCH_USER_SS/_CS) and executes it. libos_enter/libos_enter_irq
+ * below jump here after pushing their own callee-saved GPRs and loading
+ * RDI/RSI/RDX from their arguments/RFLAGS constant; src/context_switch.s's
+ * context_switch_tail jumps here too, after restoring the incoming
+ * context's callee-saved GPRs and loading RDI/RSI/RDX (and, uniquely to
+ * that caller, RAX -- see its own comment) from context_regs_t. One
+ * definition of the frame shape instead of three that could drift apart.
+ * Never returns to its caller in the ordinary sense; whoever jumps here has
+ * already arranged how control comes back (libos_return(), or a future
+ * context switch away).
+ */
+.global libos_iretq_enter
+libos_iretq_enter:
+    /* An iretq frame is the only way into a lower privilege level: the CPU
+     * pops RIP, CS, RFLAGS, RSP and SS, and the CPL comes from the CS RPL. */
+    pushq $USER_SS
+    pushq %rsi                  /* user RSP */
+    pushq %rdx                  /* RFLAGS */
+    pushq $USER_CS
+    pushq %rdi                  /* user RIP */
+    iretq
+
+/*
  * uint64_t libos_enter(uint64_t entry_vaddr, uint64_t stack_top_vaddr);
  *
  * `iretq` to CPL 3 at `entry_vaddr` (RDI) with RSP = `stack_top_vaddr`
@@ -75,14 +103,10 @@ libos_enter:
     push %r15
     movq %rsp, libos_saved_rsp(%rip)
 
-    /* An iretq frame is the only way into a lower privilege level: the CPU
-     * pops RIP, CS, RFLAGS, RSP and SS, and the CPL comes from the CS RPL. */
-    pushq $USER_SS
-    pushq %rsi                  /* user RSP = stack_top_vaddr */
-    pushq $LAUNCH_RFLAGS
-    pushq $USER_CS
-    pushq %rdi                  /* user RIP = entry_vaddr */
-    iretq
+    movq $LAUNCH_RFLAGS, %rdx    /* entry_vaddr (%rdi), stack_top_vaddr
+                                  * (%rsi) already sit where
+                                  * libos_iretq_enter expects them. */
+    jmp libos_iretq_enter
 
 /*
  * uint64_t libos_enter_irq(uint64_t entry_vaddr, uint64_t stack_top_vaddr);
@@ -103,12 +127,8 @@ libos_enter_irq:
     push %r15
     movq %rsp, libos_saved_rsp(%rip)
 
-    pushq $USER_SS
-    pushq %rsi                  /* user RSP = stack_top_vaddr */
-    pushq $LAUNCH_RFLAGS_IRQ
-    pushq $USER_CS
-    pushq %rdi                  /* user RIP = entry_vaddr */
-    iretq
+    movq $LAUNCH_RFLAGS_IRQ, %rdx
+    jmp libos_iretq_enter
 
 /*
  * int64_t libos_return(uint64_t result, ...);

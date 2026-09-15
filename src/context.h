@@ -65,10 +65,17 @@ typedef enum {
  * comment) and restores it on the way back in via iretq.
  *
  * Deliberately NOT the full 14-register set src/syscall_entry.s preserves
- * for an ordinary (non-switching) syscall: rdi/rsi/rdx/r10/r8/r9/rax are
- * SysV caller-saved at the C call site (exo_yield()) that triggers a
- * switch, so a context resumed after one needs only the callee-saved set
- * plus rsp/rip/rflags to satisfy that call's own ABI contract.
+ * for an ordinary (non-switching) syscall: rdi/rsi/rdx/r10/r8/r9 are SysV
+ * caller-saved at the C call site (exo_yield()) that triggers a switch, so
+ * a context resumed after one needs only the callee-saved set plus
+ * rsp/rip/rflags to satisfy that call's own ABI contract. rax is the one
+ * caller-saved register that DOES need to survive the round trip: it is
+ * exo_yield()'s own return value (docs/syscall_spec.md's "RAX=return"
+ * convention), so whatever a resumed context finds in RAX after
+ * context_switch_tail's iretq becomes the yield call's apparent result. A
+ * primed (context_prime(), never-run) context relies on context_create()'s
+ * memset leaving this 0, matching exo_yield()'s "returns 0 when
+ * rescheduled" contract for a context's very first resume.
  */
 typedef struct {
     uint64_t rsp;
@@ -80,6 +87,7 @@ typedef struct {
     uint64_t r13;
     uint64_t r14;
     uint64_t r15;
+    uint64_t rax;
 } context_regs_t;
 
 /* src/context_switch.s hardcodes these field offsets (no C compiler
@@ -105,7 +113,9 @@ _Static_assert(offsetof(context_regs_t, r14) == 56,
                 "context_switch.s hardcodes context_regs_t.r14's offset");
 _Static_assert(offsetof(context_regs_t, r15) == 64,
                 "context_switch.s hardcodes context_regs_t.r15's offset");
-_Static_assert(sizeof(context_regs_t) == 72,
+_Static_assert(offsetof(context_regs_t, rax) == 72,
+                "context_switch.s hardcodes context_regs_t.rax's offset");
+_Static_assert(sizeof(context_regs_t) == 80,
                 "context_switch.s hardcodes sizeof(context_regs_t)");
 
 typedef struct {

@@ -44,6 +44,9 @@ extern void context_switch_probe_b_end(void);
 #define SEED_RBX  0x1111111111111111ULL
 #define SEED_RBP  0x2222222222222222ULL
 #define SEED_R12  0x3333333333333333ULL
+#define SEED_R13  0x4444444444444444ULL
+#define SEED_R14  0x5555555555555555ULL
+#define SEED_R15  0x6666666666666666ULL
 
 /* Sweep every context this suite could have left live and free everything
  * it still owns -- the same shape context_suite_cleanup() (test_context_k.c)
@@ -194,7 +197,10 @@ static void test_switch_preserves_state_both_ways(void)
     CU_ASSERT_EQUAL(trace_a[2], SEED_RBX);
     CU_ASSERT_EQUAL(trace_a[3], SEED_RBP);
     CU_ASSERT_EQUAL(trace_a[4], SEED_R12);
-    CU_ASSERT_EQUAL(trace_a[5], MARK2);
+    CU_ASSERT_EQUAL(trace_a[5], SEED_R13);
+    CU_ASSERT_EQUAL(trace_a[6], SEED_R14);
+    CU_ASSERT_EQUAL(trace_a[7], SEED_R15);
+    CU_ASSERT_EQUAL(trace_a[8], MARK2);
 
     /* B genuinely ran too -- proves the CR3 swap and iretq into a *primed*
      * (never libos_enter()'d) context actually reached ring 3 on B's own

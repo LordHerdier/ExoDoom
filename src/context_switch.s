@@ -41,8 +41,6 @@
  *                        syscall_entry.s's push order if it ever changes.
  */
 
-#include "libos_launch.h"   /* LIBOS_LAUNCH_USER_SS/_CS */
-
 .code64
 
 /* Mirrors context_regs_t's layout in src/context.h -- that header
@@ -57,6 +55,7 @@
 .set CTX_REGS_OFF_R13,    48
 .set CTX_REGS_OFF_R14,    56
 .set CTX_REGS_OFF_R15,    64
+.set CTX_REGS_OFF_RAX,    72
 
 /* Offsets from %rsp, valid only right where context_switch_tail is entered
  * (via `jmp`, right after `call exo_syscall_dispatch` returns, before that
@@ -76,12 +75,20 @@
 .extern context_switch_in_regs
 .extern context_switch_in_pml4
 .extern saved_user_rsp
+.extern libos_iretq_enter
 
 context_switch_tail:
-    /* Capture the outgoing context: RAX is free (dispatch's return value is
-     * being discarded on this path -- the outgoing context resumes later
-     * through its own saved RIP, not through this call's return). */
+    /* Capture the outgoing context. RAX at this point holds
+     * exo_syscall_dispatch()'s return value for the very call that armed
+     * this switch (the outgoing context's own exo_yield()) -- it must
+     * survive to the context's next resume, since that is the value
+     * exo_yield() is supposed to return. Stash it in %r11 (dead here: its
+     * live value was already superseded by the pushed copy
+     * context_switch_tail reads via SAVED_R11_OFF below) before using %rax
+     * itself as a scratch pointer. */
+    movq %rax, %r11
     movq context_switch_out_regs(%rip), %rax
+    movq %r11, CTX_REGS_OFF_RAX(%rax)
     movq saved_user_rsp(%rip), %rdx
     movq %rdx, CTX_REGS_OFF_RSP(%rax)
     movq SAVED_RCX_OFF(%rsp), %rdx
@@ -104,11 +111,13 @@ context_switch_tail:
     movq context_switch_in_pml4(%rip), %rax
     movq %rax, %cr3
 
-    /* Restore the incoming context's callee-saved GPRs, then build an iretq
-     * frame from its saved RSP/RFLAGS/RIP -- the same shape libos_enter.s
-     * builds for a fresh launch (LIBOS_LAUNCH_USER_SS/_CS), whether this
-     * context was primed (context_prime()) or is resuming from a previous
-     * switch-out captured above. */
+    /* Restore the incoming context's callee-saved GPRs, then hand off to
+     * libos_iretq_enter (src/libos_enter.s) to build the iretq frame from
+     * its saved RIP/RSP/RFLAGS -- the same routine libos_enter()/
+     * libos_enter_irq() use for a fresh launch, whether this context was
+     * primed (context_prime()) or is resuming from a previous switch-out
+     * captured above. One definition of the frame shape, not a second copy
+     * here. */
     movq context_switch_in_regs(%rip), %rax
     movq CTX_REGS_OFF_RBX(%rax), %rbx
     movq CTX_REGS_OFF_RBP(%rax), %rbp
@@ -117,9 +126,13 @@ context_switch_tail:
     movq CTX_REGS_OFF_R14(%rax), %r14
     movq CTX_REGS_OFF_R15(%rax), %r15
 
-    pushq $LIBOS_LAUNCH_USER_SS
-    pushq CTX_REGS_OFF_RSP(%rax)
-    pushq CTX_REGS_OFF_RFLAGS(%rax)
-    pushq $LIBOS_LAUNCH_USER_CS
-    pushq CTX_REGS_OFF_RIP(%rax)
-    iretq
+    movq CTX_REGS_OFF_RIP(%rax), %rdi
+    movq CTX_REGS_OFF_RSP(%rax), %rsi
+    movq CTX_REGS_OFF_RFLAGS(%rax), %rdx
+
+    /* RAX itself is loaded last, from the incoming context's own saved
+     * value -- see the outgoing-side comment above. Must happen after every
+     * CTX_REGS_OFF_*(%rax) read above, since this clobbers the pointer;
+     * libos_iretq_enter never touches RAX, so it rides through to iretq. */
+    movq CTX_REGS_OFF_RAX(%rax), %rax
+    jmp libos_iretq_enter

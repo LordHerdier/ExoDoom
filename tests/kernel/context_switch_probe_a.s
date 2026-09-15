@@ -22,7 +22,10 @@
  *   +0x10  rbx_after (out: should read back as SEED_RBX)
  *   +0x18  rbp_after (out: should read back as SEED_RBP)
  *   +0x20  r12_after (out: should read back as SEED_R12)
- *   +0x28  mark2     (out: MARK2, written after resuming)
+ *   +0x28  r13_after (out: should read back as SEED_R13)
+ *   +0x30  r14_after (out: should read back as SEED_R14)
+ *   +0x38  r15_after (out: should read back as SEED_R15)
+ *   +0x40  mark2     (out: MARK2, written after resuming)
  *
  * Must be position-independent per libos_launch.h's convention: every data
  * reference uses the fixed immediate LIBOS_LAUNCH_DATA_VADDR, never an
@@ -73,8 +76,11 @@ context_switch_probe_a:
     movq %rbx, 0x10(%rax)
     movq %rbp, 0x18(%rax)
     movq %r12, 0x20(%rax)
+    movq %r13, 0x28(%rax)
+    movq %r14, 0x30(%rax)
+    movq %r15, 0x38(%rax)
     movabsq $MARK2, %rdx
-    movq %rdx, 0x28(%rax)
+    movq %rdx, 0x40(%rax)
 
     movq $RESULT_MARKER, %rdi
     movq $SYS_LIBOS_RETURN, %rax
