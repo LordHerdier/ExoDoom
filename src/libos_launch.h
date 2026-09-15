@@ -219,8 +219,11 @@ void libos_destroy_image(page_owner_t owner, const libos_image_t *img);
  * `libos_saved_rsp` (src/libos_enter.s) is a single global, so only one
  * libos_enter()/libos_return() round trip can be in flight at a time -- the
  * same non-reentrancy syscall_entry.s's saved-user-RSP slot calls out, and
- * the same fix applies: `swapgs` plus a per-CPU block once SCRUM-107 needs
- * more than one context live at once.
+ * the same fix applies: `swapgs` plus a per-CPU block once something needs
+ * more than one context live at once. SCRUM-107 (src/context.c/h) added the
+ * table that *tracks* multiple contexts' saved register state; it does not
+ * touch this global or perform a real switch -- that, and this reentrancy
+ * fix, are SCRUM-108's job.
  *
  * Does NOT switch CR3 -- `entry_vaddr`/`stack_top_vaddr` only resolve inside
  * the address space libos_build_image() mapped them into, so the caller

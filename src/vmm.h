@@ -187,10 +187,12 @@ int vmm_switch_address_space(uint64_t pml4_phys);
  *
  * Which PML4 a context (page_owner_t, the same id page_alloc.c/fb_binding.c/
  * revoke.c already use) runs on.  A flat table because v1 has exactly one
- * LibOS; SCRUM-147 is expected to grow VMM_MAX_ADDRESS_SPACES (or replace the
- * lookup with a field on its context struct) once there is more than one
- * entry worth optimizing for — nothing above this layer should assume the
- * lookup is O(1) or unbounded.
+ * LibOS; still a flat table after SCRUM-107, which builds a higher-level
+ * context_t (src/context.h — id, saved registers, scheduling state) on top
+ * of this registry rather than replacing it, so there remains one source of
+ * truth for the page-dir binding itself. VMM_MAX_ADDRESS_SPACES may still
+ * grow past 4 later — nothing above this layer should assume the lookup is
+ * O(1) or unbounded.
  */
 #define VMM_MAX_ADDRESS_SPACES 4
 

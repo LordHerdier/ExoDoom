@@ -46,6 +46,7 @@ void suite_libos_heap_stress_tests(CU_pSuite s);
 void suite_port_io_fault_tests(CU_pSuite s);
 void suite_kernel_mem_fault_tests(CU_pSuite s);
 void suite_irq_entry_tests(CU_pSuite s);
+void suite_context_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -114,6 +115,12 @@ int kernel_mem_fault_suite_cleanup(void);
  * SYS_LIBOS_RETURN handler, and a real address space around its live
  * ring-3 hardware-interrupt test (SCRUM-170). */
 int irq_entry_suite_cleanup(void);
+
+/* The context suite (SCRUM-107) creates real address spaces via
+ * vmm_create_address_space() and hands them to context_create(); a failed
+ * assertion mid-test could leave one bound with no test left to destroy it,
+ * so cleanup sweeps every context this suite's tests could have created. */
+int context_suite_cleanup(void);
 
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
@@ -248,6 +255,9 @@ int run_tests(void)
 
     s = CU_add_suite("irq_entry", NULL, irq_entry_suite_cleanup);
     suite_irq_entry_tests(s);
+
+    s = CU_add_suite("context", NULL, context_suite_cleanup);
+    suite_context_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

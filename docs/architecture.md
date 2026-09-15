@@ -655,10 +655,35 @@ full `FILE*` interface. See `docs/syscall_spec.md` §2 for the complete audit.
 ### Multi-application (Sprint 12)
 
 The eventual goal is **cooperative multitasking** between the Doom LibOS and a
-minimal shell LibOS. The kernel maintains a context table (`SCRUM-107`): each
-LibOS has its own PML4 (`CR3`), saved register set, and framebuffer
-region. `exo_yield` triggers a context switch (save registers + `CR3` swap). A
-keyboard hotkey (Ctrl+Tab) swaps input focus and the active framebuffer.
+minimal shell LibOS. `exo_yield` will trigger a context switch (save
+registers + `CR3` swap), and a keyboard hotkey (Ctrl+Tab) will swap input
+focus and the active framebuffer.
+
+> ✅ **SCRUM-107:** the context table itself exists —
+> `src/context.h`/`src/context.c`. Each entry (`context_t`) holds a
+> `page_owner_t` id, a `context_regs_t` save area (the six callee-saved GPRs
+> plus `RSP`/`RIP`/`RFLAGS` `src/libos_enter.s` needs to resume a launched
+> context) and a `context_state_t` (`READY`/`RUNNING`/`BLOCKED`).
+> `context_create()` binds a caller-built address space (typically from
+> `vmm_create_address_space()`) to a freshly allocated id via
+> `vmm_bind_address_space()` — the page-dir tracking stays in `vmm.c`'s own
+> registry rather than being duplicated here, so there is one source of
+> truth for "which PML4 does this context run on". Table capacity is
+> `CONTEXT_MAX == VMM_MAX_ADDRESS_SPACES` (4), since a context with no bound
+> address space isn't meaningful in this design.
+> `tests/kernel/test_context_k.c` proves the acceptance criterion directly:
+> 2+ real contexts, each on its own address space, tracked simultaneously.
+>
+> What this ticket does **not** do: an actual context switch. The register
+> save area is a fixed slot nothing writes to yet — `libos_enter.s` and
+> `syscall_entry.s` still each keep their own single global saved-RSP, which
+> both that file's own comment and `docs/syscall_spec.md` §3.4 flag as needing
+> to become a per-CPU (`swapgs`-based) slot once two contexts are ever
+> genuinely live *concurrently* through the syscall/launch path — that
+> rework, and performing a real switch, is SCRUM-108's job. Nothing here is
+> wired into `kernel_main`'s normal boot tail either, for the same reason
+> SCRUM-47/-49/-50 landed unwired: there is still only one real LibOS to run
+> on a normal boot.
 
 ---
 
