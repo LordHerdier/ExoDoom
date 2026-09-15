@@ -3,6 +3,7 @@
 #include "io.h"
 #include "serial.h"
 #include "pic.h"
+#include "context.h"
 
 #define PS2_DATA_PORT   0x60
 #define PS2_STATUS_PORT 0x64
@@ -447,6 +448,40 @@ void ps2_process_scancode(uint8_t scancode) {
     bool pressed = !release;
 
     update_modifier_state(key, pressed, extended);
+
+    /* Ctrl+Tab: the LibOS switch hotkey (SCRUM-111). Swallowed here rather
+     * than queued -- whichever context ends up foreground must not also see
+     * this as a literal keystroke. context_next_ready()/context_switch_
+     * request() are the exact same round-robin switch exo_yield already
+     * uses (src/syscall_yield.c's sys_yield(), including its
+     * PAGE_OWNER_FREE no-op check for "nothing else is READY"); calling
+     * them straight from the IRQ1 path mirrors how irq0_handler() already
+     * calls fb_compositor_tick() directly (src/pit.c). The actual
+     * CR3/register swap is deferred to the current context's next syscall
+     * (src/syscall_entry.s's epilogue), not immediate -- see
+     * docs/syscall_spec.md §3.5's SCRUM-111 note.
+     *
+     * context_switch_pending guard: every other caller of context_switch_
+     * request() (exo_yield, exo_exit, the wadview launcher) is itself a
+     * syscall handler, so its request is always consumed by that same
+     * syscall's own epilogue before anything else can run -- there was
+     * never a window for a second request to land on top of an unconsumed
+     * one. This IRQ path is the first caller that can arm a switch and then
+     * leave it pending for a real stretch of guest execution (until the
+     * running context's next syscall), so a second Ctrl+Tab -- or a key
+     * repeat -- in that window must not overwrite context_switch_out_regs/
+     * _in_regs/_in_pml4 out from under the first, still-unconsumed request.
+     * Simplest safe answer: drop it: the first request will land on the
+     * very next syscall regardless. */
+    if (pressed && key == KEY_TAB &&
+        (modifier_state & (MOD_LCTRL | MOD_RCTRL))) {
+        if (!context_switch_pending) {
+            page_owner_t next = context_next_ready(context_current());
+            if (next != PAGE_OWNER_FREE)
+                context_switch_request(next);
+        }
+        return;
+    }
 
     kbd_event_t ev = {
         .pressed   = pressed ? 1 : 0,

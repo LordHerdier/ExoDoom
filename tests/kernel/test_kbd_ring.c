@@ -14,6 +14,8 @@
 #include "kunit.h"
 #include "kbd_ring.h"
 #include "ps2.h"
+#include "context.h"
+#include "vmm.h"
 
 /* 768 bytes of events — kept off the 16 KB kernel stack. */
 static kbd_ring_t ring;
@@ -521,6 +523,126 @@ static void test_exo_kbd_poll_matches_dequeue(void)
     CU_ASSERT_EQUAL(exo_kbd_poll(&ev), 0);
 }
 
+/* ---- Ctrl+Tab switch hotkey (SCRUM-111) --------------------------------- */
+
+/* With no other context ever created, context_next_ready() has nothing to
+ * offer (same PAGE_OWNER_FREE case src/syscall_yield.c's sys_yield() already
+ * treats as a no-op) -- so the hotkey has nothing to do but swallow the
+ * keypress. Ctrl itself still queues normally; only Tab disappears. */
+static void test_ctrl_tab_swallowed_not_queued(void)
+{
+    static const uint8_t stream[] = { 0x1D, 0x0F };   /* LCtrl down, Tab down */
+    kbd_event_t ev;
+
+    kbd_reset();
+    feed(stream, sizeof stream);
+
+    CU_ASSERT_EQUAL(kbd_pending(), 1);
+    CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
+    CU_ASSERT_EQUAL(ev.key, KEY_CTRL);
+    CU_ASSERT_EQUAL(ev.pressed, 1);
+    CU_ASSERT_EQUAL(kbd_dequeue(&ev), 0);
+}
+
+/* With a second READY context, Ctrl+Tab actually round-robins
+ * context_current() -- the same context_next_ready()/context_switch_request()
+ * pair exo_yield() drives (src/syscall_yield.c), reached here from the IRQ1
+ * decode path instead of a syscall (src/ps2.c's SCRUM-111 comment). */
+static void test_ctrl_tab_switches_context(void)
+{
+    static const uint8_t stream[] = { 0x1D, 0x0F };   /* LCtrl down, Tab down */
+    kbd_event_t ev;
+    uint64_t phys_a = 0, phys_b = 0;
+    page_owner_t id_a = PAGE_OWNER_FREE, id_b = PAGE_OWNER_FREE;
+
+    CU_ASSERT_EQUAL(vmm_create_address_space(&phys_a), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_create_address_space(&phys_b), VMM_OK);
+    CU_ASSERT_EQUAL(context_create(phys_a, &id_a), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_create(phys_b, &id_b), CONTEXT_OK);
+
+    context_set_current(id_a);
+    CU_ASSERT_EQUAL(context_set_state(id_a, CONTEXT_STATE_RUNNING), CONTEXT_OK);
+
+    kbd_reset();
+    feed(stream, sizeof stream);
+
+    /* The Tab press never reaches the queue -- only Ctrl does. */
+    CU_ASSERT_EQUAL(kbd_pending(), 1);
+    CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
+    CU_ASSERT_EQUAL(ev.key, KEY_CTRL);
+
+    CU_ASSERT_EQUAL(context_current(), id_b);
+    CU_ASSERT_EQUAL(context_lookup(id_a)->state, CONTEXT_STATE_READY);
+    CU_ASSERT_EQUAL(context_lookup(id_b)->state, CONTEXT_STATE_RUNNING);
+
+    /* context_switch_request() only *arms* context_switch_pending -- src/
+     * syscall_entry.s's epilogue is what actually consumes it via a real
+     * syscall trip, which this test never makes. Left armed, the next real
+     * switch anywhere later in the run would take context_switch_tail with
+     * these already-destroyed contexts' now-dangling regs pointers and
+     * crash. test_context_switch_k.c/test_syscall_yield_k.c never need this
+     * because they always drive a real launch through to a real syscall. */
+    context_switch_pending = 0;
+
+    CU_ASSERT_EQUAL(context_destroy(id_a), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_destroy(id_b), CONTEXT_OK);
+    context_set_current(PAGE_OWNER_LIBOS);
+}
+
+/* Right Ctrl (E0 1D) must arm the hotkey too, not just Left Ctrl. */
+static void test_right_ctrl_tab_also_switches(void)
+{
+    static const uint8_t stream[] = { 0xE0, 0x1D, 0x0F };  /* RCtrl down, Tab down */
+    kbd_event_t ev;
+    uint64_t phys_a = 0, phys_b = 0;
+    page_owner_t id_a = PAGE_OWNER_FREE, id_b = PAGE_OWNER_FREE;
+
+    CU_ASSERT_EQUAL(vmm_create_address_space(&phys_a), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_create_address_space(&phys_b), VMM_OK);
+    CU_ASSERT_EQUAL(context_create(phys_a, &id_a), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_create(phys_b, &id_b), CONTEXT_OK);
+
+    context_set_current(id_a);
+    CU_ASSERT_EQUAL(context_set_state(id_a, CONTEXT_STATE_RUNNING), CONTEXT_OK);
+
+    kbd_reset();
+    feed(stream, sizeof stream);
+
+    CU_ASSERT_EQUAL(kbd_pending(), 1);
+    CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
+    CU_ASSERT_TRUE(ev.modifiers & MOD_RCTRL);
+
+    CU_ASSERT_EQUAL(context_current(), id_b);
+
+    /* See test_ctrl_tab_switches_context()'s own comment: context_switch_
+     * pending is armed but never consumed here, and must not leak into a
+     * later suite's real switch. */
+    context_switch_pending = 0;
+
+    CU_ASSERT_EQUAL(context_destroy(id_a), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_destroy(id_b), CONTEXT_OK);
+    context_set_current(PAGE_OWNER_LIBOS);
+}
+
+/* Regression guard: Tab with no Ctrl held is ordinary input (the shell's own
+ * command-line editing depends on this), not part of the hotkey. */
+static void test_tab_alone_still_queues_normally(void)
+{
+    static const uint8_t stream[] = { 0x0F, 0x8F };   /* Tab down, Tab up */
+    kbd_event_t ev;
+
+    kbd_reset();
+    feed(stream, sizeof stream);
+
+    CU_ASSERT_EQUAL(kbd_pending(), 2);
+    CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
+    CU_ASSERT_EQUAL(ev.key, KEY_TAB);
+    CU_ASSERT_EQUAL(ev.pressed, 1);
+    CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
+    CU_ASSERT_EQUAL(ev.key, KEY_TAB);
+    CU_ASSERT_EQUAL(ev.pressed, 0);
+}
+
 void suite_ps2_decode_tests(CU_pSuite s)
 {
     CU_add_test(s, "press_then_release",        test_press_then_release);
@@ -539,4 +661,8 @@ void suite_ps2_decode_tests(CU_pSuite s)
     CU_add_test(s, "overflow_graceful",         test_unserviced_queue_overflows_gracefully);
     CU_add_test(s, "digit_punctuation_keys",    test_digit_and_punctuation_scancodes);
     CU_add_test(s, "exo_kbd_poll",              test_exo_kbd_poll_matches_dequeue);
+    CU_add_test(s, "ctrl_tab_swallowed_noop",   test_ctrl_tab_swallowed_not_queued);
+    CU_add_test(s, "ctrl_tab_switches_context", test_ctrl_tab_switches_context);
+    CU_add_test(s, "right_ctrl_tab_switches",   test_right_ctrl_tab_also_switches);
+    CU_add_test(s, "tab_alone_queues_normally", test_tab_alone_still_queues_normally);
 }

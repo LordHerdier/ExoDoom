@@ -456,10 +456,16 @@ consequence the old binding note above used to flag ("while a LibOS holds the
 framebuffer, the kernel's own `fb_console` must stop drawing to it"): the
 kernel's own boot-time console draws directly to the real hardware buffer
 before any LibOS launches and is never composited over, since nothing has
-acquired a virtual framebuffer yet at that point. **Not done here:** a
-Ctrl+Tab hotkey that changes which context is foreground independent of which
-one is executing — there is no scheduler yet for it to interrupt, and
-"foreground == running" has no gap for it to fill until one exists.
+acquired a virtual framebuffer yet at that point.
+
+**✅ SCRUM-111:** the Ctrl+Tab hotkey this note originally left undone.
+"Foreground == running" turned out not to need a scheduler to interrupt —
+`context_switch_request()` (`src/context.c`) already lets *anything*
+request a switch, not just the running context itself, so §5.6's IRQ1
+handler calls it directly on the chord. See §5.6 and
+`docs/syscall_spec.md` §3.5's SCRUM-111 note for the mechanism and its one
+caveat (the low-level switch itself still lands on the outgoing context's
+next syscall, not instantly).
 
 ---
 
@@ -484,6 +490,20 @@ kernel context. SCRUM-39 exposes the queue to the LibOS as the
 
 PS/2 mouse (IRQ12, port `0x60`/`0x64`, 3-byte packets) follows in Sprint 2
 (SCRUM-19) and feeds `exo_mouse_poll`.
+
+> ✅ **SCRUM-111 (Ctrl+Tab switch hotkey):** `ps2_process_scancode()` checks
+> for Ctrl+Tab (either Ctrl — `MOD_LCTRL | MOD_RCTRL`) right after
+> `update_modifier_state()` runs, before the event would otherwise be
+> queued. On a match it calls `context_next_ready()`/
+> `context_switch_request()` (`src/context.c`) — the same round-robin pair
+> `exo_yield` uses (`src/syscall_yield.c`), including the same
+> `PAGE_OWNER_FREE` no-op when nothing else is `READY` — and swallows the
+> keystroke instead of enqueueing it, so it never reaches an app as
+> ordinary input. Calling straight into `context.c` from the IRQ1 path
+> mirrors `irq0_handler()`'s existing direct call to
+> `fb_compositor_tick()` (`src/pit.c`, SCRUM-112). See §5.5's SCRUM-111
+> note and `docs/syscall_spec.md` §3.5 for why no new "foreground" state
+> was needed and what the one remaining latency caveat is.
 
 ---
 
@@ -807,13 +827,54 @@ focus and the active framebuffer.
 > through a scripted return path. **Not done here:** any handoff back to
 > Doom or real cooperative scheduling — Doom is still not linked into the
 > kernel at all, so `exo_yield()`'s call in the shell's idle loop is a no-op
-> exactly as documented (`docs/syscall_spec.md` §3.2 #19). Ctrl+Tab is still
-> unowned. **✅ SCRUM-112:** framebuffer multiplexing between two live LibOS
-> instances is done — see §5.5's own note above; the WAD viewer this section
-> already describes launching (`wadview`, SCRUM-178) is what proved it: the
-> shell and the viewer no longer fight over the one real hardware buffer,
-> each keeps its own display state, and switching between them shows the
-> right one.
+> exactly as documented (`docs/syscall_spec.md` §3.2 #19). **✅ SCRUM-112:**
+> framebuffer multiplexing between two live LibOS instances is done — see
+> §5.5's own note above; the WAD viewer this section already describes
+> launching (`wadview`, SCRUM-178) is what proved it: the shell and the
+> viewer no longer fight over the one real hardware buffer, each keeps its
+> own display state, and switching between them shows the right one.
+>
+> **✅ SCRUM-111:** the Ctrl+Tab switch hotkey itself. `src/ps2.c` detects
+> the chord (either Ctrl) in `ps2_process_scancode()` and calls the same
+> `context_next_ready()`/`context_switch_request()` pair `exo_yield` uses,
+> directly from the IRQ1 path — no new "foreground" state, since
+> `context_switch_request()` already updates `context_current()`
+> synchronously and §3.5's compositor note already reads exactly that.
+> The chord is swallowed, not queued, so it never reaches an app as
+> ordinary input. The low-level register/CR3 switch is still deferred to
+> the outgoing context's next syscall (sub-frame in practice, since every
+> LibOS here polls every loop iteration) — see `docs/syscall_spec.md`
+> §3.5's SCRUM-111 note for the full latency caveat and why closing that
+> gap for good is still SCRUM-176/-127's job, not this ticket's.
+>
+> Two bugs surfaced only once this hotkey made both halves of the round-
+> robin reachable for the first time, and both are fixed as part of this
+> ticket rather than left as follow-ups, since neither is optional for the
+> acceptance criterion to actually hold:
+>
+> 1. `exo_exit` (`src/syscall_exit.c`) left the exiting context's row
+>    `CONTEXT_STATE_READY` after handing off — correct for `exo_yield`
+>    (the outgoing side really is resumable) but wrong for an exit (its
+>    pages and framebuffer are already gone). Nothing before this ticket
+>    was ever positioned to round-robin back into that stale row; Ctrl+Tab
+>    at the shell right after quitting `wadview` did, and executed garbage
+>    from freed pages. Now downgraded to `CONTEXT_STATE_BLOCKED`, which
+>    `context_next_ready()` already skips.
+> 2. `shell_main()`'s idle loop (`src/shell/shell_main.c`) called
+>    `exo_yield()` unconditionally every iteration, on the assumption
+>    (recorded in that file's own SCRUM-178-era comment) that the viewer
+>    would eventually "yield in turn" and hand control back. It never does
+>    — `run_automap_viewer()` only gives up control by fully exiting — so
+>    that call was a harmless no-op right up until Ctrl+Tab could bring the
+>    shell to the foreground while the viewer was still alive and `READY`.
+>    At that point it became actively wrong: the shell's very next loop
+>    pass immediately yielded straight back to the viewer via the same
+>    round-robin, before a keypress could ever land at the shell — Ctrl+Tab
+>    would arm and even complete the low-level switch, but the shell never
+>    stayed foreground long enough to be usable. Removed outright: every
+>    real hand-off away from the shell is already explicit (`wadview`, its
+>    own `exo_exit`, or Ctrl+Tab), so nothing needs the shell to volunteer
+>    control on its own.
 >
 > ⚠️ **A real GCC pitfall worth knowing before writing the next ring-3 link
 > target:** `libos_build_image()` always treats byte 0 of the linked code
@@ -925,5 +986,5 @@ bare-metal foundations to a playable game.
 | **Sprint 9: Playability E1M1** _(13 Jul – 27 Jul)_      | Playable first level                     | Debug and fix E1M1 rendering (walls, floors, ceilings, sprites), verify combat (shooting, enemy AI, damage, pickups, status bar), menu navigation (new game, options, difficulty, quit), performance profiling (frame time per subsystem), fix top 3 bottlenecks, verify 35 tics/sec game loop timing, test with Freedoom2 IWAD and original DOOM2.WAD                                                                                      |
 | **Sprint 10: Gameplay + Save/Load**                     | Save games                               | Ramdisk save/load (`exo_file_*`), `exo_file_remove`/`exo_file_rename`, `sscanf` for config                                                                                                                                                                                                                                                                                                                                                  |
 | **Sprint 11: Sound + Storage**                          | Audio + persistence                      | ATA PIO driver, `exo_disk_read`/`exo_disk_write`, save file persistence across reboots, PC speaker driver, Doom SFX mapping                                                                                                                                                                                                                                                                                                                 |
-| **Sprint 12: 2nd App + Context Switch**                 | Multitasking                             | Context table ✅, `CR3` swap ✅, `exo_yield` ✅, shell LibOS ✅, framebuffer multiplexing ✅ SCRUM-112, Ctrl+Tab hotkey                                                                                                                                                                                                                                                                                                                                              |
+| **Sprint 12: 2nd App + Context Switch**                 | Multitasking                             | Context table ✅, `CR3` swap ✅, `exo_yield` ✅, shell LibOS ✅, framebuffer multiplexing ✅ SCRUM-112, Ctrl+Tab hotkey ✅ SCRUM-111                                                                                                                                                                                                                                                                                                                                              |
 | **Sprint 13: Harden + Compat Test**                     | Hardening                                | Regression suite, fuzz testing syscalls, test with DOOM.WAD / DOOM2.WAD / Freedoom2, performance report, code cleanup                                                                                                                                                                                                                                                                                                                       |
