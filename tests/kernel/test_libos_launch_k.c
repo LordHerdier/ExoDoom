@@ -245,6 +245,30 @@ static void test_patch_params_rejects_no_data_region(void) {
     libos_destroy_image(LIBOS_LAUNCH_TEST_OWNER, &img);
 }
 
+/* A patch longer than one page can never fit at img.data_paddrs[0] -- there
+ * is no second page to spill into, and libos_launch_patch_params() only ever
+ * touches the first data page. */
+static void test_patch_params_rejects_oversized_len(void) {
+    static const unsigned char sample_data[] = "0123456789ABCDEF";
+    size_t code_len = (uintptr_t)&libos_launch_probe_end -
+                      (uintptr_t)&libos_launch_probe;
+
+    libos_image_t img;
+    CU_ASSERT_EQUAL(libos_build_image(LIBOS_LAUNCH_TEST_OWNER,
+                                      (const void *)&libos_launch_probe,
+                                      code_len,
+                                      sample_data, sizeof(sample_data),
+                                      0, &img),
+                   VMM_OK);
+
+    unsigned char oversized[VMM_PAGE_SIZE + 1] = {0};
+    CU_ASSERT_EQUAL(libos_launch_patch_params(&img, oversized,
+                                              sizeof(oversized)),
+                   VMM_EINVAL);
+
+    libos_destroy_image(LIBOS_LAUNCH_TEST_OWNER, &img);
+}
+
 /* Leaves nothing behind even if an assertion above failed mid-test and
  * skipped its own cleanup -- see libos_test_common.h. Unlike the normal path
  * (libos_destroy_image, which knows exactly which pages to free), `img` is
@@ -270,4 +294,6 @@ void suite_libos_launch_tests(CU_pSuite s) {
                 test_patch_params_overwrites_data_front);
     CU_add_test(s, "patch_params rejects image with no data region",
                 test_patch_params_rejects_no_data_region);
+    CU_add_test(s, "patch_params rejects oversized len",
+                test_patch_params_rejects_oversized_len);
 }
