@@ -424,14 +424,30 @@ convention and calls it from `kernel_main` instead of a test harness.
     `<strings.h>` alone (`doomtype.h` includes it on every non-Windows build).
     The doom pass now also gets `-I src` so the libc shim's headers are
     reachable at all.
-  - ⚠️ **Doom needs SSE; the kernel does not enable it.** The x86_64 SysV ABI
-    returns `float` in `xmm0`, so `m_config.c`'s `M_GetFloatVariable()` cannot
-    compile under `-mno-sse` — `-msoft-float` and `-mfpmath=387` both still hit
-    the ABI. The doom pass drops `-mno-sse`; the kernel build keeps it and is
-    unaffected (no `src/*.c` uses a float). But `src/boot.s` sets only CR4.PAE,
-    so the first SSE instruction these objects execute would `#UD` today.
-    Enabling SSE, and deciding whether XMM state must be preserved across the
-    syscall/interrupt paths, is an unowned prerequisite for running any of it.
+  - ✅ **Doom needs SSE, and the kernel enables it (SCRUM-177).** The x86_64
+    SysV ABI returns `float` in `xmm0`, so `m_config.c`'s
+    `M_GetFloatVariable()` cannot compile under `-mno-sse` — `-msoft-float`
+    and `-mfpmath=387` both still hit the ABI. The doom pass drops `-mno-sse`;
+    the kernel build keeps it and is unaffected (no `src/*.c` uses a float).
+    `src/boot.s`'s `_start64` clears CR0.EM/CR0.TS, sets CR0.MP/CR0.NE and
+    CR4.OSFXSR/CR4.OSXMMEXCPT, and loads `MXCSR` = `0x1F80`, all before
+    `kernel_main`; `tests/kernel/test_sse_k.c` proves SSE executes and is
+    correct in ring 0 and from ring 3.
+- **Nothing saves FPU/XMM state on kernel entry, and that is a decision
+  (SCRUM-177), not an oversight.** `syscall_entry.s` and `isr.s` save GP
+  registers only. That is safe *because* the kernel is compiled `-mno-sse
+  -mno-sse2 -mno-mmx` and its hand-written assembly names no XMM register — it
+  is incapable of touching a LibOS's XMM/MXCSR/x87 state, so there is nothing
+  to save. `tests/kernel/sse_ring3_probe.s` / `sse_irq_probe.s` seed all 16 XMM
+  registers in ring 3 and check them after a real syscall and after a real
+  IRQ0 taken at CPL 3, so the invariant is CI-enforced rather than asserted.
+  **Two things break it: dropping `-mno-sse` from the *kernel's* CFLAGS, and a
+  second live ring-3 context** — `context_regs_t` has no XMM fields and
+  `context_switch.s` no `fxsave`, so whoever makes the scheduler real owns
+  adding them. Also: `CR4.OSXMMEXCPT` is set, so an unmasked SIMD exception
+  would land on vector 19, where `default_stub`'s bare `iretq` loops forever;
+  `MXCSR` masks all six, and anything that unmasks one owes vector 19 a
+  handler first. Full reasoning: `docs/syscall_spec.md` §3.4a.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - **The context table (SCRUM-107, `src/context.c/h`) tracks live LibOS

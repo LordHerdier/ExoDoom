@@ -159,7 +159,7 @@ TESTS FAILED: 1 test(s) failed
 
 | Setting | Value |
 |---------|-------|
-| `KUNIT_MAX_SUITES` | 32 |
+| `KUNIT_MAX_SUITES` | 48 |
 | `KUNIT_MAX_TESTS_PER_SUITE` | 64 |
 | `KUNIT_NAME_LEN` | 64 bytes |
 
