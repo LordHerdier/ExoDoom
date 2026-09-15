@@ -26,16 +26,20 @@ extern const uint8_t _binary_libos_wad_viewer_data_bin_start[];
 extern const uint8_t _binary_libos_wad_viewer_data_bin_end[];
 
 /* The most recently launched viewer's context id, or PAGE_OWNER_FREE if
- * none is live. `wadview` quits by idling forever (src/libos_wad_viewer/
- * libos_wad_viewer.c's Q/Esc handler) rather than tearing itself down --
- * there is no exit/return syscall for a LibOS to relinquish its own
- * context -- so without this, a second `wadview` would context_create() a
- * *third* context alongside the shell and the still-idling first viewer,
- * eventually exhausting CONTEXT_MAX (3), and would leave the first
- * viewer's framebuffer binding held forever, since only whoever currently
- * holds it can be released (see below) and the first viewer never runs
- * again to release it itself. Reclaiming the previous viewer's context up
- * front, every time `wadview` runs, keeps exactly one at a time alive. */
+ * none is live. `wadview` now exits via exo_exit() on Q/Esc (#20,
+ * src/syscall_exit.c, SCRUM-155/178), which reclaims its pages and
+ * framebuffer binding immediately and hands off to the shell -- but it
+ * cannot context_destroy() its own context_t row (context_switch_request()
+ * inside exo_exit() still needs to find that row live, as the outgoing
+ * side, to capture into), so the row itself is left behind, READY but
+ * resourceless. Without reclaiming it here, a second `wadview` would
+ * context_create() a *third* context alongside the shell and the first
+ * viewer's leftover row, eventually exhausting CONTEXT_MAX (3). revoke_all()
+ * below is a harmless no-op by the time this runs (exo_exit() already freed
+ * everything); context_destroy() is the part that still matters, to free
+ * the table slot itself. Kept as a pair regardless, in case a viewer ever
+ * exits some other way (a crash, or a future teardown path exo_exit()
+ * doesn't cover) that leaves real resources behind after all. */
 static page_owner_t last_viewer_id = PAGE_OWNER_FREE;
 
 /* #21 -- build and switch to the WAD/flat/automap viewer as a second, real
