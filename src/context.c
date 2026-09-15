@@ -1,4 +1,5 @@
 #include "context.h"
+#include "libos_launch.h"  /* LIBOS_LAUNCH_RFLAGS */
 
 #include <string.h>
 
@@ -151,4 +152,65 @@ uint64_t context_pml4(page_owner_t id) {
         return 0;
     }
     return vmm_address_space_for(id);
+}
+
+int context_prime(page_owner_t id, uint64_t entry_vaddr, uint64_t stack_top_vaddr) {
+    context_t *slot = find_slot(id);
+    if (slot == NULL) {
+        return CONTEXT_ENOENT;
+    }
+    slot->regs.rip = entry_vaddr;
+    slot->regs.rsp = stack_top_vaddr;
+    slot->regs.rflags = LIBOS_LAUNCH_RFLAGS;
+    /* Callee-saved GPRs stay whatever context_create()'s memset left them
+     * (0) -- a fresh launch has no caller-established values to restore. */
+    return CONTEXT_OK;
+}
+
+/* PAGE_OWNER_LIBOS: the same single-LibOS default src/syscall.c's
+ * syscall_current_context() returned outright before this ticket. It is not
+ * necessarily a row in `contexts[]` -- src/kernel.c binds it directly into
+ * vmm.c's registry at boot, ahead of this table existing at all (see this
+ * file's own header comment) -- so context_switch_request() below checks
+ * find_slot() before trusting it as a switch source. */
+static page_owner_t current_context = PAGE_OWNER_LIBOS;
+
+/* Definitions for the raw externs context.h declares for
+ * src/context_switch.s / src/syscall_entry.s -- see their shared comment in
+ * context.h. context_switch_pending starts 0 (no switch armed); the other
+ * three are only ever read by context_switch_tail after
+ * context_switch_request() has set all four together. */
+uint64_t context_switch_pending = 0;
+context_regs_t *context_switch_out_regs = NULL;
+context_regs_t *context_switch_in_regs = NULL;
+uint64_t context_switch_in_pml4 = 0;
+
+page_owner_t context_current(void) {
+    return current_context;
+}
+
+void context_set_current(page_owner_t id) {
+    current_context = id;
+}
+
+int context_switch_request(page_owner_t to_id) {
+    context_t *to = find_slot(to_id);
+    if (to == NULL || to->state != CONTEXT_STATE_READY) {
+        return CONTEXT_ENOENT;
+    }
+    context_t *from = find_slot(current_context);
+    if (from == NULL) {
+        return CONTEXT_ENOENT;
+    }
+
+    from->state = CONTEXT_STATE_READY;
+    to->state = CONTEXT_STATE_RUNNING;
+    current_context = to_id;
+
+    context_switch_out_regs = &from->regs;
+    context_switch_in_regs = &to->regs;
+    context_switch_in_pml4 = vmm_address_space_for(to_id);
+    context_switch_pending = 1;
+
+    return CONTEXT_OK;
 }

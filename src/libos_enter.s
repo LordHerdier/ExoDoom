@@ -7,30 +7,28 @@
  * this exists as a separate thing from the probe rather than reusing it.
  */
 
+#include "libos_launch.h"
+
 .code64
 
-/* Selectors from the GDT in src/boot.s. sysretq's arithmetic pins these
- * values for the syscall return path; iretq does not require it, but using
- * anything else here would be needless inconsistency. */
-.set USER_SS, 0x20 | 3
-.set USER_CS, 0x28 | 3
-
-/* RFLAGS for libos_enter(): bit 1 is reserved and must be set; IF stays
- * clear. SCRUM-170 proved a hardware interrupt taken at CPL 3 switches to
- * TSS.RSP0 correctly (see libos_enter_irq below and
- * tests/kernel/test_irq_entry_k.c), but every fault/launch test in
- * tests/kernel/ still depends on this exact value -- do not change it; add
- * a new entry point instead, as libos_enter_irq below does. */
-.set LAUNCH_RFLAGS, 0x002
-
-/* RFLAGS for libos_enter_irq(): same, but with IF set, so PIT/keyboard IRQs
- * keep landing (on TSS.RSP0, then back to CPL 3 via their own iretq) for as
- * long as the launched context runs. Needed by any LibOS whose ring-3 code
- * relies on exo_get_ticks() actually advancing or exo_kbd_poll() actually
- * seeing input while it runs -- with IF clear (LAUNCH_RFLAGS above) neither
- * IRQ0 nor IRQ1 can ever be recognised once `iretq` drops to ring 3, so
- * exo_get_ticks() would return a frozen value forever and exo_kbd_poll()
- * would never see a keypress.
+/* Selectors and RFLAGS values now shared with src/context_switch.s
+ * (SCRUM-108) via LIBOS_LAUNCH_USER_SS/_CS/_RFLAGS/_RFLAGS_IRQ in
+ * src/libos_launch.h -- see that header's comment for why one definition
+ * replaces what used to be a private `.set` here. SCRUM-170 proved a
+ * hardware interrupt taken at CPL 3 switches to TSS.RSP0 correctly (see
+ * libos_enter_irq below and tests/kernel/test_irq_entry_k.c), but every
+ * fault/launch test in tests/kernel/ still depends on LIBOS_LAUNCH_RFLAGS's
+ * exact value for libos_enter() -- do not change it; add a new entry point
+ * instead, as libos_enter_irq below does.
+ *
+ * LIBOS_LAUNCH_RFLAGS_IRQ keeps PIT/keyboard IRQs landing (on TSS.RSP0, then
+ * back to CPL 3 via their own iretq) for as long as the launched context
+ * runs. Needed by any LibOS whose ring-3 code relies on exo_get_ticks()
+ * actually advancing or exo_kbd_poll() actually seeing input while it runs
+ * -- with IF clear (LIBOS_LAUNCH_RFLAGS above) neither IRQ0 nor IRQ1 can
+ * ever be recognised once `iretq` drops to ring 3, so exo_get_ticks() would
+ * return a frozen value forever and exo_kbd_poll() would never see a
+ * keypress.
  *
  * This is the actual exercise of what SCRUM-170 asked to be verified:
  * idt_set_gate()'s IST=0 gates mean a hardware interrupt taken at CPL 3
@@ -46,7 +44,10 @@
  * this entry point ran a multi-second interactive loop under continuous
  * PIT/keyboard IRQ traffic with no fault -- but the KUnit probe is the
  * deterministic, CI-checked proof. */
-.set LAUNCH_RFLAGS_IRQ, 0x202
+.set USER_SS, LIBOS_LAUNCH_USER_SS
+.set USER_CS, LIBOS_LAUNCH_USER_CS
+.set LAUNCH_RFLAGS, LIBOS_LAUNCH_RFLAGS
+.set LAUNCH_RFLAGS_IRQ, LIBOS_LAUNCH_RFLAGS_IRQ
 
 .section .bss
 .align 8

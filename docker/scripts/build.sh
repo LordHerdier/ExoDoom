@@ -154,11 +154,21 @@ done
 # Assemble every other src/*.s.  boot.s is excluded because it is handled
 # above with its own flags; everything else (isr.s, syscall_entry.s, ...) is
 # picked up automatically, the same way src/*.c is.
+#
+# Run through the C preprocessor first (`-x assembler-with-cpp`, same as the
+# tests/kernel/*.s loop below), rather than handed to `as` directly (SCRUM-108):
+# libos_enter.s and context_switch.s #include libos_launch.h so both share
+# LIBOS_LAUNCH_RFLAGS/_USER_SS/_USER_CS with the C side instead of a
+# hand-copied literal that can drift from it, the same reason the test-probe
+# loop already does this. A file with nothing to include still assembles
+# fine: cpp with no macros used is a no-op.
 for s in src/*.s; do
   [[ "$s" == "src/boot.s" ]] && continue
+  pp="build/$(basename "${s%.s}.pp.s")"
   o="build/$(basename "${s%.s}.o")"
   echo "    AS $(basename "$s")"
-  x86_64-elf-as "$s" -o "$o"
+  x86_64-elf-gcc -E -P -x assembler-with-cpp -I src -DEXO_KERNEL "$s" -o "$pp"
+  x86_64-elf-as "$pp" -o "$o"
   objs+=("$o")
 done
 
