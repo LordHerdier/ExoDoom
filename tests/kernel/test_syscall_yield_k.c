@@ -47,6 +47,12 @@ extern void yield_probe_b_end(void);
 #define SEED_R13  0x4444444444444444ULL
 #define SEED_R14  0x5555555555555555ULL
 #define SEED_R15  0x6666666666666666ULL
+#define SEED_RDI  0x7777777777777777ULL
+#define SEED_RSI  0x8888888888888888ULL
+#define SEED_RDX  0x9999999999999999ULL
+#define SEED_R10  0xAAAAAAAAAAAAAAAAULL
+#define SEED_R8   0xBBBBBBBBBBBBBBBBULL
+#define SEED_R9   0xCCCCCCCCCCCCCCCCULL
 
 /* Same shape as test_context_switch_k.c's own cleanup -- this suite's
  * contexts also have real code/data/stack pages mapped in, not just a bare
@@ -173,6 +179,21 @@ static void test_yield_round_robins_both_ways(void)
     CU_ASSERT_EQUAL(trace_a[5], SEED_R14);
     CU_ASSERT_EQUAL(trace_a[6], SEED_R15);
     CU_ASSERT_EQUAL(trace_a[7], MARK2);
+
+    /* SCRUM-178 regression: docs/syscall_spec.md's ABI promises these six
+     * argument registers survive an *ordinary* syscall untouched, and that
+     * has to hold just as well when the syscall happens to trigger a real
+     * context switch -- compiled C (src/libos_wad_viewer.c's
+     * `for (;;) { exo_yield(); }`) is entitled to keep a value live across
+     * the call either way. Before context_regs_t/context_switch_tail
+     * carried these, only the SysV callee-saved set (checked above) and
+     * RAX survived a real switch. */
+    CU_ASSERT_EQUAL(trace_a[8],  SEED_RDI);
+    CU_ASSERT_EQUAL(trace_a[9],  SEED_RSI);
+    CU_ASSERT_EQUAL(trace_a[10], SEED_RDX);
+    CU_ASSERT_EQUAL(trace_a[11], SEED_R10);
+    CU_ASSERT_EQUAL(trace_a[12], SEED_R8);
+    CU_ASSERT_EQUAL(trace_a[13], SEED_R9);
 
     /* B genuinely ran too -- proves round-robin actually picked it as A's
      * yield target, on B's own address space and data page. */

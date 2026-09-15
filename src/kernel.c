@@ -21,11 +21,13 @@
 #include "syscall_kbd.h"
 #include "syscall_pit.h"
 #include "syscall_yield.h"
+#include "syscall_launch.h"
 #include "fb_binding.h"
 #include "revoke.h"
 #include "vmm.h"
 #include "exo_syscall.h"
 #include "libos_launch.h"
+#include "context.h"
 #include "shell/shell_layout.h"
 
 extern void irq0_stub();
@@ -616,16 +618,20 @@ void kernel_main(void *mb2_info_ptr) {
     if (vmm_init(mb, (const struct mb2_tag_framebuffer *)fb_tag) != VMM_OK) {
         serial_print("WARN: vmm_init failed; continuing on the boot map\n");
     } else {
-        // ── LibOS address-space registry (SCRUM-48) ─────────────────────
-        // v1 has one LibOS and no ring-3 entry yet (SCRUM-47), so it still
-        // runs on the kernel's own map rather than a private one from
-        // vmm_create_address_space(). Binding it here is what lets
-        // syscall_mem.c's exo_page_map/-unmap resolve "the caller's address
-        // space" through the registry unconditionally, instead of a
-        // fallback path that only SCRUM-47 would ever exercise. Once a real
-        // LibOS address space exists, replacing this bind with
-        // vmm_create_address_space() + vmm_bind_address_space() is the whole
-        // of the change needed here.
+        // ── PAGE_OWNER_LIBOS placeholder bind ────────────────────────────
+        // Kept even after SCRUM-178 gave the shell a real context_create()'d
+        // row (see the shell-launch tail below): this runs on every boot,
+        // TESTING included, and TESTING's run_tests() exits before the shell
+        // launch code ever runs, so this is the only thing that keeps
+        // PAGE_OWNER_LIBOS bound during a test run.
+        // tests/kernel/test_context_k.c's test_create_never_steals_libos_
+        // binding() depends on this exact binding existing up front -- it is
+        // the regression test for context_create() otherwise handing this id
+        // straight back out to the first caller. Because this binding exists
+        // first, context_create()'s id search in the shell-launch tail below
+        // skips PAGE_OWNER_LIBOS and hands the shell the next id instead
+        // (harmless: nothing depends on the shell's id being PAGE_OWNER_LIBOS
+        // specifically any more, now that it is a real context_t row).
         if (vmm_bind_address_space(PAGE_OWNER_LIBOS, vmm_kernel_pml4()) != VMM_OK) {
             serial_print("WARN: vmm_bind_address_space failed; "
                          "exo_page_map/-unmap will report -EXO_EINVAL\n");
@@ -706,6 +712,14 @@ void kernel_main(void *mb2_info_ptr) {
     // placement here just follows the "after syscall_init(), ahead of the
     // TESTING branch" rule every other syscall *_init() follows.
     syscall_yield_init();
+
+    // ── WAD viewer launch syscall (SCRUM-178) ────────────────────────────
+    // Binds exo_launch_wad_viewer (#21): stages the WAD module read-only
+    // into a fresh LibOS address space and context_switch_request()s to it,
+    // so the shell's `wadview` command can invoke it as an ordinary program.
+    // Same placement rule as every other syscall *_init(): after
+    // syscall_init(), ahead of the TESTING branch.
+    syscall_launch_init();
 
 #ifdef TESTING
     // No blanket `sti` here: several suites (fault, tss, libos_launch,
@@ -846,21 +860,40 @@ void kernel_main(void *mb2_info_ptr) {
     fbcon_write(&con, "\n");
     klog(&con, kernel_get_ticks_ms(), "Timer demo complete.");
 
-    // ── Shell LibOS launch (SCRUM-110) ──────────────────────────────────
+    // ── Shell LibOS launch (SCRUM-110, refactored by SCRUM-178) ─────────
     // The first real LibOS this kernel launches on a normal boot, replacing
-    // the kernel-mode keyboard loop that used to sit here. Built as
-    // PAGE_OWNER_LIBOS -- not a fresh id -- because syscall_current_context()
-    // (src/syscall.c) is hardcoded to PAGE_OWNER_LIBOS in v1 (no real context
-    // switch has ever run), so the shell's own exo_page_map/exo_fb_acquire
-    // calls (via libos_fb_map(), src/libos_fb.c) only resolve into the
-    // address space actually loaded in CR3 if that address space is the one
-    // bound to PAGE_OWNER_LIBOS. libos_build_image() rebinds PAGE_OWNER_LIBOS
-    // in place (vmm_bind_address_space() allows a rebind), replacing the
-    // placeholder binding to vmm_kernel_pml4() set up near the top of this
-    // function with the shell's own, real address space -- exactly the
-    // "whole of the change needed" docs/architecture.md's SCRUM-48 section
-    // describes.
+    // the kernel-mode keyboard loop that used to sit here. Goes through the
+    // real context table (context_create()/context_prime()/
+    // context_set_current(), src/context.h, SCRUM-107/108) rather than the
+    // one-off PAGE_OWNER_LIBOS direct vmm bind SCRUM-110 originally used --
+    // SCRUM-178 needs the shell to have a real context_t row so
+    // context_switch_request()/exo_yield() can later switch to and from a
+    // second LibOS it launches (see src/syscall_launch.c). context_create()
+    // is called with the still-live vmm_kernel_pml4() binding as a
+    // placeholder pml4 purely to reserve an id and a table slot;
+    // libos_build_image() below rebinds that same id's vmm entry to the
+    // shell's own, real address space in place (vmm_bind_address_space()
+    // allows a rebind), exactly as the old direct-bind version did for
+    // PAGE_OWNER_LIBOS. PAGE_OWNER_LIBOS itself is still pre-bound (see the
+    // placeholder bind near vmm_init() above -- kept for
+    // test_create_never_steals_libos_binding()'s sake), so
+    // context_create()'s id search skips it and hands the shell the next id
+    // instead; nothing depends on the shell's id being PAGE_OWNER_LIBOS
+    // specifically any more, now that it is a real context_t row reached
+    // through context_current() rather than a hardcoded constant.
     klog(&con, kernel_get_ticks_ms(), "Launching shell LibOS...");
+
+    page_owner_t shell_id;
+    int shell_create_rc = context_create(vmm_kernel_pml4(), &shell_id);
+    if (shell_create_rc != CONTEXT_OK) {
+        klog(&con, kernel_get_ticks_ms(),
+             "FATAL: shell context_create failed");
+        serial_print("FATAL: context_create failed for shell LibOS\n");
+        serial_flush();
+        for (;;) {
+            __asm__ volatile ("cli; hlt");
+        }
+    }
 
     size_t shell_code_len = (size_t)(_binary_shell_code_bin_end -
                                      _binary_shell_code_bin_start);
@@ -868,7 +901,7 @@ void kernel_main(void *mb2_info_ptr) {
                                      _binary_shell_data_bin_start);
 
     libos_image_t shell_img;
-    int shell_build_rc = libos_build_image(PAGE_OWNER_LIBOS,
+    int shell_build_rc = libos_build_image(shell_id,
                                            _binary_shell_code_bin_start,
                                            shell_code_len,
                                            _binary_shell_data_bin_start,
@@ -884,6 +917,17 @@ void kernel_main(void *mb2_info_ptr) {
             __asm__ volatile ("cli; hlt");
         }
     }
+
+    // Seed the shell's saved-register area with this launch's iretq frame
+    // and declare it the running context -- context_set_current()'s own
+    // documented use case (src/context.h) is exactly this: the first
+    // dispatch of a context's life, with no "previous" context to switch
+    // away from. context_set_state() then marks it RUNNING for bookkeeping
+    // accuracy; context_switch_request() itself only requires the row to
+    // exist, not any particular prior state.
+    context_prime(shell_id, shell_img.entry_vaddr, shell_img.stack_top_vaddr);
+    context_set_current(shell_id);
+    context_set_state(shell_id, CONTEXT_STATE_RUNNING);
 
     // vmm_switch_address_space() rather than folding this into
     // libos_enter_irq(): same reasoning as libos_enter_irq()'s own comment

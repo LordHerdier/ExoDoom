@@ -17,15 +17,17 @@
  * pulling in libos_heap.c/libos_page_alloc.c's allocator machinery this
  * shell has no use for.
  *
- * Command set is intentionally trivial ("help"/"clear"/"about") — the
- * acceptance criterion is "can type commands and see output", not a real
- * shell language. It is also bounded by what src/ps2.c's scancode decoder
- * can produce: letters, digits, a handful of punctuation, space, backspace,
- * enter. No cooperative handoff to another context exists yet (Doom is not
- * linked into the kernel — docs/architecture.md's "vendored Doom engine"
- * section), so the exo_yield() call in the idle loop below is a documented
- * no-op today (docs/syscall_spec.md #19's own text: "used by shell LibOS"),
- * not a real scheduling point.
+ * Command set is intentionally trivial ("help"/"clear"/"about"/"wadview") —
+ * the acceptance criterion is "can type commands and see output", not a
+ * real shell language. It is also bounded by what src/ps2.c's scancode
+ * decoder can produce: letters, digits, a handful of punctuation, space,
+ * backspace, enter. "wadview" (SCRUM-178) is the first real cooperative
+ * handoff: exo_launch_wad_viewer() (src/exo_syscall.h #21) builds the WAD/
+ * flat/automap viewer as a second LibOS context and switches to it, and the
+ * exo_yield() call in the idle loop below is what brings control back once
+ * the viewer yields in turn (src/syscall_launch.c, context_next_ready()'s
+ * round robin) — no longer the documented no-op it was before this
+ * context existed on a normal boot.
  *
  * shell_main() is defined FIRST in this file, ahead of every helper it
  * calls (which are only forward-declared above it), and
@@ -58,9 +60,10 @@
 static char shell_banner[] = "ExoDoom Shell\n";
 static char shell_help_text[] = "type 'help' for a list of commands\n";
 static char shell_prompt[] = "exodoom> ";
-static char shell_commands_text[] = "commands: help, clear, about\n";
+static char shell_commands_text[] = "commands: help, clear, about, wadview\n";
 static char shell_about_text[] = "ExoDoom shell LibOS -- SCRUM-110\n";
 static char shell_unknown_prefix[] = "unknown command: ";
+static char shell_wadview_fail_text[] = "wadview: launch failed\n";
 
 static int str_eq(const char *a, const char *b);
 static char shell_key_to_ascii(uint8_t key, uint8_t modifiers);
@@ -202,6 +205,25 @@ static void shell_run_command(fb_console_t *con, const char *line) {
         fbcon_clear(con);
     } else if (str_eq(line, "about")) {
         fbcon_write(con, shell_about_text);
+    } else if (str_eq(line, "wadview")) {
+        /* Does not return until the viewer yields back to the shell
+         * (src/syscall_launch.c's #21 handler, exo_syscall.h's own comment
+         * on exo_launch_wad_viewer()) -- a negative return here means the
+         * launch failed before ever switching away, not that the viewer
+         * ran and came back. */
+        int64_t rc = exo_launch_wad_viewer();
+        if (rc == 0) {
+            /* The viewer draws over this whole physical framebuffer (there
+             * is no compositor yet -- docs/architecture.md's Sprint 12
+             * roadmap tracks that separately), so on a real round trip the
+             * shell's own screen is gone by the time it resumes here.
+             * Clearing and letting the caller's shell_print_prompt() redraw
+             * is what makes "back at the shell" a clean, stable screen
+             * instead of a new prompt drawn over stale automap pixels. */
+            fbcon_clear(con);
+        } else {
+            fbcon_write(con, shell_wadview_fail_text);
+        }
     } else {
         fbcon_write(con, shell_unknown_prefix);
         fbcon_write(con, line);

@@ -25,7 +25,20 @@ ENTRY(RING3_ENTRY_SYM)
 SECTIONS
 {
     . = LIBOS_LAUNCH_CODE_VADDR;
-    .text : { *(.text) *(.text.*) *(.rodata*) }
+    /* .text.entry first, unconditionally: libos_build_image() always treats
+     * offset 0 of this blob as entry_vaddr (src/libos_launch.h), and "list
+     * the entry point's source file first" (every earlier target's
+     * convention -- see this template's own top comment) only holds because
+     * a TU with no other emitted function places its one function at
+     * offset 0. src/libos_wad_viewer/libos_wad_viewer.c has several static
+     * helpers ahead of its entry point in source order, and at -O0 (DEBUG=1
+     * builds) GCC does not inline exo_syscall.h's `static inline` wrappers
+     * away, so they -- not the entry point -- land at offset 0 under the
+     * source-order convention alone. `__attribute__((section(".text.entry")))`
+     * on that one function sidesteps source/emission order entirely; every
+     * earlier target keeps working unchanged, since none of them define a
+     * .text.entry section for this rule to match. */
+    .text : { *(.text.entry) *(.text) *(.text.*) *(.rodata*) }
 
     . = LIBOS_LAUNCH_DATA_VADDR;
     .data : { *(.data) }

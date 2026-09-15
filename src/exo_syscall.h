@@ -92,10 +92,12 @@
 /* Scheduling / lifecycle */
 #define EXO_SYS_YIELD        19
 #define EXO_SYS_EXIT         20
+/* LibOS launch (SCRUM-178) */
+#define EXO_SYS_LAUNCH_WAD_VIEWER 21
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense. */
-#define EXO_SYS_COUNT        21
+#define EXO_SYS_COUNT        22
 
 /* ---- Error codes -------------------------------------------------------- */
 /*
@@ -488,6 +490,19 @@ static inline void exo_exit(int32_t code)
 {
     exo_syscall1(EXO_SYS_EXIT, (uint64_t)(int64_t)code);
     for (;;) { }
+}
+
+/* #21 — launch the WAD/flat/automap viewer as a second LibOS context and
+ * switch to it immediately (src/syscall_launch.c). Like exo_yield(), this
+ * call does not return control here until something switches back to the
+ * caller — in this case, the viewer's own exo_yield() call
+ * (context_next_ready()'s round robin). Returns a negative EXO_E* right
+ * away if the launch failed before the switch was armed, in which case the
+ * caller (the shell) keeps running uninterrupted; returns 0 once rescheduled
+ * after the viewer has yielded back. */
+static inline int64_t exo_launch_wad_viewer(void)
+{
+    return exo_syscall0(EXO_SYS_LAUNCH_WAD_VIEWER);
 }
 
 #endif /* !EXO_KERNEL */
