@@ -30,15 +30,16 @@
  * shell_main() is defined FIRST in this file, ahead of every helper it
  * calls (which are only forward-declared above it), and
  * docker/scripts/build.sh's build_ring3_link_target call for this target
- * passes -fno-reorder-functions: libos_build_image() always treats byte 0
+ * passes -fno-toplevel-reorder: libos_build_image() always treats byte 0
  * of the linked code blob as the entry point, with no ELF symbol lookup, so
  * whichever function GCC places first in this object's .text becomes the
- * real entry. -fno-reorder-functions is the actual guarantee (source order
+ * real entry. -fno-toplevel-reorder is the actual guarantee (source order
  * would otherwise be just a convention GCC's default -O2 reordering pass is
- * free to ignore); keeping shell_main() textually first as well is
- * defense-in-depth documentation of that invariant for this file
- * specifically. See probe_cflags's own comment in build.sh for how this was
- * discovered.
+ * free to ignore; -fno-reorder-functions alone does not work here, since
+ * that flag only governs hot/cold partitioning, not toplevel reordering);
+ * keeping shell_main() textually first as well is defense-in-depth
+ * documentation of that invariant for this file specifically. See
+ * probe_cflags's own comment in build.sh for how this was discovered.
  */
 
 #include "exo_syscall.h"
