@@ -25,6 +25,7 @@
  * revocation mark (SCRUM-156, below), so the id range is the low 15 bits.
  */
 typedef uint16_t page_owner_t;
+uint32_t reclaim_pages_owned(page_owner_t owner);
 
 #define PAGE_OWNER_FREE    ((page_owner_t)0)
 #define PAGE_OWNER_KERNEL  ((page_owner_t)1)
