@@ -215,6 +215,8 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`; header-only: `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/types.h`, `src/sys/stat.h` |
 | Fixed-point trigonometry (sin/cos/tan/atan, integer floor/ceil) | `src/fixed_math.c/h` |
 | Vendored Doom engine (not yet linked) | `src/doom/` |
+| doomgeneric platform layer | `src/doomgeneric_exo.c/h` (timer half: `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
+| Doom fatal-error path (`I_Error`/`I_Quit` back end) | `src/doom_panic.c/h` |
 | doomgeneric platform layer | `src/doomgeneric_exo.c/h` (`DG_Init` SCRUM-73; timer half `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
 | Mounted IWAD registry (behind `DG_Init`) | `src/doom_wad.c/h` |
 | Test framework | `src/kunit.h`, `tests/kernel/*.c`, `tests/kernel/kunit.c`, `tests/kernel/ring3_probe.s` |
@@ -500,6 +502,25 @@ convention and calls it from `kernel_main` instead of a test harness.
   possible, `build.sh` compiles **`src/doom/tables.c`** — the one file under
   `src/doom/` the kernel image links, and only under `TESTING=1`; it is pure
   const integer arrays with zero undefined references.
+- **`I_Error`/`I_Quit` report on serial and stop (SCRUM-83).** Doom's fatal
+  path used to write to `stderr`, open a zenity dialog through `system()`,
+  and `exit(-1)` — none of which exists here. `src/doom/i_system.c` now calls
+  `src/doom_panic.c`, which is **outside** the vendored tree on purpose: it
+  keeps the `i_system.c` patch small for the next re-vendor, and — since
+  nothing under `src/doom/` links into `build/exodoom` yet — it is the only
+  way the logic is reachable by a unit test at all.
+  The API is deliberately **two** calls, not one: `doom_panic_begin()` prints
+  and returns, `doom_panic_halt()` never returns. `I_Error` runs Doom's
+  atexit list *between* them, so the message is already out before shutdown
+  handlers run on a machine that has just declared itself broken — if one of
+  them faults, it no longer takes the explanation with it. There is a
+  re-entry guard, because Doom's own `already_quitting` does not actually
+  stop anything (the `exit(-1)` it guards is inside `#if ORIGCODE`), and a
+  recursive panic would otherwise recurse through the formatter on a ring-3
+  stack that is exactly **one 4 KiB page**.
+  `vprintf` was added to `src/stdio.c` for this, and **`printf` is now
+  implemented in terms of it** — one formatting engine and one sink per
+  build, rather than a second formatter on the panic path.
 - **`DG_Init` mounts the IWAD; it does not load one (SCRUM-73).** There is no
   file to read and nowhere to put 28 MB if there were — the WAD arrives as a
   multiboot module, the kernel identity-maps it, and `libos_map_wad()` maps

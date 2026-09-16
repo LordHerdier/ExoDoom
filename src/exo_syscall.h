@@ -92,12 +92,13 @@
 /* Scheduling / lifecycle */
 #define EXO_SYS_YIELD        19
 #define EXO_SYS_EXIT         20
-/* LibOS launch (SCRUM-178) */
+/* LibOS launch (SCRUM-178, SCRUM-168) */
 #define EXO_SYS_LAUNCH_WAD_VIEWER 21
+#define EXO_SYS_LAUNCH_CLOCK      22
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense. */
-#define EXO_SYS_COUNT        22
+#define EXO_SYS_COUNT        23
 
 /* ---- Error codes -------------------------------------------------------- */
 /*
@@ -503,6 +504,18 @@ static inline void exo_exit(int32_t code)
 static inline int64_t exo_launch_wad_viewer(void)
 {
     return exo_syscall0(EXO_SYS_LAUNCH_WAD_VIEWER);
+}
+
+/* #22 — launch the clock demo LibOS (SCRUM-168) as a second/third LibOS
+ * context and switch to it immediately (src/syscall_launch.c). Same calling
+ * convention as exo_launch_wad_viewer(): does not return control here until
+ * something switches back to the caller (Ctrl+Tab, SCRUM-111, since the
+ * clock itself never yields). Returns a negative EXO_E* right away if the
+ * launch failed before the switch was armed; returns 0 once rescheduled
+ * after the caller is switched back to. */
+static inline int64_t exo_launch_clock(void)
+{
+    return exo_syscall0(EXO_SYS_LAUNCH_CLOCK);
 }
 
 #endif /* !EXO_KERNEL */

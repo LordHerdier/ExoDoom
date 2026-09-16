@@ -17,6 +17,18 @@ int putchar(int c);
 int puts(const char *s);
 
 /*
+ * vprintf — printf's va_list sibling, sharing its sink (SCRUM-83).
+ *
+ * printf is implemented in terms of this rather than the other way round, so
+ * there is exactly one formatting engine and one serial sink per build.
+ * Added for doom_panic() (src/doom_panic.c), which receives I_Error's
+ * varargs as a va_list and must not stand up a second formatter to print
+ * them.  Note this is vprintf, not vfprintf -- the FILE* family below is
+ * still declared-and-undefined.
+ */
+int vprintf(const char *fmt, va_list ap);
+
+/*
  * Internal formatting core — NOT a standard stdio function.
  *
  * Emits each output character via emit(c, ctx) and returns the number of

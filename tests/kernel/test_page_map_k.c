@@ -125,6 +125,32 @@ static void test_map_own_page_round_trip(void)
 }
 
 /*
+ * SCRUM-159: exo_page_free tears down the caller's own mapping of the page it
+ * just freed, rather than leaving a live PTE pointing at memory the PMM is
+ * now free to hand to somebody else (docs/syscall_spec.md §3.2 #3). Freeing
+ * an unmapped page must stay exactly as unremarkable as it already was.
+ */
+static void test_free_unmaps_live_mapping(void)
+{
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    if (p <= 0)
+        return;
+
+    CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p, MAP_RW), 0);
+
+    uint64_t resolved = 0;
+    CU_ASSERT_EQUAL(vmm_translate_in(current_root(), SCRATCH, &resolved, NULL),
+                    VMM_OK);
+
+    /* The mapping disappears as a side effect of the free, with no separate
+     * exo_page_unmap call. */
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+    CU_ASSERT_EQUAL(vmm_translate_in(current_root(), SCRATCH, &resolved, NULL),
+                    VMM_ENOENT);
+}
+
+/*
  * The hole this story closes: a LibOS handing exo_page_map an arbitrary
  * physical address.  A page belonging to another context, and a kernel page,
  * are both -EXO_EPERM — and, crucially, are still unmapped afterwards.
@@ -342,6 +368,7 @@ void suite_page_map_tests(CU_pSuite s)
     CU_add_test(s, "window is clear of kernel mappings",
                 test_window_is_clear_of_kernel_mappings);
     CU_add_test(s, "map own page round trip",    test_map_own_page_round_trip);
+    CU_add_test(s, "free unmaps live mapping",   test_free_unmaps_live_mapping);
     CU_add_test(s, "foreign page rejected",      test_foreign_page_rejected);
     CU_add_test(s, "kernel page rejected",       test_kernel_page_rejected);
     CU_add_test(s, "unowned page rejected",      test_unowned_page_rejected);

@@ -47,19 +47,55 @@ static int64_t sys_page_alloc(uint64_t a1, uint64_t a2, uint64_t a3,
     return (int64_t)(uintptr_t)page;
 }
 
+/*
+ * The PML4 map/unmap edit for the currently executing syscall (SCRUM-48).
+ * Resolved through vmm's per-context registry (vmm_address_space_for()),
+ * keyed on syscall_current_context() — the caller's own private address
+ * space once one is bound, kernel_pml4 while a LibOS still shares the
+ * kernel's own map.
+ *
+ * NULL only if the caller's context has no address space bound — vmm_init
+ * itself failing, most likely — which vmm_map_page_in/vmm_translate_in/
+ * vmm_unmap_page_in/vmm_unmap_phys_range_in already refuse (NULL is each
+ * one's own "nothing to do" case), but checked here too so the caller sees
+ * -EXO_EINVAL rather than relying on that fallthrough.
+ */
+static uint64_t *caller_pml4(void)
+{
+    uint64_t root_phys = vmm_address_space_for(syscall_current_context());
+    return (uint64_t *)(uintptr_t)root_phys;
+}
+
 /* #1 — return a page from exo_page_alloc.  Ownership-enforced (SCRUM-152):
  *   0             freed (the caller owned paddr)
  *   -EXO_EPERM    paddr is an allocated page owned by the kernel or another
  *                 LibOS — the caller may not free it
  *   -EXO_EINVAL   unaligned / out-of-range address, or a double free of a page
  *                 that is already FREE
- * The PMM returns ABI-agnostic PAGE_FREE_* codes; the errno mapping is here. */
+ * The PMM returns ABI-agnostic PAGE_FREE_* codes; the errno mapping is here.
+ *
+ * SCRUM-159: a successful free also tears down any mapping the caller made
+ * of this page in its own address space (docs/syscall_spec.md §3.2 #3 — the
+ * chosen rule is to unmap automatically rather than refuse the free). Only
+ * the caller's own window can hold such a mapping: may_map_phys() requires
+ * ownership to install one, so nobody else could have mapped this page while
+ * this context owned it. Done only after the free succeeds, so a rejected
+ * call leaves the address space exactly as it found it, and the freed page
+ * can never again be reached through a stale PTE once the PMM hands it to a
+ * new owner. */
 static int64_t sys_page_free(uint64_t paddr, uint64_t a2, uint64_t a3,
                              uint64_t a4, uint64_t a5, uint64_t a6)
 {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
 
-    switch (free_page_owned((void*)(uintptr_t)paddr, syscall_current_context())) {
+    int rc = free_page_owned((void*)(uintptr_t)paddr, syscall_current_context());
+
+    if (rc == PAGE_FREE_OK) {
+        uint64_t page = paddr & ~(uint64_t)(VMM_PAGE_SIZE - 1);
+        vmm_unmap_phys_range_in(caller_pml4(), page, page + VMM_PAGE_SIZE);
+    }
+
+    switch (rc) {
     case PAGE_FREE_OK:    return 0;
     case PAGE_FREE_EPERM: return -EXO_EPERM;
     default:              return -EXO_EINVAL;
@@ -126,24 +162,6 @@ static int may_unmap_phys(uint64_t paddr, page_owner_t who)
 static int in_user_window(uint64_t vaddr)
 {
     return vaddr >= EXO_USER_VA_BASE && vaddr < EXO_USER_VA_END;
-}
-
-/*
- * The PML4 map/unmap edit for the currently executing syscall (SCRUM-48).
- * kernel_main binds the one v1 LibOS to vmm_kernel_pml4() itself — there is
- * no per-LibOS address space yet (SCRUM-47) — so this returns that same
- * root today; the day a real one exists, nothing in this file needs to
- * change for the switch to take effect.
- *
- * NULL only if kernel_main's boot-time bind was skipped or failed — vmm_init
- * itself failing, most likely — which vmm_map_page_in/vmm_translate_in/
- * vmm_unmap_page_in already refuse with VMM_EINVAL, but checked here too so
- * the caller sees -EXO_EINVAL rather than relying on that fallthrough.
- */
-static uint64_t *caller_pml4(void)
-{
-    uint64_t root_phys = vmm_address_space_for(syscall_current_context());
-    return (uint64_t *)(uintptr_t)root_phys;
 }
 
 /* vmm.c's status codes in the ABI's terms (src/vmm.h).  Two of them are

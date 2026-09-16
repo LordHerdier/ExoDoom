@@ -17,10 +17,15 @@
  * Scratch owner ids for suites that call vmm_bind_address_space(): distinct
  * from each other, checked below rather than left as a comment for the next
  * one to trust. Suites that only alloc/free plain pages (test_ownership_k.c,
- * test_page_map_k.c, test_fb_binding_k.c, test_revoke_k.c) all reuse
- * PAGE_OWNER_LIBOS + 1 as their own local "other LibOS" id -- safe, since
- * none of them touch the address-space registry, so there is nothing here
- * for them to collide with.
+ * test_page_map_k.c, test_fb_binding_k.c) all reuse PAGE_OWNER_LIBOS + 1 as
+ * their own local "other LibOS" id -- safe, since none of them touch the
+ * address-space registry, so there is nothing here for them to collide with.
+ *
+ * test_revoke_k.c is the exception (SCRUM-159): most of its tests are the
+ * same plain-page kind and reuse PAGE_OWNER_LIBOS + 1 too, but its
+ * revoke_force()/revoke_all() mapping-teardown tests need a real bound
+ * address space to unmap out of, so those specific tests use
+ * TEST_OWNER_REVOKE_ADDRSPACE instead.
  */
 #define TEST_OWNER_VMM_REGISTRY  ((page_owner_t)(PAGE_OWNER_LIBOS + 3))
 #define TEST_OWNER_VMM_ADDRSPACE ((page_owner_t)(PAGE_OWNER_LIBOS + 4))
@@ -31,6 +36,7 @@
 #define TEST_OWNER_KERNEL_MEM_FAULT ((page_owner_t)(PAGE_OWNER_LIBOS + 9))
 #define TEST_OWNER_IRQ_ENTRY     ((page_owner_t)(PAGE_OWNER_LIBOS + 10))
 #define TEST_OWNER_SSE           ((page_owner_t)(PAGE_OWNER_LIBOS + 11))
+#define TEST_OWNER_REVOKE_ADDRSPACE ((page_owner_t)(PAGE_OWNER_LIBOS + 12))
 
 /*
  * test_libc_shim_probe_k.c (SCRUM-51) deliberately does NOT get its own
@@ -60,6 +66,7 @@ _Static_assert(TEST_OWNER_VMM_REGISTRY     != TEST_OWNER_VMM_ADDRSPACE &&
               TEST_OWNER_VMM_REGISTRY     != TEST_OWNER_KERNEL_MEM_FAULT &&
               TEST_OWNER_VMM_REGISTRY     != TEST_OWNER_IRQ_ENTRY &&
               TEST_OWNER_VMM_REGISTRY     != TEST_OWNER_SSE &&
+              TEST_OWNER_VMM_REGISTRY     != TEST_OWNER_REVOKE_ADDRSPACE &&
               TEST_OWNER_VMM_ADDRSPACE    != TEST_OWNER_LIBOS_LAUNCH &&
               TEST_OWNER_VMM_ADDRSPACE    != TEST_OWNER_LIBOS_MAIN &&
               TEST_OWNER_VMM_ADDRSPACE    != TEST_OWNER_LIBOS_C_PROBE &&
@@ -67,27 +74,35 @@ _Static_assert(TEST_OWNER_VMM_REGISTRY     != TEST_OWNER_VMM_ADDRSPACE &&
               TEST_OWNER_VMM_ADDRSPACE    != TEST_OWNER_KERNEL_MEM_FAULT &&
               TEST_OWNER_VMM_ADDRSPACE    != TEST_OWNER_IRQ_ENTRY &&
               TEST_OWNER_VMM_ADDRSPACE    != TEST_OWNER_SSE &&
+              TEST_OWNER_VMM_ADDRSPACE    != TEST_OWNER_REVOKE_ADDRSPACE &&
               TEST_OWNER_LIBOS_LAUNCH     != TEST_OWNER_LIBOS_MAIN &&
               TEST_OWNER_LIBOS_LAUNCH     != TEST_OWNER_LIBOS_C_PROBE &&
               TEST_OWNER_LIBOS_LAUNCH     != TEST_OWNER_PORT_IO_FAULT &&
               TEST_OWNER_LIBOS_LAUNCH     != TEST_OWNER_KERNEL_MEM_FAULT &&
               TEST_OWNER_LIBOS_LAUNCH     != TEST_OWNER_IRQ_ENTRY &&
               TEST_OWNER_LIBOS_LAUNCH     != TEST_OWNER_SSE &&
+              TEST_OWNER_LIBOS_LAUNCH     != TEST_OWNER_REVOKE_ADDRSPACE &&
               TEST_OWNER_LIBOS_MAIN       != TEST_OWNER_LIBOS_C_PROBE &&
               TEST_OWNER_LIBOS_MAIN       != TEST_OWNER_PORT_IO_FAULT &&
               TEST_OWNER_LIBOS_MAIN       != TEST_OWNER_KERNEL_MEM_FAULT &&
               TEST_OWNER_LIBOS_MAIN       != TEST_OWNER_IRQ_ENTRY &&
               TEST_OWNER_LIBOS_MAIN       != TEST_OWNER_SSE &&
+              TEST_OWNER_LIBOS_MAIN       != TEST_OWNER_REVOKE_ADDRSPACE &&
               TEST_OWNER_LIBOS_C_PROBE    != TEST_OWNER_PORT_IO_FAULT &&
               TEST_OWNER_LIBOS_C_PROBE    != TEST_OWNER_KERNEL_MEM_FAULT &&
               TEST_OWNER_LIBOS_C_PROBE    != TEST_OWNER_IRQ_ENTRY &&
               TEST_OWNER_LIBOS_C_PROBE    != TEST_OWNER_SSE &&
+              TEST_OWNER_LIBOS_C_PROBE    != TEST_OWNER_REVOKE_ADDRSPACE &&
               TEST_OWNER_PORT_IO_FAULT    != TEST_OWNER_KERNEL_MEM_FAULT &&
               TEST_OWNER_PORT_IO_FAULT    != TEST_OWNER_IRQ_ENTRY &&
               TEST_OWNER_PORT_IO_FAULT    != TEST_OWNER_SSE &&
+              TEST_OWNER_PORT_IO_FAULT    != TEST_OWNER_REVOKE_ADDRSPACE &&
               TEST_OWNER_KERNEL_MEM_FAULT != TEST_OWNER_IRQ_ENTRY &&
               TEST_OWNER_KERNEL_MEM_FAULT != TEST_OWNER_SSE &&
-              TEST_OWNER_IRQ_ENTRY        != TEST_OWNER_SSE,
+              TEST_OWNER_KERNEL_MEM_FAULT != TEST_OWNER_REVOKE_ADDRSPACE &&
+              TEST_OWNER_IRQ_ENTRY        != TEST_OWNER_SSE &&
+              TEST_OWNER_IRQ_ENTRY        != TEST_OWNER_REVOKE_ADDRSPACE &&
+              TEST_OWNER_SSE              != TEST_OWNER_REVOKE_ADDRSPACE,
               "address-space-binding test owner ids must be pairwise distinct");
 
 /*
