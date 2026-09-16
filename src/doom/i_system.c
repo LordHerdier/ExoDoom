@@ -411,11 +411,21 @@ void I_Error (char *error, ...)
      * explanation with it. */
     if (already_quitting)
     {
-        /* doom_panic_begin() has its own re-entry guard, and that is the one
-         * that actually stops the recursion: it prints a fixed notice and
-         * halts rather than returning.  Upstream's exit(-1) here is inside
-         * #if ORIGCODE, so this branch used to fall straight through and
-         * re-run the entire function. */
+        /* THIS CALL DOES NOT RETURN, so control never reaches the code
+         * below it -- the branch has no `exit` or `return` of its own and
+         * reads like a fall-through until you trace why.
+         *
+         * doom_panic_begin() carries its own `panic_active` guard, and by
+         * the time this branch can run, the original I_Error has already set
+         * it.  So this call hits that guard, which prints a fixed notice and
+         * calls doom_stop(), which halts.  The `already_quitting` flag above
+         * is therefore redundant with it -- kept because it is upstream's,
+         * not because anything here depends on it.
+         *
+         * Upstream's own exit(-1) here sits inside #if ORIGCODE, which is
+         * why this branch would otherwise fall straight through and re-run
+         * the entire function.  (Review feedback on PR #87: this was the one
+         * spot in the diff that reads like a bug until traced.) */
         va_start(argptr, error);
         doom_panic_begin("I_Error (recursive): ", error, argptr);
         va_end(argptr);

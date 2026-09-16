@@ -7,7 +7,14 @@
  * little over a millisecond, generous for a printf/fprintf line. Exposed
  * here (rather than kept `static` in syscall_serial.c) so
  * test_syscall_serial_k.c can assert the real limit instead of a restated
- * literal. */
+ * literal.
+ *
+ * ONE PLACE RESTATES THIS VALUE: src/doom_panic.c's DOOM_PANIC_SERIAL_MAX.
+ * That file is compiled for ring 3 as well as for the kernel, and a ring-3
+ * TU cannot include this kernel-only header. It does not drift silently --
+ * its kernel build _Static_assert's the two against each other, so changing
+ * the cap here without changing it there fails the build rather than
+ * shortening a panic message nobody is watching. Change both. */
 #define SERIAL_WRITE_MAX_LEN 4096u
 
 /*

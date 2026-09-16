@@ -90,7 +90,9 @@ void doom_halt(const char *msg);
  * Exposed for tests: the cap is a syscall-side rule (src/syscall_serial.h)
  * that a ring-3 caller can only discover by being refused -EXO_EINVAL, so
  * getting the chunking wrong would silently drop the tail of exactly the
- * message someone is trying to read.
+ * message someone is trying to read.  src/doom_panic.c restates that cap
+ * because this file is built for ring 3 too, and _Static_assert's it against
+ * the real one in its kernel build so the two cannot drift apart.
  */
 void doom_panic_write(const char *buf, size_t len);
 

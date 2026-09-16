@@ -404,6 +404,32 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     src/stdlib.c src/stdio.c src/string.c src/ctype.c \
     src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c
 
+  echo "[3b3/7] Compile Doom's reference trig tables (SCRUM-41)"
+  # The ONE file under src/doom/ that the kernel image links, and only in a
+  # TESTING build.  tests/kernel/test_fixed_math_k.c is SCRUM-41's acceptance
+  # test: it regenerates finesine/finecosine/finetangent/tantoangle through
+  # src/fixed_math.c and compares all 24,577 entries against the vendored
+  # chocolate-doom data, which is what the ticket means by "verified against
+  # reference".  Hand-copying a few spot values into the test instead would
+  # verify the shape of the curve and nothing else.
+  #
+  # This is a deliberate exception to "nothing in src/doom/ links into
+  # build/exodoom", and a narrow one: tables.c is pure const integer arrays
+  # with no libc and no engine dependency, so it needs none of the shim the
+  # other 78 files are still waiting on (docs/libc_audit.md), and it compiles
+  # clean under the kernel's own -mno-sse CFLAGS.  It is compiled here rather
+  # than left to step 3's `src/*.c` glob because that glob deliberately does
+  # not descend into src/doom/, and it stays inside the TESTING block so a
+  # shipped kernel still links nothing from the vendored tree.
+  #
+  # -I src/doom is what step 3's loop does not pass: tables.c includes the
+  # engine's own tables.h/m_fixed.h/doomtype.h, which in turn reach the libc
+  # shim headers via -I src.
+  echo "    CC tables.c (doom reference data)"
+  x86_64-elf-gcc -c src/doom/tables.c -o build/doom_tables.o \
+    "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL
+  objs+=("build/doom_tables.o")
+
   echo "[3c/7] Compile kernel test sources"
   for c in tests/kernel/*.c; do
     o="build/$(basename "${c%.c}.o")"

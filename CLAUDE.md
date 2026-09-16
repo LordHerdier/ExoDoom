@@ -213,6 +213,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Resource revocation (repossession) | `src/revoke.c/h` (protocol), the `page_revoke_*`/`fb_binding_revoke_*` primitives |
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
 | Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`; header-only: `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/types.h`, `src/sys/stat.h` |
+| Fixed-point trigonometry (sin/cos/tan/atan, integer floor/ceil) | `src/fixed_math.c/h` |
 | Vendored Doom engine (not yet linked) | `src/doom/` |
 | doomgeneric platform layer | `src/doomgeneric_exo.c/h` (timer half: `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
 | Doom fatal-error path (`I_Error`/`I_Quit` back end) | `src/doom_panic.c/h` |
@@ -476,6 +477,29 @@ convention and calls it from `kernel_main` instead of a test harness.
   would land on vector 19, where `default_stub`'s bare `iretq` loops forever;
   `MXCSR` masks all six, and anything that unmasks one owes vector 19 a
   handler first. Full reasoning: `docs/syscall_spec.md` §3.4a.
+- **Trigonometry is fixed-point, and that is forced by `-mno-sse` (SCRUM-41).**
+  `src/fixed_math.c/h` is the whole of what the board calls "math.h":
+  `exo_fixed_sin`/`_cos`/`_tan` (Maclaurin series over a Q30 core) and
+  `exo_fixed_atan` (CORDIC, vectoring mode), all in 16.16 over binary angle
+  measure, plus `EXO_FIXED_FLOOR`/`_CEIL`. There is **no `double` libm and
+  there cannot be one in `src/`**: the kernel compiles `-mno-sse -mno-sse2`
+  and the SysV ABI returns floating point in `xmm0`, so a `double sin(double)`
+  in any globbed `src/*.c` is rejected outright — the same wall
+  `m_config.c`'s `M_GetFloatVariable()` hit in SCRUM-64, and the reason every
+  kernel test TU could not call such an API either. Nothing under `src/doom/`
+  loses by it: the engine is fixed-point throughout and its only live
+  `<math.h>` call is `fabs()`.
+  `tests/kernel/test_fixed_math_k.c` is the acceptance test and it is not a
+  spot check — it regenerates `finesine`, `finecosine`, `finetangent` and
+  `tantoangle` through this API and compares **all 24,577 entries** against
+  the vendored chocolate-doom data. Where the two disagree, **this code is
+  the accurate one**: `exo_fixed_sin` is correctly rounded (≤0.5 LSB from
+  true), while Doom's shipped table was generated in single-precision `float`
+  with a truncating cast and is off by up to 1.01 LSB — which is also why
+  `finesine`'s peak is 65535 and ours is 65536. To make that comparison
+  possible, `build.sh` compiles **`src/doom/tables.c`** — the one file under
+  `src/doom/` the kernel image links, and only under `TESTING=1`; it is pure
+  const integer arrays with zero undefined references.
 - **`I_Error`/`I_Quit` report on serial and stop (SCRUM-83).** Doom's fatal
   path used to write to `stderr`, open a zenity dialog through `system()`,
   and `exit(-1)` — none of which exists here. `src/doom/i_system.c` now calls

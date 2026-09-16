@@ -55,6 +55,7 @@ void suite_syscall_yield_tests(CU_pSuite s);
 void suite_shell_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
 void suite_fb_shadow_tests(CU_pSuite s);
+void suite_fixed_math_tests(CU_pSuite s);
 void suite_doom_panic_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
@@ -338,6 +339,8 @@ int run_tests(void)
                      context_launch_rebind_suite_cleanup);
     suite_context_launch_rebind_tests(s);
 
+    s = CU_add_suite("fixed_math", NULL, NULL);
+    suite_fixed_math_tests(s);
     s = CU_add_suite("doom_panic", NULL, NULL);
     suite_doom_panic_tests(s);
 

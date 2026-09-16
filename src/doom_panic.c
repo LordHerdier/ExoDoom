@@ -10,19 +10,33 @@
 
 #include "stdio.h" /* vprintf, printf -- one formatting engine, one sink */
 
+/*
+ * The kernel's own cap on one exo_serial_write.
+ *
+ * Its source of truth is SERIAL_WRITE_MAX_LEN in src/syscall_serial.h, which
+ * is a kernel-only header -- src/stdio.c already declines to include it from
+ * the ring-3 side for the same reason -- so the value is restated here rather
+ * than having a ring-3 TU reach into a ring-0 header.
+ *
+ * The restatement is CHECKED rather than merely commented (review feedback on
+ * PR #87).  A kernel build of this file can see both, so it asserts they
+ * agree at compile time: change the cap in syscall_serial.h without changing
+ * it here and `make docker-ci` fails on this line, naming both values.  That
+ * turns a drift whose only ring-3 symptom would have been a silently
+ * truncated panic message -- exo_serial_write answering -EXO_EINVAL on the
+ * one channel that was trying to explain a failure -- into a build error.
+ */
+#define DOOM_PANIC_SERIAL_MAX 4096u
+
 #ifdef EXO_KERNEL
 #include "serial.h"
+#include "syscall_serial.h" /* SERIAL_WRITE_MAX_LEN, for the check below */
+
+_Static_assert(DOOM_PANIC_SERIAL_MAX == SERIAL_WRITE_MAX_LEN,
+               "doom_panic.c's restated serial cap has drifted from "
+               "SERIAL_WRITE_MAX_LEN in src/syscall_serial.h");
 #else
 #include "exo_syscall.h"
-/*
- * The kernel's own cap on one exo_serial_write (src/syscall_serial.h).  That
- * header is kernel-only and src/stdio.c already declines to include it from
- * the ring-3 side for exactly this reason, so the limit is restated rather
- * than a ring-3 TU reaching into a ring-0 header.  If the two ever disagree
- * the symptom is bounded and loud -- exo_serial_write answers -EXO_EINVAL
- * and the tail of a panic message goes missing -- not silent corruption.
- */
-#define SERIAL_WRITE_MAX_LEN 4096u
 #endif
 
 /*
@@ -64,7 +78,7 @@ void doom_panic_write(const char *buf, size_t len)
     }
 #else
     /*
-     * exo_serial_write refuses anything over SERIAL_WRITE_MAX_LEN with
+     * exo_serial_write refuses anything over DOOM_PANIC_SERIAL_MAX with
      * -EXO_EINVAL (src/syscall_serial.c).  A panic message is normally one
      * line and nowhere near the cap, but "normally" is doing a lot of work
      * in a function whose entire job is to run when things have gone wrong
@@ -73,7 +87,8 @@ void doom_panic_write(const char *buf, size_t len)
      * unchunked write would drop in full.
      */
     while (len > 0) {
-        size_t chunk = len > SERIAL_WRITE_MAX_LEN ? SERIAL_WRITE_MAX_LEN : len;
+        size_t chunk =
+            len > DOOM_PANIC_SERIAL_MAX ? DOOM_PANIC_SERIAL_MAX : len;
 
         if (exo_serial_write(buf, chunk) < 0) {
             /* Nothing useful to report it to -- this IS the reporting
