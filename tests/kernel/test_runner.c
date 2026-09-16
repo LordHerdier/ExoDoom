@@ -55,6 +55,7 @@ void suite_syscall_yield_tests(CU_pSuite s);
 void suite_shell_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
 void suite_fb_shadow_tests(CU_pSuite s);
+void suite_fixed_math_tests(CU_pSuite s);
 void suite_fpconv_tests(CU_pSuite s);
 void suite_libc_gaps_tests(CU_pSuite s);
 
@@ -339,6 +340,8 @@ int run_tests(void)
                      context_launch_rebind_suite_cleanup);
     suite_context_launch_rebind_tests(s);
 
+    s = CU_add_suite("fixed_math", NULL, NULL);
+    suite_fixed_math_tests(s);
     s = CU_add_suite("fpconv", NULL, NULL);
     suite_fpconv_tests(s);
 
