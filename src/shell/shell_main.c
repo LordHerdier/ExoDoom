@@ -70,10 +70,11 @@
 static char shell_banner[] = "ExoDoom Shell\n";
 static char shell_help_text[] = "type 'help' for a list of commands\n";
 static char shell_prompt[] = "exodoom> ";
-static char shell_commands_text[] = "commands: help, clear, about, wadview\n";
+static char shell_commands_text[] = "commands: help, clear, about, wadview, snake\n";
 static char shell_about_text[] = "ExoDoom shell LibOS -- SCRUM-110\n";
 static char shell_unknown_prefix[] = "unknown command: ";
 static char shell_wadview_fail_text[] = "wadview: launch failed\n";
+static char shell_snake_fail_text[] = "snake: launch failed\n";
 
 static int str_eq(const char *a, const char *b);
 static char shell_key_to_ascii(uint8_t key, uint8_t modifiers);
@@ -231,6 +232,17 @@ static void shell_run_command(fb_console_t *con, const char *line) {
             fbcon_clear(con);
         } else {
             fbcon_write(con, shell_wadview_fail_text);
+        }
+    } else if (str_eq(line, "snake")) {
+        /* Same round-trip convention as "wadview" above: does not return
+         * until Snake exits (src/libos_snake/libos_snake.c's own
+         * EXO_SYS_EXIT + exo_yield() fallback) and control round-robins
+         * back here. */
+        int64_t rc = exo_launch_snake();
+        if (rc == 0) {
+            fbcon_clear(con);
+        } else {
+            fbcon_write(con, shell_snake_fail_text);
         }
     } else {
         fbcon_write(con, shell_unknown_prefix);

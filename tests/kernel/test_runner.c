@@ -56,6 +56,7 @@ void suite_shell_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
 void suite_fb_shadow_tests(CU_pSuite s);
 void suite_fixed_math_tests(CU_pSuite s);
+void suite_libos_snake_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -167,6 +168,12 @@ int syscall_yield_suite_cleanup(void);
  * reasoning as libc_shim_probe_suite_init/_cleanup above. */
 int shell_libos_suite_init(void);
 int shell_libos_suite_cleanup(void);
+
+/* Same idea for the libos_snake suite (SCRUM-182): builds the real Snake
+ * blob under PAGE_OWNER_LIBOS and must restore its boot-time binding, same
+ * reasoning as shell_libos_suite_init/_cleanup above. */
+int libos_snake_suite_init(void);
+int libos_snake_suite_cleanup(void);
 
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
@@ -340,6 +347,10 @@ int run_tests(void)
 
     s = CU_add_suite("fixed_math", NULL, NULL);
     suite_fixed_math_tests(s);
+
+    s = CU_add_suite("libos_snake", libos_snake_suite_init,
+                     libos_snake_suite_cleanup);
+    suite_libos_snake_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

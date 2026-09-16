@@ -6,6 +6,7 @@
 #include "libos_wad_map.h"
 #include "libos_wad_params.h"
 #include "libos_wad_viewer/libos_wad_viewer_layout.h"
+#include "libos_snake/libos_snake_layout.h"
 #include "mmap.h"
 #include "page_alloc.h"
 #include "vmm.h"
@@ -24,6 +25,13 @@ extern const uint8_t _binary_libos_wad_viewer_code_bin_start[];
 extern const uint8_t _binary_libos_wad_viewer_code_bin_end[];
 extern const uint8_t _binary_libos_wad_viewer_data_bin_start[];
 extern const uint8_t _binary_libos_wad_viewer_data_bin_end[];
+
+/* Embedded Snake code/data blobs -- same mechanism, produced by build.sh's
+ * "[2e/7]" build_ring3_link_target libos_snake step (SCRUM-182). */
+extern const uint8_t _binary_libos_snake_code_bin_start[];
+extern const uint8_t _binary_libos_snake_code_bin_end[];
+extern const uint8_t _binary_libos_snake_data_bin_start[];
+extern const uint8_t _binary_libos_snake_data_bin_end[];
 
 /* The most recently launched viewer's context id, or PAGE_OWNER_FREE if
  * none is live. `wadview` now exits via exo_exit() on Q/Esc (#20,
@@ -169,7 +177,72 @@ static int64_t sys_launch_wad_viewer(uint64_t a1, uint64_t a2, uint64_t a3,
     return 0;
 }
 
+/* Same reclaim-previous-instance pattern as last_viewer_id above, kept as a
+ * separate static since Snake and the WAD viewer are independent LibOS
+ * contexts that can each be relaunched on their own. */
+static page_owner_t last_snake_id = PAGE_OWNER_FREE;
+
+/* #22 -- build and switch to Snake as a second, real LibOS context, invoked
+ * from the shell's `snake` command (src/shell/shell_main.c). Takes no
+ * arguments and needs no libos_launch_patch_params() call -- unlike the WAD
+ * viewer, Snake has no external resource to stage and no launch-time
+ * parameters (src/libos_snake/libos_snake.c's own header comment). Same
+ * return convention as sys_launch_wad_viewer(): a negative EXO_E* if the
+ * launch failed before the switch was armed, otherwise 0 once rescheduled
+ * after Snake exits (EXO_SYS_EXIT, #20) and yields back. */
+static int64_t sys_launch_snake(uint64_t a1, uint64_t a2, uint64_t a3,
+                                uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+
+    if (last_snake_id != PAGE_OWNER_FREE &&
+       context_lookup(last_snake_id) != NULL) {
+        revoke_all(last_snake_id);
+        context_destroy(last_snake_id);
+    }
+    last_snake_id = PAGE_OWNER_FREE;
+
+    page_owner_t snake_id;
+    int create_rc = context_create(vmm_kernel_pml4(), &snake_id);
+    if (create_rc != CONTEXT_OK) {
+        return create_rc == CONTEXT_ENOMEM ? -EXO_ENOMEM : -EXO_EINVAL;
+    }
+
+    size_t code_len = (size_t)(_binary_libos_snake_code_bin_end -
+                               _binary_libos_snake_code_bin_start);
+    size_t data_len = (size_t)(_binary_libos_snake_data_bin_end -
+                               _binary_libos_snake_data_bin_start);
+
+    libos_image_t img;
+    if (libos_build_image(snake_id,
+                          _binary_libos_snake_code_bin_start, code_len,
+                          _binary_libos_snake_data_bin_start, data_len,
+                          LIBOS_SNAKE_BSS_LEN, &img) != VMM_OK) {
+        context_destroy(snake_id);
+        return -EXO_ENOMEM;
+    }
+
+    /* Same reasoning as sys_launch_wad_viewer()'s own comment: without
+     * _irq, Snake's exo_get_ticks()/exo_kbd_poll()-driven loop would never
+     * see a PIT or keyboard IRQ land. */
+    context_prime_irq(snake_id, img.entry_vaddr, img.stack_top_vaddr);
+
+    /* Same framebuffer hand-off reasoning as sys_launch_wad_viewer(). */
+    fb_binding_release(fb_binding_owner());
+
+    if (context_switch_request(snake_id) != CONTEXT_OK) {
+        libos_destroy_image(snake_id, &img);
+        context_destroy(snake_id);
+        return -EXO_EINVAL;
+    }
+
+    last_snake_id = snake_id;
+
+    return 0;
+}
+
 void syscall_launch_init(void)
 {
     exo_syscall_register(EXO_SYS_LAUNCH_WAD_VIEWER, sys_launch_wad_viewer);
+    exo_syscall_register(EXO_SYS_LAUNCH_SNAKE, sys_launch_snake);
 }
