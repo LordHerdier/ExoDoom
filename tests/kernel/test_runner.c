@@ -53,6 +53,7 @@ void suite_context_switch_tests(CU_pSuite s);
 void suite_sse_tests(CU_pSuite s);
 void suite_syscall_yield_tests(CU_pSuite s);
 void suite_shell_libos_tests(CU_pSuite s);
+void suite_clock_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
 void suite_fb_shadow_tests(CU_pSuite s);
 void suite_fixed_math_tests(CU_pSuite s);
@@ -167,6 +168,12 @@ int syscall_yield_suite_cleanup(void);
  * reasoning as libc_shim_probe_suite_init/_cleanup above. */
 int shell_libos_suite_init(void);
 int shell_libos_suite_cleanup(void);
+
+/* Same idea for the clock_libos suite (SCRUM-168): builds the real clock
+ * blob under PAGE_OWNER_LIBOS and must restore its boot-time binding, same
+ * reasoning as shell_libos_suite_init/_cleanup above. */
+int clock_libos_suite_init(void);
+int clock_libos_suite_cleanup(void);
 
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
@@ -333,6 +340,10 @@ int run_tests(void)
     s = CU_add_suite("shell_libos", shell_libos_suite_init,
                      shell_libos_suite_cleanup);
     suite_shell_libos_tests(s);
+
+    s = CU_add_suite("clock_libos", clock_libos_suite_init,
+                     clock_libos_suite_cleanup);
+    suite_clock_libos_tests(s);
 
     s = CU_add_suite("context_launch_rebind", NULL,
                      context_launch_rebind_suite_cleanup);
