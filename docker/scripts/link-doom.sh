@@ -56,6 +56,12 @@ SHIM_SOURCES=(
   src/fpconv.c
   src/doom_net_stub.c
   src/doomgeneric_exo.c
+  # SCRUM-83's I_Error/I_Quit back end. src/doom/i_system.c calls
+  # doom_panic_begin/_halt and doom_halt, so a Doom LibOS links this too --
+  # it lives outside src/doom/ only so that it stays testable and keeps the
+  # vendored patch small, not because it is optional. This gate is what found
+  # it: merging SCRUM-83 left those three symbols undefined here.
+  src/doom_panic.c
   src/libos_heap.c
   src/libos_page_alloc.c
   src/libos_fb.c

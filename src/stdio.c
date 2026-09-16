@@ -563,11 +563,13 @@ int vprintf(const char *fmt, va_list ap)
 #endif /* EXO_KERNEL */
 
 /*
- * printf is the same on both sides of the #ifdef above, because both sides
- * supply vprintf. Keeping it here rather than duplicating it into each
- * branch is what guarantees the two paths cannot drift in anything but the
- * sink -- and vfprintf below needs the va_list form anyway, so the split
- * pays for itself twice.
+ * printf is the same call on both sides of the #ifdef above, because both
+ * sides supply vprintf.  Keeping it here rather than duplicating it into
+ * each branch is what guarantees the two paths cannot drift in anything but
+ * the sink -- SCRUM-83 added vprintf precisely so doom_panic() could take a
+ * va_list through that one shared engine instead of standing up a second
+ * formatter of its own for the I_Error path, and SCRUM-65's vfprintf needs
+ * the identical form.
  */
 int printf(const char *fmt, ...)
 {

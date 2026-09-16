@@ -29,6 +29,8 @@
 #include "fb_binding.h"
 #include "syscall.h"
 #include "exo_syscall.h"
+#include "vmm.h"
+#include "libos_test_common.h"  /* TEST_OWNER_REVOKE_ADDRSPACE, SCRUM-159 */
 
 #include <stdint.h>
 
@@ -329,6 +331,48 @@ static void test_force_cannot_take_a_kernel_page(void)
     CU_ASSERT_EQUAL(page_owner(kp), PAGE_OWNER_FREE);
 }
 
+/*
+ * SCRUM-159: revoke_force removes not just the ownership tag but the target's
+ * own mapping of the page it reclaims, so it can never again reach memory the
+ * PMM is now free to hand to somebody else. Needs a real bound address space
+ * to have anything to unmap out of, unlike every other test in this suite
+ * (plain page ownership only) -- see libos_test_common.h for why this one
+ * test uses TEST_OWNER_REVOKE_ADDRSPACE instead of OTHER_LIBOS.
+ */
+static void test_force_unmaps_the_page(void)
+{
+    uint64_t pml4_phys = 0;
+    CU_ASSERT_EQUAL(vmm_create_address_space(&pml4_phys), VMM_OK);
+    if (pml4_phys == 0)
+        return;
+    CU_ASSERT_EQUAL(vmm_bind_address_space(TEST_OWNER_REVOKE_ADDRSPACE, pml4_phys),
+                    VMM_OK);
+    uint64_t *pml4 = (uint64_t *)(uintptr_t)pml4_phys;
+
+    void *p = alloc_page_owned(TEST_OWNER_REVOKE_ADDRSPACE);
+    CU_ASSERT_PTR_NOT_NULL(p);
+    if (p == NULL) {
+        vmm_destroy_address_space(TEST_OWNER_REVOKE_ADDRSPACE);
+        return;
+    }
+
+    const uint64_t vaddr = EXO_USER_VA_BASE + 0x50000000ULL;
+    CU_ASSERT_EQUAL(vmm_map_page_in(pml4, vaddr, (uint64_t)(uintptr_t)p,
+                                    VMM_WRITE | VMM_USER), VMM_OK);
+
+    uint64_t resolved = 0;
+    CU_ASSERT_EQUAL(vmm_translate_in(pml4, vaddr, &resolved, NULL), VMM_OK);
+    CU_ASSERT_EQUAL(resolved, (uint64_t)(uintptr_t)p);
+
+    revoke_res_t res = revoke_res_page((uint64_t)(uintptr_t)p);
+    CU_ASSERT_EQUAL(revoke_force(TEST_OWNER_REVOKE_ADDRSPACE, res), REVOKE_OK);
+
+    CU_ASSERT_EQUAL(page_owner(p), PAGE_OWNER_FREE);
+    CU_ASSERT_EQUAL(vmm_translate_in(pml4, vaddr, &resolved, NULL), VMM_ENOENT);
+
+    CU_ASSERT_EQUAL(vmm_destroy_address_space(TEST_OWNER_REVOKE_ADDRSPACE), VMM_OK);
+}
+
 /* ── revoke_all: the v1 policy ────────────────────────────────────────────── */
 
 /* What exo_exit will call.  Everything the context holds goes back, and
@@ -369,6 +413,47 @@ static void test_revoke_all_sweeps_one_context(void)
 
     CU_ASSERT_EQUAL(free_page_owned(other, PAGE_OWNER_LIBOS), PAGE_FREE_OK);
     free_page(kp);
+}
+
+/*
+ * SCRUM-159: revoke_all wipes every mapping left in the swept context's own
+ * window in the same pass, not just the pages it hands back to the PMM --
+ * page_reclaim_all() never reports which addresses it took, so this is what
+ * makes a repossessed shadow framebuffer (or any other page the context had
+ * mapped) unreachable without the sweep needing to enumerate them one by one.
+ */
+static void test_revoke_all_unmaps_everything(void)
+{
+    uint64_t pml4_phys = 0;
+    CU_ASSERT_EQUAL(vmm_create_address_space(&pml4_phys), VMM_OK);
+    if (pml4_phys == 0)
+        return;
+    CU_ASSERT_EQUAL(vmm_bind_address_space(TEST_OWNER_REVOKE_ADDRSPACE, pml4_phys),
+                    VMM_OK);
+    uint64_t *pml4 = (uint64_t *)(uintptr_t)pml4_phys;
+
+    void *a = alloc_page_owned(TEST_OWNER_REVOKE_ADDRSPACE);
+    void *b = alloc_page_owned(TEST_OWNER_REVOKE_ADDRSPACE);
+    CU_ASSERT_PTR_NOT_NULL(a);
+    CU_ASSERT_PTR_NOT_NULL(b);
+    if (a == NULL || b == NULL) {
+        vmm_destroy_address_space(TEST_OWNER_REVOKE_ADDRSPACE);
+        return;
+    }
+
+    const uint64_t va_a = EXO_USER_VA_BASE + 0x50008000ULL;
+    const uint64_t va_b = EXO_USER_VA_BASE + 0x5000C000ULL;
+    CU_ASSERT_EQUAL(vmm_map_page_in(pml4, va_a, (uint64_t)(uintptr_t)a,
+                                    VMM_WRITE | VMM_USER), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_map_page_in(pml4, va_b, (uint64_t)(uintptr_t)b,
+                                    VMM_WRITE | VMM_USER), VMM_OK);
+
+    CU_ASSERT_EQUAL(revoke_all(TEST_OWNER_REVOKE_ADDRSPACE), 2u);
+
+    CU_ASSERT_EQUAL(vmm_translate_in(pml4, va_a, NULL, NULL), VMM_ENOENT);
+    CU_ASSERT_EQUAL(vmm_translate_in(pml4, va_b, NULL, NULL), VMM_ENOENT);
+
+    CU_ASSERT_EQUAL(vmm_destroy_address_space(TEST_OWNER_REVOKE_ADDRSPACE), VMM_OK);
 }
 
 /* The sweep that must never happen.  PAGE_OWNER_KERNEL names every reserved
@@ -611,8 +696,11 @@ void suite_revoke_tests(CU_pSuite s)
                 test_force_is_scoped_to_the_named_context);
     CU_add_test(s, "force cannot take a kernel page",
                 test_force_cannot_take_a_kernel_page);
+    CU_add_test(s, "force unmaps the page", test_force_unmaps_the_page);
     CU_add_test(s, "revoke_all sweeps one context",
                 test_revoke_all_sweeps_one_context);
+    CU_add_test(s, "revoke_all unmaps everything",
+                test_revoke_all_unmaps_everything);
     CU_add_test(s, "revoke_all refuses reserved ids",
                 test_revoke_all_refuses_reserved_ids);
     CU_add_test(s, "FB request marks without taking",

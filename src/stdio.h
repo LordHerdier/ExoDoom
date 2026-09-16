@@ -17,11 +17,14 @@ int putchar(int c);
 int puts(const char *s);
 
 /*
- * vprintf — printf's va_list sibling, sharing its sink (SCRUM-65).
+ * vprintf — printf's va_list sibling, sharing its sink (SCRUM-83).
  *
  * printf is implemented in terms of this rather than the other way round, so
  * there is exactly one formatting engine and one serial sink per build.
- * vfprintf(stdout/stderr, ...) is this function; see the FILE* section below.
+ * Added for doom_panic() (src/doom_panic.c), which receives I_Error's
+ * varargs as a va_list and must not stand up a second formatter to print
+ * them; SCRUM-65's vfprintf(stdout/stderr, ...) is now this same function,
+ * which is the second caller that split pays for.
  */
 int vprintf(const char *fmt, va_list ap);
 

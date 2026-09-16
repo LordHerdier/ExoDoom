@@ -451,6 +451,88 @@ int vmm_unmap_page(uint64_t vaddr) {
     return vmm_unmap_page_in(kernel_pml4, vaddr);
 }
 
+/*
+ * Tear down every mapping in `pml4`'s LibOS window whose physical target
+ * falls in [paddr_lo, paddr_hi) — the SCRUM-159 primitive behind exo_page_free
+ * and the revocation protocol (src/revoke.c) both being able to say "this
+ * context no longer has a live PTE pointing at this memory", without either
+ * of them needing a separate per-context record of what was ever mapped.
+ * That record doesn't exist anywhere in the kernel today (docs/syscall_spec.md
+ * §3.7's "the kernel does not know where a context mapped anything"); this is
+ * a reverse *scan* instead — safe to do on demand because, post-SCRUM-48,
+ * `pml4`'s own LibOS window is the only place its owner's mappings can live.
+ *
+ * Walked with next_level(..., 0) exactly like vmm_translate_in/
+ * vmm_unmap_page_in — walk-only, never allocates — so a context with a
+ * mostly-empty window costs almost nothing here: an absent PML4/PDPT/PD entry
+ * ends that branch immediately rather than being created. VMM_HUGE entries at
+ * the PDPT/PD level are skipped rather than assumed impossible: nothing ever
+ * installs a huge leaf inside the LibOS window (only exo_page_map's 4 KiB
+ * path touches it), but a stale assumption here would silently stop scanning
+ * a window it doesn't actually describe.
+ *
+ * Pass (0, UINT64_MAX) to clear every mapping in the window regardless of
+ * physical target — what revoke_all() needs, since page_reclaim_all() does
+ * not hand back which addresses it reclaimed.
+ *
+ * Returns the count of leaves cleared, or 0 if pml4 is NULL (an unbound
+ * context has no window to scan).
+ */
+uint32_t vmm_unmap_phys_range_in(uint64_t *pml4, uint64_t paddr_lo, uint64_t paddr_hi) {
+    uint32_t count = 0;
+
+    if (pml4 == NULL) {
+        return 0;
+    }
+
+    for (unsigned pi = VMM_LIBOS_PML4_START; pi < VMM_LIBOS_PML4_END; pi++) {
+        uint64_t *pdpt = next_level(pml4, pml4, pi, 0);
+        if (pdpt == NULL) {
+            continue;
+        }
+
+        for (unsigned di = 0; di < 512; di++) {
+            if (pdpt[di] & VMM_HUGE) {
+                continue;               /* never created in the window */
+            }
+            uint64_t *pd = next_level(pml4, pdpt, di, 0);
+            if (pd == NULL) {
+                continue;
+            }
+
+            for (unsigned qi = 0; qi < 512; qi++) {
+                if (pd[qi] & VMM_HUGE) {
+                    continue;           /* never created in the window */
+                }
+                uint64_t *pt = next_level(pml4, pd, qi, 0);
+                if (pt == NULL) {
+                    continue;
+                }
+
+                for (unsigned ti = 0; ti < 512; ti++) {
+                    uint64_t pte = pt[ti];
+                    if (!(pte & VMM_PRESENT)) {
+                        continue;
+                    }
+
+                    uint64_t phys = pte & ENTRY_ADDR_MASK;
+                    if (phys < paddr_lo || phys >= paddr_hi) {
+                        continue;
+                    }
+
+                    uint64_t vaddr = ((uint64_t)pi << 39) | ((uint64_t)di << 30) |
+                                     ((uint64_t)qi << 21) | ((uint64_t)ti << 12);
+                    pt[ti] = 0;
+                    flush_page(pml4, vaddr);
+                    count++;
+                }
+            }
+        }
+    }
+
+    return count;
+}
+
 int vmm_translate_in(uint64_t *pml4, uint64_t vaddr, uint64_t *paddr_out, uint64_t *flags_out) {
     if (pml4 == NULL || !is_canonical(vaddr)) {
         return VMM_EINVAL;
