@@ -128,6 +128,25 @@ int vmm_translate_in(uint64_t *pml4, uint64_t vaddr, uint64_t *paddr_out,
                      uint64_t *flags_out);
 
 /*
+ * Unmap every present leaf in `pml4`'s LibOS window whose physical target
+ * falls in [paddr_lo, paddr_hi). Pass (0, UINT64_MAX) to clear every mapping
+ * in the window regardless of target — the whole-window sweep revoke_all()
+ * (src/revoke.c) needs. Never allocates; a NULL pml4 (no address space
+ * bound) or an absent intermediate table simply contributes nothing to the
+ * walk.
+ *
+ * This is SCRUM-159's mechanism for tearing down a context's mappings on
+ * exo_page_free and on revocation: there is no per-context record of what a
+ * context has ever mapped (docs/syscall_spec.md §3.7), so this scans the one
+ * place those mappings can live post-SCRUM-48 — the context's own private
+ * PML4's window — instead of tracking them separately.
+ *
+ * Returns the number of leaves cleared.
+ */
+uint32_t vmm_unmap_phys_range_in(uint64_t *pml4, uint64_t paddr_lo,
+                                 uint64_t paddr_hi);
+
+/*
  * Allocate a new PML4 and give it the kernel's own PML4[0] link verbatim —
  * not a copy of the tables it points to, the same physical PDPT kernel_pml4
  * uses.  That is what makes the two address spaces agree about kernel memory
