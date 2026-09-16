@@ -33,3 +33,43 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+/*
+ * ---------------------------------------------------------------------------
+ * Trigonometry, floor and ceil: see src/fixed_math.h (SCRUM-41).
+ * ---------------------------------------------------------------------------
+ *
+ * SCRUM-41 asked for sin/cos/tan/atan, abs and floor/ceil.  They exist, and
+ * they are deliberately NOT declared here, because a standard <math.h> spells
+ * all of them in `double` and this kernel cannot have a double-valued
+ * function at all: it compiles -mno-sse -mno-sse2, and the x86_64 SysV ABI
+ * returns floating point in xmm0, so `double sin(double)` in any file the
+ * kernel's own build globs is rejected outright -- the same wall
+ * src/doom/m_config.c's M_GetFloatVariable() hit in SCRUM-64.  Every kernel
+ * test TU carries those same flags, so a double API could not be unit-tested
+ * either.
+ *
+ * So the implementations live in src/fixed_math.h as 16.16 fixed point over
+ * binary angle measure:
+ *
+ *     exo_fixed_sin / exo_fixed_cos / exo_fixed_tan   (Maclaurin, Q30 core)
+ *     exo_fixed_atan                                  (CORDIC, vectoring)
+ *     EXO_FIXED_FLOOR / EXO_FIXED_CEIL (+ _INT forms)  -- the ticket's
+ *                                                        "floor/ceil for
+ *                                                        integers"
+ *
+ * and `abs` is where it has been since SCRUM-30, in src/stdlib.c.
+ *
+ * Nothing under src/doom/ loses anything by this.  The engine is fixed-point
+ * throughout, and the only reason it includes <math.h> at all is the single
+ * live `fabs()` above -- the sin/tan/atan calls in r_main.c's
+ * R_InitTables/R_InitPointToAngle sit inside `#if 0` blocks marked
+ * "UNUSED - now getting from tables.c", and those are precisely the tables
+ * tests/kernel/test_fixed_math_k.c now regenerates through the fixed-point
+ * API to prove it matches chocolate-doom entry for entry.
+ *
+ * If a future re-vendor ever un-#if-0s that code, the port is a few lines --
+ * call exo_fixed_sin/tan/atan on a BAM angle instead of sin/tan/atan on a
+ * float -- and it will produce a *more* accurate table than the shipped one,
+ * which was generated in single precision with a truncating cast.
+ */
