@@ -738,9 +738,17 @@ int exo_file_register_blob(const char *name, const void *data, size_t size)
 
     /* Re-registering a name replaces it rather than adding a shadowing
      * second entry -- otherwise a LibOS that re-mounts a WAD would leak
-     * slots and fopen would keep finding the stale one. */
+     * slots and fopen would keep finding the stale one.
+     *
+     * Compared case-insensitively, because find_blob() below is: if the two
+     * disagreed about what "the same name" means, registering
+     * "FreeDoom2.WAD" over "freedoom2.wad" would fall through to a second
+     * slot that find_blob then matches just as happily as the first, and
+     * which one a later fopen returns would come down to slot order. That
+     * is a worse failure than either rule on its own -- the replace-in-place
+     * contract this loop exists to provide would silently not hold. */
     for (i = 0; i < blob_count; i++) {
-        if (strcmp(blobs[i].name, name) == 0) {
+        if (strcasecmp(blobs[i].name, name) == 0) {
             blobs[i].data = data;
             blobs[i].size = size;
             return 0;
@@ -1055,6 +1063,16 @@ int mkdir(const char *path, mode_t mode)
  * below for why that path cannot execute.
  */
 
+/*
+ * Staging size for a width-limited %f field.  A field wider than this is
+ * clamped, which is benign in a way a smaller buffer would not be: this is
+ * two and a half times the longest decimal that can change a double's bits
+ * at all within the range src/fpconv.h documents as exact, so a clamp can
+ * only ever drop digits past the point where they stop affecting the
+ * result.  A narrower buffer would not have that property.
+ */
+#define SCAN_FLOAT_FIELD_MAX 128
+
 static int scan_isspace(int c)
 {
     return c == ' ' || c == '\t' || c == '\n' ||
@@ -1288,10 +1306,44 @@ int vsscanf(const char *str, const char *fmt, va_list ap)
                 if (*s == '\0')
                     goto done;
 
-                bits = exo_parse_f64(s, &end);
-                if (end == s)
-                    goto done;
-                s = end;
+                if (width > 0) {
+                    /*
+                     * C99 7.21.6.2p3: a conversion reads at most `width`
+                     * characters.  Every other conversion here already
+                     * honours that -- scan_integer takes width as a
+                     * parameter, %s bounds its copy with it -- so staging
+                     * the field into a bounded buffer is what makes the
+                     * float case consistent rather than the one exception.
+                     *
+                     * It matters more here than for %d, because
+                     * exo_parse_f64 stops only at a character that cannot
+                     * continue a number.  Against "1.5e3", a "%3f" that
+                     * ignored width would swallow the exponent as well and
+                     * hand the next conversion a tail that begins nowhere
+                     * it expects -- a silent misparse rather than a
+                     * matching failure, which is the same class of bug as
+                     * the %.3d vararg desync this ticket started from.
+                     */
+                    char   field[SCAN_FLOAT_FIELD_MAX];
+                    size_t n = 0;
+
+                    while (n < (size_t)width && n + 1 < sizeof field &&
+                           s[n] != '\0') {
+                        field[n] = s[n];
+                        n++;
+                    }
+                    field[n] = '\0';
+
+                    bits = exo_parse_f64(field, &end);
+                    if (end == field)
+                        goto done;
+                    s += (size_t)(end - field);
+                } else {
+                    bits = exo_parse_f64(s, &end);
+                    if (end == s)
+                        goto done;
+                    s = end;
+                }
 
                 if (!suppress) {
                     store_double_bits(va_arg(args, void *), lmod, bits);

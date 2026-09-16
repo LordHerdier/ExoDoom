@@ -292,6 +292,13 @@ static const unsigned char blob_bytes[] = {
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'
 };
 
+/* Same shape, different payload, so a test can tell which of two
+ * registrations under the same name actually won. */
+static const unsigned char blob_bytes_alt[] = {
+    'I', 'W', 'A', 'D', 0, 0, 0, 0, 12, 0, 0, 0,
+    'Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S'
+};
+
 static void test_fopen_finds_a_registered_blob(void)
 {
     FILE *f;
@@ -530,6 +537,98 @@ static void test_sscanf_reports_what_it_assigned(void)
     CU_ASSERT_EQUAL(a, 7);
 }
 
+static void test_register_blob_replace_matches_lookup(void)
+{
+    FILE         *f;
+    unsigned char buf[8];
+    size_t        got;
+
+    exo_file_reset_blobs();
+
+    CU_ASSERT_EQUAL(exo_file_register_blob("freedoom2.wad", blob_bytes,
+                                           sizeof blob_bytes), 0);
+
+    /*
+     * The same name in different case must REPLACE the slot, not add a
+     * second one.
+     *
+     * find_blob() matches case-insensitively, so a shadowing second slot
+     * would be exactly as matchable as the first, and which one a later
+     * fopen returned would come down to slot order -- the replace-in-place
+     * contract the registration loop exists to provide would silently not
+     * hold. Registering with strcmp while looking up with strcasecmp gave
+     * the two functions different notions of "the same name"; this is what
+     * pins them together.
+     */
+    CU_ASSERT_EQUAL(exo_file_register_blob("FreeDoom2.WAD", blob_bytes_alt,
+                                           sizeof blob_bytes_alt), 0);
+
+    /* The replacement's payload is what a read returns -- which is the
+     * observable half of "replaced, not shadowed". */
+    f = fopen("/some/where/FREEDOOM2.WAD", "rb");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f == 0) {
+        exo_file_reset_blobs();
+        return;
+    }
+
+    CU_ASSERT_EQUAL(fseek(f, 12, SEEK_SET), 0);
+    got = fread(buf, 1, 4, f);
+    CU_ASSERT_EQUAL(got, 4u);
+    CU_ASSERT_EQUAL(buf[0], 'Z');
+    CU_ASSERT_EQUAL(buf[3], 'W');
+
+    fclose(f);
+    exo_file_reset_blobs();
+}
+
+static void test_sscanf_float_honours_field_width(void)
+{
+    char word[16];
+
+    /*
+     * The float conversion reads at most `width` characters, the way every
+     * other conversion here already did (C99 7.21.6.2p3).
+     *
+     * This asserts on the SCAN POSITION rather than on a converted value,
+     * because it has to: this TU is compiled -mno-sse, so store_double_bits
+     * writes nothing at all in a kernel build (src/stdio.c) and there is no
+     * double to inspect. The position is the half that could silently go
+     * wrong anyway -- exo_parse_f64 stops only at a character that cannot
+     * continue a number, so a width the conversion ignored would not fail,
+     * it would consume more input and hand the NEXT conversion a tail
+     * beginning somewhere it does not expect. The value side is covered by
+     * test_fpconv_k.c, which drives exo_parse_f64 directly on bit patterns.
+     *
+     * Assignment suppression (%*Nf) is what makes that testable without a
+     * double destination at all.
+     */
+    word[0] = '\0';
+    CU_ASSERT_EQUAL(sscanf("12.5", "%*2f%s", word), 1);
+    CU_ASSERT_STRING_EQUAL(word, ".5");
+
+    /*
+     * The exponent case, where ignoring width does the most damage: "1.5e3"
+     * is a single token to the parser, so a %3f has to stop after "1.5" and
+     * leave "e3" behind rather than consume a value a thousand times larger
+     * and report success either way.
+     */
+    word[0] = '\0';
+    CU_ASSERT_EQUAL(sscanf("1.5e3", "%*3f%s", word), 1);
+    CU_ASSERT_STRING_EQUAL(word, "e3");
+
+    /* No width is still unbounded -- the pre-existing behaviour, unchanged. */
+    word[0] = '\0';
+    CU_ASSERT_EQUAL(sscanf("1.5e3 tail", "%*f %s", word), 1);
+    CU_ASSERT_STRING_EQUAL(word, "tail");
+
+    /* A width that outruns the input is not an error; it just stops at the
+     * end of what is there. */
+    word[0] = '\0';
+    CU_ASSERT_EQUAL(sscanf("2.5 rest", "%*99f %s", word), 1);
+    CU_ASSERT_STRING_EQUAL(word, "rest");
+}
+
 void suite_libc_gaps_tests(CU_pSuite s)
 {
     CU_add_test(s, "precision builds Doom lump names",
@@ -543,6 +642,10 @@ void suite_libc_gaps_tests(CU_pSuite s)
     CU_add_test(s, "snprintf return and truncation",
                 test_snprintf_return_and_truncation);
     CU_add_test(s, "strncmp", test_strncmp);
+    CU_add_test(s, "register_blob replace matches lookup",
+                test_register_blob_replace_matches_lookup);
+    CU_add_test(s, "sscanf %f honours field width",
+                test_sscanf_float_honours_field_width);
     CU_add_test(s, "strrchr", test_strrchr);
     CU_add_test(s, "strstr", test_strstr);
     CU_add_test(s, "strdup", test_strdup);

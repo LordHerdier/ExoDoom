@@ -212,9 +212,8 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer) |
 | Resource revocation (repossession) | `src/revoke.c/h` (protocol), the `page_revoke_*`/`fb_binding_revoke_*` primitives |
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
-| Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`; header-only: `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/types.h`, `src/sys/stat.h` |
-| Fixed-point trigonometry (sin/cos/tan/atan, integer floor/ceil) | `src/fixed_math.c/h` |
 | Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`, `src/fpconv.c/h` (float↔decimal); header-only: `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/types.h`, `src/sys/stat.h` |
+| Fixed-point trigonometry (sin/cos/tan/atan, integer floor/ceil) | `src/fixed_math.c/h` |
 | Doom globals from non-vendored netcode | `src/doom_net_stub.c` |
 | Vendored Doom engine (not yet linked) | `src/doom/` |
 | doomgeneric platform layer | `src/doomgeneric_exo.c/h` (timer half: `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
