@@ -214,7 +214,8 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
 | Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`; header-only: `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/types.h`, `src/sys/stat.h` |
 | Vendored Doom engine (not yet linked) | `src/doom/` |
-| doomgeneric platform layer | `src/doomgeneric_exo.c/h` (timer half: `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
+| doomgeneric platform layer | `src/doomgeneric_exo.c/h` (`DG_Init` SCRUM-73; timer half `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
+| Mounted IWAD registry (behind `DG_Init`) | `src/doom_wad.c/h` |
 | Test framework | `src/kunit.h`, `tests/kernel/*.c`, `tests/kernel/kunit.c`, `tests/kernel/ring3_probe.s` |
 
 ### Key architectural facts worth knowing before editing
@@ -475,6 +476,31 @@ convention and calls it from `kernel_main` instead of a test harness.
   would land on vector 19, where `default_stub`'s bare `iretq` loops forever;
   `MXCSR` masks all six, and anything that unmasks one owes vector 19 a
   handler first. Full reasoning: `docs/syscall_spec.md` §3.4a.
+- **`DG_Init` mounts the IWAD; it does not load one (SCRUM-73).** There is no
+  file to read and nowhere to put 28 MB if there were — the WAD arrives as a
+  multiboot module, the kernel identity-maps it, and `libos_map_wad()` maps
+  those *existing* physical pages read-only at `LIBOS_WAD_VADDR` before the
+  LibOS is ever entered. So `DG_Init`'s job is to prove what's mapped really
+  is a WAD, record it (`src/doom_wad.c`), and say so on serial.
+  **The ticket title says "via `exo_fb_map`" and that is a mis-filing** —
+  there is no such syscall (framebuffer mapping is `exo_fb_acquire` +
+  `exo_page_map`, composed by `libos_fb_map()`), and it has nothing to do
+  with an IWAD. The Jira description flags this on the ticket itself.
+  `DG_Init` **reports rather than halts**: it records a `DOOM_WAD_*` code in
+  `dg_init_result()` and returns. A missing or malformed IWAD is exactly what
+  Doom's own `d_iwad.c` → `W_AddFile` path exists to diagnose, with engine
+  context this layer doesn't have; halting first would pre-empt that for no
+  gain. It also means there is **no `#ifdef` splitting the tested path from
+  the shipped one** — `tests/kernel/test_dg_init_k.c` drives the real
+  function from ring 0.
+  `g_doom_params` in `src/doomgeneric_exo.c` is SCRUM-175's params hand-off,
+  reusing `libos_wad_params_t` rather than declaring a second identical
+  struct. It must stay the **first global in that file**, and that file first
+  in the Doom target's source list, or `libos_launch_patch_params()` writes
+  to the wrong offset. Its non-zero sentinel initialiser is load-bearing
+  twice over: it keeps the struct out of `.bss` (where there'd be no bytes to
+  patch), and it's what lets `DG_Init` report "nobody patched this" instead
+  of dereferencing address 0.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - **The context table (SCRUM-107, `src/context.c/h`) tracks live LibOS
