@@ -64,13 +64,28 @@ int system(const char *command);
 /*
  * atof: decimal text to double.
  *
- * NOT available in a kernel build -- it cannot be, since the x86_64 SysV ABI
- * returns double in xmm0 and the kernel compiles -mno-sse. The engine behind
- * it, exo_parse_f64() in src/fpconv.h, is integer-only and IS available (and
- * unit-tested) everywhere; this declaration is the thin ring-3 adapter over
- * it. Its one call site is m_config.c:1766.
+ * Declared only where the compiler can actually express a `double` return.
+ * The x86_64 SysV ABI returns floating point in xmm0, so under -mno-sse this
+ * prototype is rejected outright -- "SSE register return with SSE disabled".
+ *
+ * The predicate is __SSE2__, NOT !EXO_KERNEL. That distinction is load
+ * bearing and was got wrong once: docker/scripts/build.sh derives its ring-3
+ * probe_cflags from the kernel CFLAGS, and the substitution only swaps
+ * -mcmodel=small for -mcmodel=large -- so -mno-sse -mno-sse2 survive into
+ * EVERY ring-3 link target built today, including SCRUM-51's
+ * libc_shim_probe. Gating on "not the kernel" therefore still handed a
+ * double-returning prototype to a compiler with SSE disabled, and broke that
+ * target's build. __SSE2__ asks the question that actually matters -- can
+ * this translation unit name a double at all -- and answers it correctly for
+ * the kernel, for today's SSE-less ring-3 probes, and for the eventual Doom
+ * LibOS target, which must enable SSE because Doom cannot be compiled
+ * without it (SCRUM-177).
+ *
+ * The engine behind it, exo_parse_f64() in src/fpconv.h, is integer-only and
+ * IS available -- and unit-tested -- in every build. This is the thin adapter
+ * over it. Its one call site is m_config.c:1766.
  */
-#ifndef EXO_KERNEL
+#ifdef __SSE2__
 double atof(const char *nptr);
 #endif
 

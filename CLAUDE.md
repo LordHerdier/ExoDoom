@@ -464,9 +464,16 @@ convention and calls it from `kernel_main` instead of a test harness.
   - **`src/fpconv.c` exists because `-mno-sse` forbids `double` in kernel
     sources.** All of `%f` and `atof`'s real logic is integer work on an
     IEEE-754 bit pattern, so it compiles and is unit-tested from ring 0; what
-    sits behind `#ifndef EXO_KERNEL` in `stdio.c`/`stdlib.c` is two adapters
+    sits behind an **`__SSE2__` gate** in `stdio.c`/`stdlib.c` is two adapters
     that move 8 bytes. Measured against glibc: bit-exact for
     |decimal exponent| ≤ 15, worst case 2 ULP.
+    The gate is `__SSE2__` and **not `!EXO_KERNEL`**, which is a distinction
+    that has already broken a build once: `build.sh`'s `probe_cflags` is the
+    kernel `CFLAGS` with only `-mcmodel` swapped, so **every ring-3 link
+    target today is also `-mno-sse`**. "Not the kernel" does not imply "has
+    SSE". The eventual Doom LibOS target must enable SSE, since Doom cannot
+    compile without it (SCRUM-177) — and then these paths light up on their
+    own.
 - **The vendored Doom engine compiles, but is not linked.** `src/doom/` holds
   doomgeneric's core (SCRUM-63). `make docker-build-doom` runs
   `docker/scripts/build-doom.sh`, which since SCRUM-64 compiles **all 79 files

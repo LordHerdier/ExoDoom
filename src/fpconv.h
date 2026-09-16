@@ -26,13 +26,20 @@
  * kernel test TU carries the same flags, so a double-valued API could not be
  * called from a unit test either.
  *
+ * And it is not only the kernel: docker/scripts/build.sh derives its ring-3
+ * probe_cflags from those same CFLAGS, swapping only -mcmodel, so every
+ * ring-3 link target built today is ALSO -mno-sse.  Which is why the two
+ * adapters below are gated on __SSE2__ rather than on !EXO_KERNEL -- the
+ * question is "can this translation unit name a double", not "is this the
+ * kernel", and the two are not the same.
+ *
  * Taking the bit pattern as a uint64_t sidesteps all of it.  The conversion
  * logic -- which is where every actual bug lives: exponent handling,
  * rounding, carry propagation, the subnormal and infinity edges -- lives
  * here, builds everywhere, and is driven directly by
  * tests/kernel/test_fpconv_k.c from ring 0.  What stays behind the
- * #ifndef EXO_KERNEL in src/stdio.c and src/stdlib.c is two adapters of
- * three lines each, doing nothing but moving 8 bytes between a double and a
+ * __SSE2__ gate in src/stdio.c and src/stdlib.c is two adapters of three
+ * lines each, doing nothing but moving 8 bytes between a double and a
  * uint64_t.
  */
 

@@ -398,7 +398,7 @@ void abort(void)
     exit(134);
 }
 
-#ifndef EXO_KERNEL
+#ifdef __SSE2__
 double atof(const char *nptr)
 {
     /*
@@ -407,6 +407,10 @@ double atof(const char *nptr)
      * edges -- is in exo_parse_f64(), which is integer-only and is driven
      * directly by tests/kernel/test_fpconv_k.c from ring 0. All that happens
      * here is moving 8 bytes.
+     *
+     * __SSE2__ rather than !EXO_KERNEL -- see the declaration's comment in
+     * src/stdlib.h for why "not the kernel" is not the same question as "has
+     * SSE", and which build that difference broke.
      */
     uint64_t bits = exo_parse_f64(nptr, NULL);
     double   d;

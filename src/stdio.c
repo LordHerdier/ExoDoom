@@ -218,30 +218,37 @@ static size_t fmt_uint_prec(char *buf, uint64_t val, unsigned base, int lower,
  * Pull a double off the varargs and hand back its bit pattern.
  *
  * This is the ONLY place in the kernel-visible sources that names the type
- * `double`, and it is behind #ifndef EXO_KERNEL because it has to be: the
- * kernel builds -mno-sse and va_arg(ap, double) is rejected outright there
+ * `double`, and it is gated because it has to be: under -mno-sse the
+ * va_arg(ap, double) below is rejected outright
  * ("SSE register argument with SSE disabled"). All the actual work -- the
  * exponent handling, the rounding, the carry propagation -- is in
  * src/fpconv.c, which is integer-only and is unit-tested from ring 0.
  *
- * In a kernel build this returns the bit pattern of 0.0 and consumes
- * nothing. That is safe rather than merely convenient: no kernel source uses a
- * float (CLAUDE.md), so the kernel's own printf can never be handed a %f,
- * and the ring-3 build -- the one Doom links against, and the only one with
- * a %f call site -- takes the real path.
+ * The predicate is __SSE2__, NOT !EXO_KERNEL. docker/scripts/build.sh builds
+ * every ring-3 link target with probe_cflags, which is the kernel CFLAGS
+ * with only -mcmodel swapped -- so -mno-sse -mno-sse2 survive into all of
+ * them, and "not the kernel" does not imply "has SSE". Getting that wrong
+ * broke SCRUM-51's libc_shim_probe build. See src/stdlib.h's atof comment.
+ *
+ * Without SSE this returns the bit pattern of 0.0 and consumes nothing.
+ * That is safe rather than merely convenient: a translation unit that cannot
+ * name a double cannot pass one to printf either, so a %f is unreachable
+ * from such a build -- while the eventual Doom LibOS target, which must
+ * enable SSE because Doom cannot compile without it (SCRUM-177), takes the
+ * real path.
  */
 static uint64_t fetch_double_bits(va_list *ap)
 {
-#ifdef EXO_KERNEL
-    (void)ap;
-    return 0;
-#else
+#ifdef __SSE2__
     double   d = va_arg(*ap, double);
     uint64_t bits;
 
     __builtin_memcpy(&bits, &d, sizeof bits);
 
     return bits;
+#else
+    (void)ap;
+    return 0;
 #endif
 }
 
@@ -1128,12 +1135,15 @@ static int scan_integer(const char **sp, int base, int width, int is_signed,
 /*
  * Store a parsed floating-point value through a scanf pointer argument.
  *
- * The mirror image of fetch_double_bits, and behind the same #ifdef for the
- * same reason: writing a `double` or a `float` needs SSE, which the kernel
- * build does not have. In a kernel build this stores nothing and the caller
- * still counts the conversion, which is the honest shape -- no kernel
-X
- * build (the one Doom links) takes the real path.
+ * The mirror image of fetch_double_bits, gated on __SSE2__ for exactly the
+ * same reason and with the same caveat: writing a `double` or a `float`
+ * needs SSE, and "not the kernel" does not imply "has SSE" -- every ring-3
+ * link target build.sh produces today inherits -mno-sse from the kernel
+ * CFLAGS. See src/stdlib.h's atof comment.
+ *
+ * Without SSE this stores nothing and the caller still counts the
+ * conversion, which is the honest shape: a translation unit that cannot name
+ * a float cannot have passed a pointer to one either.
  *
  * %lf is a double and plain %f is a FLOAT, unlike printf where both are
  * promoted to double. Getting that backwards writes 8 bytes through a
@@ -1141,7 +1151,7 @@ X
  */
 static void store_double_bits(void *dest, length_mod_t lmod, uint64_t bits)
 {
-#ifdef EXO_KERNEL
+#ifndef __SSE2__
     (void)dest;
     (void)lmod;
     (void)bits;
