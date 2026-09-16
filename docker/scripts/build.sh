@@ -418,10 +418,18 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # libc_shim_probe.c MUST come first in this list -- see
   # build_ring3_link_target's own comment on why source order determines
   # entry_vaddr.
+  # src/errno.c and src/fpconv.c are SCRUM-65 additions to this list, and
+  # they are here because src/stdio.c and src/stdlib.c grew real dependencies
+  # on them rather than because anything in the probe calls them directly:
+  # fopen/fseek/ftell set errno (which src/errno.h resolves to exo_errno), and
+  # %f / atof route through exo_fmt_f64 / exo_parse_f64. Leaving them out is
+  # not a compile error anywhere -- it is an undefined reference at THIS
+  # target's link step, which is how CI found it.
   shim_dir=tests/kernel/libc_shim_probe
   build_ring3_link_target libc_shim_probe "$shim_dir" "$shim_dir" \
     "$shim_dir/libc_shim_probe.c" \
     src/stdlib.c src/stdio.c src/string.c src/ctype.c \
+    src/errno.c src/fpconv.c \
     src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c
 
   echo "[3b3/7] Compile Doom's reference trig tables (SCRUM-41)"

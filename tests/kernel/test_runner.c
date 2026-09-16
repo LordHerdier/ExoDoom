@@ -59,6 +59,8 @@ void suite_fb_shadow_tests(CU_pSuite s);
 void suite_fixed_math_tests(CU_pSuite s);
 void suite_doom_panic_tests(CU_pSuite s);
 void suite_dg_init_tests(CU_pSuite s);
+void suite_fpconv_tests(CU_pSuite s);
+void suite_libc_gaps_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -357,6 +359,12 @@ int run_tests(void)
     suite_doom_panic_tests(s);
     s = CU_add_suite("dg_init", NULL, NULL);
     suite_dg_init_tests(s);
+
+    s = CU_add_suite("fpconv", NULL, NULL);
+    suite_fpconv_tests(s);
+
+    s = CU_add_suite("libc_gaps", NULL, NULL);
+    suite_libc_gaps_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

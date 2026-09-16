@@ -30,10 +30,14 @@
  * printing because that is exactly the silent failure mode this comment
  * already warned about. Discovered because the new context suite (37th)
  * hit it too. Raised again from 48 to 64 under SCRUM-73: main had reached
- * 48 registered suites on its own, so this branch's dg_init suite was the
+ * 48 registered suites on its own, so that branch's dg_init suite was the
  * 49th and would have been silently dropped -- CU_add_suite returning NULL,
  * the suite running zero tests, and ALL TESTS PASSED printing anyway, which
- * is the exact failure this comment has now warned about twice. */
+ * is the exact failure this comment has now warned about twice. SCRUM-65
+ * needed the same raise independently and for the same reason, which is
+ * why the two branches made an identical change: a ceiling whose overflow
+ * mode is silence leaves no safe margin, so do not trim this back toward
+ * the current count. */
 #define KUNIT_MAX_SUITES          64
 #define KUNIT_MAX_TESTS_PER_SUITE 64
 #define KUNIT_NAME_LEN            64

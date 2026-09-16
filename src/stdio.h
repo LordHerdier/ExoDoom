@@ -23,8 +23,8 @@ int puts(const char *s);
  * there is exactly one formatting engine and one serial sink per build.
  * Added for doom_panic() (src/doom_panic.c), which receives I_Error's
  * varargs as a va_list and must not stand up a second formatter to print
- * them.  Note this is vprintf, not vfprintf -- the FILE* family below is
- * still declared-and-undefined.
+ * them; SCRUM-65's vfprintf(stdout/stderr, ...) is now this same function,
+ * which is the second caller that split pays for.
  */
 int vprintf(const char *fmt, va_list ap);
 
@@ -41,33 +41,46 @@ int kvprintf(void (*emit)(int c, void *ctx), void *ctx,
 
 /*
  * ---------------------------------------------------------------------------
- * File I/O surface (SCRUM-64) -- DECLARED, NOT IMPLEMENTED.
+ * File I/O surface -- declared by SCRUM-64, IMPLEMENTED by SCRUM-65.
  * ---------------------------------------------------------------------------
  *
- * Everything below this line exists so that src/doom/ compiles.  None of it
- * has a definition anywhere in the tree, on purpose: SCRUM-64's scope is
- * "every doomgeneric .c file compiles to .o with zero errors", and a call that
- * is declared but undefined compiles cleanly and then fails loudly at link
- * time.  That is the honest state to be in -- the alternative, stubbing each
- * one to return a plausible value, would let Doom link and then misbehave
- * somewhere deep inside W_Init with no indication that the filesystem under it
- * was imaginary.
+ * This block used to be declared-and-undefined on purpose: SCRUM-64's scope
+ * was "every file under src/doom/ compiles", and a call that is declared but
+ * has no definition compiles cleanly and then fails loudly at link. That was
+ * the honest state, and the alternative it warned against -- stubbing each
+ * one to return a plausible value -- would have let Doom link and then
+ * misbehave deep inside W_Init with no sign the filesystem under it was
+ * imaginary.
  *
- * So: do not read this block as "stdio works now".  `make docker-build-doom`
- * compiles these files; nothing links them into build/exodoom, and the
- * undefined references are exactly the remaining work.
- * docs/libc_audit.md (SCRUM-72) lists every one of them with its call sites and
- * what implementing it actually requires -- most of them want the memory-mapped
- * WAD reader described in docs/architecture.md sec7, not real file I/O.
+ * SCRUM-65 implements them, and not by inventing a filesystem. The design
+ * docs/architecture.md sec7 calls for is a MEMORY-MAPPED reader:
  *
- * `FILE` is an incomplete type here.  Nothing under src/doom/ reaches into it
- * -- every use is through a `FILE *` -- so leaving the struct undefined keeps
- * the eventual definition (a pointer and an offset into the mapped WAD module,
- * most likely) free to be whatever the reader needs, and makes any code that
- * tries to peek inside fail at compile time rather than against a layout
- * invented here.
+ *   - fopen() looks the requested name up in a table of registered blobs
+ *     (see exo_file_register_blob below) and returns a read-only stream over
+ *     memory that is already mapped. For the IWAD that is the multiboot
+ *     module the kernel mapped at LIBOS_WAD_VADDR -- 28 MB that is never
+ *     copied, because there is nowhere to copy it to.
+ *   - fread/fseek/ftell/feof are offset arithmetic over that window.
+ *   - fopen() for WRITING FAILS, and that is deliberate. Doom writes a
+ *     config file and savegames; a write that silently went nowhere would
+ *     surface much later as a config that never persists or a savegame that
+ *     reloads as garbage. Returning NULL puts the failure at the open, where
+ *     M_SaveDefaults and P_SaveGame already handle it. Same reasoning for
+ *     remove/rename/mkdir, which report EROFS rather than claiming success.
+ *   - fwrite/fprintf/vfprintf to stdout or stderr go to COM1. Those are the
+ *     65 fprintf(stderr, ...) diagnostics the audit counted, and they need
+ *     no file at all.
+ *
+ * `FILE` is still an incomplete type to everything outside src/stdio.c.
+ * Nothing under src/doom/ reaches into it -- every use is through a
+ * `FILE *` -- so the layout stays free to change without touching a caller.
+ *
+ * The one thing still missing is fscanf's scanset ("%99[^\n]"), used once,
+ * to read the config file. fscanf returns EOF, which is what C99 specifies
+ * for input failure before any conversion and what M_LoadDefaults' loop
+ * already treats as end-of-file; it is also unreachable, since fopen cannot
+ * produce a config file to read.
  */
-
 typedef struct _exo_file FILE;
 
 extern FILE *stdin;
@@ -100,16 +113,53 @@ int remove(const char *path);
 int rename(const char *oldpath, const char *newpath);
 
 /*
- * snprintf/vsnprintf are undefined like the rest of this block, but they are
- * the cheapest of it to finish and the only ones that need no filesystem:
- * src/stdio.c's kvprintf already takes an arbitrary sink, so both are that
- * core plus a bounded-buffer emit function.  SCRUM-21 owns that work -- it is
- * deliberately not done here, because SCRUM-64 is the compile pass and
- * implementing one function from the block while declaring the other fourteen
- * would blur which of the two tickets left the tree where it is.
+ * snprintf/vsnprintf (SCRUM-21's subject, finished under SCRUM-65).
+ *
+ * kvprintf already took an arbitrary sink, so these are that core plus a
+ * bounded-buffer emit function. The part that mattered was NOT the sink: it
+ * was precision, without which the WAD lump names these build are wrong.
+ * See docs/libc_audit.md sec3.1 and the tests in
+ * tests/kernel/test_libc_gaps_k.c.
+ *
+ * Both return what they WOULD have written, not what they did -- m_misc.c's
+ * M_StringJoin sizes its allocation from that number.
  *
  * Consumers under src/doom/: m_misc.c's M_snprintf/M_vsnprintf wrappers, and
  * 5 vsnprintf call sites reached through them.
  */
 int snprintf(char *str, size_t size, const char *fmt, ...);
 int vsnprintf(char *str, size_t size, const char *fmt, va_list ap);
+
+/* vsscanf -- sscanf's va_list form. Not called by Doom; sscanf is
+ * implemented in terms of it, the same way printf is in terms of vprintf. */
+int vsscanf(const char *str, const char *fmt, va_list ap);
+
+/*
+ * ---------------------------------------------------------------------------
+ * exo_file_register_blob -- NOT a standard stdio function (SCRUM-65).
+ * ---------------------------------------------------------------------------
+ *
+ * How a file comes to exist on a system with no filesystem.
+ *
+ * The caller hands over a name and a region of memory that is already
+ * mapped, and fopen() will thereafter find it under that name. The intended
+ * caller is the Doom LibOS, registering the IWAD the kernel mapped for it
+ * (src/libos_wad_map.h) as "freedoom2.wad", so that W_AddFile's fopen
+ * resolves without anything under src/doom/ being modified.
+ *
+ * Matching is on the BASENAME and case-insensitive: Doom builds WAD paths by
+ * joining a directory it discovered (d_iwad.c) onto a filename, so what
+ * reaches fopen is a path while what was registered is a name.
+ *
+ * `name` and `data` are borrowed, not copied -- both must outlive every
+ * stream opened over them. That is free for the WAD, which is a kernel
+ * mapping that outlives the LibOS entirely.
+ *
+ * Returns 0, or -1 if the table is full or an argument is NULL.
+ * Registering a name that already exists replaces it.
+ */
+int exo_file_register_blob(const char *name, const void *data, size_t size);
+
+/* Forget every registered blob. For tests, which register a series of them
+ * and must not leave one behind for the next suite. */
+void exo_file_reset_blobs(void);
