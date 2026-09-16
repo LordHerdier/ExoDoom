@@ -23,11 +23,21 @@
  * decoder can produce: letters, digits, a handful of punctuation, space,
  * backspace, enter. "wadview" (SCRUM-178) is the first real cooperative
  * handoff: exo_launch_wad_viewer() (src/exo_syscall.h #21) builds the WAD/
- * flat/automap viewer as a second LibOS context and switches to it, and the
- * exo_yield() call in the idle loop below is what brings control back once
- * the viewer yields in turn (src/syscall_launch.c, context_next_ready()'s
- * round robin) — no longer the documented no-op it was before this
- * context existed on a normal boot.
+ * flat/automap viewer as a second LibOS context and switches to it.
+ *
+ * SCRUM-111: the idle loop below used to call exo_yield() once per
+ * iteration, on the theory that it would "bring control back once the
+ * viewer yields in turn." That never actually happened -- run_automap_
+ * viewer() (src/libos_wad_viewer/libos_wad_viewer.c) only ever gives up
+ * control by fully exiting (exo_exit() on Q/Esc), never by yielding -- so
+ * the call was always either a no-op (nothing else READY) or, once the
+ * Ctrl+Tab hotkey could bring the shell to the foreground while the viewer
+ * was still alive and READY, actively wrong: the shell's very next loop
+ * pass would immediately yield straight back to the viewer via the same
+ * round-robin, undoing the switch before a keypress could ever land here.
+ * Removed for that reason -- every real hand-off away from the shell is
+ * already explicit (a `wadview` launch, the viewer's own exo_exit(), or
+ * Ctrl+Tab), so nothing needs the shell to volunteer control on its own.
  *
  * shell_main() is defined FIRST in this file, ahead of every helper it
  * calls (which are only forward-declared above it), and
@@ -130,8 +140,6 @@ void shell_main(void) {
                 fbcon_putc(&con, c);
             }
         }
-
-        exo_yield();
     }
 }
 

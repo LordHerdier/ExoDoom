@@ -753,9 +753,73 @@ scheduling (SCRUM-147) invalidates that assumption and will need a lock here.
 > real one on a throttled PIT tick (`src/pit.c`'s `irq0_handler()`,
 > ~60&nbsp;Hz) — "foreground" is simply "the context currently running,"
 > with no separate state, matching the cooperative model where exactly one
-> context executes at a time. A future preemptive scheduler or a true
-> Ctrl+Tab hotkey that changes focus independent of execution would need to
-> give "foreground" its own state; neither exists yet.
+> context executes at a time. A future preemptive scheduler would need to
+> give "foreground" its own state; the Ctrl+Tab hotkey below does not.
+>
+> ✅ **SCRUM-111 (Ctrl+Tab switch hotkey):** `src/ps2.c`'s
+> `ps2_process_scancode()` detects Ctrl+Tab (either Ctrl) and calls
+> `context_next_ready()`/`context_switch_request()` (`src/context.c`) —
+> the exact round-robin pair `exo_yield` already uses
+> (`src/syscall_yield.c`), including its `PAGE_OWNER_FREE` no-op when
+> nothing else is `READY` — directly from the IRQ1 path, the same way
+> `irq0_handler()` already calls `fb_compositor_tick()` directly (`src/
+> pit.c`). The chord is swallowed, never enqueued, so it never reaches an
+> app as ordinary input. No new "foreground" state was needed after all:
+> `context_switch_request()` already updates `context_current()`
+> synchronously, so the compositor above picks up the new foreground
+> immediately. What *is* still deferred is the low-level register-save/
+> CR3-swap itself — `context_switch_pending` is only actually carried out
+> at the currently-running context's next syscall (`src/syscall_entry.s`'s
+> epilogue), so there is a bounded window, up to one syscall long, where
+> the display has already flipped but the outgoing context is still
+> executing its own code. In practice this is sub-frame: every LibOS
+> today (`shell_main.c`, the WAD viewer) polls `exo_kbd_poll()`/
+> `exo_get_ticks()` every loop iteration. Genuine zero-latency preemption
+> — switching before the running context's next syscall, from arbitrary
+> interrupt context — still needs the full `swapgs` + per-CPU rework this
+> section already scoped to SCRUM-176, gated on SCRUM-127; this ticket
+> does not attempt that.
+>
+> ⚠️ **Corollary bug this hotkey exposed and fixes:** driving
+> `context_next_ready()`/`context_switch_request()` from somewhere other
+> than the outgoing context's own syscall handler turned out to matter for
+> correctness, not just latency. `exo_exit` (`src/syscall_exit.c`) hands off
+> to the next context via this exact pair, but left the exiting context's
+> own row `CONTEXT_STATE_READY` — indistinguishable from a context that
+> voluntarily `exo_yield()`'d and is safe to resume, even though `exo_exit`
+> has already freed every page and framebuffer binding it held. Nothing
+> before this ticket was ever positioned to notice: the only things that
+> called `context_next_ready()` were themselves running *as* the outgoing
+> context, and control never returns to a dead context's own code to make
+> that call again. Ctrl+Tab breaks that pattern on purpose — pressing it at
+> the shell right after quitting `wadview` round-robins straight into that
+> stale, resourceless row and executes garbage from its freed pages.
+> `sys_exit()` now overrides the row to `CONTEXT_STATE_BLOCKED` immediately
+> after handing off — `context_next_ready()` already skips `BLOCKED` rows —
+> which closes this for `exo_yield`'s own round-robin too, not just this
+> hotkey's. `tests/kernel/test_syscall_exit_k.c`'s "exit blocks outgoing
+> context from round-robin" is the regression test.
+>
+> ⚠️ **Second corollary bug, same root cause:** `shell_main()`
+> (`src/shell/shell_main.c`) called `exo_yield()` unconditionally on every
+> loop iteration, not just when genuinely idle. That was harmless before
+> this ticket — the only way the viewer's row was ever `READY` again while
+> the shell ran was a scenario that never actually arose, since
+> `run_automap_viewer()` gives up control solely by exiting, never by
+> yielding. Ctrl+Tab is the first thing that returns control to the shell
+> while the other context is still alive *and* `READY` (by design — it must
+> stay resumable), and in that case the shell's own auto-yield immediately
+> round-robined straight back to it on the very next loop pass, before a
+> keystroke could land. The low-level switch genuinely completed each time
+> — `context_current()` really did flip to the shell — it just didn't stay
+> there long enough to be usable. Fixed by removing the shell's per-loop
+> `exo_yield()` outright: every real hand-off away from the shell is
+> already explicit (`wadview`'s launch syscall, its own `exo_exit`, or
+> Ctrl+Tab), so nothing depends on the shell volunteering control on its
+> own. Verified by scripted QEMU monitor `sendkey` injection rather than a
+> KUnit test, since `shell_main()` is a genuine never-returning interactive
+> loop that the test harness deliberately never launches (see
+> `tests/kernel/test_shell_libos_k.c`'s own comment).
 
 ### 3.6 Revocation & repossession (SCRUM-156)
 

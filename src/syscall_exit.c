@@ -37,10 +37,30 @@
  * row: context_switch_request() below still needs to find it (as the
  * outgoing side) to capture into, so there is no point in this call's own
  * control flow where the row could safely be torn down without racing that
- * requirement -- it is left READY-but-resourceless instead, for whoever
- * launches the next LibOS into its place to context_destroy() once it is no
- * longer live (see src/syscall_launch.c's WAD viewer launcher for the one
- * caller that does).
+ * requirement -- it is left resourceless instead, for whoever launches the
+ * next LibOS into its place to context_destroy() once it is no longer live
+ * (see src/syscall_launch.c's WAD viewer launcher for the one caller that
+ * does).
+ *
+ * SCRUM-111 found the actual hazard that leaves this row in: context_
+ * switch_request() unconditionally sets the outgoing side to CONTEXT_STATE_
+ * READY, which is correct for exo_yield() (the outgoing context really is
+ * safe to resume later) but wrong here -- this context has no valid
+ * continuation, its pages and framebuffer are gone. Before this ticket
+ * nothing was ever positioned to notice: context_next_ready() was only ever
+ * driven by something the *outgoing* context itself called (another
+ * exo_yield, another exo_exit), and control never returns to a dead
+ * context's own code to make that call. SCRUM-111's Ctrl+Tab hotkey drives
+ * context_next_ready()/context_switch_request() from the keyboard IRQ
+ * instead, entirely independent of which context is actually running --
+ * round-robining straight into this READY-but-resourceless row from the
+ * shell right after quitting a viewer, executing whatever garbage its freed
+ * pages now hold. Downgrading to CONTEXT_STATE_BLOCKED immediately after
+ * the handoff closes this for exo_yield()'s own round-robin too, not just
+ * Ctrl+Tab's: context_next_ready() already skips BLOCKED rows (see its own
+ * comment in context.h), and nothing here ever un-blocks this one -- it
+ * stays inert until context_destroy() reaps it, exactly as already
+ * documented above.
  */
 static int64_t sys_exit(uint64_t code, uint64_t a2, uint64_t a3,
                         uint64_t a4, uint64_t a5, uint64_t a6)
@@ -81,7 +101,13 @@ static int64_t sys_exit(uint64_t code, uint64_t a2, uint64_t a3,
      * matching this handler's original v1 behavior for that case. */
     page_owner_t next = context_next_ready(owner);
     if (next != PAGE_OWNER_FREE) {
-        context_switch_request(next);
+        if (context_switch_request(next) == CONTEXT_OK) {
+            /* SCRUM-111: override the CONTEXT_STATE_READY context_switch_
+             * request() just set for `owner` -- see this file's own top
+             * comment for why READY is wrong for an exited context and
+             * BLOCKED is what keeps it out of every future round-robin. */
+            context_set_state(owner, CONTEXT_STATE_BLOCKED);
+        }
     }
 
     return 0;
