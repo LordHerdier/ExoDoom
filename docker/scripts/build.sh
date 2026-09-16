@@ -314,6 +314,26 @@ build_ring3_link_target libos_wad_viewer src/libos_wad_viewer "" \
   src/libos_wad_viewer/libos_wad_viewer.c src/wad.c src/flat.c src/automap.c \
   src/fb.c src/fb_console.c src/libos_fb.c
 
+echo "[2e/7] Build clock demo LibOS (SCRUM-168)"
+# Same reasoning and same mechanism as the shell/WAD-viewer steps just
+# above: built UNCONDITIONALLY and ahead of step 3's C compile loop, because
+# src/syscall_launch.c (the kernel-side #22 handler that launches this
+# LibOS from the shell's "clock" command) #includes the generated
+# src/libos_clock/libos_clock_layout.h this call produces. src/libos_clock/
+# is its own subdirectory for the same reason src/shell/ and
+# src/libos_wad_viewer/ are: step 3's plain `src/*.c` glob below must never
+# compile libos_clock.c with -DEXO_KERNEL.
+#
+# src/fb.c/src/fb_console.c/src/libos_fb.c are the same framebuffer/
+# text-console/mapping code the shell and WAD-viewer targets above already
+# link in unmodified. libos_clock.c MUST come first in this list -- see
+# build_ring3_link_target's own comment on why source order determines
+# entry_vaddr (this target also carries the
+# __attribute__((section(".text.entry"))) belt-and-suspenders fix, for the
+# same reason the WAD-viewer target's own comment gives).
+build_ring3_link_target libos_clock src/libos_clock "" \
+  src/libos_clock/libos_clock.c src/fb.c src/fb_console.c src/libos_fb.c
+
 echo "[3/7] Compile C sources"
 
 # -DEXO_KERNEL selects the kernel view of src/exo_syscall.h (numbers, shared

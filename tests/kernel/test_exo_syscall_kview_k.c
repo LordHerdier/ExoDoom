@@ -28,7 +28,7 @@ static void test_kernel_view_has_the_abi(void)
 
     /* Numbers and error codes survive the guard. */
     CU_ASSERT_EQUAL(EXO_SYS_GET_TICKS, 5);
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT,    22);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT,    23);
     CU_ASSERT_EQUAL(EXO_ENOSYS,       38);
 
     /* So do the structs the dispatcher fills in on the caller's behalf. */

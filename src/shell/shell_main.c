@@ -70,10 +70,11 @@
 static char shell_banner[] = "ExoDoom Shell\n";
 static char shell_help_text[] = "type 'help' for a list of commands\n";
 static char shell_prompt[] = "exodoom> ";
-static char shell_commands_text[] = "commands: help, clear, about, wadview\n";
+static char shell_commands_text[] = "commands: help, clear, about, wadview, clock\n";
 static char shell_about_text[] = "ExoDoom shell LibOS -- SCRUM-110\n";
 static char shell_unknown_prefix[] = "unknown command: ";
 static char shell_wadview_fail_text[] = "wadview: launch failed\n";
+static char shell_clock_fail_text[] = "clock: launch failed\n";
 
 static int str_eq(const char *a, const char *b);
 static char shell_key_to_ascii(uint8_t key, uint8_t modifiers);
@@ -231,6 +232,18 @@ static void shell_run_command(fb_console_t *con, const char *line) {
             fbcon_clear(con);
         } else {
             fbcon_write(con, shell_wadview_fail_text);
+        }
+    } else if (str_eq(line, "clock")) {
+        /* Same calling convention as wadview above: does not return until
+         * something switches back to this context (Ctrl+Tab, SCRUM-111,
+         * since the clock never yields on its own -- src/libos_clock/
+         * libos_clock.c's own comment on why). A negative return means the
+         * launch failed before switching away. */
+        int64_t rc = exo_launch_clock();
+        if (rc == 0) {
+            fbcon_clear(con);
+        } else {
+            fbcon_write(con, shell_clock_fail_text);
         }
     } else {
         fbcon_write(con, shell_unknown_prefix);
