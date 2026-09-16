@@ -29,8 +29,11 @@
  * took slot 32) were never actually running, with "ALL TESTS PASSED" still
  * printing because that is exactly the silent failure mode this comment
  * already warned about. Discovered because the new context suite (37th)
- * hit it too. */
-#define KUNIT_MAX_SUITES          48
+ * hit it too. Raised again from 48 to 64 under SCRUM-65, which took the
+ * count to 47 -- one slot short of the cap. Being one away from a ceiling
+ * whose overflow mode is "the suite silently does not run, and ALL TESTS
+ * PASSED prints anyway" is not a margin worth keeping. */
+#define KUNIT_MAX_SUITES          64
 #define KUNIT_MAX_TESTS_PER_SUITE 64
 #define KUNIT_NAME_LEN            64
 

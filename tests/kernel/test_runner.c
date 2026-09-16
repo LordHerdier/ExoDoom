@@ -55,6 +55,8 @@ void suite_syscall_yield_tests(CU_pSuite s);
 void suite_shell_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
 void suite_fb_shadow_tests(CU_pSuite s);
+void suite_fpconv_tests(CU_pSuite s);
+void suite_libc_gaps_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -336,6 +338,12 @@ int run_tests(void)
     s = CU_add_suite("context_launch_rebind", NULL,
                      context_launch_rebind_suite_cleanup);
     suite_context_launch_rebind_tests(s);
+
+    s = CU_add_suite("fpconv", NULL, NULL);
+    suite_fpconv_tests(s);
+
+    s = CU_add_suite("libc_gaps", NULL, NULL);
+    suite_libc_gaps_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

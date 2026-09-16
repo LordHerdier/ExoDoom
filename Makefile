@@ -1,4 +1,4 @@
-.PHONY: docker-build docker-run docker-run-kernel docker-test docker-build-doom clean
+.PHONY: docker-build docker-run docker-run-kernel docker-test docker-build-doom docker-link-doom clean
 
 DEBUG ?= 0
 
@@ -63,6 +63,15 @@ docker-ci:
 docker-build-doom:
 	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-build /work/docker/scripts/build-doom.sh
+
+# SCRUM-65's acceptance gate: compile the libc shim the way a ring-3 LibOS
+# target would, put it next to the doom objects, and fail if any libc symbol
+# is still undefined. docker-build-doom above proves src/doom/ COMPILES; this
+# proves the shim under it is complete. The four DG_* platform callbacks are
+# expected to remain and are allowlisted by ticket inside the script.
+docker-link-doom:
+	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
+	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-build /work/docker/scripts/link-doom.sh
 
 docker-run-debug: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker

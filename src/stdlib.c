@@ -7,6 +7,16 @@
 #include "libos_heap.h"
 #endif
 
+#include "fpconv.h"  /* exo_parse_f64 -- atof's integer-only engine (SCRUM-65) */
+#include "stdio.h"   /* printf: exit() reports its status on serial */
+#include "string.h"  /* memset: calloc */
+
+#ifdef EXO_KERNEL
+#include "serial.h"  /* serial_flush before exit()'s halt */
+#else
+#include "exo_syscall.h"  /* exo_exit (#20) */
+#endif
+
 #include <limits.h>
 #include <stdint.h>
 
@@ -26,7 +36,7 @@
  * (SCRUM-51) -- the same EXO_KERNEL switch src/exo_syscall.h already uses to
  * pick between the kernel and LibOS views of the syscall ABI:
  *
- *   - EXO_KERNEL (kernel builds, and every existing tests/kernel/*.c suite
+ *   - EXO_KERNEL (kernel builds, and every existing kernel test suite
  *     compiled through the shared loop): kmalloc/kfree/krealloc, the kernel
  *     heap under its libc name.  kmalloc (src/memory.c) dispatches to
  *     heap_alloc once the PMM is live and bump-allocates before that, so a
@@ -312,3 +322,97 @@ void qsort(void *base, size_t nmemb, size_t size, cmp_fn compar) {
     }
     qsort_range((char *)base, nmemb, size, compar);
 }
+
+/*
+ * ===========================================================================
+ * SCRUM-65. See src/stdlib.h for what each of these promises.
+ * ===========================================================================
+ */
+
+void *calloc(size_t nmemb, size_t size)
+{
+    size_t total;
+    void  *p;
+
+    if (nmemb == 0 || size == 0) {
+        /* Either a NULL or a unique freeable pointer is conforming. malloc(0)
+         * here already picks one; deferring to it keeps the two consistent
+         * rather than inventing a second convention. */
+        return malloc(0);
+    }
+
+    /* The overflow check is the whole reason calloc exists as something other
+     * than malloc+memset: nmemb * size wrapping produces a small allocation
+     * that the caller then writes nmemb*size bytes into. Checking the
+     * division form cannot itself overflow. */
+    if (nmemb > (size_t)-1 / size) {
+        return NULL;
+    }
+
+    total = nmemb * size;
+    p     = malloc(total);
+
+    if (p != NULL) {
+        memset(p, 0, total);
+    }
+
+    return p;
+}
+
+int system(const char *command)
+{
+    (void)command;
+
+    /* A NULL command asks "is a shell available?" -- and the answer is no,
+     * which is the same -1... except the standard says return 0 for that
+     * probe when no interpreter exists. Both branches collapse to "no shell",
+     * so reporting it the way each caller expects costs one comparison. */
+    return (command == NULL) ? 0 : -1;
+}
+
+void exit(int status)
+{
+    printf("exit(%d)\n", status);
+
+#ifdef EXO_KERNEL
+    serial_flush();
+    for (;;) {
+        __asm__ volatile("cli; hlt");
+    }
+#else
+    exo_exit(status);
+    /* exo_exit spins internally, but only if the syscall is bound; a LibOS
+     * that kept running after announcing its own exit would be worse than
+     * one that stops. */
+    for (;;) {
+        __asm__ volatile("pause" ::: "memory");
+    }
+#endif
+}
+
+void abort(void)
+{
+    /* SIGABRT's conventional exit status, and the one a shell would report
+     * -- kept even though nothing here has a shell, because it is the value
+     * anyone reading the serial line will recognise. */
+    exit(134);
+}
+
+#ifndef EXO_KERNEL
+double atof(const char *nptr)
+{
+    /*
+     * The thin adapter src/fpconv.h describes: every part of this that can
+     * be wrong -- the exponent, the rounding, the overflow and underflow
+     * edges -- is in exo_parse_f64(), which is integer-only and is driven
+     * directly by tests/kernel/test_fpconv_k.c from ring 0. All that happens
+     * here is moving 8 bytes.
+     */
+    uint64_t bits = exo_parse_f64(nptr, NULL);
+    double   d;
+
+    __builtin_memcpy(&d, &bits, sizeof d);
+
+    return d;
+}
+#endif
