@@ -199,15 +199,11 @@ static void serial_emit(int c, void *ctx)
     serial_putc((char)c);
 }
 
-int printf(const char *fmt, ...)
+int vprintf(const char *fmt, va_list ap)
 {
     /* No serial_flush() here — matches the rest of the kernel; qemu_exit()
      * and explicit callers flush COM1 before it matters. */
-    va_list ap;
-    va_start(ap, fmt);
-    int n = kvprintf(serial_emit, NULL, fmt, ap);
-    va_end(ap);
-    return n;
+    return kvprintf(serial_emit, NULL, fmt, ap);
 }
 
 #else /* !EXO_KERNEL — the ring-3 LibOS link target (SCRUM-51/-173) */
@@ -251,18 +247,35 @@ static void serial_emit(int c, void *raw_ctx)
     ctx->buf[ctx->len++] = (char)c;
 }
 
-int printf(const char *fmt, ...)
+int vprintf(const char *fmt, va_list ap)
 {
     serial_emit_ctx_t ctx = { .len = 0 };
-    va_list ap;
-    va_start(ap, fmt);
     int n = kvprintf(serial_emit, &ctx, fmt, ap);
-    va_end(ap);
     serial_emit_flush(&ctx);
     return n;
 }
 
 #endif /* EXO_KERNEL */
+
+/*
+ * printf is the same call on both sides of the #ifdef above, because both
+ * sides supply vprintf.  Keeping it here rather than duplicating it into
+ * each branch is what guarantees the two paths cannot drift in anything but
+ * the sink -- SCRUM-83 added vprintf precisely so doom_panic() could take a
+ * va_list through that one shared engine instead of standing up a second
+ * formatter of its own for the I_Error path.
+ */
+int printf(const char *fmt, ...)
+{
+    va_list ap;
+    int     n;
+
+    va_start(ap, fmt);
+    n = vprintf(fmt, ap);
+    va_end(ap);
+
+    return n;
+}
 
 int putchar(int c)
 {

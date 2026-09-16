@@ -51,6 +51,14 @@
 #include "w_wad.h"
 #include "z_zone.h"
 
+/* ExoDoom (SCRUM-83): I_Error and I_Quit report through the serial syscall
+ * and halt, because there is no stderr, no zenity and no process to exit
+ * from on bare metal.  The machinery lives in src/doom_panic.c -- outside
+ * the vendored tree on purpose, so this file's patch stays small and so the
+ * logic is reachable by a unit test (nothing under src/doom/ links into
+ * build/exodoom).  The quoted include resolves via build.sh's -I src. */
+#include "doom_panic.h"
+
 #ifdef __MACOSX__
 #include <CoreFoundation/CFUserNotification.h>
 #endif
@@ -262,9 +270,23 @@ void I_Quit (void)
 
     exit(0);
 #endif
+
+    /* ExoDoom (SCRUM-83).  Upstream falls out of I_Quit here and lets the
+     * ORIGCODE exit(0) end the process; with that block compiled out the
+     * function would simply return, and Doom's caller (M_QuitResponse) has
+     * nothing left to run.  Announce it and stop instead -- there is no
+     * scheduler to return to and nothing else to do. */
+    doom_halt("I_Quit: Doom exited cleanly.");
 }
 
-#if !defined(_WIN32) && !defined(__MACOSX__) && !defined(__DJGPP__)
+/* ExoDoom (SCRUM-83): the zenity error-box path is dead on bare metal --
+ * it shells out via system(), which has no meaning without a process model
+ * or a filesystem, and I_Error below no longer calls it.  Gated out rather
+ * than deleted so a re-vendor diff stays readable, and gated at all because
+ * ZenityAvailable/EscapeShellString/ZenityErrorBox are static: left behind
+ * with their only caller gone they would each warn "defined but not used"
+ * under the -Wall -Wextra that docker/scripts/build-doom.sh passes. */
+#if ORIGCODE && !defined(_WIN32) && !defined(__MACOSX__) && !defined(__DJGPP__)
 #define ZENITY_BINARY "/usr/bin/zenity"
 
 // returns non-zero if zenity is available
@@ -347,7 +369,7 @@ static int ZenityErrorBox(char *message)
     return result;
 }
 
-#endif /* !defined(_WIN32) && !defined(__MACOSX__) && !defined(__DJGPP__) */
+#endif /* ORIGCODE && !_WIN32 && !__MACOSX__ && !__DJGPP__ */
 
 
 //
@@ -358,39 +380,54 @@ static boolean already_quitting = false;
 
 void I_Error (char *error, ...)
 {
-    char msgbuf[512];
     va_list argptr;
     atexit_listentry_t *entry;
-    boolean exit_gui_popup;
 
+    /* ExoDoom (SCRUM-83).  Upstream writes the message to stderr, copies it
+     * into msgbuf for a zenity dialog, and exits.  None of that exists here,
+     * so the whole body is replaced by: announce, run the error-time atexit
+     * handlers, halt.
+     *
+     * What is deliberately gone, and why:
+     *
+     *   - the stderr writes (vfprintf/fprintf/fflush).  There is no stderr;
+     *     doom_panic_begin() routes through exo_serial_write (#8) instead,
+     *     which is the only output channel a ring-3 LibOS has.
+     *   - msgbuf[512].  It existed only to feed the GUI dialog.  Dropping it
+     *     also drops half a kilobyte of stack from the failure path, which
+     *     matters more here than upstream: a launched LibOS gets exactly one
+     *     4 KiB stack page (LIBOS_LAUNCH_STACK_VADDR, src/libos_launch.h).
+     *   - ZenityErrorBox / M_ParmExists("-nogui") / I_ConsoleStdout.  A
+     *     desktop dialog shelled out through system().
+     *   - exit(-1).  doom_panic_halt() replaces it and does not return; on
+     *     ring 3 it goes through exo_exit (#20) so the context's pages and
+     *     framebuffer binding are actually released, then spins in case that
+     *     syscall is unbound.
+     *
+     * The atexit walk is kept as-is, and it sits BETWEEN the two halves of
+     * the panic on purpose: the message goes out first, because those
+     * handlers are shutdown code running on a machine that has just declared
+     * itself broken, and one of them faulting would otherwise take the
+     * explanation with it. */
     if (already_quitting)
     {
-        fprintf(stderr, "Warning: recursive call to I_Error detected.\n");
-#if ORIGCODE
-        exit(-1);
-#endif
-    }
-    else
-    {
-        already_quitting = true;
+        /* doom_panic_begin() has its own re-entry guard, and that is the one
+         * that actually stops the recursion: it prints a fixed notice and
+         * halts rather than returning.  Upstream's exit(-1) here is inside
+         * #if ORIGCODE, so this branch used to fall straight through and
+         * re-run the entire function. */
+        va_start(argptr, error);
+        doom_panic_begin("I_Error (recursive): ", error, argptr);
+        va_end(argptr);
     }
 
-    // Message first.
-    va_start(argptr, error);
-    //fprintf(stderr, "\nError: ");
-    vfprintf(stderr, error, argptr);
-    fprintf(stderr, "\n\n");
-    va_end(argptr);
-    fflush(stderr);
+    already_quitting = true;
 
-    // Write a copy of the message into buffer.
     va_start(argptr, error);
-    memset(msgbuf, 0, sizeof(msgbuf));
-    M_vsnprintf(msgbuf, sizeof(msgbuf), error, argptr);
+    doom_panic_begin("I_Error: ", error, argptr);
     va_end(argptr);
 
-    // Shutdown. Here might be other errors.
-
+    /* Shutdown. Here might be other errors. */
     entry = exit_funcs;
 
     while (entry != NULL)
@@ -403,71 +440,7 @@ void I_Error (char *error, ...)
         entry = entry->next;
     }
 
-    exit_gui_popup = !M_ParmExists("-nogui");
-
-    // Pop up a GUI dialog box to show the error message, if the
-    // game was not run from the console (and the user will
-    // therefore be unable to otherwise see the message).
-    if (exit_gui_popup && !I_ConsoleStdout())
-#ifdef _WIN32
-    {
-        wchar_t wmsgbuf[512];
-
-        MultiByteToWideChar(CP_ACP, 0,
-                            msgbuf, strlen(msgbuf) + 1,
-                            wmsgbuf, sizeof(wmsgbuf));
-
-        MessageBoxW(NULL, wmsgbuf, L"", MB_OK);
-    }
-#elif defined(__MACOSX__)
-    {
-        CFStringRef message;
-	int i;
-
-	// The CoreFoundation message box wraps text lines, so replace
-	// newline characters with spaces so that multiline messages
-	// are continuous.
-
-	for (i = 0; msgbuf[i] != '\0'; ++i)
-        {
-            if (msgbuf[i] == '\n')
-            {
-                msgbuf[i] = ' ';
-            }
-        }
-
-        message = CFStringCreateWithCString(NULL, msgbuf,
-                                            kCFStringEncodingUTF8);
-
-        CFUserNotificationDisplayNotice(0,
-                                        kCFUserNotificationCautionAlertLevel,
-                                        NULL,
-                                        NULL,
-                                        NULL,
-                                        CFSTR(PACKAGE_STRING),
-                                        message,
-                                        NULL);
-    }
-#elif defined(__DJGPP__)
-    {
-        printf("%s\n", msgbuf);
-        exit(-1);
-    }
-
-#else
-    {
-        ZenityErrorBox(msgbuf);
-    }
-#endif
-
-    // abort();
-#if ORIGCODE
-    SDL_Quit();
-
-    exit(-1);
-#else
-    exit(-1);
-#endif
+    doom_panic_halt();
 }
 
 //
