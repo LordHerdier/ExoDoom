@@ -56,6 +56,13 @@ SHIM_SOURCES=(
   src/fpconv.c
   src/doom_net_stub.c
   src/doomgeneric_exo.c
+  # SCRUM-73's mounted-WAD registry, and the header-parse it validates
+  # through. DG_Init calls doom_wad_mount/_mounted/_strerror and doom_wad.c
+  # calls wad_init, so merging SCRUM-73 left four symbols undefined here --
+  # the same way merging SCRUM-83 left doom_panic's three. Neither file
+  # touches kernel-only state, so both compile unchanged for the ring-3 view.
+  src/doom_wad.c
+  src/wad.c
   # SCRUM-83's I_Error/I_Quit back end. src/doom/i_system.c calls
   # doom_panic_begin/_halt and doom_halt, so a Doom LibOS links this too --
   # it lives outside src/doom/ only so that it stays testable and keeps the
@@ -77,8 +84,11 @@ SHIM_SOURCES=(
 # docs/libc_audit.md classifies the DG_* callbacks as PLATFORM rather than
 # libc for exactly this reason: they are the port's own six functions, not
 # anything the C standard owes Doom.
+#
+# DG_Init was on this list until SCRUM-73 landed and defined it; pruned
+# here rather than left to the reverse check below, which is what an
+# allowlist entry decaying into an exemption looks like on its first day.
 declare -A ALLOWED=(
-  [DG_Init]="SCRUM-73 -- mounts the multiboot-module WAD"
   [DG_DrawFrame]="Sprint 8 -- needs exo_fb_acquire + the BGRX blit"
   [DG_GetKey]="Sprint 8 -- needs exo_kbd_poll + keycode translation"
   [DG_SetWindowTitle]="Sprint 8 -- a no-op or a serial line"
