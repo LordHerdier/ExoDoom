@@ -51,15 +51,17 @@ static void test_numbers_match_spec(void)
     CU_ASSERT_EQUAL(EXO_SYS_YIELD,        19);
     CU_ASSERT_EQUAL(EXO_SYS_EXIT,         20);
     CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_WAD_VIEWER, 21);
-    CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_SNAKE,  22);
+    CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_CLOCK, 22);
+    CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_SNAKE,  23);
 }
 
 /* The dispatcher will range-check against EXO_SYS_COUNT, so it has to stay one
- * past the last number — and the spec's total is 23 syscalls. */
+ * past the last number — and the spec's total is 24 syscalls (SCRUM-168,
+ * SCRUM-182). */
 static void test_count_is_one_past_last(void)
 {
     CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_LAUNCH_SNAKE + 1);
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 23);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 24);
 }
 
 /* Two syscalls sharing a number would route silently to the wrong handler. */
@@ -73,7 +75,7 @@ static void test_numbers_are_unique(void)
         EXO_SYS_FILE_WRITE,   EXO_SYS_FILE_SEEK,   EXO_SYS_FILE_STAT,
         EXO_SYS_FILE_REMOVE,  EXO_SYS_FILE_RENAME, EXO_SYS_SOUND_TONE,
         EXO_SYS_SOUND_STOP,   EXO_SYS_YIELD,       EXO_SYS_EXIT,
-        EXO_SYS_LAUNCH_WAD_VIEWER, EXO_SYS_LAUNCH_SNAKE,
+        EXO_SYS_LAUNCH_WAD_VIEWER, EXO_SYS_LAUNCH_CLOCK, EXO_SYS_LAUNCH_SNAKE,
     };
     /* 64-bit so the mask keeps working as the table grows; the assert makes
      * the ceiling explicit rather than letting the shift go undefined. */
@@ -229,7 +231,8 @@ static void *const volatile stub_addresses[] = {
     (void *)exo_file_write,   (void *)exo_file_seek,   (void *)exo_file_stat,
     (void *)exo_file_remove,  (void *)exo_file_rename, (void *)exo_sound_tone,
     (void *)exo_sound_stop,   (void *)exo_yield,       (void *)exo_exit,
-    (void *)exo_launch_wad_viewer, (void *)exo_launch_snake,
+    (void *)exo_launch_wad_viewer, (void *)exo_launch_clock,
+    (void *)exo_launch_snake,
 };
 
 static void test_every_syscall_has_a_stub(void)

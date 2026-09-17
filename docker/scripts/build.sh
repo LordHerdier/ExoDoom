@@ -314,10 +314,30 @@ build_ring3_link_target libos_wad_viewer src/libos_wad_viewer "" \
   src/libos_wad_viewer/libos_wad_viewer.c src/wad.c src/flat.c src/automap.c \
   src/fb.c src/fb_console.c src/libos_fb.c
 
-echo "[2e/7] Build Snake LibOS (SCRUM-182)"
-# Same reasoning and same mechanism as the WAD viewer step just above: built
+echo "[2e/7] Build clock demo LibOS (SCRUM-168)"
+# Same reasoning and same mechanism as the shell/WAD-viewer steps just
+# above: built UNCONDITIONALLY and ahead of step 3's C compile loop, because
+# src/syscall_launch.c (the kernel-side #22 handler that launches this
+# LibOS from the shell's "clock" command) #includes the generated
+# src/libos_clock/libos_clock_layout.h this call produces. src/libos_clock/
+# is its own subdirectory for the same reason src/shell/ and
+# src/libos_wad_viewer/ are: step 3's plain `src/*.c` glob below must never
+# compile libos_clock.c with -DEXO_KERNEL.
+#
+# src/fb.c/src/fb_console.c/src/libos_fb.c are the same framebuffer/
+# text-console/mapping code the shell and WAD-viewer targets above already
+# link in unmodified. libos_clock.c MUST come first in this list -- see
+# build_ring3_link_target's own comment on why source order determines
+# entry_vaddr (this target also carries the
+# __attribute__((section(".text.entry"))) belt-and-suspenders fix, for the
+# same reason the WAD-viewer target's own comment gives).
+build_ring3_link_target libos_clock src/libos_clock "" \
+  src/libos_clock/libos_clock.c src/fb.c src/fb_console.c src/libos_fb.c
+
+echo "[2f/7] Build Snake LibOS (SCRUM-182)"
+# Same reasoning and same mechanism as the WAD viewer step above: built
 # UNCONDITIONALLY and ahead of step 3's C compile loop, because
-# src/syscall_launch.c (the kernel-side #22 handler that launches this LibOS
+# src/syscall_launch.c (the kernel-side #23 handler that launches this LibOS
 # from the shell's "snake" command) #includes the generated
 # src/libos_snake/libos_snake_layout.h this call produces. src/libos_snake/
 # is its own subdirectory for the same reason src/libos_wad_viewer/ is: step
@@ -421,10 +441,18 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # libc_shim_probe.c MUST come first in this list -- see
   # build_ring3_link_target's own comment on why source order determines
   # entry_vaddr.
+  # src/errno.c and src/fpconv.c are SCRUM-65 additions to this list, and
+  # they are here because src/stdio.c and src/stdlib.c grew real dependencies
+  # on them rather than because anything in the probe calls them directly:
+  # fopen/fseek/ftell set errno (which src/errno.h resolves to exo_errno), and
+  # %f / atof route through exo_fmt_f64 / exo_parse_f64. Leaving them out is
+  # not a compile error anywhere -- it is an undefined reference at THIS
+  # target's link step, which is how CI found it.
   shim_dir=tests/kernel/libc_shim_probe
   build_ring3_link_target libc_shim_probe "$shim_dir" "$shim_dir" \
     "$shim_dir/libc_shim_probe.c" \
     src/stdlib.c src/stdio.c src/string.c src/ctype.c \
+    src/errno.c src/fpconv.c \
     src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c
 
   echo "[3b3/7] Compile Doom's reference trig tables (SCRUM-41)"

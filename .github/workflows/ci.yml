@@ -60,5 +60,15 @@ jobs:
       - name: Compile vendored Doom engine (src/doom)
         run: make docker-build-doom
 
+      # SCRUM-65. Compiling was never the hard part: a call that is declared
+      # and undefined compiles perfectly and only fails at link. This gate
+      # compiles the libc shim as a ring-3 LibOS target would, puts it beside
+      # those doom objects, and fails if any libc symbol is still undefined.
+      # The four DG_* platform callbacks are expected to remain, and are
+      # allowlisted by ticket number inside the script -- adding to that list
+      # without a ticket is how it would rot into a set of exemptions.
+      - name: Link-check Doom against the libc shim
+        run: make docker-link-doom
+
       - name: Success
-        run: echo "All kernel tests passed; src/doom compiles clean."
+        run: echo "All kernel tests passed; src/doom compiles and resolves against the shim."

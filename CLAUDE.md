@@ -212,10 +212,14 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer) |
 | Resource revocation (repossession) | `src/revoke.c/h` (protocol), the `page_revoke_*`/`fb_binding_revoke_*` primitives |
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
-| Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`; header-only: `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/types.h`, `src/sys/stat.h` |
+| Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`, `src/fpconv.c/h` (float↔decimal); header-only: `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/types.h`, `src/sys/stat.h` |
 | Fixed-point trigonometry (sin/cos/tan/atan, integer floor/ceil) | `src/fixed_math.c/h` |
+| Doom globals from non-vendored netcode | `src/doom_net_stub.c` |
 | Vendored Doom engine (not yet linked) | `src/doom/` |
 | doomgeneric platform layer | `src/doomgeneric_exo.c/h` (timer half: `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
+| Doom fatal-error path (`I_Error`/`I_Quit` back end) | `src/doom_panic.c/h` |
+| doomgeneric platform layer | `src/doomgeneric_exo.c/h` (`DG_Init` SCRUM-73; timer half `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
+| Mounted IWAD registry (behind `DG_Init`) | `src/doom_wad.c/h` |
 | Test framework | `src/kunit.h`, `tests/kernel/*.c`, `tests/kernel/kunit.c`, `tests/kernel/ring3_probe.s` |
 
 ### Key architectural facts worth knowing before editing
@@ -434,6 +438,44 @@ convention and calls it from `kernel_main` instead of a test harness.
   syscall probe can run. All of physical memory is then reachable from CPL 3 —
   test builds only; a normal build keeps supervisor-only pages. SCRUM-48/-55/-56
   close this properly.
+- **✅ Every libc symbol Doom needs now resolves (SCRUM-65).** `nm` over the
+  compiled engine lists 52 external symbols; 32 of them had no definition
+  before this. All the libc ones do now, and **`make docker-link-doom`
+  (`docker/scripts/link-doom.sh`, run by CI) is the gate that keeps it that
+  way** — it compiles the shim as a ring-3 LibOS target, sets it beside the
+  doom objects, and fails naming any libc symbol still undefined. The only
+  survivors are the four `DG_*` platform callbacks, each allowlisted in that
+  script **by ticket number**; adding to that list without one is how it
+  would rot into a set of exemptions.
+  Three things are worth knowing before touching this area:
+  - **`printf`'s missing precision was the highest-severity item in the whole
+    audit**, and not because of cosmetics: `%.3d` fell to the `default:`
+    branch, which echoed the text *and did not consume the vararg*, so every
+    later conversion in the call read a shifted argument. `hu_stuff.c` builds
+    HUD font lump names with `"STCFN%.3d"`, so Doom died in `I_Error` before
+    the HUD ever drew. Precision, length modifiers, `%X`/`%o`/`%f`, `%n` and
+    `*` width are all implemented now.
+  - **`fopen` is a memory-mapped reader, not a filesystem.** It resolves a
+    name against blobs registered via `exo_file_register_blob()` and returns a
+    read-only stream over memory the kernel already mapped — 28 MB of IWAD
+    that is never copied. Matching is on the **basename**, case-insensitively,
+    because Doom joins a discovered directory onto a filename before calling.
+    **`fopen` for writing FAILS**, as do `remove`/`rename`/`mkdir` (`EROFS`):
+    a write that silently went nowhere would surface much later as a config
+    that never persists or a savegame that reloads as garbage.
+  - **`src/fpconv.c` exists because `-mno-sse` forbids `double` in kernel
+    sources.** All of `%f` and `atof`'s real logic is integer work on an
+    IEEE-754 bit pattern, so it compiles and is unit-tested from ring 0; what
+    sits behind an **`__SSE2__` gate** in `stdio.c`/`stdlib.c` is two adapters
+    that move 8 bytes. Measured against glibc: bit-exact for
+    |decimal exponent| ≤ 15, worst case 2 ULP.
+    The gate is `__SSE2__` and **not `!EXO_KERNEL`**, which is a distinction
+    that has already broken a build once: `build.sh`'s `probe_cflags` is the
+    kernel `CFLAGS` with only `-mcmodel` swapped, so **every ring-3 link
+    target today is also `-mno-sse`**. "Not the kernel" does not imply "has
+    SSE". The eventual Doom LibOS target must enable SSE, since Doom cannot
+    compile without it (SCRUM-177) — and then these paths light up on their
+    own.
 - **The vendored Doom engine compiles, but is not linked.** `src/doom/` holds
   doomgeneric's core (SCRUM-63). `make docker-build-doom` runs
   `docker/scripts/build-doom.sh`, which since SCRUM-64 compiles **all 79 files
@@ -499,6 +541,50 @@ convention and calls it from `kernel_main` instead of a test harness.
   possible, `build.sh` compiles **`src/doom/tables.c`** — the one file under
   `src/doom/` the kernel image links, and only under `TESTING=1`; it is pure
   const integer arrays with zero undefined references.
+- **`I_Error`/`I_Quit` report on serial and stop (SCRUM-83).** Doom's fatal
+  path used to write to `stderr`, open a zenity dialog through `system()`,
+  and `exit(-1)` — none of which exists here. `src/doom/i_system.c` now calls
+  `src/doom_panic.c`, which is **outside** the vendored tree on purpose: it
+  keeps the `i_system.c` patch small for the next re-vendor, and — since
+  nothing under `src/doom/` links into `build/exodoom` yet — it is the only
+  way the logic is reachable by a unit test at all.
+  The API is deliberately **two** calls, not one: `doom_panic_begin()` prints
+  and returns, `doom_panic_halt()` never returns. `I_Error` runs Doom's
+  atexit list *between* them, so the message is already out before shutdown
+  handlers run on a machine that has just declared itself broken — if one of
+  them faults, it no longer takes the explanation with it. There is a
+  re-entry guard, because Doom's own `already_quitting` does not actually
+  stop anything (the `exit(-1)` it guards is inside `#if ORIGCODE`), and a
+  recursive panic would otherwise recurse through the formatter on a ring-3
+  stack that is exactly **one 4 KiB page**.
+  `vprintf` was added to `src/stdio.c` for this, and **`printf` is now
+  implemented in terms of it** — one formatting engine and one sink per
+  build, rather than a second formatter on the panic path.
+- **`DG_Init` mounts the IWAD; it does not load one (SCRUM-73).** There is no
+  file to read and nowhere to put 28 MB if there were — the WAD arrives as a
+  multiboot module, the kernel identity-maps it, and `libos_map_wad()` maps
+  those *existing* physical pages read-only at `LIBOS_WAD_VADDR` before the
+  LibOS is ever entered. So `DG_Init`'s job is to prove what's mapped really
+  is a WAD, record it (`src/doom_wad.c`), and say so on serial.
+  **The ticket title says "via `exo_fb_map`" and that is a mis-filing** —
+  there is no such syscall (framebuffer mapping is `exo_fb_acquire` +
+  `exo_page_map`, composed by `libos_fb_map()`), and it has nothing to do
+  with an IWAD. The Jira description flags this on the ticket itself.
+  `DG_Init` **reports rather than halts**: it records a `DOOM_WAD_*` code in
+  `dg_init_result()` and returns. A missing or malformed IWAD is exactly what
+  Doom's own `d_iwad.c` → `W_AddFile` path exists to diagnose, with engine
+  context this layer doesn't have; halting first would pre-empt that for no
+  gain. It also means there is **no `#ifdef` splitting the tested path from
+  the shipped one** — `tests/kernel/test_dg_init_k.c` drives the real
+  function from ring 0.
+  `g_doom_params` in `src/doomgeneric_exo.c` is SCRUM-175's params hand-off,
+  reusing `libos_wad_params_t` rather than declaring a second identical
+  struct. It must stay the **first global in that file**, and that file first
+  in the Doom target's source list, or `libos_launch_patch_params()` writes
+  to the wrong offset. Its non-zero sentinel initialiser is load-bearing
+  twice over: it keeps the struct out of `.bss` (where there'd be no bytes to
+  patch), and it's what lets `DG_Init` report "nobody patched this" instead
+  of dereferencing address 0.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - **The context table (SCRUM-107, `src/context.c/h`) tracks live LibOS

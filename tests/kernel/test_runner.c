@@ -53,9 +53,14 @@ void suite_context_switch_tests(CU_pSuite s);
 void suite_sse_tests(CU_pSuite s);
 void suite_syscall_yield_tests(CU_pSuite s);
 void suite_shell_libos_tests(CU_pSuite s);
+void suite_clock_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
 void suite_fb_shadow_tests(CU_pSuite s);
 void suite_fixed_math_tests(CU_pSuite s);
+void suite_doom_panic_tests(CU_pSuite s);
+void suite_dg_init_tests(CU_pSuite s);
+void suite_fpconv_tests(CU_pSuite s);
+void suite_libc_gaps_tests(CU_pSuite s);
 void suite_libos_snake_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
@@ -168,6 +173,12 @@ int syscall_yield_suite_cleanup(void);
  * reasoning as libc_shim_probe_suite_init/_cleanup above. */
 int shell_libos_suite_init(void);
 int shell_libos_suite_cleanup(void);
+
+/* Same idea for the clock_libos suite (SCRUM-168): builds the real clock
+ * blob under PAGE_OWNER_LIBOS and must restore its boot-time binding, same
+ * reasoning as shell_libos_suite_init/_cleanup above. */
+int clock_libos_suite_init(void);
+int clock_libos_suite_cleanup(void);
 
 /* Same idea for the libos_snake suite (SCRUM-182): builds the real Snake
  * blob under PAGE_OWNER_LIBOS and must restore its boot-time binding, same
@@ -341,12 +352,26 @@ int run_tests(void)
                      shell_libos_suite_cleanup);
     suite_shell_libos_tests(s);
 
+    s = CU_add_suite("clock_libos", clock_libos_suite_init,
+                     clock_libos_suite_cleanup);
+    suite_clock_libos_tests(s);
+
     s = CU_add_suite("context_launch_rebind", NULL,
                      context_launch_rebind_suite_cleanup);
     suite_context_launch_rebind_tests(s);
 
     s = CU_add_suite("fixed_math", NULL, NULL);
     suite_fixed_math_tests(s);
+    s = CU_add_suite("doom_panic", NULL, NULL);
+    suite_doom_panic_tests(s);
+    s = CU_add_suite("dg_init", NULL, NULL);
+    suite_dg_init_tests(s);
+
+    s = CU_add_suite("fpconv", NULL, NULL);
+    suite_fpconv_tests(s);
+
+    s = CU_add_suite("libc_gaps", NULL, NULL);
+    suite_libc_gaps_tests(s);
 
     s = CU_add_suite("libos_snake", libos_snake_suite_init,
                      libos_snake_suite_cleanup);

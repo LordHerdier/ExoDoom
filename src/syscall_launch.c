@@ -6,6 +6,7 @@
 #include "libos_wad_map.h"
 #include "libos_wad_params.h"
 #include "libos_wad_viewer/libos_wad_viewer_layout.h"
+#include "libos_clock/libos_clock_layout.h"
 #include "libos_snake/libos_snake_layout.h"
 #include "mmap.h"
 #include "page_alloc.h"
@@ -25,6 +26,13 @@ extern const uint8_t _binary_libos_wad_viewer_code_bin_start[];
 extern const uint8_t _binary_libos_wad_viewer_code_bin_end[];
 extern const uint8_t _binary_libos_wad_viewer_data_bin_start[];
 extern const uint8_t _binary_libos_wad_viewer_data_bin_end[];
+
+/* Embedded clock LibOS code/data blobs (SCRUM-168) -- same
+ * build_ring3_link_target mechanism as the WAD viewer's own blobs above. */
+extern const uint8_t _binary_libos_clock_code_bin_start[];
+extern const uint8_t _binary_libos_clock_code_bin_end[];
+extern const uint8_t _binary_libos_clock_data_bin_start[];
+extern const uint8_t _binary_libos_clock_data_bin_end[];
 
 /* Embedded Snake code/data blobs -- same mechanism, produced by build.sh's
  * "[2e/7]" build_ring3_link_target libos_snake step (SCRUM-182). */
@@ -49,6 +57,19 @@ extern const uint8_t _binary_libos_snake_data_bin_end[];
  * exits some other way (a crash, or a future teardown path exo_exit()
  * doesn't cover) that leaves real resources behind after all. */
 static page_owner_t last_viewer_id = PAGE_OWNER_FREE;
+
+/* Same reclaim-before-create bookkeeping as last_viewer_id above, for the
+ * clock LibOS's own context row (SCRUM-168). Kept as a separate variable
+ * rather than shared with last_viewer_id: the two are independent live
+ * contexts under framebuffer multiplexing (SCRUM-112), not mutually
+ * exclusive the way "the current viewer" was before that ticket. */
+static page_owner_t last_clock_id = PAGE_OWNER_FREE;
+
+/* Same reclaim-before-create bookkeeping as last_viewer_id above, for
+ * Snake's own context row (SCRUM-182). Kept as a separate variable for the
+ * same reason as last_clock_id: independent LibOS contexts under
+ * framebuffer multiplexing, each relaunched on its own. */
+static page_owner_t last_snake_id = PAGE_OWNER_FREE;
 
 /* #21 -- build and switch to the WAD/flat/automap viewer as a second, real
  * LibOS context, invoked from the shell's `wadview` command
@@ -177,15 +198,72 @@ static int64_t sys_launch_wad_viewer(uint64_t a1, uint64_t a2, uint64_t a3,
     return 0;
 }
 
-/* Same reclaim-previous-instance pattern as last_viewer_id above, kept as a
- * separate static since Snake and the WAD viewer are independent LibOS
- * contexts that can each be relaunched on their own. */
-static page_owner_t last_snake_id = PAGE_OWNER_FREE;
+/* #22 -- build and switch to the clock demo LibOS (SCRUM-168) as a second/
+ * third, real LibOS context, invoked from the shell's `clock` command
+ * (src/shell/shell_main.c). Takes no arguments and needs no launch-time
+ * parameters (unlike the WAD viewer, there is no libos_launch_patch_params()
+ * step here) -- the clock's only input is exo_get_ticks(), which it can
+ * already call once launched.
+ *
+ * Simpler than sys_launch_wad_viewer() in one more respect:
+ * exo_fb_acquire() always succeeds under framebuffer multiplexing
+ * (SCRUM-112, src/fb_shadow.c), so there is no fb_binding_release() dance to
+ * do here -- the clock gets its own private virtual framebuffer regardless
+ * of who else is live. */
+static int64_t sys_launch_clock(uint64_t a1, uint64_t a2, uint64_t a3,
+                                uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
 
-/* #22 -- build and switch to Snake as a second, real LibOS context, invoked
- * from the shell's `snake` command (src/shell/shell_main.c). Takes no
- * arguments and needs no libos_launch_patch_params() call -- unlike the WAD
- * viewer, Snake has no external resource to stage and no launch-time
+    /* Reclaim the previous clock's context, if one is still live, before
+     * creating a new one -- see last_clock_id's own comment. */
+    if (last_clock_id != PAGE_OWNER_FREE &&
+       context_lookup(last_clock_id) != NULL) {
+        revoke_all(last_clock_id);
+        context_destroy(last_clock_id);
+    }
+    last_clock_id = PAGE_OWNER_FREE;
+
+    page_owner_t clock_id;
+    int create_rc = context_create(vmm_kernel_pml4(), &clock_id);
+    if (create_rc != CONTEXT_OK) {
+        return create_rc == CONTEXT_ENOMEM ? -EXO_ENOMEM : -EXO_EINVAL;
+    }
+
+    size_t code_len = (size_t)(_binary_libos_clock_code_bin_end -
+                               _binary_libos_clock_code_bin_start);
+    size_t data_len = (size_t)(_binary_libos_clock_data_bin_end -
+                               _binary_libos_clock_data_bin_start);
+
+    libos_image_t img;
+    if (libos_build_image(clock_id,
+                          _binary_libos_clock_code_bin_start, code_len,
+                          _binary_libos_clock_data_bin_start, data_len,
+                          LIBOS_CLOCK_BSS_LEN, &img) != VMM_OK) {
+        context_destroy(clock_id);
+        return -EXO_ENOMEM;
+    }
+
+    /* _irq: needs real IRQ-driven exo_get_ticks() advancement to display
+     * anything other than a frozen 0:00:00 -- same reasoning as the WAD
+     * viewer's own context_prime_irq() call. */
+    context_prime_irq(clock_id, img.entry_vaddr, img.stack_top_vaddr);
+
+    if (context_switch_request(clock_id) != CONTEXT_OK) {
+        libos_destroy_image(clock_id, &img);
+        context_destroy(clock_id);
+        return -EXO_EINVAL;
+    }
+
+    last_clock_id = clock_id;
+
+    return 0;
+}
+
+/* #23 -- build and switch to Snake as a second/third, real LibOS context,
+ * invoked from the shell's `snake` command (src/shell/shell_main.c). Takes
+ * no arguments and needs no libos_launch_patch_params() call -- unlike the
+ * WAD viewer, Snake has no external resource to stage and no launch-time
  * parameters (src/libos_snake/libos_snake.c's own header comment). Same
  * return convention as sys_launch_wad_viewer(): a negative EXO_E* if the
  * launch failed before the switch was armed, otherwise 0 once rescheduled
@@ -244,5 +322,6 @@ static int64_t sys_launch_snake(uint64_t a1, uint64_t a2, uint64_t a3,
 void syscall_launch_init(void)
 {
     exo_syscall_register(EXO_SYS_LAUNCH_WAD_VIEWER, sys_launch_wad_viewer);
+    exo_syscall_register(EXO_SYS_LAUNCH_CLOCK, sys_launch_clock);
     exo_syscall_register(EXO_SYS_LAUNCH_SNAKE, sys_launch_snake);
 }

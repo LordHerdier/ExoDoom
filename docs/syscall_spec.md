@@ -346,7 +346,7 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | #  | Syscall                             | Category    | Status | Description + Doom usage                                                                                                                                                                                                                                                       |
 | -- | ----------------------------------- | ----------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 0  | `exo_page_alloc()`                  | Memory      | ✅     | Allocate one 4K physical page. Returns physical address, or `-ENOMEM`. Bound to the dispatcher (SCRUM-34).                                                                        |
-| 1  | `exo_page_free(paddr)`              | Memory      | ✅     | Free a physical page. Bound to the dispatcher (SCRUM-34); currently `0` or `-EINVAL`. **Ownership-checked (§3.3)** — will return `-EPERM` unless the caller owns `paddr` once the page ownership table (SCRUM-152) lands.                  |
+| 1  | `exo_page_free(paddr)`              | Memory      | ✅     | Free a physical page. **Ownership-checked (§3.3):** `-EPERM` unless the caller owns `paddr`, `-EINVAL` for a misaligned/out-of-range address or a double free of an already-free page. On success (SCRUM-159) also unmaps every one of the caller's own mappings of `paddr` in its own address space — see §3.7 — so a page the PMM hands to a new owner can never be reached through the previous owner's stale mapping. Bound to the dispatcher (SCRUM-34), ownership enforcement SCRUM-152, mapping teardown SCRUM-159 (`src/syscall_mem.c`, `src/vmm.c`). |
 | 2  | `exo_page_map(vaddr, paddr, flags)` | Memory      | ✅     | Map physical page at virtual address in caller's address space. `flags`: `EXO_PAGE_READ`/`WRITE`/`USER`/`EXEC`. `EXEC` is accepted and ignored until `EFER.NXE` is enabled; `READ` is not representable on x86 (present implies readable) and is accepted and ignored. **Ownership-checked (§3.3):** `paddr` must be owned by the caller (or be the framebuffer the caller has acquired), and `vaddr` must lie in the LibOS window `[EXO_USER_VA_BASE, EXO_USER_VA_END)` — §3.7. Returns `0`, `-EINVAL` (misaligned address, unknown flag bit), `-EPERM` (window or ownership) or `-ENOMEM` (no page for an intermediate page table). Implemented in SCRUM-35 (`src/syscall_mem.c`, `src/vmm.c`), enforcement SCRUM-153. |
 | 3  | `exo_page_unmap(vaddr)`             | Memory      | ✅     | Unmap a virtual page; the physical page stays allocated (`exo_page_free` returns it). Only unmaps a mapping of a page the caller owns, holds the FB binding for, or that belongs to nobody — §3.7. Returns `0`, `-EINVAL` (misaligned, or nothing mapped there), `-EPERM` or `-ENOMEM`. Implemented in SCRUM-35, enforcement SCRUM-153. |
 | 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ✅     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct, backed by a **private, RAM-backed virtual framebuffer sized to the real framebuffer's geometry — not the real hardware framebuffer itself** (multiplexing, SCRUM-112, §3.3, §3.5). Every context gets its own on request; there is no exclusivity and no `-EBUSY` anymore. LibOS then calls `exo_page_map` to map it — an ordinary owned-page mapping, not a binding check. Freed (the pages) when the terminating context's pages are reclaimed, and (the directory entry) explicitly on `exo_exit` / forced revocation. Used by `DG_Init`. Returns `0` (including a re-acquire by the current owner, which re-fills the struct with the *same* buffer), `-EFAULT` if `[info_out, info_out + sizeof(exo_fb_info_t))` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` (SCRUM-54, same `exo_range_in_user_window` check #8 uses), `-ENOMEM` if no contiguous run of pages that size is free, or `-ENODEV` on a machine the bootloader gave no framebuffer. Implemented in SCRUM-154 (`src/syscall_fb.c`, `src/fb_binding.c`) and replaced by SCRUM-112 (`src/fb_shadow.c`); what actually reaches the screen is decided independently by `src/fb_compositor.c`, which composites whichever context is `context_current()` onto the real hardware framebuffer on a throttled PIT tick (`src/pit.c`). |
@@ -365,13 +365,14 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 17 | `exo_sound_tone(freq, dur_ms)`      | Sound       | ⬜     | Play a tone on the PC speaker at `freq` Hz for `dur_ms` milliseconds. Non-blocking (kernel manages PIT ch2). Returns `0`. Used by `I_StartSound` shim.                                                                                                                         |
 | 18 | `exo_sound_stop()`                  | Sound       | ⬜     | Silence the PC speaker immediately. Returns `0`. Used by `I_StopSound` shim.                                                                                                                                                                                                   |
 | 19 | `exo_yield()`                       | Scheduling  | ✅     | Cooperatively yield CPU to next runnable LibOS context. Returns when rescheduled. Called once per idle-loop iteration by the real shell LibOS (SCRUM-110, `src/shell/shell_main.c`) and optionally by `DG_SleepMs`. Still a no-op in practice today: nothing yet registers a second context via `context_create()` on a normal boot (Doom is not linked in), so the call always finds nothing else `READY`. Bound in SCRUM-109 (`src/syscall_yield.c`) to `context_switch_request()` (SCRUM-108) via a round-robin scan of the context table, `context_next_ready()` (`src/context.c`) — the minimum policy the acceptance criterion needs, not a real scheduler (priority/fairness/wake-on-event is SCRUM-147's job). No error return: if nothing else is `READY`, including a caller with no row in the table (the boot-time default LibOS), it is a no-op that returns `0`.                                                                                                                                          |
-| 20 | `exo_exit(code)`                    | Lifecycle   | ✅     | Terminate calling LibOS. Frees its pages and framebuffer binding (`revoke_all`) and hands off to whatever's next-ready via `context_switch_request()` — leaves the now-resourceless `context_t` row behind rather than destroying it (the outgoing side of that switch still needs it live to capture into); the caller that launched this LibOS is what eventually `context_destroy()`s it, on its own next relaunch (see #21/#22). Does not return. Implemented in SCRUM-155, extended in SCRUM-178 (`src/syscall_exit.c`). |
+| 20 | `exo_exit(code)`                    | Lifecycle   | ✅     | Terminate calling LibOS. Frees its pages and framebuffer binding (`revoke_all`) and hands off to whatever's next-ready via `context_switch_request()` — leaves the now-resourceless `context_t` row behind rather than destroying it (the outgoing side of that switch still needs it live to capture into); the caller that launched this LibOS is what eventually `context_destroy()`s it, on its own next relaunch (see #21/#22/#23). Does not return. Implemented in SCRUM-155, extended in SCRUM-178 (`src/syscall_exit.c`). |
 | 21 | `exo_launch_wad_viewer()`           | Lifecycle   | ✅     | Build the WAD/flat/automap viewer (`src/libos_wad_viewer/`) as a second, real LibOS context and `context_switch_request()` to it immediately; reclaims (`revoke_all` + `context_destroy`) whatever the previous launch left behind first. Like `exo_yield()`, does not return control to the caller until something switches back — here, the viewer's own `exo_exit()`/`exo_yield()` round trip. Returns a negative `EXO_E*` only if the launch failed before the switch was armed. Invoked by the shell's `wadview` command. Implemented in SCRUM-178 (`src/syscall_launch.c`). |
-| 22 | `exo_launch_snake()`                | Lifecycle   | ✅     | Same shape as #21, for the Snake LibOS demo (`src/libos_snake/`) — no external resource to stage and no launch-time parameters, so no `libos_launch_patch_params()` step. Invoked by the shell's `snake` command. Implemented in SCRUM-182 (`src/syscall_launch.c`). |
+| 22 | `exo_launch_clock()`                | Lifecycle   | ✅     | Same shape as #21, for the clock demo LibOS (`src/libos_clock/`) — no external resource to stage and no launch-time parameters. Unlike the WAD viewer, does not return control via the launched LibOS's own yield/exit — the clock never yields on its own — so switching back happens only via Ctrl+Tab (SCRUM-111). Invoked by the shell's `clock` command. Implemented in SCRUM-168 (`src/syscall_launch.c`). |
+| 23 | `exo_launch_snake()`                | Lifecycle   | ✅     | Same shape as #21, for the Snake LibOS demo (`src/libos_snake/`) — no external resource to stage and no launch-time parameters, so no `libos_launch_patch_params()` step. Invoked by the shell's `snake` command. Implemented in SCRUM-182 (`src/syscall_launch.c`). |
 
-**Total: 23 syscalls.** This is the complete interface needed to run Doom with
-save/load, config, sound, and cooperative multitasking, plus the two
-LibOS-launch syscalls (#21/#22) that back the shell's interactive demo
+**Total: 24 syscalls.** This is the complete interface needed to run Doom with
+save/load, config, sound, and cooperative multitasking, plus the three
+LibOS-launch syscalls (#21/#22/#23) that back the shell's interactive demo
 commands.
 
 ### 3.2a Error codes (SCRUM-57)
@@ -943,6 +944,18 @@ is trivial on purpose:
   `revoke_force` still in flight for that address would find the context
   holding it and take it. Harmless in v1, where force only runs from a context
   that is exiting; SCRUM-147 closes it by generation-stamping the tag.
+- **Mapping teardown is done (SCRUM-159).** Taking a resource back in the
+  ownership table used to leave the old holder's page-table mapping of it
+  live — the kernel considered the resource reclaimed while the previous
+  owner could still read and write it, and a shadow framebuffer's pages
+  (§3.2 #4) stayed on screen through the old holder after repossession.
+  `revoke_force`/`revoke_all` now also clear every mapping `who` has of what
+  was reclaimed, via `vmm_unmap_phys_range_in()` (`src/vmm.c`) — a reverse
+  scan of `who`'s own LibOS-window PML4 rather than a separate per-context
+  mapping record, since post-SCRUM-48 that window is the only place `who`'s
+  mappings can live (§3.7). The mark itself (phase 1) is unaffected: a
+  marked-but-not-yet-forced resource still changes nothing, per this
+  section's own rule.
 
 **No locking**, for the same reason as §3.5, and with a sharper caveat: under
 preemption the lock has to span the whole mark-then-reclaim sequence, not each
@@ -1025,19 +1038,24 @@ A page belonging to the kernel or to another context is still refused.
   kept. Walking a table on every unmap to discover it is empty costs more than
   the page is worth at v1 scale; the bound is one PT per 2 MiB of address space
   a LibOS has ever touched.
-- **No per-LibOS address space.** With one PML4, the window is what separates a
-  LibOS from the kernel, and nothing separates two LibOSes from each other:
-  they would share the window and could unmap each other's mappings of unowned
-  pages. SCRUM-48 makes `vmm.c`'s implicit "current PML4" a parameter, at which
-  point the window becomes a per-context policy rather than a global one.
-- **The kernel does not know where a context mapped anything.** Nothing records
-  a context's mappings, so nothing can tear them down: `exo_page_free` leaves a
-  live PTE pointing at a page the PMM may hand to somebody else, and
-  repossessing the framebuffer (§3.6) clears the binding while the old holder's
-  mapping keeps writing to the screen. Both need per-context tracking that
-  neither SCRUM-48's address spaces nor SCRUM-47's launch mechanism add —
-  those two make a LibOS's mappings reachable and exercisable from ring 3 at
-  all, but nothing has recorded what one has mapped yet.
+- **Per-LibOS address spaces exist (SCRUM-48).** Each context can have its own
+  PML4 (`vmm_create_address_space`/`vmm_bind_address_space`), sharing only
+  PML4[0] — the kernel's own subtree — with every other one, so the window is
+  now a per-context policy rather than the single global one this bullet used
+  to describe: two LibOSes each get their own private copy of it and cannot
+  reach each other's mappings at all, let alone unmap them.
+- **Mapping teardown is done (SCRUM-159).** The kernel still keeps no
+  per-context *record* of what a context has mapped — nothing appends to a
+  list on `exo_page_map`. What closes the gap instead is
+  `vmm_unmap_phys_range_in()` (`src/vmm.c`): a reverse scan of one context's
+  own LibOS-window PML4 for every leaf pointing at a given physical range (or
+  at anything at all, for a full sweep), safe to do on demand because
+  post-SCRUM-48 that window is the only place the context's mappings can
+  live. `exo_page_free` uses it on its own caller to unmap what it just freed
+  before the PMM can hand the frame to somebody else; `revoke_force`/
+  `revoke_all` (§3.6) use it on the target context, so repossessing a
+  resource — a shadow framebuffer's pages included — actually revokes write
+  access to it rather than only updating the ownership table.
 - **No quota on page tables.** Every level `vmm.c` allocates is a
   `PAGE_OWNER_KERNEL` page that no sweep reclaims, and a caller can walk the
   128 TiB window installing one mapping per 2 MiB to consume them without
