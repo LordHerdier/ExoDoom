@@ -37,7 +37,8 @@ int printf(const char *fmt, ...);
 static inline void assert_fail(const char *expr, const char *file, int line,
                                const char *func)
 {
-    printf("assertion failed: %s\n  at %s:%d in %s\n", expr, file, line, func);
+    (void)func;
+    printf("Assertion failed: %s [%s:%d]\n", expr, file, line);
     for (;;) {
         __asm__ volatile("cli; hlt");
     }

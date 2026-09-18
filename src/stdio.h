@@ -130,6 +130,18 @@ int rename(const char *oldpath, const char *newpath);
 int snprintf(char *str, size_t size, const char *fmt, ...);
 int vsnprintf(char *str, size_t size, const char *fmt, va_list ap);
 
+/*
+ * sprintf/vsprintf — the unbounded sibling of snprintf/vsnprintf.
+ *
+ * Implemented in terms of vsnprintf with an effectively unbounded size,
+ * so there is exactly one buffer-writing engine, not two.
+ * Prefer snprintf/vsnprintf wherever the destination size is known --
+ * these exist only for callers that already guarantee the buffer is large enough.
+ */
+int sprintf(char *str, const char *fmt, ...);
+int vsprintf(char *str, const char *fmt, va_list ap);
+
+
 /* vsscanf -- sscanf's va_list form. Not called by Doom; sscanf is
  * implemented in terms of it, the same way printf is in terms of vprintf. */
 int vsscanf(const char *str, const char *fmt, va_list ap);
