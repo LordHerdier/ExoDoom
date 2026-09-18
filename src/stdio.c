@@ -669,6 +669,31 @@ int snprintf(char *str, size_t size, const char *fmt, ...)
     return n;
 }
 
+/* ---- sprintf / vsprintf -------------------------------------------------
+ *
+ * Same engine and the same bounded-buffer sink as snprintf, just called
+ * with no upper bound -- there is nothing else to reuse a formatter for.
+ * There is no way to make sprintf itself safe (the caller's buffer size
+ * isn't passed in, by definition); callers that know their size should use
+ * snprintf instead.
+ */
+int vsprintf(char *str, const char *fmt, va_list ap)
+{
+    return vsnprintf(str, (size_t)-1, fmt, ap);
+}
+
+int sprintf(char *str, const char *fmt, ...)
+{
+    va_list ap;
+    int     n;
+
+    va_start(ap, fmt);
+    n = vsprintf(str, fmt, ap);
+    va_end(ap);
+
+    return n;
+}
+
 /* ---- FILE ---------------------------------------------------------------
  *
  * Two kinds of stream, one struct.
