@@ -4,6 +4,8 @@ ExoDoom is a bare-metal x86_64 (long mode) exokernel: the goal is to run Doom
 (via [doomgeneric](https://github.com/ozkl/doomgeneric)) directly on
 hardware/QEMU with no conventional OS underneath. See `docs/architecture.md`
 for the full design and `docs/syscall_spec.md` for the syscall/libc audit.
+See `docs/contributing.md` for branch/commit conventions, code style, and how
+to write/run tests.
 
 ## Repo layout
 
