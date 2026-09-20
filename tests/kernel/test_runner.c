@@ -61,6 +61,7 @@ void suite_doom_panic_tests(CU_pSuite s);
 void suite_dg_init_tests(CU_pSuite s);
 void suite_fpconv_tests(CU_pSuite s);
 void suite_libc_gaps_tests(CU_pSuite s);
+void suite_syscall_fuzz_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -365,6 +366,12 @@ int run_tests(void)
 
     s = CU_add_suite("libc_gaps", NULL, NULL);
     suite_libc_gaps_tests(s);
+
+    /* Runs last: hammers exo_syscall_dispatch() with a million random
+     * syscalls and checks the PMM is still sane afterward, so it should not
+     * shadow which earlier suite actually broke a handler (SCRUM-115). */
+    s = CU_add_suite("syscall_fuzz", NULL, NULL);
+    suite_syscall_fuzz_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 
