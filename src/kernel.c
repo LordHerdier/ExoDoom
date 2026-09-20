@@ -726,7 +726,7 @@ void kernel_main(void *mb2_info_ptr) {
     syscall_yield_init();
 
     // ── WAD viewer launch syscall (SCRUM-178) ────────────────────────────
-    // Binds exo_launch_wad_viewer (#21): stages the WAD module read-only
+    // Binds exo_launch (#21): stages the WAD module read-only
     // into a fresh LibOS address space and context_switch_request()s to it,
     // so the shell's `wadview` command can invoke it as an ordinary program.
     // Same placement rule as every other syscall *_init(): after

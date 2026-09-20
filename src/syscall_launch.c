@@ -1,3 +1,49 @@
+/*
+ * syscall_launch.c — EXO_SYS_LAUNCH (#21), the one syscall that starts a
+ * ring-3 LibOS app (SCRUM-184).
+ *
+ * Before this ticket every launchable app had a syscall number of its own --
+ * EXO_SYS_LAUNCH_WAD_VIEWER (#21, SCRUM-178), _CLOCK (#22, SCRUM-168),
+ * _SNAKE (#23, SCRUM-182) and _DOOM (#24, SCRUM-66) -- each with a
+ * hand-written sys_launch_*() closing over its own build-time blob symbols,
+ * and each costing an edit to exo_syscall.h's dense table plus the two tests
+ * that police it. Four apps in, the four handlers differed only in which
+ * blobs they named and which of two optional steps they ran, while the other
+ * forty-odd lines were copied verbatim.
+ *
+ * So the per-app part is now DATA -- one row in launch_apps[] naming the
+ * blobs, the bss length and two flags -- and the procedure is written once,
+ * below. Adding an app is a row plus a shell command; it is no longer a
+ * syscall number, a dispatcher entry, and test churn.
+ *
+ * ── What a row has to say ─────────────────────────────────────────────
+ *
+ * Only two things actually varied between the old handlers, and both are
+ * flags rather than code:
+ *
+ *   LAUNCH_NEEDS_WAD    map the multiboot WAD module into the new address
+ *                       space and patch its address/length into the image's
+ *                       params page. The WAD viewer and Doom need it; the
+ *                       clock and Snake have no external resource to stage.
+ *
+ *   LAUNCH_RELEASES_FB  release whoever currently holds the framebuffer
+ *                       binding before entering.
+ *
+ * That second flag preserves an inconsistency rather than inventing one,
+ * which is worth being explicit about since it is exactly the sort of thing
+ * a refactor quietly "tidies away": sys_launch_wad_viewer() and
+ * sys_launch_snake() both called fb_binding_release(), and
+ * sys_launch_clock() deliberately did not -- its comment argued the call is
+ * unnecessary under framebuffer multiplexing (SCRUM-112, src/fb_shadow.c),
+ * since every app gets its own private virtual framebuffer regardless of who
+ * else is live. That argument looks right, and would apply equally to the
+ * other three. But "looks right" is not "tested", and changing three apps'
+ * launch behaviour is not what this ticket was asked to do. The flag keeps
+ * each app doing exactly what it did before and makes the discrepancy
+ * visible in one table instead of buried across four functions. Resolving it
+ * is its own change.
+ */
+
 #include "syscall_launch.h"
 #include "syscall.h"
 #include "exo_syscall.h"
@@ -18,429 +64,268 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Embedded WAD viewer code/data blobs -- produced at build time by
+/* Embedded code/data blobs -- produced at build time by
  * build_ring3_link_target's objcopy step (docker/scripts/build.sh), the same
- * mechanism as the shell LibOS's own _binary_shell_*_bin_* symbols
- * (src/kernel.c). LIBOS_WAD_VIEWER_BSS_LEN comes from that step's generated
- * src/libos_wad_viewer/libos_wad_viewer_layout.h. */
+ * mechanism as the shell LibOS's own _binary_shell_*_bin_* symbols. */
 extern const uint8_t _binary_libos_wad_viewer_code_bin_start[];
 extern const uint8_t _binary_libos_wad_viewer_code_bin_end[];
 extern const uint8_t _binary_libos_wad_viewer_data_bin_start[];
 extern const uint8_t _binary_libos_wad_viewer_data_bin_end[];
 
-/* Embedded clock LibOS code/data blobs (SCRUM-168) -- same
- * build_ring3_link_target mechanism as the WAD viewer's own blobs above. */
 extern const uint8_t _binary_libos_clock_code_bin_start[];
 extern const uint8_t _binary_libos_clock_code_bin_end[];
 extern const uint8_t _binary_libos_clock_data_bin_start[];
 extern const uint8_t _binary_libos_clock_data_bin_end[];
 
-/* Embedded Snake code/data blobs -- same mechanism, produced by build.sh's
- * "[2f/7]" build_ring3_link_target libos_snake step (SCRUM-182). */
 extern const uint8_t _binary_libos_snake_code_bin_start[];
 extern const uint8_t _binary_libos_snake_code_bin_end[];
 extern const uint8_t _binary_libos_snake_data_bin_start[];
 extern const uint8_t _binary_libos_snake_data_bin_end[];
 
-/* Doom's blobs (SCRUM-66), same mechanism. Much the largest of the four:
- * ~390 KiB of code+rodata and ~80 KiB of .data against a ~314 KiB .bss,
- * which is why LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES had to grow from 8/16 to
- * 192/192 in src/libos_launch.h for this ticket. */
+/* Doom's blobs (SCRUM-66). Much the largest of the four: ~390 KiB of
+ * code+rodata and ~80 KiB of .data against a ~314 KiB .bss, which is why
+ * LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES had to grow from 8/16 to 192/192 in
+ * src/libos_launch.h for that ticket. */
 extern const uint8_t _binary_libos_doom_code_bin_start[];
 extern const uint8_t _binary_libos_doom_code_bin_end[];
 extern const uint8_t _binary_libos_doom_data_bin_start[];
 extern const uint8_t _binary_libos_doom_data_bin_end[];
 
-/* The most recently launched viewer's context id, or PAGE_OWNER_FREE if
- * none is live. `wadview` now exits via exo_exit() on Q/Esc (#20,
- * src/syscall_exit.c, SCRUM-155/178), which reclaims its pages and
- * framebuffer binding immediately and hands off to the shell -- but it
- * cannot context_destroy() its own context_t row (context_switch_request()
- * inside exo_exit() still needs to find that row live, as the outgoing
- * side, to capture into), so the row itself is left behind, READY but
- * resourceless. Without reclaiming it here, a second `wadview` would
- * context_create() a *third* context alongside the shell and the first
- * viewer's leftover row, eventually exhausting CONTEXT_MAX (3). revoke_all()
- * below is a harmless no-op by the time this runs (exo_exit() already freed
- * everything); context_destroy() is the part that still matters, to free
- * the table slot itself. Kept as a pair regardless, in case a viewer ever
- * exits some other way (a crash, or a future teardown path exo_exit()
- * doesn't cover) that leaves real resources behind after all. */
-static page_owner_t last_viewer_id = PAGE_OWNER_FREE;
+#define LAUNCH_NEEDS_WAD    (1u << 0)
+#define LAUNCH_RELEASES_FB  (1u << 1)
 
-/* Same reclaim-before-create bookkeeping as last_viewer_id above, for the
- * clock LibOS's own context row (SCRUM-168). Kept as a separate variable
- * rather than shared with last_viewer_id: the two are independent live
- * contexts under framebuffer multiplexing (SCRUM-112), not mutually
- * exclusive the way "the current viewer" was before that ticket. */
-static page_owner_t last_clock_id = PAGE_OWNER_FREE;
+typedef struct {
+    const uint8_t *code_start;
+    const uint8_t *code_end;
+    const uint8_t *data_start;
+    const uint8_t *data_end;
+    size_t         bss_len;
+    unsigned       flags;
 
-/* #21 -- build and switch to the WAD/flat/automap viewer as a second, real
- * LibOS context, invoked from the shell's `wadview` command
- * (src/shell/shell_main.c). Takes no arguments: the kernel already knows
- * where the WAD module and the viewer's blobs are.
+    /*
+     * The most recently launched instance's context id, or PAGE_OWNER_FREE
+     * if none is live. Per-app and mutable, which is why launch_apps[] is
+     * not const.
+     *
+     * Each app exits via exo_exit() (#20, src/syscall_exit.c,
+     * SCRUM-155/178), which reclaims its pages and framebuffer binding
+     * immediately and hands off to the shell -- but it cannot
+     * context_destroy() its own context_t row, because
+     * context_switch_request() inside exo_exit() still needs that row live,
+     * as the outgoing side, to capture into. The row is therefore left
+     * behind READY but resourceless, and without reclaiming it here a second
+     * launch of the same app would context_create() yet another context
+     * alongside the shell and the leftover row, eventually exhausting
+     * CONTEXT_MAX.
+     *
+     * revoke_all() is a harmless no-op by the time the reclaim runs
+     * (exo_exit() already freed everything); context_destroy() is the part
+     * that still matters, to free the table slot itself. Kept as a pair
+     * regardless, in case an app ever exits some other way -- a crash, or a
+     * future teardown path exo_exit() does not cover -- that leaves real
+     * resources behind after all.
+     *
+     * Per-app rather than one shared "the current app": under framebuffer
+     * multiplexing (SCRUM-112) these are independent live contexts, not
+     * mutually exclusive the way "the current viewer" was before it.
+     */
+    page_owner_t   last_id;
+} launch_app_t;
+
+/*
+ * Indexed by EXO_LAUNCH_APP_* (src/exo_syscall.h). That order is ABI -- the
+ * ids cross the syscall boundary -- so rows may be appended but not
+ * reordered, and EXO_LAUNCH_APP_COUNT stays one past the last.
+ */
+static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
+    [EXO_LAUNCH_APP_WAD_VIEWER] = {
+        _binary_libos_wad_viewer_code_bin_start,
+        _binary_libos_wad_viewer_code_bin_end,
+        _binary_libos_wad_viewer_data_bin_start,
+        _binary_libos_wad_viewer_data_bin_end,
+        LIBOS_WAD_VIEWER_BSS_LEN,
+        LAUNCH_NEEDS_WAD | LAUNCH_RELEASES_FB,
+        PAGE_OWNER_FREE,
+    },
+    [EXO_LAUNCH_APP_CLOCK] = {
+        _binary_libos_clock_code_bin_start,
+        _binary_libos_clock_code_bin_end,
+        _binary_libos_clock_data_bin_start,
+        _binary_libos_clock_data_bin_end,
+        LIBOS_CLOCK_BSS_LEN,
+        0u,
+        PAGE_OWNER_FREE,
+    },
+    [EXO_LAUNCH_APP_SNAKE] = {
+        _binary_libos_snake_code_bin_start,
+        _binary_libos_snake_code_bin_end,
+        _binary_libos_snake_data_bin_start,
+        _binary_libos_snake_data_bin_end,
+        LIBOS_SNAKE_BSS_LEN,
+        LAUNCH_RELEASES_FB,
+        PAGE_OWNER_FREE,
+    },
+    [EXO_LAUNCH_APP_DOOM] = {
+        _binary_libos_doom_code_bin_start,
+        _binary_libos_doom_code_bin_end,
+        _binary_libos_doom_data_bin_start,
+        _binary_libos_doom_data_bin_end,
+        LIBOS_DOOM_BSS_LEN,
+        LAUNCH_NEEDS_WAD | LAUNCH_RELEASES_FB,
+        PAGE_OWNER_FREE,
+    },
+};
+
+/*
+ * #21 -- build and switch to the ring-3 LibOS app named by `app_id`,
+ * invoked from the shell's per-app commands (src/shell/shell_main.c).
  *
  * Returns a negative EXO_E* on any failure before the switch is armed, in
- * which case the caller (the shell) keeps running and can report the
- * error. On success, context_switch_request() has armed
- * context_switch_pending and this returns 0 -- but the caller never
- * observes that 0 as an ordinary syscall return: src/syscall_entry.s's
- * epilogue sees the pending switch immediately after this handler returns
- * and takes the context_switch_tail exit into the viewer instead of
- * sysret-ing back to the shell. */
-static int64_t sys_launch_wad_viewer(uint64_t a1, uint64_t a2, uint64_t a3,
-                                     uint64_t a4, uint64_t a5, uint64_t a6)
+ * which case the caller (the shell) keeps running and can report the error.
+ * On success, context_switch_request() has armed context_switch_pending and
+ * this returns 0 -- but the caller never observes that 0 as an ordinary
+ * syscall return: src/syscall_entry.s's epilogue sees the pending switch
+ * immediately after this handler returns and takes the context_switch_tail
+ * exit into the new app instead of sysret-ing back to the shell.
+ */
+static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
+                          uint64_t a4, uint64_t a5, uint64_t a6)
 {
-    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
 
-    /* Reclaim the previous viewer's context (pages + framebuffer binding,
-     * whichever it still holds) before creating a new one -- see
-     * last_viewer_id's own comment. context_lookup() guards against a
-     * stale id from a viewer some other path already tore down. */
-    if (last_viewer_id != PAGE_OWNER_FREE &&
-       context_lookup(last_viewer_id) != NULL) {
-        revoke_all(last_viewer_id);
-        context_destroy(last_viewer_id);
+    /* The one new failure mode this ticket introduces. An unknown app id is
+     * a caller error rather than a resource problem, and is rejected before
+     * anything has been created. The argument is unsigned, so a "negative"
+     * id arrives as a huge value and is caught by the same comparison. */
+    if (app_id >= EXO_LAUNCH_APP_COUNT) {
+        return -EXO_EINVAL;
     }
-    last_viewer_id = PAGE_OWNER_FREE;
 
-    uint64_t wad_start, wad_end;
-    if (mmap_find_module(&wad_start, &wad_end) != 0) {
-        return -EXO_ENODEV;
+    launch_app_t *app = &launch_apps[app_id];
+
+    /* Reclaim the previous instance of THIS app before creating another --
+     * see last_id's own comment. context_lookup() guards against a stale id
+     * from an instance some other path already tore down. */
+    if (app->last_id != PAGE_OWNER_FREE &&
+        context_lookup(app->last_id) != NULL) {
+        revoke_all(app->last_id);
+        context_destroy(app->last_id);
     }
-    uint64_t wad_size = wad_end - wad_start;
+    app->last_id = PAGE_OWNER_FREE;
 
-    page_owner_t viewer_id;
-    int create_rc = context_create(vmm_kernel_pml4(), &viewer_id);
+    /* Looked up before context_create() so a missing module fails without
+     * having allocated anything -- the ordering the old WAD-viewer handler
+     * used, preserved. */
+    uint64_t wad_start = 0, wad_end = 0, wad_size = 0;
+    if (app->flags & LAUNCH_NEEDS_WAD) {
+        if (mmap_find_module(&wad_start, &wad_end) != 0) {
+            return -EXO_ENODEV;
+        }
+        wad_size = wad_end - wad_start;
+    }
+
+    page_owner_t id;
+    int create_rc = context_create(vmm_kernel_pml4(), &id);
     if (create_rc != CONTEXT_OK) {
         return create_rc == CONTEXT_ENOMEM ? -EXO_ENOMEM : -EXO_EINVAL;
     }
 
-    size_t code_len = (size_t)(_binary_libos_wad_viewer_code_bin_end -
-                               _binary_libos_wad_viewer_code_bin_start);
-    size_t data_len = (size_t)(_binary_libos_wad_viewer_data_bin_end -
-                               _binary_libos_wad_viewer_data_bin_start);
-
-    libos_image_t img;
-    if (libos_build_image(viewer_id,
-                          _binary_libos_wad_viewer_code_bin_start, code_len,
-                          _binary_libos_wad_viewer_data_bin_start, data_len,
-                          LIBOS_WAD_VIEWER_BSS_LEN, &img) != VMM_OK) {
-        context_destroy(viewer_id);
-        return -EXO_ENOMEM;
-    }
-
-    if (libos_map_wad((uint64_t *)(uintptr_t)img.pml4_phys,
-                      wad_start, wad_size) != VMM_OK) {
-        libos_destroy_image(viewer_id, &img);
-        context_destroy(viewer_id);
-        return -EXO_EINVAL;
-    }
-
-    /* SCRUM-175: patch libos_wad_params_t -- the only thing the viewer
-     * cannot learn through an ordinary syscall (see src/libos_wad_params.h)
-     * -- directly into the viewer's own g_wad_params global (its first
-     * .data global) rather than hand-mapping a separate side-channel page
-     * the way an earlier version of this mechanism did. See
-     * libos_launch_patch_params()'s own comment (src/libos_launch.h) for why
-     * this is safe: it requires only that libos_wad_viewer.c stays first in
-     * build.sh's source list for this target, which it already is for
-     * .text.entry placement. Unlike the old side-channel page (mapped
-     * read-only), g_wad_params now lives in the viewer's ordinary writable
-     * .data, so the viewer itself could in principle corrupt its own
-     * wad_vaddr/wad_size after launch -- an accepted widening, not a
-     * regression the kernel needs to guard against, per that same comment. */
-    libos_wad_params_t params = {
-        .wad_vaddr = LIBOS_WAD_VADDR,
-        .wad_size  = wad_size,
-    };
-    if (libos_launch_patch_params(&img, &params, sizeof(params)) != VMM_OK) {
-        libos_destroy_image(viewer_id, &img);
-        context_destroy(viewer_id);
-        return -EXO_EINVAL;
-    }
-
-    /* _irq: this is the viewer's very first entry, reached through
-     * context_switch_tail rather than a direct libos_enter_irq() call --
-     * without this it would launch with RFLAGS.IF clear (context_prime()'s
-     * default, correct for SCRUM-108/109's cooperative-only ping-pong
-     * probes) and its exo_get_ticks()/exo_kbd_poll()-driven loops would
-     * never see a PIT or keyboard IRQ land. */
-    context_prime_irq(viewer_id, img.entry_vaddr, img.stack_top_vaddr);
-
-    /* Whoever currently holds the framebuffer binding -- the shell, from
-     * its own libos_fb_map() call at startup (src/shell/shell_main.c), on
-     * the very first `wadview`; nobody, on a later one, since the reclaim
-     * at the top of this function already released it from the previous
-     * viewer -- must give it up before this one can exo_fb_acquire() it
-     * (exclusive, src/fb_binding.c, SCRUM-154). fb_binding_owner() rather
-     * than assuming the caller: the caller is always the shell, but the
-     * *holder* is not, once a second `wadview` runs. Only the binding is
-     * released, not the holder's own already-established page-table
-     * mapping (fb_binding_release() never touches page tables), so the
-     * shell keeps rendering to its existing framebuffer pointer
-     * uninterrupted once it is switched back to. Done last, right before
-     * the point of no return: every earlier failure path above leaves
-     * whoever holds the binding untouched. */
-    fb_binding_release(fb_binding_owner());
-
-    /* Succeeds because the caller (the shell) has a real context_t row of
-     * its own -- see src/kernel.c's SCRUM-178 refactor of the shell launch.
-     * Arms context_switch_pending; src/syscall_entry.s does the actual
-     * switch once this handler returns. */
-    if (context_switch_request(viewer_id) != CONTEXT_OK) {
-        libos_destroy_image(viewer_id, &img);
-        context_destroy(viewer_id);
-        return -EXO_EINVAL;
-    }
-
-    /* Only now, on the success path -- everything above that fails instead
-     * destroys viewer_id itself and returns with last_viewer_id still
-     * PAGE_OWNER_FREE from the top of this function. */
-    last_viewer_id = viewer_id;
-
-    return 0;
-}
-
-/* #22 -- build and switch to the clock demo LibOS (SCRUM-168) as a second/
- * third, real LibOS context, invoked from the shell's `clock` command
- * (src/shell/shell_main.c). Takes no arguments and needs no launch-time
- * parameters (unlike the WAD viewer, there is no libos_launch_patch_params()
- * step here) -- the clock's only input is exo_get_ticks(), which it can
- * already call once launched.
- *
- * Simpler than sys_launch_wad_viewer() in one more respect:
- * exo_fb_acquire() always succeeds under framebuffer multiplexing
- * (SCRUM-112, src/fb_shadow.c), so there is no fb_binding_release() dance to
- * do here -- the clock gets its own private virtual framebuffer regardless
- * of who else is live. */
-static int64_t sys_launch_clock(uint64_t a1, uint64_t a2, uint64_t a3,
-                                uint64_t a4, uint64_t a5, uint64_t a6)
-{
-    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-
-    /* Reclaim the previous clock's context, if one is still live, before
-     * creating a new one -- see last_clock_id's own comment. */
-    if (last_clock_id != PAGE_OWNER_FREE &&
-       context_lookup(last_clock_id) != NULL) {
-        revoke_all(last_clock_id);
-        context_destroy(last_clock_id);
-    }
-    last_clock_id = PAGE_OWNER_FREE;
-
-    page_owner_t clock_id;
-    int create_rc = context_create(vmm_kernel_pml4(), &clock_id);
-    if (create_rc != CONTEXT_OK) {
-        return create_rc == CONTEXT_ENOMEM ? -EXO_ENOMEM : -EXO_EINVAL;
-    }
-
-    size_t code_len = (size_t)(_binary_libos_clock_code_bin_end -
-                               _binary_libos_clock_code_bin_start);
-    size_t data_len = (size_t)(_binary_libos_clock_data_bin_end -
-                               _binary_libos_clock_data_bin_start);
-
-    libos_image_t img;
-    if (libos_build_image(clock_id,
-                          _binary_libos_clock_code_bin_start, code_len,
-                          _binary_libos_clock_data_bin_start, data_len,
-                          LIBOS_CLOCK_BSS_LEN, &img) != VMM_OK) {
-        context_destroy(clock_id);
-        return -EXO_ENOMEM;
-    }
-
-    /* _irq: needs real IRQ-driven exo_get_ticks() advancement to display
-     * anything other than a frozen 0:00:00 -- same reasoning as the WAD
-     * viewer's own context_prime_irq() call. */
-    context_prime_irq(clock_id, img.entry_vaddr, img.stack_top_vaddr);
-
-    if (context_switch_request(clock_id) != CONTEXT_OK) {
-        libos_destroy_image(clock_id, &img);
-        context_destroy(clock_id);
-        return -EXO_EINVAL;
-    }
-
-    last_clock_id = clock_id;
-
-    return 0;
-}
-
-/* Same reclaim-previous-instance pattern as last_viewer_id above, kept as a
- * separate static since Snake and the WAD viewer are independent LibOS
- * contexts that can each be relaunched on their own. */
-static page_owner_t last_snake_id = PAGE_OWNER_FREE;
-
-/* #23 -- build and switch to Snake as a second, real LibOS context, invoked
- * from the shell's `snake` command (src/shell/shell_main.c). Takes no
- * arguments and needs no libos_launch_patch_params() call -- unlike the WAD
- * viewer, Snake has no external resource to stage and no launch-time
- * parameters (src/libos_snake/libos_snake.c's own header comment). Same
- * return convention as sys_launch_wad_viewer(): a negative EXO_E* if the
- * launch failed before the switch was armed, otherwise 0 once rescheduled
- * after Snake exits (EXO_SYS_EXIT, #20) and yields back. */
-static int64_t sys_launch_snake(uint64_t a1, uint64_t a2, uint64_t a3,
-                                uint64_t a4, uint64_t a5, uint64_t a6)
-{
-    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-
-    if (last_snake_id != PAGE_OWNER_FREE &&
-       context_lookup(last_snake_id) != NULL) {
-        revoke_all(last_snake_id);
-        context_destroy(last_snake_id);
-    }
-    last_snake_id = PAGE_OWNER_FREE;
-
-    page_owner_t snake_id;
-    int create_rc = context_create(vmm_kernel_pml4(), &snake_id);
-    if (create_rc != CONTEXT_OK) {
-        return create_rc == CONTEXT_ENOMEM ? -EXO_ENOMEM : -EXO_EINVAL;
-    }
-
-    size_t code_len = (size_t)(_binary_libos_snake_code_bin_end -
-                               _binary_libos_snake_code_bin_start);
-    size_t data_len = (size_t)(_binary_libos_snake_data_bin_end -
-                               _binary_libos_snake_data_bin_start);
-
-    libos_image_t img;
-    if (libos_build_image(snake_id,
-                          _binary_libos_snake_code_bin_start, code_len,
-                          _binary_libos_snake_data_bin_start, data_len,
-                          LIBOS_SNAKE_BSS_LEN, &img) != VMM_OK) {
-        context_destroy(snake_id);
-        return -EXO_ENOMEM;
-    }
-
-    /* Same reasoning as sys_launch_wad_viewer()'s own comment: without
-     * _irq, Snake's exo_get_ticks()/exo_kbd_poll()-driven loop would never
-     * see a PIT or keyboard IRQ land. */
-    context_prime_irq(snake_id, img.entry_vaddr, img.stack_top_vaddr);
-
-    /* Same framebuffer hand-off reasoning as sys_launch_wad_viewer(). */
-    fb_binding_release(fb_binding_owner());
-
-    if (context_switch_request(snake_id) != CONTEXT_OK) {
-        libos_destroy_image(snake_id, &img);
-        context_destroy(snake_id);
-        return -EXO_EINVAL;
-    }
-
-    last_snake_id = snake_id;
-
-    return 0;
-}
-
-/* Same reclaim-previous-instance pattern as last_viewer_id/last_snake_id. */
-static page_owner_t last_doom_id = PAGE_OWNER_FREE;
-
-/* #24 -- build and switch to Doom (SCRUM-66), invoked from the shell's
- * `doom` command (src/shell/shell_main.c).
- *
- * Structurally this is sys_launch_wad_viewer() rather than
- * sys_launch_snake(): Doom is the other target with an external resource to
- * stage before ring 3 begins. The WAD module is mapped read-only into the
- * new address space at LIBOS_WAD_VADDR, and its address and length are
- * patched into the image's params page, where DG_Init()
- * (src/doomgeneric_exo.c) reads them out of g_doom_params and hands them to
- * doom_wad_mount(). That global is a libos_wad_params_t -- the very same
- * struct and the very same libos_launch_patch_params() call the viewer uses
- * (SCRUM-175), which is exactly what its own comment anticipated.
- *
- * The patch lands on offset 0 of the .data blob, so src/doomgeneric_exo.c
- * must be FIRST in build.sh's source list for this target and g_doom_params
- * must stay the first global in that file. Note this is the one target where
- * that file is not also the one defining the entry point: libos_doom_main()
- * lives in src/libos_doom/libos_doom.c and gets to offset 0 of .text through
- * __attribute__((section(".text.entry"))) instead of through link order (see
- * tests/kernel/ring3_link_target.ld.in). Two different offsets, two
- * different mechanisms, no conflict -- but change either and the other does
- * not save you.
- *
- * Same return convention as the other three handlers. */
-static int64_t sys_launch_doom(uint64_t a1, uint64_t a2, uint64_t a3,
-                               uint64_t a4, uint64_t a5, uint64_t a6)
-{
-    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-
-    if (last_doom_id != PAGE_OWNER_FREE &&
-       context_lookup(last_doom_id) != NULL) {
-        revoke_all(last_doom_id);
-        context_destroy(last_doom_id);
-    }
-    last_doom_id = PAGE_OWNER_FREE;
-
-    uint64_t wad_start, wad_end;
-    if (mmap_find_module(&wad_start, &wad_end) != 0) {
-        return -EXO_ENODEV;
-    }
-    uint64_t wad_size = wad_end - wad_start;
-
-    page_owner_t doom_id;
-    int create_rc = context_create(vmm_kernel_pml4(), &doom_id);
-    if (create_rc != CONTEXT_OK) {
-        return create_rc == CONTEXT_ENOMEM ? -EXO_ENOMEM : -EXO_EINVAL;
-    }
-
-    size_t code_len = (size_t)(_binary_libos_doom_code_bin_end -
-                               _binary_libos_doom_code_bin_start);
-    size_t data_len = (size_t)(_binary_libos_doom_data_bin_end -
-                               _binary_libos_doom_data_bin_start);
+    size_t code_len = (size_t)(app->code_end - app->code_start);
+    size_t data_len = (size_t)(app->data_end - app->data_start);
 
     /* static, not a local: libos_image_t carries one uint64_t per mappable
      * page, so at 192/192/16 pages it is a little over 3 KiB -- a fifth of
      * src/syscall_entry.s's 16 KiB syscall stack to spend on one local.
      * Safe because a launch cannot overlap another: `syscall` masks IF
      * (FMASK, src/syscall.c) so no interrupt can re-enter the dispatcher
-     * here, and the handler runs to completion before the switch it arms
-     * ever takes effect. The other three handlers keep their stack locals;
-     * only this one is big enough for the question to arise. */
+     * here, and this handler runs to completion before the switch it arms
+     * ever takes effect. Introduced by SCRUM-66 for Doom, and now shared by
+     * every app, since there is only one handler. */
     static libos_image_t img;
-    if (libos_build_image(doom_id,
-                          _binary_libos_doom_code_bin_start, code_len,
-                          _binary_libos_doom_data_bin_start, data_len,
-                          LIBOS_DOOM_BSS_LEN, &img) != VMM_OK) {
-        context_destroy(doom_id);
+    if (libos_build_image(id, app->code_start, code_len,
+                          app->data_start, data_len,
+                          app->bss_len, &img) != VMM_OK) {
+        context_destroy(id);
         return -EXO_ENOMEM;
     }
 
-    if (libos_map_wad((uint64_t *)(uintptr_t)img.pml4_phys,
-                      wad_start, wad_size) != VMM_OK) {
-        libos_destroy_image(doom_id, &img);
-        context_destroy(doom_id);
+    if (app->flags & LAUNCH_NEEDS_WAD) {
+        if (libos_map_wad((uint64_t *)(uintptr_t)img.pml4_phys,
+                          wad_start, wad_size) != VMM_OK) {
+            libos_destroy_image(id, &img);
+            context_destroy(id);
+            return -EXO_EINVAL;
+        }
+
+        /* SCRUM-175: patch libos_wad_params_t -- the only thing the app
+         * cannot learn through an ordinary syscall (see
+         * src/libos_wad_params.h) -- directly into the app's own first
+         * .data global, rather than hand-mapping a separate side-channel
+         * page the way an earlier version of this mechanism did. See
+         * libos_launch_patch_params()'s own comment (src/libos_launch.h) for
+         * why that is safe: it requires only that the TU owning that global
+         * stays first in build.sh's source list for the target. Unlike the
+         * old side-channel page (mapped read-only), the global lives in
+         * ordinary writable .data, so the app itself could in principle
+         * corrupt its own wad_vaddr/wad_size after launch -- an accepted
+         * widening, not a regression the kernel needs to guard against, per
+         * that same comment. */
+        libos_wad_params_t params = {
+            .wad_vaddr = LIBOS_WAD_VADDR,
+            .wad_size  = wad_size,
+        };
+        if (libos_launch_patch_params(&img, &params, sizeof(params)) != VMM_OK) {
+            libos_destroy_image(id, &img);
+            context_destroy(id);
+            return -EXO_EINVAL;
+        }
+    }
+
+    /* _irq: this is the app's very first entry, reached through
+     * context_switch_tail rather than a direct libos_enter_irq() call --
+     * without it the app would launch with RFLAGS.IF clear (context_prime()'s
+     * default, correct for SCRUM-108/109's cooperative-only ping-pong
+     * probes) and its exo_get_ticks()/exo_kbd_poll()-driven loops would never
+     * see a PIT or keyboard IRQ land. */
+    context_prime_irq(id, img.entry_vaddr, img.stack_top_vaddr);
+
+    if (app->flags & LAUNCH_RELEASES_FB) {
+        /* Whoever currently holds the framebuffer binding -- the shell, from
+         * its own libos_fb_map() call at startup (src/shell/shell_main.c),
+         * on a first launch; nobody, on a later one, since the reclaim at
+         * the top of this function already released it from the previous
+         * instance -- must give it up before this one can exo_fb_acquire()
+         * it (exclusive, src/fb_binding.c, SCRUM-154). fb_binding_owner()
+         * rather than assuming the caller: the caller is always the shell,
+         * but the *holder* is not, once a second launch runs. Only the
+         * binding is released, not the holder's own already-established page
+         * table mapping (fb_binding_release() never touches page tables), so
+         * the shell keeps rendering to its existing framebuffer pointer
+         * uninterrupted once it is switched back to. Done last, right before
+         * the point of no return: every earlier failure path above leaves
+         * whoever holds the binding untouched. */
+        fb_binding_release(fb_binding_owner());
+    }
+
+    /* Succeeds because the caller (the shell) has a real context_t row of
+     * its own -- see src/kernel.c's SCRUM-178 refactor of the shell launch.
+     * Arms context_switch_pending; src/syscall_entry.s does the actual
+     * switch once this handler returns. */
+    if (context_switch_request(id) != CONTEXT_OK) {
+        libos_destroy_image(id, &img);
+        context_destroy(id);
         return -EXO_EINVAL;
     }
 
-    libos_wad_params_t params = {
-        .wad_vaddr = LIBOS_WAD_VADDR,
-        .wad_size  = wad_size,
-    };
-    if (libos_launch_patch_params(&img, &params, sizeof(params)) != VMM_OK) {
-        libos_destroy_image(doom_id, &img);
-        context_destroy(doom_id);
-        return -EXO_EINVAL;
-    }
-
-    /* _irq for the same reason as the other three: DG_SleepMs() and
-     * DG_GetTicksMs() are built on exo_get_ticks(), which never advances
-     * without PIT interrupts reaching this context. */
-    context_prime_irq(doom_id, img.entry_vaddr, img.stack_top_vaddr);
-
-    /* Same framebuffer hand-off reasoning as sys_launch_wad_viewer(). */
-    fb_binding_release(fb_binding_owner());
-
-    if (context_switch_request(doom_id) != CONTEXT_OK) {
-        libos_destroy_image(doom_id, &img);
-        context_destroy(doom_id);
-        return -EXO_EINVAL;
-    }
-
-    last_doom_id = doom_id;
+    /* Only now, on the success path -- everything above that fails instead
+     * destroys `id` itself and returns with app->last_id still
+     * PAGE_OWNER_FREE from the top of this function. */
+    app->last_id = id;
 
     return 0;
 }
 
 void syscall_launch_init(void)
 {
-    exo_syscall_register(EXO_SYS_LAUNCH_WAD_VIEWER, sys_launch_wad_viewer);
-    exo_syscall_register(EXO_SYS_LAUNCH_CLOCK, sys_launch_clock);
-    exo_syscall_register(EXO_SYS_LAUNCH_SNAKE, sys_launch_snake);
-    exo_syscall_register(EXO_SYS_LAUNCH_DOOM, sys_launch_doom);
+    exo_syscall_register(EXO_SYS_LAUNCH, sys_launch);
 }

@@ -137,7 +137,19 @@ static int rare_hit(void)
 
 /* A syscall number to dispatch: uniform over [0, EXO_SYS_COUNT + 4), the
  * +4 slack covering the out-of-range -EXO_ENOSYS path, with EXO_SYS_EXIT
- * excluded outright and the two LAUNCH_* numbers rate-limited. */
+ * excluded outright and EXO_SYS_LAUNCH rate-limited.
+ *
+ * The rate limit used to name two numbers (EXO_SYS_LAUNCH_WAD_VIEWER and
+ * EXO_SYS_LAUNCH_CLOCK) and now names one, because SCRUM-184 collapsed the
+ * per-app launch syscalls into EXO_SYS_LAUNCH with an app-id argument. The
+ * limit still matters for the same reason it always did: a launch that
+ * SUCCEEDS arms a context switch and the fuzzer does not come back.
+ *
+ * Worth noting that this change makes a successful launch far less likely
+ * rather than more. The app id is a1, which the loop below fills with a
+ * random pointer-shaped value, so it is almost always >= EXO_LAUNCH_APP_COUNT
+ * and comes straight back as -EXO_EINVAL. Before, picking the number *was*
+ * picking the app. */
 static uint64_t next_syscall_num(void)
 {
     for (;;) {
@@ -146,8 +158,7 @@ static uint64_t next_syscall_num(void)
         if (n == EXO_SYS_EXIT)
             continue;
 
-        if ((n == EXO_SYS_LAUNCH_WAD_VIEWER || n == EXO_SYS_LAUNCH_CLOCK) &&
-            !rare_hit())
+        if (n == EXO_SYS_LAUNCH && !rare_hit())
             continue;
 
         return n;

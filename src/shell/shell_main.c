@@ -22,7 +22,7 @@
  * real shell language. It is also bounded by what src/ps2.c's scancode
  * decoder can produce: letters, digits, a handful of punctuation, space,
  * backspace, enter. "wadview" (SCRUM-178) is the first real cooperative
- * handoff: exo_launch_wad_viewer() (src/exo_syscall.h #21) builds the WAD/
+ * handoff: exo_launch() (src/exo_syscall.h #21) builds the WAD/
  * flat/automap viewer as a second LibOS context and switches to it.
  *
  * SCRUM-111: the idle loop below used to call exo_yield() once per
@@ -219,10 +219,10 @@ static void shell_run_command(fb_console_t *con, const char *line) {
     } else if (str_eq(line, "wadview")) {
         /* Does not return until the viewer yields back to the shell
          * (src/syscall_launch.c's #21 handler, exo_syscall.h's own comment
-         * on exo_launch_wad_viewer()) -- a negative return here means the
+         * on exo_launch()) -- a negative return here means the
          * launch failed before ever switching away, not that the viewer
          * ran and came back. */
-        int64_t rc = exo_launch_wad_viewer();
+        int64_t rc = exo_launch(EXO_LAUNCH_APP_WAD_VIEWER);
         if (rc == 0) {
             /* The viewer draws over this whole physical framebuffer (there
              * is no compositor yet -- docs/architecture.md's Sprint 12
@@ -241,7 +241,7 @@ static void shell_run_command(fb_console_t *con, const char *line) {
          * since the clock never yields on its own -- src/libos_clock/
          * libos_clock.c's own comment on why). A negative return means the
          * launch failed before switching away. */
-        int64_t rc = exo_launch_clock();
+        int64_t rc = exo_launch(EXO_LAUNCH_APP_CLOCK);
         if (rc == 0) {
             fbcon_clear(con);
         } else {
@@ -252,7 +252,7 @@ static void shell_run_command(fb_console_t *con, const char *line) {
          * until Snake exits (src/libos_snake/libos_snake.c's own
          * EXO_SYS_EXIT + exo_yield() fallback) and control round-robins
          * back here. */
-        int64_t rc = exo_launch_snake();
+        int64_t rc = exo_launch(EXO_LAUNCH_APP_SNAKE);
         if (rc == 0) {
             fbcon_clear(con);
         } else {
@@ -265,7 +265,7 @@ static void shell_run_command(fb_console_t *con, const char *line) {
          * how you reach the shell again. A failure here is the launch
          * itself: no WAD module (-EXO_ENODEV), or no room for the image
          * (-EXO_ENOMEM), which is much the largest of the four. */
-        int64_t rc = exo_launch_doom();
+        int64_t rc = exo_launch(EXO_LAUNCH_APP_DOOM);
         if (rc == 0) {
             fbcon_clear(con);
         } else {
