@@ -178,7 +178,16 @@ probe_cflags=("${CFLAGS[@]/-mcmodel=small/-mcmodel=large}" -fno-toplevel-reorder
 #   $2        dir        -- directory holding $name.c(s) and where
 #                          ${name}_layout.h is generated
 #   $3        extra_inc  -- extra -I path for the compile step ("" for none)
-#   $4..      srcs       -- source files to compile and link, IN ORDER: the
+#   $4        extra_cflags -- extra/overriding compiler flags for this one
+#                          target, space-separated ("" for none). Appended
+#                          after probe_cflags, so a later flag wins over an
+#                          earlier one -- which is how libos_doom (SCRUM-66)
+#                          turns SSE back on with "-msse -msse2" despite
+#                          probe_cflags inheriting the kernel's -mno-sse.
+#                          Doom needs SSE and the kernel must not have it;
+#                          docker/scripts/build-doom.sh's own comment has why
+#                          that is an ABI requirement, not a preference.
+#   $5..      srcs       -- source files to compile and link, IN ORDER: the
 #                          first one lands at offset 0 of the .text blob
 #                          (ld places each input file's .text contiguously
 #                          in command-line order), which is what
@@ -187,18 +196,25 @@ probe_cflags=("${CFLAGS[@]/-mcmodel=small/-mcmodel=large}" -fno-toplevel-reorder
 #                          first whenever more than one source is passed.
 # Appends the resulting code/data blob objects to the global `objs` array.
 build_ring3_link_target() {
-  local name="$1" dir="$2" extra_inc="$3"
-  shift 3
+  local name="$1" dir="$2" extra_inc="$3" extra_cflags="$4"
+  shift 4
   local srcs=("$@")
+
+  local target_cflags=("${probe_cflags[@]}")
+  if [[ -n "$extra_cflags" ]]; then
+    # Deliberately unquoted: extra_cflags is a space-separated flag list from
+    # this script's own call sites, never outside input.
+    target_cflags+=($extra_cflags)
+  fi
 
   local target_objs=()
   for c in "${srcs[@]}"; do
     local o="build/${name}_$(basename "${c%.c}.o")"
     echo "    CC $(basename "$c") (${name}, ring 3)"
     if [[ -n "$extra_inc" ]]; then
-      x86_64-elf-gcc -c "$c" -o "$o" "${probe_cflags[@]}" -I src/ -I "$extra_inc"
+      x86_64-elf-gcc -c "$c" -o "$o" "${target_cflags[@]}" -I src/ -I "$extra_inc"
     else
-      x86_64-elf-gcc -c "$c" -o "$o" "${probe_cflags[@]}" -I src/
+      x86_64-elf-gcc -c "$c" -o "$o" "${target_cflags[@]}" -I src/
     fi
     target_objs+=("$o")
   done
@@ -283,7 +299,7 @@ echo "[2c/7] Build shell LibOS (SCRUM-110)"
 #
 # shell_main.c MUST come first in this list -- see build_ring3_link_target's
 # own comment on why source order determines entry_vaddr.
-build_ring3_link_target shell src/shell "" \
+build_ring3_link_target shell src/shell "" "" \
   src/shell/shell_main.c src/fb.c src/fb_console.c src/libos_fb.c
 
 echo "[2d/7] Build WAD/flat/automap viewer LibOS (SCRUM-178)"
@@ -310,7 +326,7 @@ echo "[2d/7] Build WAD/flat/automap viewer LibOS (SCRUM-178)"
 # libos_wad_viewer.c's g_wad_params is that TU's first global, and being
 # first in this source list is what puts it first in link order too -- see
 # libos_launch_patch_params()'s comment in src/libos_launch.h.
-build_ring3_link_target libos_wad_viewer src/libos_wad_viewer "" \
+build_ring3_link_target libos_wad_viewer src/libos_wad_viewer "" "" \
   src/libos_wad_viewer/libos_wad_viewer.c src/wad.c src/flat.c src/automap.c \
   src/fb.c src/fb_console.c src/libos_fb.c
 
@@ -331,7 +347,7 @@ echo "[2e/7] Build clock demo LibOS (SCRUM-168)"
 # entry_vaddr (this target also carries the
 # __attribute__((section(".text.entry"))) belt-and-suspenders fix, for the
 # same reason the WAD-viewer target's own comment gives).
-build_ring3_link_target libos_clock src/libos_clock "" \
+build_ring3_link_target libos_clock src/libos_clock "" "" \
   src/libos_clock/libos_clock.c src/fb.c src/fb_console.c src/libos_fb.c
 
 echo "[2f/7] Build Snake LibOS (SCRUM-182)"
@@ -354,8 +370,68 @@ echo "[2f/7] Build Snake LibOS (SCRUM-182)"
 # src/fb.c/src/fb_console.c/src/libos_fb.c are the same framebuffer/text-
 # console/mapping code the shell and WAD viewer targets above already link
 # in unmodified.
-build_ring3_link_target libos_snake src/libos_snake "" \
+build_ring3_link_target libos_snake src/libos_snake "" "" \
   src/libos_snake/libos_snake.c src/fb.c src/fb_console.c src/libos_fb.c
+
+echo "[2f/7] Build Doom LibOS (SCRUM-66)"
+# The convergence point: the vendored engine (src/doom/, SCRUM-63/-64), the
+# libc shim (SCRUM-51/-65), the WAD mount (SCRUM-73), the doomgeneric timer
+# half (SCRUM-74) and the I_Error/I_Quit back end (SCRUM-83) linked into one
+# ring-3 image, through the same build_ring3_link_target() mechanism as every
+# demo LibOS above. Unconditional and ahead of step 3 for the same reason
+# they are: src/syscall_launch.c #includes the generated
+# src/libos_doom/libos_doom_layout.h.
+#
+# Two things differ from every other target here:
+#
+#   "-msse -msse2 -w" -- Doom needs SSE. m_config.c's M_GetFloatVariable()
+#     returns a float, and the x86_64 SysV ABI returns float in xmm0 with no
+#     alternative encoding, so -mno-sse (which probe_cflags inherits from the
+#     kernel's CFLAGS) cannot compile it. docker/scripts/build-doom.sh's
+#     header comment has the full argument, including why the kernel keeps
+#     -mno-sse and why that is load-bearing rather than incidental. The
+#     runtime half has been satisfied since SCRUM-177 set CR4.OSFXSR/
+#     OSXMMEXCPT in _start64. -w because this is vendored third-party source
+#     compiled with -Wall -Wextra; build-doom.sh passes -w for the same
+#     reason.
+#
+#   src/doom as extra_inc -- the engine's own headers.
+#
+# SOURCE ORDER. Every other target leads with the file defining its entry
+# point, per build_ring3_link_target()'s $5.. doc. This one leads with
+# src/doomgeneric_exo.c instead, and the difference is deliberate:
+#
+#   .data offset 0 -- libos_launch_patch_params() (src/libos_launch.c) writes
+#     the WAD address/length through img.data_paddrs[0], i.e. offset 0 of the
+#     .data blob, which is the first .data global of the first object on this
+#     command line. That global has to be g_doom_params (src/doomgeneric_exo.c),
+#     because DG_Init() is what reads it. Its own comment in that file states
+#     both halves of the requirement.
+#
+#   .text offset 0 -- libos_build_image() enters at the base of the code blob.
+#     libos_doom_main() gets there via __attribute__((section(".text.entry")))
+#     and the linker script's explicit *(.text.entry) first (see
+#     tests/kernel/ring3_link_target.ld.in), which is independent of command
+#     line order.
+#
+# So the two offsets are claimed by two different files through two different
+# mechanisms. Reorder this list and the params patch silently lands on
+# whatever global leads the new first file -- DG_Init would then report an
+# unpatched launch, which is at least loud, but only because that sentinel
+# exists.
+#
+# The shim list is deliberately the same one docker/scripts/link-doom.sh
+# carries, because that script is the gate proving this set resolves with no
+# undefined symbols; add a file here without adding it there and the gate
+# stops speaking for this link.
+build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
+  src/doomgeneric_exo.c \
+  src/libos_doom/libos_doom.c \
+  src/stdio.c src/stdlib.c src/string.c src/ctype.c src/errno.c \
+  src/fpconv.c src/doom_net_stub.c \
+  src/doom_wad.c src/wad.c src/doom_panic.c \
+  src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c \
+  src/doom/*.c
 
 echo "[3/7] Compile C sources"
 
@@ -412,7 +488,7 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # add a test file" promise stays true for that loop; this probe simply
   # isn't a file the loop's glob ever sees, rather than an exception it has
   # to special-case.
-  build_ring3_link_target libos_c_probe tests/kernel/libos_c_probe "" \
+  build_ring3_link_target libos_c_probe tests/kernel/libos_c_probe "" "" \
     tests/kernel/libos_c_probe/libos_c_probe.c
 
   echo "[3b2/7] Build libc shim probe (SCRUM-51)"
@@ -449,7 +525,7 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # not a compile error anywhere -- it is an undefined reference at THIS
   # target's link step, which is how CI found it.
   shim_dir=tests/kernel/libc_shim_probe
-  build_ring3_link_target libc_shim_probe "$shim_dir" "$shim_dir" \
+  build_ring3_link_target libc_shim_probe "$shim_dir" "$shim_dir" "" \
     "$shim_dir/libc_shim_probe.c" \
     src/stdlib.c src/stdio.c src/string.c src/ctype.c \
     src/errno.c src/fpconv.c \

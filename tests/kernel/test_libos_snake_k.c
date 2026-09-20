@@ -80,7 +80,7 @@ static void test_snake_image_builds_and_fits_budget(void)
     }
 
     CU_ASSERT_EQUAL(img.entry_vaddr, LIBOS_LAUNCH_CODE_VADDR);
-    CU_ASSERT_EQUAL(img.stack_top_vaddr, LIBOS_LAUNCH_STACK_VADDR + 0x1000);
+    CU_ASSERT_EQUAL(img.stack_top_vaddr, LIBOS_LAUNCH_STACK_TOP);
 
     libos_destroy_image(PAGE_OWNER_LIBOS, &img);
 }

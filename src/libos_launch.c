@@ -90,20 +90,22 @@ static int load_region(page_owner_t owner, uint64_t *pml4, uint64_t vaddr,
 }
 
 /* Undo everything libos_build_image() may have built past a successful
- * vmm_bind_address_space(): the stack page (if `stack_page` is non-NULL --
- * some failure paths run before it is allocated), whatever code/data pages
- * `out->code_pages`/`out->data_pages` already record, and the address space
- * itself. Centralising this is what keeps the four failure sites below in
- * sync as regions are added -- each one differs only in whether a stack page
- * exists yet and what status code it reports. */
-static int build_fail(page_owner_t owner, libos_image_t *out,
-                      void *stack_page, int rc)
+ * vmm_bind_address_space(): whatever code, data and stack pages
+ * `out->code_pages`/`out->data_pages`/`out->stack_pages` already record, and
+ * the address space itself. Centralising this is what keeps the failure
+ * sites below in sync as regions are added -- each one now differs only in
+ * the status code it reports.
+ *
+ * The stack used to be passed in as a bare `void *stack_page`, because it
+ * was exactly one page allocated inline rather than a region (SCRUM-66 made
+ * it LIBOS_LAUNCH_STACK_PAGES of them, built through the same load_region()
+ * as the other two). A count of zero makes free_pages() a no-op, so the
+ * paths that fail before the stack exists need no special case for it. */
+static int build_fail(page_owner_t owner, libos_image_t *out, int rc)
 {
-    if (stack_page != NULL) {
-        free_page_owned(stack_page, owner);
-    }
     free_pages(out->code_paddrs, out->code_pages, owner);
     free_pages(out->data_paddrs, out->data_pages, owner);
+    free_pages(out->stack_paddrs, out->stack_pages, owner);
     vmm_destroy_address_space(owner);
     return rc;
 }
@@ -154,9 +156,10 @@ int libos_build_image(page_owner_t owner,
     }
 
     /* Zeroed before anything that can fail below reads them -- build_fail()
-     * relies on both being valid counts from this point on. */
-    out->code_pages = 0;
-    out->data_pages = 0;
+     * relies on all three being valid counts from this point on. */
+    out->code_pages  = 0;
+    out->data_pages  = 0;
+    out->stack_pages = 0;
 
     uint64_t *pml4 = (uint64_t *)(uintptr_t)pml4_phys;
 
@@ -167,7 +170,7 @@ int libos_build_image(page_owner_t owner,
                      code, code_len, 0,
                      out->code_paddrs, &out->code_pages);
     if (rc != VMM_OK) {
-        return build_fail(owner, out, NULL, rc);
+        return build_fail(owner, out, rc);
     }
 
     /* Present + user + writable: `.data` (copied) followed by `.bss`
@@ -177,26 +180,36 @@ int libos_build_image(page_owner_t owner,
                      data, data_len, bss_len,
                      out->data_paddrs, &out->data_pages);
     if (rc != VMM_OK) {
-        return build_fail(owner, out, NULL, rc);
+        return build_fail(owner, out, rc);
     }
 
-    void *stack_page = alloc_page_owned(owner);
-    if (stack_page == NULL) {
-        return build_fail(owner, out, NULL, VMM_ENOMEM);
-    }
-    memset(stack_page, 0, VMM_PAGE_SIZE);
-
-    rc = vmm_map_page_in(pml4, LIBOS_LAUNCH_STACK_VADDR,
-                         (uint64_t)(uintptr_t)stack_page,
-                         VMM_PRESENT | VMM_USER | VMM_WRITE);
+    /* The stack is LIBOS_LAUNCH_STACK_PAGES of zero-filled, writable,
+     * user-accessible pages (SCRUM-66 -- it was a single page before Doom
+     * needed a real one). Built through the same load_region() as code and
+     * data rather than an inline alloc/map: passing src=NULL with
+     * copy_len=0 and zero_len=the whole span is exactly the .bss case that
+     * function already implements, down to zeroing each page and unwinding
+     * its own partial work if a later page fails to map. */
+    rc = load_region(owner, pml4, LIBOS_LAUNCH_STACK_VADDR,
+                     VMM_PRESENT | VMM_USER | VMM_WRITE,
+                     NULL, 0,
+                     (size_t)LIBOS_LAUNCH_STACK_PAGES * VMM_PAGE_SIZE,
+                     out->stack_paddrs, &out->stack_pages);
     if (rc != VMM_OK) {
-        return build_fail(owner, out, stack_page, rc);
+        return build_fail(owner, out, rc);
     }
 
-    out->pml4_phys       = pml4_phys;
+    out->pml4_phys        = pml4_phys;
     out->entry_vaddr      = LIBOS_LAUNCH_CODE_VADDR;
-    out->stack_top_vaddr  = LIBOS_LAUNCH_STACK_VADDR + VMM_PAGE_SIZE;
-    out->stack_paddr      = (uint64_t)(uintptr_t)stack_page;
+    /* Eight bytes below the top of the highest stack page, not at it: the
+     * SysV ABI's "RSP == 8 (mod 16) on entry" contract, which an iretq entry
+     * has to honour by hand since it pushes no return address. See
+     * LIBOS_LAUNCH_STACK_TOP's own comment (src/libos_launch.h) -- getting
+     * this wrong costs an aligned-SSE #GP in the first ring-3 target that
+     * enables SSE, and nothing at all in the ones that do not. The stack
+     * grows down from here toward the guard page below
+     * LIBOS_LAUNCH_STACK_VADDR. */
+    out->stack_top_vaddr  = LIBOS_LAUNCH_STACK_TOP;
     return VMM_OK;
 }
 
@@ -215,6 +228,6 @@ void libos_destroy_image(page_owner_t owner, const libos_image_t *img)
 {
     free_pages(img->code_paddrs, img->code_pages, owner);
     free_pages(img->data_paddrs, img->data_pages, owner);
-    free_page_owned((void *)(uintptr_t)img->stack_paddr, owner);
+    free_pages(img->stack_paddrs, img->stack_pages, owner);
     vmm_destroy_address_space(owner);
 }

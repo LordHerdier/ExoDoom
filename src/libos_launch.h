@@ -94,9 +94,23 @@
  * to the max would have its one-page stack sitting immediately below a
  * mapped, writable page -- a stack overflow would then silently corrupt data
  * instead of taking the page fault the guard page exists to produce. */
-#define LIBOS_LAUNCH_MAX_CODE_PAGES 8
-#define LIBOS_LAUNCH_MAX_DATA_PAGES 16
+#define LIBOS_LAUNCH_MAX_CODE_PAGES 192
+#define LIBOS_LAUNCH_MAX_DATA_PAGES 192
 #define LIBOS_LAUNCH_GUARD_PAGES    1
+
+/* Stack pages, raised from the single page every earlier target ran on
+ * (SCRUM-66). 4 KiB was enough for a probe and for the hand-written demo
+ * LibOSes and is nowhere near enough for Doom: R_RenderPlayerView descends
+ * through R_RenderBSPNode recursively over the level's BSP tree, and the
+ * setup path (P_SetupLevel -> P_LoadThings -> P_SpawnMapThing) is deep in
+ * its own right. A blown ring-3 stack grows down into
+ * LIBOS_LAUNCH_GUARD_PAGES' unmapped page and takes a page fault rather
+ * than silently corrupting .bss, so the failure is at least legible -- but
+ * it is still a crash, and 64 KiB buys enough depth not to have it.
+ *
+ * The guard page sits between data+bss and the stack, i.e. below the
+ * stack's lowest address, which is the direction a stack grows. */
+#define LIBOS_LAUNCH_STACK_PAGES    16
 
 /* Selectors and RFLAGS values shared between src/libos_enter.s and
  * src/context_switch.s (SCRUM-108): both build an iretq frame into the same
@@ -122,18 +136,68 @@
                                   (LIBOS_LAUNCH_MAX_DATA_PAGES + \
                                    LIBOS_LAUNCH_GUARD_PAGES) * 0x1000ULL)
 
+/* One past the highest address libos_build_image() can map, and the first
+ * page after it, which is therefore guaranteed unmapped.
+ *
+ * These exist because the layout stopped being small (SCRUM-66). The probes
+ * that deliberately fault on an unmapped user address used to hardcode
+ * EXO_USER_VA_BASE + 0x20000 and rely on a prose promise in this file that
+ * nothing would ever grow past it -- exactly the coupling that breaks
+ * silently when someone raises a cap, because a probe whose "unmapped"
+ * target has quietly become mapped stops testing anything and starts
+ * reading the stack. Deriving both from the same constants the loader uses
+ * means a cap change moves the probes with it.
+ *
+ * Headroom above this, for the record: the LibOS heap
+ * (LIBOS_HEAP_VADDR_BASE, src/libos_page_alloc.c) starts at
+ * EXO_USER_VA_BASE + 0x1000000 and the layout as sized above ends at
+ * EXO_USER_VA_BASE + 0x192000 -- a factor of ten clear. It is not asserted
+ * here only because that base is defined in a .c file this header cannot
+ * include; raise the caps far enough and it is the next thing to check. */
+#define LIBOS_LAUNCH_LAYOUT_END  (LIBOS_LAUNCH_STACK_VADDR + LIBOS_LAUNCH_STACK_PAGES * 0x1000ULL)
+#define LIBOS_LAUNCH_UNMAPPED_VADDR (LIBOS_LAUNCH_LAYOUT_END + 0x1000ULL)
+
+/*
+ * The RSP a freshly launched LibOS starts with -- deliberately 8 below the
+ * top of its stack, not at it (SCRUM-66).
+ *
+ * The x86-64 SysV ABI requires RSP to be 16-byte aligned *at the point of a
+ * call*. `call` then pushes an 8-byte return address, so every compiled
+ * function is entitled to assume RSP == 8 (mod 16) on entry, which is what
+ * makes its `push %rbp; mov %rsp,%rbp` prologue leave %rbp 16-byte aligned,
+ * which in turn is what makes an aligned SSE access to a local slot such as
+ * `movdqa -0x40(%rbp),%xmm2` legal.
+ *
+ * A LibOS is not called: libos_enter()/context_prime_irq() arrive by iretq,
+ * which sets RSP to exactly this value and pushes no return address. Enter
+ * with a page-aligned RSP -- 0 (mod 16) -- and every frame in the process is
+ * skewed by 8 from what the compiler assumed, so the first aligned SSE
+ * access to a stack local raises #GP.
+ *
+ * That is not hypothetical: it is precisely how this constant was found.
+ * Doom is the first ring-3 target compiled with SSE enabled (it has to be --
+ * see docker/scripts/build-doom.sh on the float ABI), and it faulted on the
+ * `movdqa -0x40(%rbp),%xmm2` in doom_wad_mount() the very first time it ran.
+ * Every earlier target is built -mno-sse and never emits an alignment-
+ * sensitive instruction, which is why a launch ABI that had been subtly
+ * wrong all along had never once been caught.
+ */
+#define LIBOS_LAUNCH_STACK_TOP (LIBOS_LAUNCH_LAYOUT_END - 8ULL)
+
 #ifndef __ASSEMBLER__
-/* The comment above promises the whole layout stays below
- * EXO_USER_VA_BASE + 0x20000 (libos_launch_probe.s's deliberate unmapped
- * fault target) -- checked here, at compile time, rather than left as prose
- * a future change to either constant could silently invalidate. One stack
- * page, same as the struct field below and libos_build_image()'s single
- * alloc_page_owned() call for it. */
-_Static_assert(LIBOS_LAUNCH_STACK_VADDR + 0x1000ULL <=
-              EXO_USER_VA_BASE + 0x20000ULL,
-              "libos_launch layout no longer fits below the probes' fault "
-              "target -- update libos_launch_probe.s's FAULT_VA (and any "
-              "other probe relying on that gap) before changing this");
+/* The layout, plus the guaranteed-unmapped page the probes fault on, has to
+ * stay inside the LibOS window. This replaces the old assertion that it fit
+ * below EXO_USER_VA_BASE + 0x20000: that ceiling existed only to protect
+ * libos_launch_probe.s's hardcoded fault target, which now derives from
+ * LIBOS_LAUNCH_UNMAPPED_VADDR and moves on its own (SCRUM-66).
+ *
+ * What still has to hold is the window itself: everything here lives between
+ * EXO_USER_VA_BASE and EXO_USER_VA_END because exo_page_map() refuses any
+ * vaddr outside it (docs/syscall_spec.md sec3.7), so an image that spilled
+ * past the end could not map its own heap alongside its own bss. */
+_Static_assert(LIBOS_LAUNCH_UNMAPPED_VADDR + 0x1000ULL <= EXO_USER_VA_END,
+              "libos_launch layout no longer fits inside the LibOS VA "
+              "window [EXO_USER_VA_BASE, EXO_USER_VA_END)");
 
 /*
  * entry_vaddr and stack_top_vaddr are runtime fields, not compile-time
@@ -147,12 +211,13 @@ _Static_assert(LIBOS_LAUNCH_STACK_VADDR + 0x1000ULL <=
 typedef struct {
     uint64_t pml4_phys;        /* the new address space's PML4 (for teardown) */
     uint64_t entry_vaddr;      /* always LIBOS_LAUNCH_CODE_VADDR, for libos_enter() */
-    uint64_t stack_top_vaddr;  /* always LIBOS_LAUNCH_STACK_VADDR + VMM_PAGE_SIZE, ditto */
+    uint64_t stack_top_vaddr;  /* always LIBOS_LAUNCH_STACK_TOP, ditto        */
     uint64_t code_paddrs[LIBOS_LAUNCH_MAX_CODE_PAGES]; /* backing pages, in order */
     uint32_t code_pages;       /* how many of the above are actually mapped   */
     uint64_t data_paddrs[LIBOS_LAUNCH_MAX_DATA_PAGES]; /* ditto, for data+bss  */
     uint32_t data_pages;
-    uint64_t stack_paddr;      /* backing page for the stack                  */
+    uint64_t stack_paddrs[LIBOS_LAUNCH_STACK_PAGES]; /* backing pages, in order */
+    uint32_t stack_pages;      /* how many of the above are actually mapped   */
 } libos_image_t;
 
 /*

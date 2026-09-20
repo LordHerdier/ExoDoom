@@ -8,6 +8,7 @@
 #include "libos_wad_viewer/libos_wad_viewer_layout.h"
 #include "libos_clock/libos_clock_layout.h"
 #include "libos_snake/libos_snake_layout.h"
+#include "libos_doom/libos_doom_layout.h"
 #include "mmap.h"
 #include "page_alloc.h"
 #include "vmm.h"
@@ -40,6 +41,15 @@ extern const uint8_t _binary_libos_snake_code_bin_start[];
 extern const uint8_t _binary_libos_snake_code_bin_end[];
 extern const uint8_t _binary_libos_snake_data_bin_start[];
 extern const uint8_t _binary_libos_snake_data_bin_end[];
+
+/* Doom's blobs (SCRUM-66), same mechanism. Much the largest of the four:
+ * ~390 KiB of code+rodata and ~80 KiB of .data against a ~314 KiB .bss,
+ * which is why LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES had to grow from 8/16 to
+ * 192/192 in src/libos_launch.h for this ticket. */
+extern const uint8_t _binary_libos_doom_code_bin_start[];
+extern const uint8_t _binary_libos_doom_code_bin_end[];
+extern const uint8_t _binary_libos_doom_data_bin_start[];
+extern const uint8_t _binary_libos_doom_data_bin_end[];
 
 /* The most recently launched viewer's context id, or PAGE_OWNER_FREE if
  * none is live. `wadview` now exits via exo_exit() on Q/Esc (#20,
@@ -318,9 +328,119 @@ static int64_t sys_launch_snake(uint64_t a1, uint64_t a2, uint64_t a3,
     return 0;
 }
 
+/* Same reclaim-previous-instance pattern as last_viewer_id/last_snake_id. */
+static page_owner_t last_doom_id = PAGE_OWNER_FREE;
+
+/* #24 -- build and switch to Doom (SCRUM-66), invoked from the shell's
+ * `doom` command (src/shell/shell_main.c).
+ *
+ * Structurally this is sys_launch_wad_viewer() rather than
+ * sys_launch_snake(): Doom is the other target with an external resource to
+ * stage before ring 3 begins. The WAD module is mapped read-only into the
+ * new address space at LIBOS_WAD_VADDR, and its address and length are
+ * patched into the image's params page, where DG_Init()
+ * (src/doomgeneric_exo.c) reads them out of g_doom_params and hands them to
+ * doom_wad_mount(). That global is a libos_wad_params_t -- the very same
+ * struct and the very same libos_launch_patch_params() call the viewer uses
+ * (SCRUM-175), which is exactly what its own comment anticipated.
+ *
+ * The patch lands on offset 0 of the .data blob, so src/doomgeneric_exo.c
+ * must be FIRST in build.sh's source list for this target and g_doom_params
+ * must stay the first global in that file. Note this is the one target where
+ * that file is not also the one defining the entry point: libos_doom_main()
+ * lives in src/libos_doom/libos_doom.c and gets to offset 0 of .text through
+ * __attribute__((section(".text.entry"))) instead of through link order (see
+ * tests/kernel/ring3_link_target.ld.in). Two different offsets, two
+ * different mechanisms, no conflict -- but change either and the other does
+ * not save you.
+ *
+ * Same return convention as the other three handlers. */
+static int64_t sys_launch_doom(uint64_t a1, uint64_t a2, uint64_t a3,
+                               uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+
+    if (last_doom_id != PAGE_OWNER_FREE &&
+       context_lookup(last_doom_id) != NULL) {
+        revoke_all(last_doom_id);
+        context_destroy(last_doom_id);
+    }
+    last_doom_id = PAGE_OWNER_FREE;
+
+    uint64_t wad_start, wad_end;
+    if (mmap_find_module(&wad_start, &wad_end) != 0) {
+        return -EXO_ENODEV;
+    }
+    uint64_t wad_size = wad_end - wad_start;
+
+    page_owner_t doom_id;
+    int create_rc = context_create(vmm_kernel_pml4(), &doom_id);
+    if (create_rc != CONTEXT_OK) {
+        return create_rc == CONTEXT_ENOMEM ? -EXO_ENOMEM : -EXO_EINVAL;
+    }
+
+    size_t code_len = (size_t)(_binary_libos_doom_code_bin_end -
+                               _binary_libos_doom_code_bin_start);
+    size_t data_len = (size_t)(_binary_libos_doom_data_bin_end -
+                               _binary_libos_doom_data_bin_start);
+
+    /* static, not a local: libos_image_t carries one uint64_t per mappable
+     * page, so at 192/192/16 pages it is a little over 3 KiB -- a fifth of
+     * src/syscall_entry.s's 16 KiB syscall stack to spend on one local.
+     * Safe because a launch cannot overlap another: `syscall` masks IF
+     * (FMASK, src/syscall.c) so no interrupt can re-enter the dispatcher
+     * here, and the handler runs to completion before the switch it arms
+     * ever takes effect. The other three handlers keep their stack locals;
+     * only this one is big enough for the question to arise. */
+    static libos_image_t img;
+    if (libos_build_image(doom_id,
+                          _binary_libos_doom_code_bin_start, code_len,
+                          _binary_libos_doom_data_bin_start, data_len,
+                          LIBOS_DOOM_BSS_LEN, &img) != VMM_OK) {
+        context_destroy(doom_id);
+        return -EXO_ENOMEM;
+    }
+
+    if (libos_map_wad((uint64_t *)(uintptr_t)img.pml4_phys,
+                      wad_start, wad_size) != VMM_OK) {
+        libos_destroy_image(doom_id, &img);
+        context_destroy(doom_id);
+        return -EXO_EINVAL;
+    }
+
+    libos_wad_params_t params = {
+        .wad_vaddr = LIBOS_WAD_VADDR,
+        .wad_size  = wad_size,
+    };
+    if (libos_launch_patch_params(&img, &params, sizeof(params)) != VMM_OK) {
+        libos_destroy_image(doom_id, &img);
+        context_destroy(doom_id);
+        return -EXO_EINVAL;
+    }
+
+    /* _irq for the same reason as the other three: DG_SleepMs() and
+     * DG_GetTicksMs() are built on exo_get_ticks(), which never advances
+     * without PIT interrupts reaching this context. */
+    context_prime_irq(doom_id, img.entry_vaddr, img.stack_top_vaddr);
+
+    /* Same framebuffer hand-off reasoning as sys_launch_wad_viewer(). */
+    fb_binding_release(fb_binding_owner());
+
+    if (context_switch_request(doom_id) != CONTEXT_OK) {
+        libos_destroy_image(doom_id, &img);
+        context_destroy(doom_id);
+        return -EXO_EINVAL;
+    }
+
+    last_doom_id = doom_id;
+
+    return 0;
+}
+
 void syscall_launch_init(void)
 {
     exo_syscall_register(EXO_SYS_LAUNCH_WAD_VIEWER, sys_launch_wad_viewer);
     exo_syscall_register(EXO_SYS_LAUNCH_CLOCK, sys_launch_clock);
     exo_syscall_register(EXO_SYS_LAUNCH_SNAKE, sys_launch_snake);
+    exo_syscall_register(EXO_SYS_LAUNCH_DOOM, sys_launch_doom);
 }
