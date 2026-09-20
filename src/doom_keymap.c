@@ -37,18 +37,31 @@ unsigned char doom_keymap_translate(uint8_t key)
     case KEY_RIGHT: return DOOM_KEY_RIGHTARROW;
 
     /*
-     * CTRL is fire and SPACE is use, matching vanilla Doom's defaults
-     * (m_config.c binds key_fire = KEY_RCTRL and key_use = ' ').
+     * CTRL is fire and SPACE is use -- delivered as Doom's ACTION keycodes,
+     * not as the physical keys.
      *
-     * Note what is NOT done here: KEY_CTRL is translated to Doom's
-     * KEY_RCTRL rather than to KEY_FIRE. Doom's own binding layer turns
-     * KEY_RCTRL into the fire action, and short-circuiting that would make
-     * the key unrebindable and would break the menu, which wants the raw
-     * keycode. The same reasoning applies to SPACE below: it is the
-     * character ' ', and Doom's default binding makes it "use".
+     * This is the one place where this port must not follow chocolate
+     * doom's convention, and getting it wrong is invisible until you try to
+     * shoot. Chocolate doom binds key_fire = KEY_RCTRL and key_use = ' ',
+     * so a platform layer there reports the physical key and the binding
+     * layer resolves it. This vendored tree does not:
+     *
+     *     src/doom/m_controls.c:35   int key_fire = KEY_FIRE;
+     *     src/doom/m_controls.c:36   int key_use  = KEY_USE;
+     *
+     * KEY_FIRE (0xa3) and KEY_USE (0xa2) are abstract action codes with no
+     * physical key behind them, so nothing ever sets gamekeydown[] for them
+     * unless the platform layer sends them itself. G_BuildTiccmd() tests
+     * `gamekeydown[key_fire]` (g_game.c:431) and would simply never see a
+     * press.
+     *
+     * That is exactly the bug this mapping shipped with: menus, movement,
+     * strafe and run all worked -- because key_strafe = KEY_RALT and
+     * key_speed = KEY_RSHIFT, which the modifier cases below already match
+     * -- while the trigger did nothing at all.
      */
-    case KEY_CTRL:  return DOOM_KEY_RCTRL;
-    case KEY_SPACE: return ' ';
+    case KEY_CTRL:  return DOOM_KEY_FIRE;
+    case KEY_SPACE: return DOOM_KEY_USE;
 
     /*
      * The three modifier keys all collapse to Doom's right-hand keycode,
@@ -153,8 +166,23 @@ unsigned char doom_keymap_translate(uint8_t key)
      */
     case KEY_MINUS:     return DOOM_KEY_MINUS;
     case KEY_EQUALS:    return DOOM_KEY_EQUALS;
-    case KEY_COMMA:     return ',';
-    case KEY_PERIOD:    return '.';
+
+    /*
+     * Comma and period strafe, for the same reason CTRL fires: this tree
+     * binds key_strafeleft/key_straferight to KEY_STRAFE_L/KEY_STRAFE_R
+     * (m_controls.c:33-34), which are action codes no physical key
+     * produces. Vanilla's own defaults put strafe on these two keys, so the
+     * muscle memory matches.
+     *
+     * The cost is that ',' and '.' can no longer be typed as characters --
+     * which today only affects naming a savegame, and saving cannot work at
+     * all until there is a writable filesystem (the FILE* shim in
+     * src/stdio.c refuses every write mode). ALT+arrow still strafes
+     * regardless, since key_strafe = KEY_RALT.
+     */
+    case KEY_COMMA:     return DOOM_KEY_STRAFE_L;
+    case KEY_PERIOD:    return DOOM_KEY_STRAFE_R;
+
     case KEY_SLASH:     return '/';
     case KEY_SEMICOLON: return ';';
 
