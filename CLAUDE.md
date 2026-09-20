@@ -215,7 +215,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`, `src/fpconv.c/h` (float↔decimal); header-only: `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/types.h`, `src/sys/stat.h` |
 | Fixed-point trigonometry (sin/cos/tan/atan, integer floor/ceil) | `src/fixed_math.c/h` |
 | Doom globals from non-vendored netcode | `src/doom_net_stub.c` |
-| Vendored Doom engine (not yet linked) | `src/doom/` |
+| Vendored Doom engine (linked as the `libos_doom` ring-3 target, SCRUM-66) | `src/doom/`, `src/libos_doom/` |
 | doomgeneric platform layer | `src/doomgeneric_exo.c/h` (timer half: `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
 | Doom fatal-error path (`I_Error`/`I_Quit` back end) | `src/doom_panic.c/h` |
 | doomgeneric platform layer | `src/doomgeneric_exo.c/h` (`DG_Init` SCRUM-73; timer half `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
@@ -476,19 +476,41 @@ convention and calls it from `kernel_main` instead of a test harness.
     SSE". The eventual Doom LibOS target must enable SSE, since Doom cannot
     compile without it (SCRUM-177) — and then these paths light up on their
     own.
-- **The vendored Doom engine compiles, but is not linked.** `src/doom/` holds
-  doomgeneric's core (SCRUM-63). `make docker-build-doom` runs
-  `docker/scripts/build-doom.sh`, which since SCRUM-64 compiles **all 79 files
-  with zero errors** (it was 2 of 79) and **exits non-zero if that regresses** —
-  it is a gate now, not a status report, and CI runs it. Nothing in `src/doom/`
-  links into `build/exodoom`, and `docker-build` still excludes it.
-  **Compiling is not linking**: the `FILE*` block in `src/stdio.h`, plus
-  `mkdir`, `strdup` and `atof`, are *declared and undefined* on purpose, so
-  these objects would fail at link with undefined references. That is
-  deliberate — stubbing them would let Doom link and then misbehave deep inside
-  `W_Init` with no sign the filesystem under it was imaginary. See
-  `docs/libc_audit.md` (SCRUM-72) for the per-function, per-call-site list of
-  what is still owed.
+- **The vendored Doom engine is linked, launches, and runs (SCRUM-66).**
+  `src/doom/` holds doomgeneric's core (SCRUM-63). `make docker-build-doom`
+  runs `docker/scripts/build-doom.sh`, which since SCRUM-64 compiles **all 79
+  files with zero errors** (it was 2 of 79) and **exits non-zero if that
+  regresses** — a gate, not a status report, and CI runs it.
+  Since SCRUM-66 those 79 objects are also **linked into `build/exodoom`** as
+  a ring-3 LibOS: `build.sh`'s `[2f/7]` step builds the `libos_doom` target
+  through the same `build_ring3_link_target()` mechanism as every demo LibOS,
+  and `src/syscall_launch.c` embeds the resulting blobs and launches them on
+  `exo_launch_doom` (#24), wired to the shell's `doom` command. Doom then
+  completes its whole startup — `W_Init` over the mounted WAD, `R_Init`,
+  `P_Init`, `S_Init`, `HU_Init`, `ST_Init`, `I_InitGraphics` — and runs its
+  tick loop. What it cannot yet do is **show** anything or **read a key**:
+  `DG_DrawFrame` and `DG_GetKey` are deliberate stubs in
+  `src/libos_doom/libos_doom.c`, owned by SCRUM-77 and SCRUM-79.
+  Three things that had to move for that link to happen, all worth knowing
+  before touching the launch path:
+  - `LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES` went 8/16 → **192/192**, and the
+    LibOS stack went 1 page → **`LIBOS_LAUNCH_STACK_PAGES` = 16** (Doom
+    recurses through the BSP tree). Doom uses ~97 and ~99 of those pages.
+  - **`LIBOS_LAUNCH_STACK_TOP` is `LAYOUT_END - 8`, not `LAYOUT_END`.** The
+    SysV ABI guarantees `RSP ≡ 8 (mod 16)` on entry to a called function, so
+    a LibOS entered by `iretq` (which pushes no return address) must be given
+    that same skew by hand or every stack frame is misaligned by 8 and the
+    first aligned SSE access (`movdqa -0x40(%rbp)`) `#GP`s. Doom is the first
+    ring-3 target compiled *with* SSE, so it is the first to have caught this.
+  - `DG_Init` now calls `exo_file_register_blob("freedoom2.wad", ...)` after
+    mounting, because `D_DoomMain` finds its IWAD through
+    `D_FindIWAD`→`fopen`, not through `doom_wad_mounted()`. The blob shim
+    (SCRUM-65) and the mount (SCRUM-73) existed; nothing had connected them.
+  `mkdir`, `strdup` and `atof` and the `FILE*` block in `src/stdio.h` are real
+  now (SCRUM-65); `docs/libc_audit.md` (SCRUM-72) remains the per-function,
+  per-call-site list of what each one does and does not do — `fopen` in
+  particular serves registered blobs only, and there is still no writable
+  file.
   - What SCRUM-64 fixed was overwhelmingly *missing headers*, not bad vendored
     source: 77 files stopped at their first `#include`, 66 of them on
     `<strings.h>` alone (`doomtype.h` includes it on every non-Windows build).

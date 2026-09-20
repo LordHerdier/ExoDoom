@@ -64,6 +64,7 @@ void suite_libc_gaps_tests(CU_pSuite s);
 void suite_syscall_fuzz_tests(CU_pSuite s);
 void suite_syscall_bench_tests(CU_pSuite s);
 void suite_libos_snake_tests(CU_pSuite s);
+void suite_libos_doom_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -195,6 +196,12 @@ int clock_libos_suite_cleanup(void);
  * reasoning as shell_libos_suite_init/_cleanup above. */
 int libos_snake_suite_init(void);
 int libos_snake_suite_cleanup(void);
+
+/* Same idea again for libos_doom (SCRUM-66): builds the real Doom image
+ * from the embedded blobs, so it needs the same save/restore of
+ * PAGE_OWNER_LIBOS's address-space binding. */
+int libos_doom_suite_init(void);
+int libos_doom_suite_cleanup(void);
 
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
@@ -390,6 +397,10 @@ int run_tests(void)
     s = CU_add_suite("libos_snake", libos_snake_suite_init,
                      libos_snake_suite_cleanup);
     suite_libos_snake_tests(s);
+
+    s = CU_add_suite("libos_doom", libos_doom_suite_init,
+                     libos_doom_suite_cleanup);
+    suite_libos_doom_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not
