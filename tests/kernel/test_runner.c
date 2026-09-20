@@ -62,6 +62,7 @@ void suite_dg_init_tests(CU_pSuite s);
 void suite_fpconv_tests(CU_pSuite s);
 void suite_libc_gaps_tests(CU_pSuite s);
 void suite_syscall_fuzz_tests(CU_pSuite s);
+void suite_syscall_bench_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -121,6 +122,14 @@ int libos_c_probe_suite_cleanup(void);
  * has to. */
 int libc_shim_probe_suite_init(void);
 int libc_shim_probe_suite_cleanup(void);
+
+/* Same idea for the syscall_bench suite (SCRUM-60): it installs the fault
+ * hook, a SYS_LIBOS_RETURN handler, and a real address space around each
+ * benchmark's live ring-3 launch. Its init additionally saves
+ * PAGE_OWNER_LIBOS's boot-time address-space binding for the same reason
+ * libc_shim_probe's does -- see test_syscall_bench_k.c's own comment. */
+int syscall_bench_suite_init(void);
+int syscall_bench_suite_cleanup(void);
 
 /* Same idea for the port_io_fault suite: it installs the fault hook, a
  * SYS_LIBOS_RETURN handler, and a real address space around its live
@@ -366,6 +375,10 @@ int run_tests(void)
 
     s = CU_add_suite("libc_gaps", NULL, NULL);
     suite_libc_gaps_tests(s);
+
+    s = CU_add_suite("syscall_bench", syscall_bench_suite_init,
+                     syscall_bench_suite_cleanup);
+    suite_syscall_bench_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not
