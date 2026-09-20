@@ -37,8 +37,10 @@
  * needed the same raise independently and for the same reason, which is
  * why the two branches made an identical change: a ceiling whose overflow
  * mode is silence leaves no safe margin, so do not trim this back toward
- * the current count. */
-#define KUNIT_MAX_SUITES          64
+ * the current count. Raised from 64 to 256 under SCRUM-185, well ahead of
+ * the 51 suites registered in tests/kernel/test_runner.c at the time, to
+ * stop this needing a bump every few sprints. */
+#define KUNIT_MAX_SUITES          256
 #define KUNIT_MAX_TESTS_PER_SUITE 64
 #define KUNIT_NAME_LEN            64
 
