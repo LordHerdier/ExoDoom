@@ -25,16 +25,15 @@
  *   DG_DrawFrame       SCRUM-77 -- the 640x400 -> framebuffer blit. DONE:
  *                                  it maps the framebuffer on its first
  *                                  call and scales every frame into it.
- *   DG_GetKey          SCRUM-79 -- exo_kbd_poll + Doom keycode translation
- *                                  (whose translation table is SCRUM-40)
+ *   DG_GetKey          SCRUM-79 -- exo_kbd_poll + Doom keycode translation.
+ *                                  DONE: it drains the kernel's key ring
+ *                                  each tic through doom_keymap_translate()
+ *                                  (src/doom_keymap.c, SCRUM-40).
  *   DG_SetWindowTitle  no windows here; a serial line
  *
- * DG_GetKey is still a stub with the honest shape -- it reports "no key" and
- * says so on serial exactly once, so a boot log shows which half of the port
- * is missing rather than looking like a hang. Note that this costs less than
- * it sounds: Doom's attract mode (title screen, then demo playback, then the
- * credits) runs with no input at all, so the picture is live and moving
- * without it. What is missing is the menu and the ability to start a game.
+ * With both of those in, all six DG_* callbacks are real and Doom is
+ * playable: the menu responds, a game starts, and the movement/fire/use
+ * keys reach G_BuildTiccmd like they would anywhere else.
  *
  * ── Entry convention ──────────────────────────────────────────────────
  *
@@ -55,6 +54,7 @@
 #include "exo_syscall.h"
 #include "doomgeneric_exo.h"
 #include "libos_fb.h"
+#include "doom_keymap.h"
 #include "doom/doomgeneric.h"
 
 #include <stddef.h>
@@ -79,10 +79,6 @@ void doomgeneric_Tick(void);
  */
 static char  arg0[] = "exodoom";
 static char *doom_argv[] = { arg0, NULL };
-
-/* One-shot serial note, so an unimplemented callback says so once rather
- * than on every one of Doom's 35 frames a second. */
-static int warned_getkey;
 
 /*
  * The framebuffer, mapped once on the first frame (SCRUM-77).
@@ -212,21 +208,67 @@ void DG_DrawFrame(void)
 }
 
 /*
- * SCRUM-79 replaces this with exo_kbd_poll plus the Doom keycode translation
- * SCRUM-40 builds. Reporting "no key available" is the correct shape for a
- * platform with no input yet: doomgeneric's caller (D_ProcessEvents via
- * I_GetEvent) simply sees an empty queue.
+ * Hand Doom one key event, if the kernel has one queued (SCRUM-79).
+ *
+ * Contract, from doomgeneric's only caller (I_GetEvent, src/doom/i_input.c):
+ * return non-zero having filled *pressed and *key, or 0 when nothing is
+ * left. That caller is a `while (DG_GetKey(&pressed, &key))` loop, so it
+ * drains everything available each tic.
+ *
+ * ── Why `key` is already a Doom keycode ───────────────────────────────
+ *
+ * Because doomgeneric asks for one. i_input.c's TranslateKey() -- the hook
+ * that would map a platform scancode into Doom's keycode space -- is
+ * `return key;` in this tree, its lookup-table body commented out upstream.
+ * So whatever DG_GetKey reports IS what reaches event.data1, and what the
+ * menu, the binding layer and the cheat matcher compare against.
+ * doom_keymap_translate() (src/doom_keymap.c, SCRUM-40) is that mapping and
+ * its output lands here unmodified.
+ *
+ * Two things downstream lean on choices SCRUM-40 made, worth naming since
+ * they are what makes this a few lines rather than a subsystem:
+ *
+ *   - UpdateShiftStatus() (i_input.c) counts shift by comparing against
+ *     Doom's KEY_RSHIFT. The keymap folds both PS/2 shifts onto that one
+ *     keycode, so either physical key moves the counter -- which is what
+ *     makes GetTypedChar()'s shiftxform[] upshifting work when typing a
+ *     savegame name.
+ *   - Letters arrive lowercase, which is what the cheat matcher
+ *     (st_stuff.c) and the menu's y/n prompts compare against.
+ *
+ * ── Unmapped keys are dropped, not reported ───────────────────────────
+ *
+ * `continue` rather than `return 0`: a key with no Doom meaning must not
+ * end the caller's drain loop, or one unmapped keypress would stall every
+ * event queued behind it until the next tic. Dropping it and looking again
+ * keeps the queue moving.
+ *
+ * Ctrl+Tab never arrives here at all -- src/ps2.c swallows it as the LibOS
+ * switch hotkey (SCRUM-111) before the event is queued, so Doom does not see
+ * a spurious TAB (which would toggle the automap) on every switch.
  */
 int DG_GetKey(int *pressed, unsigned char *key)
 {
-    (void)pressed;
-    (void)key;
+    exo_kbd_event_t ev;
 
-    if (!warned_getkey) {
-        warned_getkey = 1;
-        printf("libos_doom: DG_GetKey is a stub (SCRUM-79) -- "
-               "no input will reach the engine.\n");
+    /* `== 1` rather than `> 0`: 0 means the ring was empty and a negative is
+     * -EXO_EFAULT. Neither is an event, and both end the drain. */
+    while (exo_kbd_poll(&ev) == 1) {
+        unsigned char doom_key = doom_keymap_translate(ev.key);
+
+        if (doom_key == DOOM_KEY_NONE) {
+            continue;
+        }
+
+        if (pressed != NULL) {
+            *pressed = ev.pressed ? 1 : 0;
+        }
+        if (key != NULL) {
+            *key = doom_key;
+        }
+        return 1;
     }
+
     return 0;
 }
 

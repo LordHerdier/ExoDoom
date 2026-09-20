@@ -429,7 +429,7 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/libos_doom/libos_doom.c \
   src/stdio.c src/stdlib.c src/string.c src/ctype.c src/errno.c \
   src/fpconv.c src/doom_net_stub.c \
-  src/doom_wad.c src/wad.c src/doom_panic.c \
+  src/doom_wad.c src/wad.c src/doom_panic.c src/doom_keymap.c \
   src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c \
   src/doom/*.c
 
