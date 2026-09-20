@@ -28,7 +28,12 @@ static int64_t sys_kbd_poll(uint64_t event_out, uint64_t a2, uint64_t a3,
 {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
 
-    if (!exo_range_in_user_window(event_out, sizeof(exo_kbd_event_t)))
+    /* Bounds alone isn't enough: the LibOS window is reserved-but-unmapped
+     * until the caller exo_page_maps it, so an in-window-but-unmapped
+     * event_out still has to be rejected here, or the write below takes a
+     * fatal supervisor-mode page fault (SCRUM-186). */
+    if (!exo_range_in_user_window(event_out, sizeof(exo_kbd_event_t)) ||
+        !exo_user_range_mapped(event_out, sizeof(exo_kbd_event_t), 1))
         return -EXO_EFAULT;
 
     kbd_event_t ev;

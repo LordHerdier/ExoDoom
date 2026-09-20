@@ -26,6 +26,11 @@
  * ranges (test_page_map_k.c, test_vmm_k.c, test_syscall_serial_k.c). */
 #define SCRATCH (EXO_USER_VA_BASE + 0x30000000ULL)
 
+/* A second scratch address in this suite's own range, one page past SCRATCH,
+ * that no test here ever maps with EXO_PAGE_WRITE|EXO_PAGE_USER -- the
+ * in-window-but-unmapped pointer SCRUM-186 reproduces the crash with. */
+#define UNMAPPED (SCRATCH + 0x1000ULL)
+
 static int64_t do_kbd_poll(uint64_t event_out)
 {
     return exo_syscall_dispatch(EXO_SYS_KBD_POLL, event_out, 0, 0, 0, 0, 0);
@@ -173,6 +178,40 @@ static void test_valid_poll_preserves_fifo_order(void)
     CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
 }
 
+/* SCRUM-186: an in-window pointer that was never exo_page_map'd used to reach
+ * the write to *event_out and take a fatal supervisor-mode page fault (the
+ * whole window is reserved-but-unmapped by default). This is the exact crash
+ * repro -- it must now come back cleanly as -EXO_EFAULT instead. A queued
+ * event distinguishes that from a non-conforming "ring empty" 0, same
+ * reasoning as test_null_event_out_rejected. */
+static void test_unmapped_in_window_event_out_rejected(void)
+{
+    kbd_reset();
+    kbd_event_t ev = { .pressed = 1, .key = (uint8_t)KEY_A, .modifiers = 0 };
+    kbd_enqueue(ev);
+
+    CU_ASSERT_EQUAL(do_kbd_poll(UNMAPPED), -EXO_EFAULT);
+}
+
+/* Mapped but read-only (EXO_PAGE_USER without EXO_PAGE_WRITE) is still not
+ * somewhere the kernel may write *event_out through on the caller's behalf
+ * -- unlike exo_serial_write's buf, this handler writes to its pointer. */
+static void test_read_only_mapped_event_out_rejected(void)
+{
+    kbd_reset();
+    kbd_event_t ev = { .pressed = 1, .key = (uint8_t)KEY_A, .modifiers = 0 };
+    kbd_enqueue(ev);
+
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(UNMAPPED, (uint64_t)p, EXO_PAGE_USER), 0);
+
+    CU_ASSERT_EQUAL(do_kbd_poll(UNMAPPED), -EXO_EFAULT);
+
+    CU_ASSERT_EQUAL(do_unmap(UNMAPPED), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+}
+
 void suite_syscall_kbd_tests(CU_pSuite s)
 {
     CU_add_test(s, "handler is bound", test_handler_is_bound);
@@ -188,4 +227,8 @@ void suite_syscall_kbd_tests(CU_pSuite s)
                test_valid_poll_dequeues_one_event);
     CU_add_test(s, "valid poll preserves FIFO order",
                test_valid_poll_preserves_fifo_order);
+    CU_add_test(s, "unmapped in-window event_out rejected",
+               test_unmapped_in_window_event_out_rejected);
+    CU_add_test(s, "read-only mapped event_out rejected",
+               test_read_only_mapped_event_out_rejected);
 }

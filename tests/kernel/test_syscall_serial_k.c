@@ -32,6 +32,11 @@
  * and test_vmm_k.c's ranges. */
 #define SCRATCH (EXO_USER_VA_BASE + 0x28000000ULL)
 
+/* A second scratch address in this suite's own range, one page past SCRATCH,
+ * that no test here ever maps -- the in-window-but-unmapped pointer SCRUM-186
+ * reproduces the crash with. */
+#define UNMAPPED (SCRATCH + 0x1000ULL)
+
 static int64_t do_serial_write(uint64_t buf, uint64_t len)
 {
     return exo_syscall_dispatch(EXO_SYS_SERIAL_WRITE, buf, len, 0, 0, 0, 0);
@@ -125,6 +130,48 @@ static void test_valid_write_reports_full_length(void)
     CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
 }
 
+/* SCRUM-186: an in-window pointer that was never exo_page_map'd used to reach
+ * serial.c and take a fatal supervisor-mode page fault (the whole window is
+ * reserved-but-unmapped by default). This is the exact crash repro -- it
+ * must now come back cleanly as -EXO_EFAULT instead. */
+static void test_unmapped_in_window_buffer_rejected(void)
+{
+    CU_ASSERT_EQUAL(do_serial_write(UNMAPPED, 1), -EXO_EFAULT);
+}
+
+/* Present but not user-accessible (flags 0: neither WRITE nor USER) is still
+ * not memory ring 3 could have written -- the kernel-only identity map looks
+ * exactly like this. */
+static void test_mapped_kernel_only_buffer_rejected(void)
+{
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(UNMAPPED, (uint64_t)p, 0), 0);
+
+    CU_ASSERT_EQUAL(do_serial_write(UNMAPPED, 1), -EXO_EFAULT);
+
+    CU_ASSERT_EQUAL(do_unmap(UNMAPPED), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+}
+
+/* exo_serial_write only *reads* buf -- a present, user-accessible page with
+ * no WRITE bit is still a legitimate source, unlike exo_fb_acquire/
+ * exo_kbd_poll which write *through* their pointer and do need WRITE. */
+static void test_read_only_mapped_buffer_accepted(void)
+{
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(UNMAPPED, (uint64_t)p, EXO_PAGE_USER), 0);
+
+    char *buf = (char *)(uintptr_t)UNMAPPED;
+    buf[0] = 'x';
+
+    CU_ASSERT_EQUAL(do_serial_write(UNMAPPED, 1), 1);
+
+    CU_ASSERT_EQUAL(do_unmap(UNMAPPED), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+}
+
 void suite_syscall_serial_tests(CU_pSuite s)
 {
     CU_add_test(s, "handler is bound", test_handler_is_bound);
@@ -138,4 +185,10 @@ void suite_syscall_serial_tests(CU_pSuite s)
                test_max_length_at_cap_not_rejected_by_length_check);
     CU_add_test(s, "valid write reports full length",
                test_valid_write_reports_full_length);
+    CU_add_test(s, "unmapped in-window buffer rejected",
+               test_unmapped_in_window_buffer_rejected);
+    CU_add_test(s, "mapped kernel-only buffer rejected",
+               test_mapped_kernel_only_buffer_rejected);
+    CU_add_test(s, "read-only mapped buffer accepted",
+               test_read_only_mapped_buffer_accepted);
 }

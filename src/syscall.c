@@ -2,6 +2,7 @@
 #include "context.h"
 #include "exo_syscall.h"
 #include "msr.h"
+#include "vmm.h"
 
 /*
  * syscall.c — MSR setup and syscall dispatch (SCRUM-32).
@@ -56,6 +57,49 @@ page_owner_t syscall_current_context(void)
      * matches v1's single-LibOS behavior exactly until something actually
      * switches. */
     return context_current();
+}
+
+int exo_user_range_mapped(uint64_t base, uint64_t len, int writable)
+{
+    /* Mirrors exo_range_in_user_window's len==0 rule: an empty range can't
+     * touch memory that isn't there. */
+    if (len == 0)
+        return 1;
+
+    /* Deliberately CR3 itself, not vmm_address_space_for(syscall_current_
+     * context()): `syscall` never switches CR3 (only the caller's own
+     * exo_page_map/-unmap calls change what it points at), so whatever is
+     * loaded there right now is exactly the tree a write through `base`
+     * would really be checked against -- the thing this function exists to
+     * answer. The registry lookup is a different question ("who owns the
+     * address space bound to this context id"), which several ring-3 test
+     * harnesses (tests/kernel/libos_test_common.h) deliberately answer
+     * differently from "what's actually in CR3" by launching under a
+     * scratch owner id that is never bound to PAGE_OWNER_LIBOS -- reading
+     * CR3 directly gives the right answer for both v1's single real LibOS
+     * and every such test harness, with no dependency on that registry
+     * being kept in sync with reality. */
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    uint64_t *root = (uint64_t *)(uintptr_t)(cr3 & ~0xFFFULL);
+
+    /* The caller already ran exo_range_in_user_window(), so [base, base+len)
+     * neither wraps nor leaves the LibOS window -- this only has to walk it
+     * one page at a time and confirm every page is really there. */
+    uint64_t start = base & ~(uint64_t)(VMM_PAGE_SIZE - 1);
+    uint64_t end   = base + len;
+    uint64_t need  = VMM_USER | (writable ? VMM_WRITE : 0);
+
+    for (uint64_t page = start; page < end; page += VMM_PAGE_SIZE) {
+        uint64_t flags;
+        if (vmm_translate_in(root, page, NULL, &flags) != VMM_OK)
+            return 0;
+
+        if ((flags & need) != need)
+            return 0;
+    }
+
+    return 1;
 }
 
 void syscall_init(void)
