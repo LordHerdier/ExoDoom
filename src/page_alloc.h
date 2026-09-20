@@ -66,10 +66,15 @@ uint32_t reclaim_pages_owned(page_owner_t owner);
 #define PAGE_REVOKE_ENOENT (-2) /* `owner` does not hold this page (free, or
                                  * allocated to somebody else)                 */
 
-// Initializes the bitmap allocator using the first eligible usable memory region.
-//
-// NOTE: currently only the first large usable region is managed.
-
+// Initializes the bitmap allocator, registering every MULTIBOOT_MMAP_AVAILABLE
+// region above 1 MB (SCRUM-158) -- not just the first -- each with its own
+// bitmap + owner table, up to MAX_PAGE_REGIONS regions (extras are logged and
+// skipped, not treated as fatal). A region's bitmap/owner table is bump-
+// allocated (kmalloc) as it is registered; the kernel/heap, multiboot-info and
+// WAD-module ranges are then reserved across whichever regions actually
+// contain them. See alloc_pages_contig_owned() below for the one behavioral
+// consequence of managing more than one region: a contiguous run can never
+// span two of them.
 void page_alloc_init(const struct mb2_info* mb);
 
 // Allocate one 4K page and stamp `owner` as its owner.  Returns the physical
@@ -85,6 +90,11 @@ void* alloc_page_owned(page_owner_t owner);
 // individually, same as alloc_page_owned(), so free_page_owned() one at a
 // time or the reclaim sweeps (reclaim_pages_owned()/page_reclaim_all()) free
 // them exactly like any other owned page.
+//
+// A run never spans two managed regions (SCRUM-158): two mmap regions are
+// physically separate spans of RAM, so "contiguous" only means anything
+// within one of them.  A request that would only fit by straddling a region
+// boundary fails with NULL even if enough free pages exist in total.
 void* alloc_pages_contig_owned(page_owner_t owner, uint32_t count);
 
 // Free a page previously handed out to `owner`.  Returns PAGE_FREE_OK on
@@ -113,10 +123,15 @@ int free_page_checked(void* addr);
 
 // Whether page_alloc_init() has run.  Past that point the bump allocator and
 // the PMM would hand out the same physical pages -- page_alloc_init reserves
-// [managed_base, memory_base_address()) once, and never learns about a later
-// kmalloc -- so kmalloc() uses this to complain loudly instead of silently
-// aliasing an allocated page.
+// [first region's base, memory_base_address()) once, and never learns about a
+// later kmalloc -- so kmalloc() uses this to complain loudly instead of
+// silently aliasing an allocated page.
 int page_alloc_is_live(void);
+
+// How many separate memory regions page_alloc_init() registered (SCRUM-158),
+// or 0 before it has run. For tests/introspection only -- allocation callers
+// never need to know how many regions back the pool.
+uint32_t page_alloc_region_count(void);
 
 /* ---- Revocation / repossession (SCRUM-156) ------------------------------
  *
@@ -167,10 +182,12 @@ uint32_t page_reclaim_all(page_owner_t owner);
 // tests; O(total_pages).
 uint32_t page_count_owned(page_owner_t owner);
 
-// One past the last address the allocator manages (managed_base +
-// total_pages * PAGE_SIZE), or 0 if page_alloc_init() hasn't run yet. Lets
-// callers (tests included) derive a genuinely out-of-range address instead of
-// hardcoding one that assumes a particular QEMU memory size.
+// One past the last address the allocator manages -- the end of the
+// highest-based registered region (SCRUM-158: regions are not necessarily
+// contiguous, so this is not "all managed RAM", just a genuinely
+// out-of-range address) -- or 0 if page_alloc_init() hasn't run yet. Lets
+// callers (tests included) derive such an address instead of hardcoding one
+// that assumes a particular QEMU memory size.
 uintptr_t page_alloc_pool_end(void);
 
 #endif
