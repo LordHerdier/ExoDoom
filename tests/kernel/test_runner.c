@@ -61,6 +61,9 @@ void suite_doom_panic_tests(CU_pSuite s);
 void suite_dg_init_tests(CU_pSuite s);
 void suite_fpconv_tests(CU_pSuite s);
 void suite_libc_gaps_tests(CU_pSuite s);
+void suite_syscall_fuzz_tests(CU_pSuite s);
+void suite_syscall_bench_tests(CU_pSuite s);
+void suite_libos_snake_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -121,6 +124,14 @@ int libos_c_probe_suite_cleanup(void);
 int libc_shim_probe_suite_init(void);
 int libc_shim_probe_suite_cleanup(void);
 
+/* Same idea for the syscall_bench suite (SCRUM-60): it installs the fault
+ * hook, a SYS_LIBOS_RETURN handler, and a real address space around each
+ * benchmark's live ring-3 launch. Its init additionally saves
+ * PAGE_OWNER_LIBOS's boot-time address-space binding for the same reason
+ * libc_shim_probe's does -- see test_syscall_bench_k.c's own comment. */
+int syscall_bench_suite_init(void);
+int syscall_bench_suite_cleanup(void);
+
 /* Same idea for the port_io_fault suite: it installs the fault hook, a
  * SYS_LIBOS_RETURN handler, and a real address space around its live
  * ring-3 port-I/O trap test (SCRUM-56). */
@@ -178,6 +189,12 @@ int shell_libos_suite_cleanup(void);
  * reasoning as shell_libos_suite_init/_cleanup above. */
 int clock_libos_suite_init(void);
 int clock_libos_suite_cleanup(void);
+
+/* Same idea for the libos_snake suite (SCRUM-182): builds the real Snake
+ * blob under PAGE_OWNER_LIBOS and must restore its boot-time binding, same
+ * reasoning as shell_libos_suite_init/_cleanup above. */
+int libos_snake_suite_init(void);
+int libos_snake_suite_cleanup(void);
 
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
@@ -365,6 +382,20 @@ int run_tests(void)
 
     s = CU_add_suite("libc_gaps", NULL, NULL);
     suite_libc_gaps_tests(s);
+
+    s = CU_add_suite("syscall_bench", syscall_bench_suite_init,
+                     syscall_bench_suite_cleanup);
+    suite_syscall_bench_tests(s);
+
+    s = CU_add_suite("libos_snake", libos_snake_suite_init,
+                     libos_snake_suite_cleanup);
+    suite_libos_snake_tests(s);
+
+    /* Runs last: hammers exo_syscall_dispatch() with a million random
+     * syscalls and checks the PMM is still sane afterward, so it should not
+     * shadow which earlier suite actually broke a handler (SCRUM-115). */
+    s = CU_add_suite("syscall_fuzz", NULL, NULL);
+    suite_syscall_fuzz_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

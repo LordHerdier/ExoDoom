@@ -1,0 +1,1 @@
+#define LIBOS_SNAKE_BSS_LEN 2448

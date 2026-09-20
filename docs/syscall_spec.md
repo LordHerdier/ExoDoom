@@ -365,10 +365,15 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 17 | `exo_sound_tone(freq, dur_ms)`      | Sound       | ⬜     | Play a tone on the PC speaker at `freq` Hz for `dur_ms` milliseconds. Non-blocking (kernel manages PIT ch2). Returns `0`. Used by `I_StartSound` shim.                                                                                                                         |
 | 18 | `exo_sound_stop()`                  | Sound       | ⬜     | Silence the PC speaker immediately. Returns `0`. Used by `I_StopSound` shim.                                                                                                                                                                                                   |
 | 19 | `exo_yield()`                       | Scheduling  | ✅     | Cooperatively yield CPU to next runnable LibOS context. Returns when rescheduled. Called once per idle-loop iteration by the real shell LibOS (SCRUM-110, `src/shell/shell_main.c`) and optionally by `DG_SleepMs`. Still a no-op in practice today: nothing yet registers a second context via `context_create()` on a normal boot (Doom is not linked in), so the call always finds nothing else `READY`. Bound in SCRUM-109 (`src/syscall_yield.c`) to `context_switch_request()` (SCRUM-108) via a round-robin scan of the context table, `context_next_ready()` (`src/context.c`) — the minimum policy the acceptance criterion needs, not a real scheduler (priority/fairness/wake-on-event is SCRUM-147's job). No error return: if nothing else is `READY`, including a caller with no row in the table (the boot-time default LibOS), it is a no-op that returns `0`.                                                                                                                                          |
-| 20 | `exo_exit(code)`                    | Lifecycle   | ⬜     | Terminate calling LibOS. Frees all pages, closes all files, removes from scheduler. Does not return.                                                                                                                                                                           |
+| 20 | `exo_exit(code)`                    | Lifecycle   | ✅     | Terminate calling LibOS. Frees its pages and framebuffer binding (`revoke_all`) and hands off to whatever's next-ready via `context_switch_request()` — leaves the now-resourceless `context_t` row behind rather than destroying it (the outgoing side of that switch still needs it live to capture into); the caller that launched this LibOS is what eventually `context_destroy()`s it, on its own next relaunch (see #21/#22). Does not return. Implemented in SCRUM-155, extended in SCRUM-178 (`src/syscall_exit.c`). |
+| 21 | `exo_launch_wad_viewer()`           | Lifecycle   | ✅     | Build the WAD/flat/automap viewer (`src/libos_wad_viewer/`) as a second, real LibOS context and `context_switch_request()` to it immediately; reclaims (`revoke_all` + `context_destroy`) whatever the previous launch left behind first. Like `exo_yield()`, does not return control to the caller until something switches back — here, the viewer's own `exo_exit()`/`exo_yield()` round trip. Returns a negative `EXO_E*` only if the launch failed before the switch was armed. Invoked by the shell's `wadview` command. Implemented in SCRUM-178 (`src/syscall_launch.c`). |
+| 22 | `exo_launch_clock()`                | Lifecycle   | ✅     | Same shape as #21, for the clock demo LibOS (`src/libos_clock/`) — no external resource to stage and no launch-time parameters, so no `libos_launch_patch_params()` step; multiple live LibOS contexts render concurrently under framebuffer multiplexing (SCRUM-112), so control returns via Ctrl+Tab (SCRUM-111) rather than the clock itself yielding back. Invoked by the shell's `clock` command. Implemented in SCRUM-168 (`src/syscall_launch.c`). |
+| 23 | `exo_launch_snake()`                | Lifecycle   | ✅     | Same shape as #21, for the Snake LibOS demo (`src/libos_snake/`) — no external resource to stage and no launch-time parameters, so no `libos_launch_patch_params()` step. Invoked by the shell's `snake` command. Implemented in SCRUM-182 (`src/syscall_launch.c`). |
 
-**Total: 21 syscalls.** This is the complete interface needed to run Doom with
-save/load, config, sound, and cooperative multitasking.
+**Total: 24 syscalls.** This is the complete interface needed to run Doom with
+save/load, config, sound, and cooperative multitasking, plus the three
+LibOS-launch syscalls (#21/#22/#23) that back the shell's interactive demo
+commands.
 
 ### 3.2a Error codes (SCRUM-57)
 
@@ -1070,6 +1075,62 @@ A page belonging to the kernel or to another context is still refused.
   needs building, now that SCRUM-47/48 supply the address space and launch
   mechanism it would act on.
 
+### 3.8 Syscall round-trip benchmarks (SCRUM-60)
+
+Blocked on SCRUM-33 (`exo_get_ticks`, the first end-to-end syscall) until it
+landed; six more syscalls have since been bound, so
+`tests/kernel/test_syscall_bench_k.c` covers `exo_page_alloc`/`_free`
+(#0/#1), `exo_page_map`/`_unmap` (#2/#3), `exo_fb_acquire` (#4),
+`exo_get_ticks` (#5), `exo_kbd_poll` (#6) and `exo_serial_write` (#8), plus
+the dispatcher's bare `-EXO_ENOSYS` floor via the still-unbound
+`exo_mouse_poll` (#7) — a "no handler work at all" baseline the others sit
+on top of.
+
+**Method.** Each case is a real ring-3 `syscall`/`sysretq` round trip, not an
+in-kernel call to `exo_syscall_dispatch()` — that would skip exactly the
+entry/exit cost this ticket wants. `tests/kernel/syscall_bench_probe.s`
+loops the syscall under test back to back inside a real launched LibOS image
+(`libos_build_image()`/`libos_enter()`, §3.7's launch mechanism, *not*
+`tests/kernel/ring3_probe.s`'s older `ring3_run()` — `src/vmm.c` (SCRUM-55)
+re-exposes only that file's own two probes as user-executable, "the sole,
+explicitly-scoped legacy exception"), timing the whole run with `rdtsc`
+(`CR4.TSD` is never set, so it executes fine at CPL 3) and reporting cycles
+rather than wall time — there is no calibrated clock to convert against, and
+the ticket asks for cycles regardless. `exo_page_alloc`/`_free` and
+`exo_page_map`/`_unmap` run as alternating pairs (alloc immediately freed,
+map immediately unmapped) so the PMM and the test's own mapping end exactly
+where they started; the reported number is the pair's total cycles divided
+by 2.
+
+**Baseline (QEMU/TCG, `make docker-test`, 5000 iterations for the four
+argument-only cases and the ENOSYS floor, 2000 for the alloc/free and
+map/unmap pairs):**
+
+| Syscall                          | Cycles/call | Notes |
+| --------------------------------- | ----------: | ----- |
+| Dispatcher `-ENOSYS` floor (#7)   |         266 | No handler bound; range-check + return only. |
+| `exo_get_ticks` (#5)              |         225 | No args, no memory touched. |
+| `exo_serial_write(len=0)` (#8)    |         216 | `len==0` returns before touching `buf` or COM1. |
+| `exo_kbd_poll` (empty ring) (#6)  |         266 | Window check only; ring empty, `event_out` untouched. |
+| `exo_fb_acquire` (re-acquire) (#4)|        1385 | Writes a 24-byte `exo_fb_info_t`; re-acquire is idempotent. |
+| `exo_page_map`+`exo_page_unmap` (#2/#3) | 943 | Per syscall, averaged over the pair; edits real page tables. |
+| `exo_page_alloc`+`exo_page_free` (#0/#1) | 32914 | Per syscall, averaged over the pair; PMM bitmap scan dominates. |
+
+These are QEMU/TCG numbers on the machine that ran `make docker-test` at
+the time this table was written, not a hardware measurement — `rdtsc`
+reflects the *host's* real clock under TCG emulation, which varies across
+developer machines and CI runners, so treat the relative shape (dispatcher
+floor ≈ 220-270 cycles; `exo_page_alloc` two orders of magnitude above
+everything else) as the durable finding, not the absolute counts. The
+`CU_ASSERT`s in `test_syscall_bench_k.c` are loose sanity bounds (nonzero,
+under 10,000,000) for exactly this reason — a regression gate on exact
+cycle counts would be flaky by construction on this kernel's only timing
+source. `exo_page_alloc`'s cost is the standout: `src/page_alloc.c`'s
+bitmap PMM does a linear scan for a free page, an order of magnitude above
+`exo_page_map`'s page-table edit and nearly 150x the dispatcher floor —
+worth keeping in mind for SCRUM-117's eventual performance report if
+anything above this layer starts allocating pages in a hot loop.
+
 ---
 
 ## 4. Architectural decision: file I/O strategy
@@ -1148,6 +1209,33 @@ To add PC speaker sound, there are two options:
 
 **Option A (minimal):** Keep `FEATURE_SOUND` undefined. Doom runs silently. No
 sound syscalls needed.
+
+> **This is what the port does, and it needed no code (SCRUM-82).** The
+> vendored tree ships `FEATURE_SOUND` undefined already
+> (`src/doom/doomfeatures.h`), so `sound_modules[]` collapses to `{ NULL }`,
+> `InitSfxModule()`/`InitMusicModule()` leave both module pointers `NULL`, and
+> every `I_*` entry point in `src/doom/i_sound.c` takes its existing
+> null-pointer branch: `0` from `I_StartSound`/`I_GetSfxLumpNum`, `false` from
+> `I_SoundIsPlaying`, nothing from `I_StopSound`/`I_UpdateSound`. `s_sound.c`
+> is untroubled by that -- it stores a handle that is never played, and
+> `I_SoundIsPlaying(0)` answering `false` simply retires the channel. So
+> SCRUM-82's acceptance holds without stubbing anything, and stubbing would
+> have meant editing vendored source (which SCRUM-63 exists to avoid) to
+> replace working code with identical behaviour.
+>
+> What SCRUM-82 did add is the thing that makes it stay true: a gate at the
+> end of `docker/scripts/build-doom.sh` that reads `build/doom/i_sound.o` and
+> fails the build if `DG_sound_module`/`DG_music_module`/`Mix_*`/`SDL_*` ever
+> go undefined there, or if any of `I_StartSound`/`I_StopSound`/`I_UpdateSound`
+> stops being defined (`s_sound.c` calls all three unconditionally).
+>
+> It covers the quiet half of the regression. Defining `FEATURE_SOUND` on its
+> own is already loud -- `i_sound.c` includes `<SDL_mixer.h>` under the same
+> guard and the compile pass dies there. But define it with that include
+> bypassed (`-D__DJGPP__`, or an `SDL_mixer.h` appearing on the include path)
+> and the file compiles cleanly while leaving both module symbols undefined;
+> a compile-only pass says nothing, and the first sign would be an undefined
+> symbol during SCRUM-66's link.
 
 **Option B (PC speaker):** Implement a `sound_module_t` with
 `Init`/`StartSound`/`StopSound`/`Update` that maps Doom SFX lump data to PC
