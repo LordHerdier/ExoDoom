@@ -22,17 +22,19 @@
  * has been carrying in its ALLOWED list as the last undefined symbols in the
  * tree, and they have to be defined here or nothing links:
  *
- *   DG_DrawFrame       SCRUM-77 -- the real 640x400 -> framebuffer blit
+ *   DG_DrawFrame       SCRUM-77 -- the 640x400 -> framebuffer blit. DONE:
+ *                                  it maps the framebuffer on its first
+ *                                  call and scales every frame into it.
  *   DG_GetKey          SCRUM-79 -- exo_kbd_poll + Doom keycode translation
  *                                  (whose translation table is SCRUM-40)
  *   DG_SetWindowTitle  no windows here; a serial line
  *
- * Both SCRUM-77 and SCRUM-79 are *blocked by this ticket* on the board, so
- * this file deliberately does not implement them. They are stubs with the
- * honest shape -- DG_GetKey reports "no key", DG_DrawFrame drops the frame --
- * and each says so on serial exactly once, so a boot log shows which half of
- * the port is still missing rather than looking like a hang. Filling them in
- * is a two-function change against this file and touches nothing else.
+ * DG_GetKey is still a stub with the honest shape -- it reports "no key" and
+ * says so on serial exactly once, so a boot log shows which half of the port
+ * is missing rather than looking like a hang. Note that this costs less than
+ * it sounds: Doom's attract mode (title screen, then demo playback, then the
+ * credits) runs with no input at all, so the picture is live and moving
+ * without it. What is missing is the menu and the ability to start a game.
  *
  * ── Entry convention ──────────────────────────────────────────────────
  *
@@ -52,6 +54,7 @@
 
 #include "exo_syscall.h"
 #include "doomgeneric_exo.h"
+#include "libos_fb.h"
 #include "doom/doomgeneric.h"
 
 #include <stddef.h>
@@ -77,23 +80,134 @@ void doomgeneric_Tick(void);
 static char  arg0[] = "exodoom";
 static char *doom_argv[] = { arg0, NULL };
 
-/* One-shot serial notes, so an unimplemented callback says so once rather
+/* One-shot serial note, so an unimplemented callback says so once rather
  * than on every one of Doom's 35 frames a second. */
-static int warned_drawframe;
 static int warned_getkey;
 
 /*
- * SCRUM-77 replaces this with the real blit: exo_fb_acquire + libos_fb_map()
- * for the framebuffer, then DG_ScreenBuffer (640x400 ARGB, allocated by
- * doomgeneric_Create) scaled into it. Until then the engine runs and simply
- * has nowhere to put the frame.
+ * The framebuffer, mapped once on the first frame (SCRUM-77).
+ *
+ * fb_state is a tri-state rather than a "mapped" flag so that a failed map
+ * is remembered: DG_DrawFrame() is called 35 times a second and retrying a
+ * failing exo_fb_acquire() at that rate would bury the serial log in the
+ * same message forever.
+ */
+#define FB_UNTRIED 0
+#define FB_READY   1
+#define FB_FAILED  (-1)
+
+static libos_fb_t fb;
+static int        fb_state = FB_UNTRIED;
+
+/*
+ * Blit Doom's frame to the screen (SCRUM-77).
+ *
+ * ── Why this is a copy and not a conversion ───────────────────────────
+ *
+ * doomgeneric renders into DG_ScreenBuffer as 32-bit pixels whose channel
+ * offsets Doom itself reports at startup: red 16, green 8, blue 0, alpha 24.
+ * Little-endian, that is B,G,R,X byte order in memory -- which is exactly
+ * the framebuffer's own BGRX8888 layout (empirically confirmed on QEMU; see
+ * CLAUDE.md). So no channel swizzle is needed and each pixel moves as one
+ * 32-bit word. The ticket title calls the source "ARGB", which is true of
+ * the *word* on a little-endian machine and would be misleading as a byte
+ * order.
+ *
+ * ── Why a full-screen stretch is the CORRECT aspect, not a distortion ──
+ *
+ * 640x400 into 1024x768 is 1.6x horizontally and 1.92x vertically, which
+ * looks like it ought to be wrong. It is not. Doom renders 320x200 (which
+ * doomgeneric has already doubled to 640x400 -- "Auto-scaling factor: 2" in
+ * its startup log) and 320x200 was designed for a 4:3 display, i.e. with
+ * non-square pixels 1.2x taller than wide. 1024x768 is exactly 4:3. So
+ * stretching to fill it reproduces the intended geometry, and it is
+ * preserving the 16:10 pixel grid that would squash the picture.
+ *
+ * ── Scaling ───────────────────────────────────────────────────────────
+ *
+ * Nearest-neighbour, with a Bresenham-style accumulator per axis rather
+ * than a multiply-and-divide per pixel: the source index advances by a
+ * whole pixel whenever the accumulator passes the destination width, so
+ * the inner loop is an add, a compare and a 32-bit store. SCRUM-78 is the
+ * ticket for going faster than that if it turns out to matter.
+ *
+ * Written against fb.width/fb.height/fb.pitch rather than 1024/768/4096:
+ * the geometry comes from exo_fb_acquire at runtime and GRUB is free to
+ * hand us a different mode.
  */
 void DG_DrawFrame(void)
 {
-    if (!warned_drawframe) {
-        warned_drawframe = 1;
-        printf("libos_doom: DG_DrawFrame is a stub (SCRUM-77) -- "
-               "the engine is running, frames are being dropped.\n");
+    if (fb_state == FB_UNTRIED) {
+        int rc = libos_fb_map(&fb);
+
+        if (rc != 0 || fb.vaddr == NULL) {
+            fb_state = FB_FAILED;
+            printf("libos_doom: framebuffer map failed (%d) -- running "
+                   "blind.\n", rc);
+            return;
+        }
+
+        /* Every path this port has is 32bpp: the kernel refuses to start a
+         * framebuffer console on anything else, and fb_init_bgrx8888()
+         * (which the other LibOS apps use) checks the same thing. Bail
+         * rather than write garbage at a stride we guessed. */
+        if (fb.bpp != 32) {
+            fb_state = FB_FAILED;
+            printf("libos_doom: framebuffer is %u bpp, need 32 -- running "
+                   "blind.\n", (unsigned)fb.bpp);
+            return;
+        }
+
+        fb_state = FB_READY;
+        printf("libos_doom: framebuffer %ux%u, pitch %u -- scaling %ux%u\n",
+               (unsigned)fb.width, (unsigned)fb.height, (unsigned)fb.pitch,
+               (unsigned)DOOMGENERIC_RESX, (unsigned)DOOMGENERIC_RESY);
+    }
+
+    if (fb_state != FB_READY || DG_ScreenBuffer == NULL) {
+        return;
+    }
+
+    const uint32_t dst_w = fb.width;
+    const uint32_t dst_h = fb.height;
+
+    uint32_t src_y = 0;
+    uint32_t y_acc = 0;
+
+    for (uint32_t dy = 0; dy < dst_h; dy++) {
+        const pixel_t *src_row = DG_ScreenBuffer +
+                                 (size_t)src_y * DOOMGENERIC_RESX;
+        uint32_t      *dst_row = (uint32_t *)((uint8_t *)fb.vaddr +
+                                              (size_t)dy * fb.pitch);
+
+        uint32_t src_x = 0;
+        uint32_t x_acc = 0;
+
+        for (uint32_t dx = 0; dx < dst_w; dx++) {
+            dst_row[dx] = (uint32_t)src_row[src_x];
+
+            x_acc += DOOMGENERIC_RESX;
+            while (x_acc >= dst_w) {
+                x_acc -= dst_w;
+                src_x++;
+            }
+            /* Only reachable when the framebuffer is NARROWER than Doom's
+             * buffer, where the accumulator can step past the last column
+             * on the final pixel. Cheap insurance against a mode nobody
+             * has tried rather than a condition seen at 1024x768. */
+            if (src_x >= DOOMGENERIC_RESX) {
+                src_x = DOOMGENERIC_RESX - 1;
+            }
+        }
+
+        y_acc += DOOMGENERIC_RESY;
+        while (y_acc >= dst_h) {
+            y_acc -= dst_h;
+            src_y++;
+        }
+        if (src_y >= DOOMGENERIC_RESY) {
+            src_y = DOOMGENERIC_RESY - 1;
+        }
     }
 }
 
