@@ -99,13 +99,27 @@ static void test_movement_and_fire(void)
     CU_ASSERT_EQUAL(doom_keymap_translate(KEY_LEFT),  DOOM_KEY_LEFTARROW);
     CU_ASSERT_EQUAL(doom_keymap_translate(KEY_RIGHT), DOOM_KEY_RIGHTARROW);
 
-    /* Fire is CTRL in vanilla's default bindings, and the mapping hands Doom
-     * the KEY_RCTRL keycode rather than the KEY_FIRE action -- see
-     * doom_keymap.c on why binding is Doom's job and not ours. */
-    CU_ASSERT_EQUAL(doom_keymap_translate(KEY_CTRL), DOOM_KEY_RCTRL);
+    /*
+     * Fire and use are delivered as Doom's ACTION codes, not as the
+     * physical keys, because src/doom/m_controls.c binds key_fire to
+     * KEY_FIRE and key_use to KEY_USE -- codes no physical key produces.
+     * Send KEY_RCTRL or ' ' instead and `gamekeydown[key_fire]` is never
+     * set: menus and movement still work and the trigger silently does
+     * nothing, which is precisely how this shipped broken the first time.
+     */
+    CU_ASSERT_EQUAL(doom_keymap_translate(KEY_CTRL),  DOOM_KEY_FIRE);
+    CU_ASSERT_EQUAL(doom_keymap_translate(KEY_SPACE), DOOM_KEY_USE);
 
-    /* Use is SPACE, delivered as the plain character for the same reason. */
-    CU_ASSERT_EQUAL(doom_keymap_translate(KEY_SPACE), ' ');
+    /* Same reasoning for strafe-left/right (m_controls.c binds them to
+     * KEY_STRAFE_L/_R), which vanilla also puts on comma and period. */
+    CU_ASSERT_EQUAL(doom_keymap_translate(KEY_COMMA),  DOOM_KEY_STRAFE_L);
+    CU_ASSERT_EQUAL(doom_keymap_translate(KEY_PERIOD), DOOM_KEY_STRAFE_R);
+
+    /* ALT and SHIFT are the exception: key_strafe = KEY_RALT and
+     * key_speed = KEY_RSHIFT really are physical-key codes, which is why
+     * those two worked even while fire did not. */
+    CU_ASSERT_EQUAL(doom_keymap_translate(KEY_ALT),         DOOM_KEY_RALT);
+    CU_ASSERT_EQUAL(doom_keymap_translate(KEY_SHIFT_LEFT),  DOOM_KEY_RSHIFT);
 }
 
 static void test_menu_keys(void)
@@ -173,10 +187,11 @@ static void test_punctuation(void)
 {
     CU_ASSERT_EQUAL(doom_keymap_translate(KEY_MINUS),     DOOM_KEY_MINUS);
     CU_ASSERT_EQUAL(doom_keymap_translate(KEY_EQUALS),    DOOM_KEY_EQUALS);
-    CU_ASSERT_EQUAL(doom_keymap_translate(KEY_COMMA),     ',');
-    CU_ASSERT_EQUAL(doom_keymap_translate(KEY_PERIOD),    '.');
     CU_ASSERT_EQUAL(doom_keymap_translate(KEY_SLASH),     '/');
     CU_ASSERT_EQUAL(doom_keymap_translate(KEY_SEMICOLON), ';');
+
+    /* Comma and period are strafe, not characters -- asserted in
+     * test_movement_and_fire() alongside the other action codes. */
 }
 
 /*

@@ -13,6 +13,26 @@
  * port". This is that mapping, and it is the last piece SCRUM-79's DG_GetKey
  * needs.
  *
+ * ── Action codes, not physical keys, for fire/use/strafe ─────────────
+ *
+ * This tree binds those three to Doom's ABSTRACT action keycodes, not to
+ * the keys a player presses:
+ *
+ *     src/doom/m_controls.c   key_fire       = KEY_FIRE       (0xa3)
+ *                             key_use        = KEY_USE        (0xa2)
+ *                             key_strafeleft = KEY_STRAFE_L   (0xa0)
+ *                             key_straferight= KEY_STRAFE_R   (0xa1)
+ *
+ * Nothing physical produces those codes, so the platform layer has to send
+ * them or `gamekeydown[key_fire]` is never set and the trigger does
+ * nothing. Chocolate doom is the other way round (key_fire = KEY_RCTRL),
+ * which is the convention this file shipped with and had to correct.
+ *
+ * key_strafe = KEY_RALT and key_speed = KEY_RSHIFT are the exception: those
+ * ARE physical-key codes, and the modifier folding below already produces
+ * them, which is why strafe-with-ALT and run-with-SHIFT worked while fire
+ * did not.
+ *
  * It is a pure function over one key and the modifier mask: no state, no
  * hardware, no syscalls. That is what lets it be unit-tested exhaustively in
  * ring 0 (tests/kernel/test_doom_keymap_k.c) while shipping inside the ring-3
