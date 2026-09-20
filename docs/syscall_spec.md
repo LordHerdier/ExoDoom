@@ -1070,6 +1070,62 @@ A page belonging to the kernel or to another context is still refused.
   needs building, now that SCRUM-47/48 supply the address space and launch
   mechanism it would act on.
 
+### 3.8 Syscall round-trip benchmarks (SCRUM-60)
+
+Blocked on SCRUM-33 (`exo_get_ticks`, the first end-to-end syscall) until it
+landed; six more syscalls have since been bound, so
+`tests/kernel/test_syscall_bench_k.c` covers `exo_page_alloc`/`_free`
+(#0/#1), `exo_page_map`/`_unmap` (#2/#3), `exo_fb_acquire` (#4),
+`exo_get_ticks` (#5), `exo_kbd_poll` (#6) and `exo_serial_write` (#8), plus
+the dispatcher's bare `-EXO_ENOSYS` floor via the still-unbound
+`exo_mouse_poll` (#7) — a "no handler work at all" baseline the others sit
+on top of.
+
+**Method.** Each case is a real ring-3 `syscall`/`sysretq` round trip, not an
+in-kernel call to `exo_syscall_dispatch()` — that would skip exactly the
+entry/exit cost this ticket wants. `tests/kernel/syscall_bench_probe.s`
+loops the syscall under test back to back inside a real launched LibOS image
+(`libos_build_image()`/`libos_enter()`, §3.7's launch mechanism, *not*
+`tests/kernel/ring3_probe.s`'s older `ring3_run()` — `src/vmm.c` (SCRUM-55)
+re-exposes only that file's own two probes as user-executable, "the sole,
+explicitly-scoped legacy exception"), timing the whole run with `rdtsc`
+(`CR4.TSD` is never set, so it executes fine at CPL 3) and reporting cycles
+rather than wall time — there is no calibrated clock to convert against, and
+the ticket asks for cycles regardless. `exo_page_alloc`/`_free` and
+`exo_page_map`/`_unmap` run as alternating pairs (alloc immediately freed,
+map immediately unmapped) so the PMM and the test's own mapping end exactly
+where they started; the reported number is the pair's total cycles divided
+by 2.
+
+**Baseline (QEMU/TCG, `make docker-test`, 5000 iterations for the four
+argument-only cases and the ENOSYS floor, 2000 for the alloc/free and
+map/unmap pairs):**
+
+| Syscall                          | Cycles/call | Notes |
+| --------------------------------- | ----------: | ----- |
+| Dispatcher `-ENOSYS` floor (#7)   |         266 | No handler bound; range-check + return only. |
+| `exo_get_ticks` (#5)              |         225 | No args, no memory touched. |
+| `exo_serial_write(len=0)` (#8)    |         216 | `len==0` returns before touching `buf` or COM1. |
+| `exo_kbd_poll` (empty ring) (#6)  |         266 | Window check only; ring empty, `event_out` untouched. |
+| `exo_fb_acquire` (re-acquire) (#4)|        1385 | Writes a 24-byte `exo_fb_info_t`; re-acquire is idempotent. |
+| `exo_page_map`+`exo_page_unmap` (#2/#3) | 943 | Per syscall, averaged over the pair; edits real page tables. |
+| `exo_page_alloc`+`exo_page_free` (#0/#1) | 32914 | Per syscall, averaged over the pair; PMM bitmap scan dominates. |
+
+These are QEMU/TCG numbers on the machine that ran `make docker-test` at
+the time this table was written, not a hardware measurement — `rdtsc`
+reflects the *host's* real clock under TCG emulation, which varies across
+developer machines and CI runners, so treat the relative shape (dispatcher
+floor ≈ 220-270 cycles; `exo_page_alloc` two orders of magnitude above
+everything else) as the durable finding, not the absolute counts. The
+`CU_ASSERT`s in `test_syscall_bench_k.c` are loose sanity bounds (nonzero,
+under 10,000,000) for exactly this reason — a regression gate on exact
+cycle counts would be flaky by construction on this kernel's only timing
+source. `exo_page_alloc`'s cost is the standout: `src/page_alloc.c`'s
+bitmap PMM does a linear scan for a free page, an order of magnitude above
+`exo_page_map`'s page-table edit and nearly 150x the dispatcher floor —
+worth keeping in mind for SCRUM-117's eventual performance report if
+anything above this layer starts allocating pages in a hot loop.
+
 ---
 
 ## 4. Architectural decision: file I/O strategy
