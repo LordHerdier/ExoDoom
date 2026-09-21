@@ -68,22 +68,23 @@
 
 /* Fixed layout inside the LibOS window: code, then data+bss, then the stack,
  * each given enough headroom (LIBOS_LAUNCH_MAX_*_PAGES) that one section's
- * worst case cannot overlap the next section's base. Everything here stays
- * well below EXO_USER_VA_BASE + 0x20000, which tests/kernel/libos_launch_probe.s
- * relies on being unmapped (its deliberate page-fault target) -- move the
- * stack without checking that file's comment first.
+ * worst case cannot overlap the next section's base.
  *
- * Raised from 4/4 pages to 8/16 under SCRUM-51: the ring-3 libc-shim probe
- * links in libos_page_alloc.c's slot table (LIBOS_PAGE_ALLOC_MAX_PAGES = 4096
- * slots, src/libos_page_alloc.h) as static data, which alone is 48 KiB
- * (slot_paddr + free_slots) -- more than the whole old 16 KiB data budget.
- * This is still headroom, not a real sizing exercise: a compiled libc shim
- * that also links in libos_heap.c and the DG_* platform glue (SCRUM-66) will
- * likely need to grow these again, the same way LIBOS_PAGE_ALLOC_MAX_PAGES's
- * own 16 MiB was picked for the real Doom heap estimate rather than for any
- * probe. Both stay comfortably under the 0x20000 ceiling below with this
- * increase (24 pages of code+data + 1 guard page + 1 stack page + the 0x1000
- * code-start offset = 0x1B000).
+ * Sizing history, because each step was driven by a real target rather than
+ * by round numbers: 4/4 pages originally; 8/16 under SCRUM-51, when the
+ * ring-3 libc-shim probe linked in libos_page_alloc.c's slot table
+ * (LIBOS_PAGE_ALLOC_MAX_PAGES = 4096 slots) as 48 KiB of static data, more
+ * than the whole previous data budget; and 192/192 plus a 16-page stack
+ * under SCRUM-66, for Doom -- which needs ~97 pages of code+rodata, ~99 of
+ * data+bss, and rather more than one page of stack to recurse through a
+ * level's BSP tree. That last step is roughly twice what Doom actually
+ * uses, deliberately.
+ *
+ * The layout no longer has a hand-maintained ceiling. It used to promise it
+ * stayed below EXO_USER_VA_BASE + 0x20000 so that the fault probes could
+ * hardcode that address as "unmapped"; those probes now derive their target
+ * from LIBOS_LAUNCH_UNMAPPED_VADDR (defined below, with the reasoning), so
+ * raising a cap moves them with it instead of silently invalidating them.
  *
  * LIBOS_LAUNCH_GUARD_PAGES leaves a deliberately unmapped page between the
  * data+bss region's worst case and the stack: libos_build_image() never maps
