@@ -41,7 +41,7 @@
  * ── Why Doom's keycodes are restated here ────────────────────────────
  *
  * src/doom/doomkeys.h and src/ps2.h CANNOT BE INCLUDED IN THE SAME
- * TRANSLATION UNIT. Nineteen names collide outright -- KEY_ENTER, KEY_TAB,
+ * TRANSLATION UNIT. Seventeen names collide outright -- KEY_ENTER, KEY_TAB,
  * KEY_BACKSPACE, KEY_MINUS, KEY_EQUALS and KEY_F1..KEY_F12 -- as an enum
  * constant on one side and an object-like macro on the other. Include
  * doomkeys.h first and the preprocessor rewrites ps2.h's enum body
