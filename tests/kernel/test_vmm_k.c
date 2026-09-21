@@ -27,6 +27,9 @@
 #define SCRATCH_VA   0x0000001000000000ULL
 /* Second window, 2 MiB-aligned, for the large-page and split tests. */
 #define SCRATCH_VA_2M 0x0000001040000000ULL
+/* Third window, 2 MiB-aligned, for the PAT split test — kept separate from
+ * SCRATCH_VA_2M so the two tests' live mappings never overlap. */
+#define SCRATCH_VA_2M_PAT 0x0000001080000000ULL
 
 extern uint8_t _load_start[];
 extern void ring3_probe(void);
@@ -282,6 +285,78 @@ static void test_large_page_split_preserves_neighbours(void)
     free_page(page);
 }
 
+/*
+ * SCRUM-161: split_large_page() used to extract a 2 MiB leaf's frame with
+ * ENTRY_ADDR_MASK (bits 51:12) and its flags with ENTRY_FLAG_MASK (bits
+ * 11:0) — but in a PS=1 PDE, bit 12 is PAT, not address. With PAT set, that
+ * shifted every replacement PTE's frame up by one page and silently dropped
+ * the cache-type bit. This builds a 2 MiB leaf with PAT set, splits it via
+ * the same vmm_unmap_page() path the test above uses, and checks both the
+ * repointed frame and the translated PAT bit (moved from bit 12 to bit 7)
+ * survive.
+ */
+static void test_large_page_split_preserves_pat(void)
+{
+    uint64_t phys_2m = (uint64_t)(uintptr_t)_load_start;
+    CU_ASSERT_EQUAL(phys_2m % VMM_LARGE_PAGE_SIZE, 0);
+    if (phys_2m % VMM_LARGE_PAGE_SIZE != 0) return;
+
+    CU_ASSERT_EQUAL(vmm_map_range(SCRATCH_VA_2M_PAT, phys_2m,
+                                  VMM_LARGE_PAGE_SIZE,
+                                  VMM_PRESENT | VMM_WRITE | VMM_PAT_HUGE),
+                    VMM_OK);
+
+    /*
+     * Deliberately not checking vmm_translate() against the un-split 2 MiB
+     * leaf here: its own huge-leaf branch (src/vmm.c, the PS=1 cases) has the
+     * identical ENTRY_ADDR_MASK-on-a-huge-leaf issue this ticket is about,
+     * just on the read side instead of the split side, and fixing that is out
+     * of SCRUM-161's scope (see the plan's "Not in scope" note). This test
+     * only needs the split's own output to be correct, which is what the AC
+     * asks for.
+     */
+    uint64_t resolved = 0;
+    uint64_t odd_va = SCRATCH_VA_2M_PAT + 0x8000;
+
+    CU_ASSERT_EQUAL(vmm_unmap_page(odd_va), VMM_OK);   /* splits the leaf */
+
+    /* The remapped page itself carries no PAT expectation — it's a plain
+     * vmm_map_page() call, exactly like the neighbours test — but proves the
+     * split's replacement table is otherwise usable. */
+    void *page = alloc_page();
+    CU_ASSERT_PTR_NOT_NULL(page);
+    if (page != NULL) {
+        CU_ASSERT_EQUAL(vmm_map_page(odd_va, (uint64_t)(uintptr_t)page,
+                                     VMM_PRESENT | VMM_WRITE), VMM_OK);
+        CU_ASSERT_EQUAL(vmm_translate(odd_va, &resolved, NULL), VMM_OK);
+        CU_ASSERT_EQUAL(resolved, (uint64_t)(uintptr_t)page);
+    }
+
+    /* A neighbour that was never explicitly remapped: still resolves to
+     * exactly where the original 2 MiB leaf put it — the frame did not shift
+     * by 0x1000 — and still carries the translated PAT bit at its 4 KiB
+     * position. */
+    uint64_t neighbour_va = odd_va - VMM_PAGE_SIZE;
+    uint64_t flags = 0;
+    CU_ASSERT_EQUAL(vmm_translate(neighbour_va, &resolved, &flags), VMM_OK);
+    CU_ASSERT_EQUAL(resolved, phys_2m + 0x8000 - VMM_PAGE_SIZE);
+    CU_ASSERT_NOT_EQUAL(flags & VMM_PAT_4K, 0);
+
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_VA_2M_PAT + 0x1F0000, &resolved, &flags),
+                    VMM_OK);
+    CU_ASSERT_EQUAL(resolved, phys_2m + 0x1F0000);
+    CU_ASSERT_NOT_EQUAL(flags & VMM_PAT_4K, 0);
+
+    for (uint64_t off = 0; off < VMM_LARGE_PAGE_SIZE; off += VMM_PAGE_SIZE) {
+        CU_ASSERT_EQUAL(vmm_unmap_page(SCRATCH_VA_2M_PAT + off), VMM_OK);
+    }
+    CU_ASSERT_EQUAL(vmm_translate(SCRATCH_VA_2M_PAT, NULL, NULL), VMM_ENOENT);
+
+    if (page != NULL) {
+        free_page(page);
+    }
+}
+
 /* vmm_map_range validates the same way vmm_map_page does — it has its own
  * 2 MiB path that never reaches those checks. */
 static void test_map_range_validates(void)
@@ -530,6 +605,8 @@ void suite_vmm_tests(CU_pSuite s)
                 test_conflicting_map_does_not_split);
     CU_add_test(s, "2 MiB split preserves neighbours",
                 test_large_page_split_preserves_neighbours);
+    CU_add_test(s, "2 MiB split preserves PAT",
+                test_large_page_split_preserves_pat);
 
     CU_add_test(s, "LibOS context bound to kernel map by default",
                 test_libos_bound_to_kernel_map_by_default);

@@ -26,12 +26,29 @@
 #include "page_alloc.h"
 #include "serial.h"
 
-/* Bits 51:12 of an entry — the physical address of the next table or leaf. */
+/*
+ * Bits 51:12 of an entry — the physical address of the next table or leaf.
+ * Valid for a 4 KiB PTE and for any non-leaf link entry at any level, none of
+ * which have a PAT bit of their own. NOT valid for a 2 MB or 1 GB PS=1 leaf:
+ * bit 12 there is PAT, not address — use PD_HUGE_ADDR_MASK for those instead
+ * (SCRUM-161).
+ */
 #define ENTRY_ADDR_MASK 0x000FFFFFFFFFF000ULL
-/* Bits 11:0 — every flag this kernel sets.  Anything a caller passes outside
- * this mask is dropped rather than trusted: bit 63 (NX) faults the walk while
- * EFER.NXE is clear, and the rest are reserved. */
+/*
+ * Bits 11:0 — every flag this kernel sets on a 4 KiB PTE or a link entry.
+ * Anything a caller passes outside this mask is dropped rather than trusted:
+ * bit 63 (NX) faults the walk while EFER.NXE is clear, and the rest are
+ * reserved. A 2 MB/1 GB PS=1 leaf has one more real flag bit than this mask
+ * covers — bit 12, PAT (VMM_PAT_HUGE) — since address bits start one bit
+ * later there than in a 4 KiB PTE.
+ */
 #define ENTRY_FLAG_MASK 0x0000000000000FFFULL
+/* Bits 51:21 — the physical frame of a 2 MB PS=1 PDE leaf. Bit 12 in that
+ * same entry is PAT, not address (see ENTRY_ADDR_MASK above); using
+ * ENTRY_ADDR_MASK on a huge leaf shifts the frame up by one page whenever
+ * PAT is set. */
+#define PD_HUGE_ADDR_MASK 0x000FFFFFFFE00000ULL
+/* VMM_PAT_HUGE/VMM_PAT_4K are declared in vmm.h, next to VMM_HUGE. */
 
 #define PML4_IDX(v) (((v) >> 39) & 0x1FF)
 #define PDPT_IDX(v) (((v) >> 30) & 0x1FF)
@@ -221,8 +238,11 @@ static uint64_t *next_level(uint64_t *pml4, uint64_t *table, unsigned index, uin
  */
 static int split_large_page(uint64_t *pml4, uint64_t *pd, unsigned index) {
     uint64_t entry = pd[index];
-    uint64_t base  = entry & ENTRY_ADDR_MASK;
+    uint64_t base  = entry & PD_HUGE_ADDR_MASK;
     uint64_t flags = (entry & ENTRY_FLAG_MASK) & ~VMM_HUGE;
+    if (entry & VMM_PAT_HUGE) {
+        flags |= VMM_PAT_4K;   /* PAT moves from bit 12 to bit 7 across the split */
+    }
 
     uint64_t *pt = alloc_table();
     if (pt == NULL) {
@@ -321,7 +341,10 @@ int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
  * vmm_map_range_in() treats as "fall back to 4 KiB pages" rather than an error.
  */
 static int map_large_page(uint64_t *pml4, uint64_t vaddr, uint64_t paddr, uint64_t flags) {
-    uint64_t leaf = (flags & ENTRY_FLAG_MASK) | VMM_PRESENT;
+    /* A 2 MB leaf has one more real flag bit (PAT, bit 12) than ENTRY_FLAG_MASK
+     * covers — admit it here so a caller can actually request a non-default
+     * cache type on a huge leaf (SCRUM-161). */
+    uint64_t leaf = (flags & (ENTRY_FLAG_MASK | VMM_PAT_HUGE)) | VMM_PRESENT;
 
     uint64_t *pdpt = next_level(pml4, pml4, PML4_IDX(vaddr), leaf);
     if (pdpt == NULL) {
