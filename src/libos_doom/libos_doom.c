@@ -56,6 +56,7 @@
 #include "libos_fb.h"
 #include "doom_keymap.h"
 #include "doom/doomgeneric.h"
+#include "doom/d_loop.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -94,6 +95,8 @@ static char *doom_argv[] = { arg0, NULL };
 
 static libos_fb_t fb;
 static int        fb_state = FB_UNTRIED;
+
+static void doom_tic_rate_sample(void);
 
 /*
  * Blit Doom's frame to the screen (SCRUM-77).
@@ -205,6 +208,76 @@ void DG_DrawFrame(void)
             src_y = DOOMGENERIC_RESY - 1;
         }
     }
+
+    doom_tic_rate_sample();
+}
+
+/*
+ * doom_tic_rate_sample -- SCRUM-89's tic-rate diagnostic.
+ *
+ * Measures `gametic` (src/doom/d_loop.c/.h), the count of SIMULATED game
+ * tics Doom has run, against real wall-clock time from DG_GetTicksMs() --
+ * the same clock Doom's own pacing (I_GetTime, src/doom/i_timer.c) uses.
+ *
+ * This is deliberately NOT a count of DG_DrawFrame() calls. An earlier
+ * version of this diagnostic counted frames and measured ~63-70 draws/sec
+ * at 1024x768 under KVM on the title/menu screen -- not a bug, but a
+ * misreading: doomgeneric_Tick() (src/doom/d_main.c) calls D_Display(),
+ * and so DG_DrawFrame(), once per host loop iteration regardless of
+ * whether TryRunTics() actually advanced gametic that iteration.
+ * TryRunTics's own wait loop explicitly returns without running a tic "to
+ * update the screen" when idle (its comment says so) -- "will run at least
+ * one tic" is a lower bound on ticks run once it does run one, not a
+ * guarantee every call runs one. So render calls can and do run faster
+ * than 35 Hz, independent of the actual game-time rate, which is what
+ * "game speed" in the acceptance criterion means (monster speed, player
+ * move speed, the level timer). Sampling gametic measures that directly
+ * and is correct regardless of how the render side behaves.
+ *
+ * Reporting every DOOM_TIC_RATE_SAMPLE_MS of wall time (10 sim-seconds at
+ * the 35 Hz target) keeps this to a handful of serial lines per minute of
+ * play. It's driven from DG_DrawFrame since that's the only per-iteration
+ * hook this port has; it does no work beyond one comparison on iterations
+ * where the window hasn't elapsed yet.
+ */
+#define DOOM_TIC_RATE_TARGET_HZ 35
+#define DOOM_TIC_RATE_SAMPLE_MS (10 * 1000)
+
+static void doom_tic_rate_sample(void)
+{
+    static uint32_t sample_start_ms;
+    static int       sample_start_gametic;
+    static int       have_sample_start;
+
+    uint32_t now_ms = DG_GetTicksMs();
+
+    if (!have_sample_start) {
+        sample_start_ms = now_ms;
+        sample_start_gametic = gametic;
+        have_sample_start = 1;
+        return;
+    }
+
+    uint32_t elapsed_ms = now_ms - sample_start_ms;
+
+    if (elapsed_ms < DOOM_TIC_RATE_SAMPLE_MS) {
+        return;
+    }
+
+    int tics_run = gametic - sample_start_gametic;
+
+    if (tics_run >= 0 && elapsed_ms > 0) {
+        uint32_t rate_centi_hz = ((uint32_t)tics_run * 100u * 1000u) / elapsed_ms;
+
+        printf("libos_doom: tic rate %d gametics in %u ms "
+               "(%u.%02u tics/sec, target %u.00)\n",
+               tics_run, (unsigned)elapsed_ms,
+               (unsigned)(rate_centi_hz / 100), (unsigned)(rate_centi_hz % 100),
+               (unsigned)DOOM_TIC_RATE_TARGET_HZ);
+    }
+
+    sample_start_ms = now_ms;
+    sample_start_gametic = gametic;
 }
 
 /*
