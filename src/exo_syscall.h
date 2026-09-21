@@ -92,14 +92,15 @@
 /* Scheduling / lifecycle */
 #define EXO_SYS_YIELD        19
 #define EXO_SYS_EXIT         20
-/* LibOS launch (SCRUM-178, SCRUM-168, SCRUM-182) */
+/* LibOS launch (SCRUM-178, SCRUM-168, SCRUM-182, SCRUM-66) */
 #define EXO_SYS_LAUNCH_WAD_VIEWER 21
 #define EXO_SYS_LAUNCH_CLOCK      22
 #define EXO_SYS_LAUNCH_SNAKE      23
+#define EXO_SYS_LAUNCH_DOOM       24
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense. */
-#define EXO_SYS_COUNT        24
+#define EXO_SYS_COUNT        25
 
 /* ---- Error codes -------------------------------------------------------- */
 /*
@@ -528,6 +529,20 @@ static inline int64_t exo_launch_clock(void)
 static inline int64_t exo_launch_snake(void)
 {
     return exo_syscall0(EXO_SYS_LAUNCH_SNAKE);
+}
+
+/*
+ * Launch the Doom LibOS (SCRUM-66).
+ *
+ * Like the WAD viewer's #21 and unlike snake's #23, the kernel side stages a
+ * resource before entering ring 3: sys_launch_doom() maps the multiboot WAD
+ * module into the new address space and patches its address and length into
+ * the image's params page, where DG_Init (src/doomgeneric_exo.c) reads them.
+ * Nothing about that is visible here -- the call still takes no arguments.
+ */
+static inline int64_t exo_launch_doom(void)
+{
+    return exo_syscall0(EXO_SYS_LAUNCH_DOOM);
 }
 
 #endif /* !EXO_KERNEL */
