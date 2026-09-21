@@ -35,7 +35,12 @@ static int64_t sys_serial_write(uint64_t buf, uint64_t len, uint64_t a3,
     if (len > SERIAL_WRITE_MAX_LEN)
         return -EXO_EINVAL;
 
-    if (!exo_range_in_user_window(buf, len))
+    /* Bounds alone isn't enough: the LibOS window is reserved-but-unmapped
+     * until the caller exo_page_maps it, so an in-window-but-unmapped buf
+     * still has to be rejected here, or the read below takes a fatal
+     * supervisor-mode page fault (SCRUM-186). */
+    if (!exo_range_in_user_window(buf, len) ||
+        !exo_user_range_mapped(buf, len, 0))
         return -EXO_EFAULT;
 
     const char *p = (const char *)(uintptr_t)buf;

@@ -46,8 +46,13 @@ static int64_t sys_fb_acquire(uint64_t info_out, uint64_t a2, uint64_t a3,
      * a kernel address here is otherwise indistinguishable from a real one:
      * the map is an identity map, so every kernel address is present and
      * writable, and without this check the kernel would fill a caller-chosen
-     * 24 bytes of its own memory on request (SCRUM-54). */
-    if (!exo_range_in_user_window(info_out, sizeof(exo_fb_info_t)))
+     * 24 bytes of its own memory on request (SCRUM-54). Bounds alone isn't
+     * enough, though: the LibOS window is reserved-but-unmapped until the
+     * caller exo_page_maps it, so an in-window-but-unmapped info_out still
+     * has to be rejected here too, or the write below takes a fatal
+     * supervisor-mode page fault (SCRUM-186). */
+    if (!exo_range_in_user_window(info_out, sizeof(exo_fb_info_t)) ||
+        !exo_user_range_mapped(info_out, sizeof(exo_fb_info_t), 1))
         return -EXO_EFAULT;
 
     exo_fb_info_t *out = (exo_fb_info_t *)(uintptr_t)info_out;

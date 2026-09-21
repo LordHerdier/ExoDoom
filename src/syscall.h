@@ -107,3 +107,33 @@ static inline int exo_range_in_user_window(uint64_t base, uint64_t len)
     uint64_t end = base + len;
     return end >= base && end <= EXO_USER_VA_END;
 }
+
+/*
+ * Is [base, base+len) not just in-window but actually backed by present
+ * pages in the *caller's* own address space (SCRUM-186), writable by it if
+ * `writable` is set?
+ *
+ * exo_range_in_user_window() above is a bounds check only: the whole 64 TiB
+ * LibOS window is reserved-but-unmapped by default, so an in-window pointer
+ * the caller never exo_page_map'd passes it fine and then faults the kernel
+ * when a handler dereferences it (there is no fixup for a kernel write
+ * through a caller-supplied pointer — see src/fault.c). This is the second,
+ * independent check every handler that takes a LibOS output/input pointer
+ * must run *after* the bounds check, not instead of it — a non-canonical or
+ * out-of-window `base` is exo_range_in_user_window()'s job to catch first.
+ *
+ * `writable` distinguishes a handler that writes *through* the pointer
+ * (exo_fb_acquire's info_out, exo_kbd_poll's event_out — pass 1) from one
+ * that only reads from it (exo_serial_write's buf — pass 0): a present page
+ * with VMM_WRITE clear is still perfectly readable on x86 (EXO_PAGE_READ is
+ * unconditional — see syscall_mem.c's sys_page_map), so requiring WRITE on a
+ * read-only source buffer would reject a legitimate caller. VMM_USER is
+ * required either way — a present-but-supervisor-only page is exactly the
+ * kernel's own identity map, not something ring 3 could have written.
+ *
+ * Not `static inline` like the bounds check: it needs vmm.h
+ * (vmm_translate_in/VMM_*), which syscall.h does not otherwise pull in, so
+ * this lives in syscall.c instead of dragging that dependency into every TU
+ * that includes this header.
+ */
+int exo_user_range_mapped(uint64_t base, uint64_t len, int writable);

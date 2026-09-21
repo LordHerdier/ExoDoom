@@ -61,6 +61,11 @@
  * +0x10000000, test_syscall_serial_k.c: +0x28000000). */
 #define SCRATCH_INFO_VA (EXO_USER_VA_BASE + 0x2C000000ULL)
 
+/* A second scratch address in this suite's own range, one page past
+ * SCRATCH_INFO_VA, that fb_binding_suite_init() never maps -- the
+ * in-window-but-unmapped pointer SCRUM-186 reproduces the crash with. */
+#define UNMAPPED_INFO_VA (SCRATCH_INFO_VA + 0x1000ULL)
+
 static fb_geometry_t boot_geometry;
 static int           boot_had_fb;
 static uint64_t      scratch_paddr;
@@ -284,6 +289,20 @@ static void test_info_straddling_window_end_faults(void)
     CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
 }
 
+/* SCRUM-186: an in-window info_out that was never exo_page_map'd used to
+ * reach the write in fb_shadow_acquire() and take a fatal supervisor-mode
+ * page fault (the whole window is reserved-but-unmapped by default). This is
+ * the exact crash repro -- it must now come back cleanly as -EXO_EFAULT
+ * instead, with no binding taken. */
+static void test_unmapped_info_faults_without_binding(void)
+{
+    install_test_fb();
+
+    CU_ASSERT_EQUAL(do_fb_acquire((exo_fb_info_t *)(uintptr_t)UNMAPPED_INFO_VA),
+                    -EXO_EFAULT);
+    CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
+}
+
 /* Nobody can bind the framebuffer to PAGE_OWNER_FREE: that is the "unheld"
  * sentinel, and a binding to it would look free to the next caller. */
 static void test_free_sentinel_cannot_own(void)
@@ -479,6 +498,8 @@ void suite_fb_binding_tests(CU_pSuite s)
                 test_kernel_address_info_faults_without_binding);
     CU_add_test(s, "info straddling window end faults",
                 test_info_straddling_window_end_faults);
+    CU_add_test(s, "unmapped info faults without binding",
+                test_unmapped_info_faults_without_binding);
     CU_add_test(s, "FREE sentinel cannot own", test_free_sentinel_cannot_own);
     CU_add_test(s, "headless reports ENODEV", test_headless_reports_enodev);
     CU_add_test(s, "degenerate geometry refused",
