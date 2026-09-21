@@ -64,6 +64,7 @@ void suite_libc_gaps_tests(CU_pSuite s);
 void suite_syscall_fuzz_tests(CU_pSuite s);
 void suite_syscall_bench_tests(CU_pSuite s);
 void suite_libos_snake_tests(CU_pSuite s);
+void suite_doom_keymap_tests(CU_pSuite s);
 void suite_libos_doom_tests(CU_pSuite s);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
@@ -398,6 +399,10 @@ int run_tests(void)
                      libos_snake_suite_cleanup);
     suite_libos_snake_tests(s);
 
+    /* Pure function over one key -- no hardware, no state, so no suite
+     * init/cleanup (SCRUM-40). */
+    s = CU_add_suite("doom_keymap", NULL, NULL);
+    suite_doom_keymap_tests(s);
     s = CU_add_suite("libos_doom", libos_doom_suite_init,
                      libos_doom_suite_cleanup);
     suite_libos_doom_tests(s);
