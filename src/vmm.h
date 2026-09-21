@@ -47,6 +47,20 @@
 #define VMM_PCD     (1ULL << 4)
 #define VMM_HUGE    (1ULL << 7)   /* PS: 2 MB leaf at the PD level */
 
+/*
+ * PAT — cache type selector. Its bit position depends on leaf granularity,
+ * which is what SCRUM-161 was filed over: a 2 MB/1 GB PS=1 leaf carries it at
+ * bit 12 (VMM_PAT_HUGE), a 4 KiB PTE at bit 7 (VMM_PAT_4K, the same numeric
+ * value as VMM_HUGE above — harmless, since a PTE has no PS bit for it to
+ * collide with). vmm_map_page()/vmm_map_range() translate neither for you:
+ * pass VMM_PAT_HUGE only when the call is known to land on a 2 MB leaf (see
+ * vmm_map_range()'s doc comment), VMM_PAT_4K only for a 4 KiB one. Splitting
+ * a huge PAT leaf (src/vmm.c's split_large_page()) carries the bit across
+ * correctly on its own.
+ */
+#define VMM_PAT_HUGE (1ULL << 12)
+#define VMM_PAT_4K   (1ULL << 7)
+
 /* Status codes.  ABI-agnostic like the PMM's (page_alloc.h): the syscall layer
  * maps them to EXO_E* codes when SCRUM-153 exposes mapping to a LibOS. */
 #define VMM_OK      0
