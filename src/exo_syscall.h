@@ -92,15 +92,35 @@
 /* Scheduling / lifecycle */
 #define EXO_SYS_YIELD        19
 #define EXO_SYS_EXIT         20
-/* LibOS launch (SCRUM-178, SCRUM-168, SCRUM-182, SCRUM-66) */
-#define EXO_SYS_LAUNCH_WAD_VIEWER 21
-#define EXO_SYS_LAUNCH_CLOCK      22
-#define EXO_SYS_LAUNCH_SNAKE      23
-#define EXO_SYS_LAUNCH_DOOM       24
+/* LibOS launch (SCRUM-178, SCRUM-168, SCRUM-182, SCRUM-66, SCRUM-184).
+ *
+ * ONE number for every launchable app, taking an EXO_LAUNCH_APP_* id below.
+ * It replaced four -- EXO_SYS_LAUNCH_WAD_VIEWER/_CLOCK/_SNAKE/_DOOM, #21..#24
+ * -- which did not scale: each new demo LibOS cost a syscall number, a
+ * dispatcher handler, and edits to the two tests that police this table's
+ * density and size, to say nothing of the number space itself. The app id is
+ * an ordinary argument, so adding an app now touches neither. */
+#define EXO_SYS_LAUNCH       21
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense. */
-#define EXO_SYS_COUNT        25
+#define EXO_SYS_COUNT        22
+
+/* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
+/*
+ * These cross the syscall boundary, so the order is ABI: append, never
+ * reorder, and keep EXO_LAUNCH_APP_COUNT one past the last. The kernel's
+ * launch_apps[] table (src/syscall_launch.c) is indexed by exactly these
+ * values and rejects anything >= COUNT with -EXO_EINVAL.
+ *
+ * Numbered from 0 rather than carrying over the old #21..#24 so the id is
+ * an index rather than a syscall number wearing a disguise.
+ */
+#define EXO_LAUNCH_APP_WAD_VIEWER 0
+#define EXO_LAUNCH_APP_CLOCK      1
+#define EXO_LAUNCH_APP_SNAKE      2
+#define EXO_LAUNCH_APP_DOOM       3
+#define EXO_LAUNCH_APP_COUNT      4
 
 /* ---- Error codes -------------------------------------------------------- */
 /*
@@ -495,54 +515,35 @@ static inline void exo_exit(int32_t code)
     for (;;) { }
 }
 
-/* #21 — launch the WAD/flat/automap viewer as a second LibOS context and
- * switch to it immediately (src/syscall_launch.c). Like exo_yield(), this
- * call does not return control here until something switches back to the
- * caller — in this case, the viewer's own exo_yield() call
- * (context_next_ready()'s round robin). Returns a negative EXO_E* right
- * away if the launch failed before the switch was armed, in which case the
- * caller (the shell) keeps running uninterrupted; returns 0 once rescheduled
- * after the viewer has yielded back. */
-static inline int64_t exo_launch_wad_viewer(void)
-{
-    return exo_syscall0(EXO_SYS_LAUNCH_WAD_VIEWER);
-}
-
-/* #22 — launch the clock demo LibOS (SCRUM-168) as a second/third LibOS
- * context and switch to it immediately (src/syscall_launch.c). Same calling
- * convention as exo_launch_wad_viewer(): does not return control here until
- * something switches back to the caller (Ctrl+Tab, SCRUM-111, since the
- * clock itself never yields). Returns a negative EXO_E* right away if the
- * launch failed before the switch was armed; returns 0 once rescheduled
- * after the caller is switched back to. */
-static inline int64_t exo_launch_clock(void)
-{
-    return exo_syscall0(EXO_SYS_LAUNCH_CLOCK);
-}
-
-/* #23 — launch the Snake LibOS as a second LibOS context and switch to it
- * immediately (src/syscall_launch.c, SCRUM-182). Same calling convention as
- * exo_launch_wad_viewer(): does not return control here until something
- * switches back to the caller (Snake's own exo_yield() call after exiting
- * via EXO_SYS_EXIT), returns a negative EXO_E* right away only if the launch
- * failed before the switch was armed. */
-static inline int64_t exo_launch_snake(void)
-{
-    return exo_syscall0(EXO_SYS_LAUNCH_SNAKE);
-}
-
 /*
- * Launch the Doom LibOS (SCRUM-66).
+ * #21 — launch the ring-3 LibOS app named by `app_id` (an EXO_LAUNCH_APP_*
+ * value) as its own context and switch to it immediately
+ * (src/syscall_launch.c, SCRUM-184).
  *
- * Like the WAD viewer's #21 and unlike snake's #23, the kernel side stages a
- * resource before entering ring 3: sys_launch_doom() maps the multiboot WAD
- * module into the new address space and patches its address and length into
- * the image's params page, where DG_Init (src/doomgeneric_exo.c) reads them.
- * Nothing about that is visible here -- the call still takes no arguments.
+ * Replaces exo_launch_wad_viewer()/_clock()/_snake()/_doom(), which were four
+ * no-argument wrappers over four syscall numbers. One wrapper over one
+ * number, because the thing that varied was never the call -- it was which
+ * blob the kernel picked.
+ *
+ * Calling convention, unchanged from those four: this does not return control
+ * to the caller when it succeeds. The launch arms a context switch and the
+ * syscall epilogue takes it, so the next thing that runs is the new app. The
+ * call appears to return 0 only later, once something switches back to the
+ * caller -- the app's own exo_yield() after exiting via EXO_SYS_EXIT, or
+ * Ctrl+Tab (SCRUM-111) for an app that never yields, such as the clock.
+ *
+ * A negative EXO_E* comes back immediately, with the caller still running
+ * uninterrupted, if the launch failed before the switch was armed:
+ *
+ *   -EXO_EINVAL  app_id is not a valid EXO_LAUNCH_APP_* (new to SCRUM-184 --
+ *                with a number per app, an unknown app was an unknown
+ *                syscall and the dispatcher answered -EXO_ENOSYS)
+ *   -EXO_ENODEV  the app needs the WAD module and there is none
+ *   -EXO_ENOMEM  no room for the image or no free context row
  */
-static inline int64_t exo_launch_doom(void)
+static inline int64_t exo_launch(uint64_t app_id)
 {
-    return exo_syscall0(EXO_SYS_LAUNCH_DOOM);
+    return exo_syscall1(EXO_SYS_LAUNCH, app_id);
 }
 
 #endif /* !EXO_KERNEL */
