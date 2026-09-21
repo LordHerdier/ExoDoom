@@ -10,7 +10,7 @@
  *
  * A triple fault kills QEMU outright, so the "no panic" half of the
  * acceptance criterion is already covered by this suite simply completing
- * — the harness's own timeout (make docker-ci's `timeout 30`) is what would
+ * — the harness's own timeout (make docker-ci's `timeout 120`) is what would
  * catch that. The "no corruption" half needs an explicit check, which
  * test_post_fuzz_integrity() below provides: a known-good page alloc/free
  * round trip, and that it leaves PAGE_OWNER_LIBOS's owned-page count exactly
@@ -25,9 +25,12 @@
  * that runs after this one. Its argument-independence is already covered by
  * test_syscall_exit_k.c.
  *
- * EXO_SYS_LAUNCH_WAD_VIEWER/_CLOCK (#21/#22) also ignore their arguments,
- * and each does a real context_create() + image copy on every call — bounded
- * by CONTEXT_MAX and shared with every other suite in this boot. They are
+ * EXO_SYS_LAUNCH_WAD_VIEWER/_CLOCK/_DOOM (#21/#22/#24) also ignore their
+ * arguments, and each does a real context_create() + image copy on every
+ * call — bounded by CONTEXT_MAX and shared with every other suite in this
+ * boot. EXO_SYS_LAUNCH_DOOM's image is by far the largest of the three
+ * (~200 pages against WAD_VIEWER's/CLOCK's much smaller ones), so it is the
+ * one that actually made unrated inclusion expensive. All three are
  * included in the pool but rate-limited to roughly 1-in-2000 draws (see
  * rare_hit() below) so a garbage-argument call is still proven safe without
  * spending most of the 1,000,000-call budget on context churn.
@@ -128,8 +131,8 @@ static uint64_t next_arg_out_of_window(void)
     return next_u64_random();
 }
 
-/* True roughly 1 draw in 2000 — the rate limit for the two LAUNCH_* numbers
- * (see file comment). */
+/* True roughly 1 draw in 2000 — the rate limit for the rate-limited LAUNCH_*
+ * numbers (see file comment). */
 static int rare_hit(void)
 {
     return (next_u30() % 2000) == 0;
@@ -137,7 +140,12 @@ static int rare_hit(void)
 
 /* A syscall number to dispatch: uniform over [0, EXO_SYS_COUNT + 4), the
  * +4 slack covering the out-of-range -EXO_ENOSYS path, with EXO_SYS_EXIT
- * excluded outright and the two LAUNCH_* numbers rate-limited. */
+ * excluded outright and the WAD viewer/clock/Doom LAUNCH_* numbers
+ * rate-limited (SCRUM-66: EXO_SYS_LAUNCH_DOOM does a real context_create()
+ * plus a ~200-page image copy, same as WAD_VIEWER/CLOCK's own reasoning in
+ * the file comment — left unguarded it turns roughly 1-in-29 of the
+ * 1,000,000 draws into a full Doom image build instead of an occasional
+ * probe, which is what was blowing the suite past the QEMU boot's timeout). */
 static uint64_t next_syscall_num(void)
 {
     for (;;) {
@@ -146,8 +154,8 @@ static uint64_t next_syscall_num(void)
         if (n == EXO_SYS_EXIT)
             continue;
 
-        if ((n == EXO_SYS_LAUNCH_WAD_VIEWER || n == EXO_SYS_LAUNCH_CLOCK) &&
-            !rare_hit())
+        if ((n == EXO_SYS_LAUNCH_WAD_VIEWER || n == EXO_SYS_LAUNCH_CLOCK ||
+             n == EXO_SYS_LAUNCH_DOOM) && !rare_hit())
             continue;
 
         return n;
