@@ -98,9 +98,8 @@ SHIM_SOURCES=(
 # would make the gate fail on a symbol that is fine.
 declare -A ALLOWED=(
   [DG_DrawFrame]="implemented in src/libos_doom/libos_doom.c (SCRUM-77); not compiled by this gate"
-  [DG_GetKey]="Sprint 8 -- needs exo_kbd_poll + keycode translation"
+  [DG_GetKey]="implemented in src/libos_doom/libos_doom.c (SCRUM-79); not compiled by this gate"
   [DG_SetWindowTitle]="implemented in src/libos_doom/libos_doom.c (SCRUM-66); not compiled by this gate"
-  [_GLOBAL_OFFSET_TABLE_]="not a symbol -- ld synthesises this itself"
 )
 
 echo "[1/3] Compile vendored Doom engine"

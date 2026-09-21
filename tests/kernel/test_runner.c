@@ -403,6 +403,7 @@ int run_tests(void)
      * init/cleanup (SCRUM-40). */
     s = CU_add_suite("doom_keymap", NULL, NULL);
     suite_doom_keymap_tests(s);
+
     s = CU_add_suite("libos_doom", libos_doom_suite_init,
                      libos_doom_suite_cleanup);
     suite_libos_doom_tests(s);
