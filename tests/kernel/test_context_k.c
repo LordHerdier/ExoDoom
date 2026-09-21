@@ -27,7 +27,7 @@
  * suite's CU_add_suite cleanup in test_runner.c.
  *
  * Bounded well past anything this suite could ever actually hand out --
- * context_create() only ever advances its id counter by CONTEXT_MAX (4) per
+ * context_create() only ever advances its id counter by CONTEXT_MAX (15) per
  * test at most, across a handful of tests in this one file -- rather than
  * walking the full 15-bit id space PAGE_OWNER_ID_MASK allows, which a linear
  * context_lookup() scan per id would make needlessly slow for no benefit

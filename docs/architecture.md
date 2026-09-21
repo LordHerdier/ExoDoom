@@ -725,8 +725,10 @@ focus and the active framebuffer.
 > `vmm_bind_address_space()` — the page-dir tracking stays in `vmm.c`'s own
 > registry rather than being duplicated here, so there is one source of
 > truth for "which PML4 does this context run on". Table capacity is
-> `CONTEXT_MAX == VMM_MAX_ADDRESS_SPACES` (4), since a context with no bound
-> address space isn't meaningful in this design.
+> `CONTEXT_MAX == VMM_MAX_ADDRESS_SPACES - 1` (15), since a context with no
+> bound address space isn't meaningful in this design and one of vmm's
+> `VMM_MAX_ADDRESS_SPACES` slots is permanently claimed at boot by
+> `src/kernel.c`'s `PAGE_OWNER_LIBOS` placeholder bind.
 > `tests/kernel/test_context_k.c` proves the acceptance criterion directly:
 > 2+ real contexts, each on its own address space, tracked simultaneously.
 >
