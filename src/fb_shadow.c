@@ -94,6 +94,17 @@ void fb_shadow_release(page_owner_t who) {
         return;
     }
 
+    /* SCRUM-187: free exactly the pages this slot allocated, rather than
+     * leaving that to a caller-side reclaim_pages_owned(who) sweep — such a
+     * sweep frees *every* page `who` owns, not just this buffer's, and
+     * collides with anything else that happens to share the same owner id
+     * (see this file's header comment in fb_shadow.h). Same per-page loop
+     * fb_shadow_acquire()'s own ENOMEM cleanup path already uses above. */
+    for (uint32_t i = 0; i < slot->page_count; i++) {
+        void *page = (void *)(uintptr_t)(slot->phys_base + (uint64_t)i * PAGE_SIZE);
+        free_page_owned(page, who);
+    }
+
     slot->present    = 0;
     slot->who        = PAGE_OWNER_FREE;
     slot->phys_base  = 0;

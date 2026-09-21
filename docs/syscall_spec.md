@@ -754,10 +754,16 @@ scheduling (SCRUM-147) invalidates that assumption and will need a lock here.
 > anymore — the real framebuffer is unmappable by any LibOS, full stop.
 > "Reclaim" for the virtual framebuffer is `fb_shadow_release()`, called from
 > the same two places `fb_binding_release()`/`fb_binding_reclaim()` already
-> were (`exo_exit`, `revoke_all()`) — it only drops `fb_shadow.c`'s own
-> directory entry; the underlying pages are ordinary pages owned by the
-> context, already covered by `page_reclaim_all()`'s existing generic sweep.
-> What decides what is actually *visible*: `src/fb_compositor.c` copies
+> were (`exo_exit`, `revoke_all()`). ✅ **SCRUM-187:** it now frees the
+> underlying pages itself, from the exact `phys_base`/`page_count` its own
+> directory entry tracks, rather than leaving that to the caller's
+> owner-wide `reclaim_pages_owned()`/`page_reclaim_all()` sweep — that sweep
+> frees *every* page the owner id holds, not just the shadow buffer's, which
+> is correct at real `exo_exit` (where "free everything" is the intent) but
+> was a hazard anywhere else the same owner id held unrelated pages, as
+> `tests/kernel/test_fb_binding_k.c`'s own scratch page did. `exo_exit`'s
+> subsequent sweep still reclaims the rest of the context's pages exactly as
+> before. What decides what is actually *visible*: `src/fb_compositor.c` copies
 > whichever context is `context_current()`'s virtual framebuffer onto the
 > real one on a throttled PIT tick (`src/pit.c`'s `irq0_handler()`,
 > ~60&nbsp;Hz) — "foreground" is simply "the context currently running,"
