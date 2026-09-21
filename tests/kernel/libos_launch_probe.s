@@ -43,10 +43,13 @@
 .set SYS_LIBOS_RETURN, LIBOS_RETURN_SYSCALL_NUM
 .set RESULT_MARKER, 0x600DC0DE
 
-/* An offset well clear of the code and stack regions libos_build_image()
- * maps at +0x1000/+0x5000/+0x9000 (SCRUM-49). Must match
- * LIBOS_LAUNCH_PROBE_FAULT_VADDR in test_libos_launch_k.c. */
-.set FAULT_VA, EXO_USER_VA_BASE + 0x20000
+/* The first page past everything libos_build_image() can map, so it is
+ * unmapped by construction rather than by a hardcoded offset that has to be
+ * rechecked every time a cap moves (SCRUM-66 -- the old
+ * EXO_USER_VA_BASE + 0x20000 sat inside the image once the code/data caps
+ * grew for Doom). Must match FAULT_VADDR in test_libos_launch_k.c, which
+ * derives it from the same macro. */
+.set FAULT_VA, LIBOS_LAUNCH_UNMAPPED_VADDR
 
 .global libos_launch_probe
 .global libos_launch_probe_resume

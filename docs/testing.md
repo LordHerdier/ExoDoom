@@ -46,17 +46,31 @@ string is absent or if `TESTS FAILED` is present.
 
 ### Time budget
 
-Both `docker-test` and `docker-ci` run QEMU under `timeout 30`. The whole
-suite currently boots and finishes in roughly 6 seconds, so there is ample
-headroom — but it is a hard ceiling, and a suite that blows through it looks
-like a *truncated serial log*, not like a failure: the grep for
-`ALL TESTS PASSED` simply finds nothing and CI reports the completion signal
-as missing.
+Both `docker-test` and `docker-ci` run QEMU under `timeout 120` (raised from
+60 in SCRUM-66 for headroom — see below). It is a hard ceiling, and a suite
+that blows through it looks like a *truncated serial log*, not like a
+failure: the grep for `ALL TESTS PASSED` simply finds nothing, CI reports the
+completion signal as missing, and QEMU's own serial output (already
+flushed/buffered up to that point) dumps out right as `timeout` kills the
+process — which can look like a pile of failures even when every one of
+those lines is an expected rejection from whichever suite was still running.
 
-The expensive suite is `heap_stress` (SCRUM-27), at about 2.5 seconds: it runs
-20,000 allocations against a first-fit allocator whose search is O(live
-blocks). If you add load there, re-measure rather than assuming the headroom
-is still there.
+The expensive suite is `syscall_fuzz` (SCRUM-115): it drives 1,000,000 random
+syscalls through the dispatcher. Three of those syscall numbers —
+`EXO_SYS_LAUNCH_WAD_VIEWER`/`_CLOCK`/`_DOOM` — do a real `context_create()`
+plus a full image copy instead of a cheap validation check, so
+`test_syscall_fuzz_k.c`'s `next_syscall_num()` deliberately rate-limits all
+three to roughly 1-in-2000 draws rather than letting them land at their
+natural ~1-in-29 frequency. **Any new `EXO_SYS_LAUNCH_*` number must be added
+to that rate limit when it's introduced** — SCRUM-66 added
+`EXO_SYS_LAUNCH_DOOM` to `exo_syscall.h` without updating the fuzz test, and
+left unrated it turned roughly 1-in-29 of the million draws into a full
+~200-page Doom image build, which is what blew the suite through the old
+60s ceiling (and very nearly the new 120s one too). It runs last on purpose
+(see that suite's own file comment), so it has no headroom to spare: any
+suite added *before* it also eats into its share of the timeout, and adding
+an unrated expensive syscall is worse still. Re-measure the full run rather
+than assuming the headroom is still there.
 
 ---
 
