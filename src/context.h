@@ -228,6 +228,18 @@ context_t *context_lookup(page_owner_t id);
 /* Number of contexts currently in a non-UNUSED state. */
 uint32_t context_count(void);
 
+/* One entry per live (non-UNUSED) context, id + state only -- deliberately
+ * not the full context_t (its regs field is internal switch state, not
+ * something a caller should see). Fills up to `max` entries into `out` and
+ * returns the number written, which never exceeds context_count() or `max`.
+ * For introspection (SCRUM-113): backs exo_pslist (src/syscall_stat.c). */
+typedef struct {
+    page_owner_t     id;
+    context_state_t  state;
+} context_info_t;
+
+uint32_t context_list(context_info_t *out, uint32_t max);
+
 /* Move `id` to `state`. Returns CONTEXT_OK, or CONTEXT_ENOENT if `id` names
  * no live context. */
 int context_set_state(page_owner_t id, context_state_t state);

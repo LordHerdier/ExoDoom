@@ -70,19 +70,25 @@
 static char shell_banner[] = "ExoDoom Shell\n";
 static char shell_help_text[] = "type 'help' for a list of commands\n";
 static char shell_prompt[] = "exodoom> ";
-static char shell_commands_text[] = "commands: help, clear, about, wadview, clock, snake, doom\n";
+static char shell_commands_text[] =
+    "commands: help, clear, about, wadview, clock, snake, doom, memstat, pslist\n";
 static char shell_about_text[] = "ExoDoom shell LibOS -- SCRUM-110\n";
 static char shell_unknown_prefix[] = "unknown command: ";
 static char shell_wadview_fail_text[] = "wadview: launch failed\n";
 static char shell_clock_fail_text[] = "clock: launch failed\n";
 static char shell_snake_fail_text[] = "snake: launch failed\n";
 static char shell_doom_fail_text[] = "doom: launch failed\n";
+static char shell_memstat_fail_text[] = "memstat: query failed\n";
+static char shell_pslist_fail_text[] = "pslist: query failed\n";
 
 static int str_eq(const char *a, const char *b);
 static char shell_key_to_ascii(uint8_t key, uint8_t modifiers);
 static void shell_backspace(fb_console_t *con);
 static void shell_print_prompt(fb_console_t *con);
 static void shell_run_command(fb_console_t *con, const char *line);
+static void shell_write_u32(fb_console_t *con, uint32_t v);
+static void shell_run_memstat(fb_console_t *con);
+static void shell_run_pslist(fb_console_t *con);
 
 void shell_main(void) {
     libos_fb_t fb;
@@ -271,9 +277,80 @@ static void shell_run_command(fb_console_t *con, const char *line) {
         } else {
             fbcon_write(con, shell_doom_fail_text);
         }
+    } else if (str_eq(line, "memstat")) {
+        shell_run_memstat(con);
+    } else if (str_eq(line, "pslist")) {
+        shell_run_pslist(con);
     } else {
         fbcon_write(con, shell_unknown_prefix);
         fbcon_write(con, line);
+        fbcon_write(con, "\n");
+    }
+}
+
+/* Decimal, unsigned -- the only numbers memstat/pslist ever print. The
+ * shell links no libc (see this file's own top comment), so there is no
+ * itoa/printf to reach for; this is the one small helper both commands
+ * below share. */
+static void shell_write_u32(fb_console_t *con, uint32_t v) {
+    char buf[11];
+    int i = 10;
+    buf[10] = '\0';
+    do {
+        buf[--i] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v != 0);
+    fbcon_write(con, &buf[i]);
+}
+
+/* `memstat` -- exo_memstat (#25, src/syscall_stat.c). The output struct is
+ * an ordinary local: the shell's own stack is always in the LibOS window
+ * and mapped (libos_build_image() put it there), so the -EXO_EFAULT branch
+ * below is unreachable in practice and only guards against the kernel ever
+ * disagreeing with that. */
+static void shell_run_memstat(fb_console_t *con) {
+    exo_memstat_t stat;
+    if (exo_memstat(&stat) != 0) {
+        fbcon_write(con, shell_memstat_fail_text);
+        return;
+    }
+
+    fbcon_write(con, "total=");
+    shell_write_u32(con, stat.total_pages);
+    fbcon_write(con, " free=");
+    shell_write_u32(con, stat.free_pages);
+    fbcon_write(con, " kernel=");
+    shell_write_u32(con, stat.kernel_pages);
+    fbcon_write(con, " libos=");
+    shell_write_u32(con, stat.libos_pages);
+    fbcon_write(con, " regions=");
+    shell_write_u32(con, stat.region_count);
+    fbcon_write(con, " (pages)\n");
+}
+
+/* `pslist` -- exo_pslist (#26, src/syscall_stat.c). Same stack-buffer
+ * reasoning as shell_run_memstat() above for why -EXO_EFAULT is not
+ * expected here either. */
+static void shell_run_pslist(fb_console_t *con) {
+    exo_ps_info_t procs[EXO_PSLIST_MAX];
+    int64_t rc = exo_pslist(procs, EXO_PSLIST_MAX);
+    if (rc < 0) {
+        fbcon_write(con, shell_pslist_fail_text);
+        return;
+    }
+
+    for (int64_t i = 0; i < rc; i++) {
+        fbcon_write(con, "id=");
+        shell_write_u32(con, procs[i].id);
+        fbcon_write(con, " state=");
+        switch (procs[i].state) {
+        case 1: fbcon_write(con, "ready");   break;
+        case 2: fbcon_write(con, "running"); break;
+        case 3: fbcon_write(con, "blocked"); break;
+        default: fbcon_write(con, "?");      break;
+        }
+        fbcon_write(con, " pages=");
+        shell_write_u32(con, procs[i].page_count);
         fbcon_write(con, "\n");
     }
 }

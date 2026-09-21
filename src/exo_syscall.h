@@ -97,10 +97,13 @@
 #define EXO_SYS_LAUNCH_CLOCK      22
 #define EXO_SYS_LAUNCH_SNAKE      23
 #define EXO_SYS_LAUNCH_DOOM       24
+/* Introspection (SCRUM-113) */
+#define EXO_SYS_MEMSTAT      25
+#define EXO_SYS_PSLIST       26
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense. */
-#define EXO_SYS_COUNT        25
+#define EXO_SYS_COUNT        27
 
 /* ---- Error codes -------------------------------------------------------- */
 /*
@@ -224,10 +227,45 @@ typedef struct {
     uint8_t reserved;
 } exo_mouse_state_t;
 
+/* exo_memstat(stat_out) — #25.  Page-usage snapshot of the whole PMM, not
+ * just the caller's own pages — introspection is deliberately unscoped, the
+ * same way exo_pslist() below reports every live context rather than just
+ * the caller's. */
+typedef struct {
+    uint32_t total_pages;   /* pages across every registered region         */
+    uint32_t free_pages;    /* unallocated                                  */
+    uint32_t kernel_pages;  /* allocated, PAGE_OWNER_KERNEL                 */
+    uint32_t libos_pages;   /* allocated, owned by some LibOS context       */
+    uint32_t region_count;  /* separate physical regions backing the pool   */
+    uint32_t reserved;      /* zeroed by the kernel                         */
+} exo_memstat_t;
+
+/* exo_pslist(out, max) — #26.  One entry per live LibOS context (the shell
+ * included — it is context_create()'d like any other, SCRUM-178).
+ * `state` mirrors context_state_t (src/context.h): 1=READY, 2=RUNNING,
+ * 3=BLOCKED.  0 (CONTEXT_STATE_UNUSED) never appears — unused slots are
+ * skipped, not reported. */
+typedef struct {
+    uint16_t id;
+    uint8_t  state;
+    uint8_t  reserved;      /* zeroed by the kernel                         */
+    uint32_t page_count;    /* pages currently owned by this context        */
+} exo_ps_info_t;
+#endif /* __ASSEMBLER__ */
+
+/* EXO_PSLIST_MAX mirrors CONTEXT_MAX (src/context.h), restated here because
+ * context.h is kernel-only (it pulls in vmm.h) and unreachable from the
+ * LibOS side of this header.  A #define, not wrapped in __ASSEMBLER__ —
+ * consistent with every other numeric constant in this file. */
+#define EXO_PSLIST_MAX 3
+
+#ifndef __ASSEMBLER__
 /* Layout is ABI — break it and the kernel and LibOS silently disagree. */
 _Static_assert(sizeof(exo_fb_info_t)     == 24, "exo_fb_info_t layout is ABI");
 _Static_assert(sizeof(exo_kbd_event_t)   ==  4, "exo_kbd_event_t layout is ABI");
 _Static_assert(sizeof(exo_mouse_state_t) ==  6, "exo_mouse_state_t layout is ABI");
+_Static_assert(sizeof(exo_memstat_t)     == 24, "exo_memstat_t layout is ABI");
+_Static_assert(sizeof(exo_ps_info_t)     ==  8, "exo_ps_info_t layout is ABI");
 #endif /* __ASSEMBLER__ */
 
 #ifndef EXO_KERNEL
@@ -543,6 +581,25 @@ static inline int64_t exo_launch_snake(void)
 static inline int64_t exo_launch_doom(void)
 {
     return exo_syscall0(EXO_SYS_LAUNCH_DOOM);
+}
+
+/* #25 — page-usage snapshot of the whole PMM (docs/syscall_spec.md §3.2).
+ * Returns 0 with *stat_out filled, or -EXO_EFAULT if
+ * [stat_out, stat_out + sizeof(exo_memstat_t)) is not entirely inside the
+ * LibOS window and mapped writable. */
+static inline int64_t exo_memstat(exo_memstat_t *stat_out)
+{
+    return exo_syscall1(EXO_SYS_MEMSTAT, (uint64_t)(uintptr_t)stat_out);
+}
+
+/* #26 — list every live LibOS context (the caller included) into `out`,
+ * an array of at least `max` exo_ps_info_t entries; `max` must not exceed
+ * EXO_PSLIST_MAX. Returns the number of entries written (0..max), or
+ * -EXO_EFAULT for a bad `out` range, -EXO_EINVAL if max > EXO_PSLIST_MAX. */
+static inline int64_t exo_pslist(exo_ps_info_t *out, uint32_t max)
+{
+    return exo_syscall2(EXO_SYS_PSLIST, (uint64_t)(uintptr_t)out,
+                        (uint64_t)max);
 }
 
 #endif /* !EXO_KERNEL */

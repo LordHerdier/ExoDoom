@@ -54,15 +54,16 @@ static void test_numbers_match_spec(void)
     CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_CLOCK, 22);
     CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_SNAKE,  23);
     CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_DOOM,   24);
+    CU_ASSERT_EQUAL(EXO_SYS_MEMSTAT,       25);
+    CU_ASSERT_EQUAL(EXO_SYS_PSLIST,        26);
 }
 
 /* The dispatcher will range-check against EXO_SYS_COUNT, so it has to stay one
- * past the last number — and the spec's total is 24 syscalls (SCRUM-168,
- * SCRUM-182). */
+ * past the last number — and the spec's total is 26 syscalls (SCRUM-113). */
 static void test_count_is_one_past_last(void)
 {
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_LAUNCH_DOOM + 1);
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 25);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_PSLIST + 1);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 27);
 }
 
 /* Two syscalls sharing a number would route silently to the wrong handler. */
@@ -77,7 +78,7 @@ static void test_numbers_are_unique(void)
         EXO_SYS_FILE_REMOVE,  EXO_SYS_FILE_RENAME, EXO_SYS_SOUND_TONE,
         EXO_SYS_SOUND_STOP,   EXO_SYS_YIELD,       EXO_SYS_EXIT,
         EXO_SYS_LAUNCH_WAD_VIEWER, EXO_SYS_LAUNCH_CLOCK, EXO_SYS_LAUNCH_SNAKE,
-        EXO_SYS_LAUNCH_DOOM,
+        EXO_SYS_LAUNCH_DOOM,       EXO_SYS_MEMSTAT,      EXO_SYS_PSLIST,
     };
     /* 64-bit so the mask keeps working as the table grows; the assert makes
      * the ceiling explicit rather than letting the shift go undefined. */
@@ -164,6 +165,25 @@ static void test_mouse_state_layout(void)
     }
 }
 
+static void test_memstat_layout(void)
+{
+    CU_ASSERT_EQUAL(sizeof(exo_memstat_t), 24);
+    CU_ASSERT_EQUAL(__builtin_offsetof(exo_memstat_t, total_pages),  0);
+    CU_ASSERT_EQUAL(__builtin_offsetof(exo_memstat_t, free_pages),   4);
+    CU_ASSERT_EQUAL(__builtin_offsetof(exo_memstat_t, kernel_pages), 8);
+    CU_ASSERT_EQUAL(__builtin_offsetof(exo_memstat_t, libos_pages), 12);
+    CU_ASSERT_EQUAL(__builtin_offsetof(exo_memstat_t, region_count),16);
+}
+
+static void test_ps_info_layout(void)
+{
+    CU_ASSERT_EQUAL(sizeof(exo_ps_info_t), 8);
+    CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, id),         0);
+    CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, state),      2);
+    CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, page_count), 4);
+    CU_ASSERT_EQUAL(EXO_PSLIST_MAX, 3);
+}
+
 /* ---- Argument constants ------------------------------------------------- */
 
 static void test_argument_constants(void)
@@ -235,6 +255,7 @@ static void *const volatile stub_addresses[] = {
     (void *)exo_sound_stop,   (void *)exo_yield,       (void *)exo_exit,
     (void *)exo_launch_wad_viewer, (void *)exo_launch_clock,
     (void *)exo_launch_snake,      (void *)exo_launch_doom,
+    (void *)exo_memstat,           (void *)exo_pslist,
 };
 
 static void test_every_syscall_has_a_stub(void)
@@ -265,6 +286,8 @@ void suite_exo_syscall_tests(CU_pSuite s)
     CU_add_test(s, "kbd_event_layout",     test_kbd_event_layout);
     CU_add_test(s, "kbd_modifier_bits",    test_kbd_modifier_bits);
     CU_add_test(s, "mouse_state_layout",   test_mouse_state_layout);
+    CU_add_test(s, "memstat_layout",       test_memstat_layout);
+    CU_add_test(s, "ps_info_layout",       test_ps_info_layout);
     CU_add_test(s, "argument_constants",   test_argument_constants);
     CU_add_test(s, "stubs_link",           test_every_syscall_has_a_stub);
 }

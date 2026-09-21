@@ -182,6 +182,13 @@ uint32_t page_reclaim_all(page_owner_t owner);
 // tests; O(total_pages).
 uint32_t page_count_owned(page_owner_t owner);
 
+// Page-usage snapshot across every registered region (SCRUM-113): total
+// managed pages, free pages, pages owned by PAGE_OWNER_KERNEL, and pages
+// owned by any LibOS context (everything else allocated). All four are set
+// to 0 if page_alloc_init() hasn't run. Backs exo_memstat (src/syscall_stat.c).
+void page_alloc_totals(uint32_t* total_out, uint32_t* free_out,
+                       uint32_t* kernel_out, uint32_t* libos_out);
+
 // One past the last address the allocator manages -- the end of the
 // highest-based registered region (SCRUM-158: regions are not necessarily
 // contiguous, so this is not "all managed RAM", just a genuinely

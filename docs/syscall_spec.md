@@ -370,11 +370,14 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 22 | `exo_launch_clock()`                | Lifecycle   | ✅     | Same shape as #21, for the clock demo LibOS (`src/libos_clock/`) — no external resource to stage and no launch-time parameters, so no `libos_launch_patch_params()` step; multiple live LibOS contexts render concurrently under framebuffer multiplexing (SCRUM-112), so control returns via Ctrl+Tab (SCRUM-111) rather than the clock itself yielding back. Invoked by the shell's `clock` command. Implemented in SCRUM-168 (`src/syscall_launch.c`). |
 | 23 | `exo_launch_snake()`                | Lifecycle   | ✅     | Same shape as #21, for the Snake LibOS demo (`src/libos_snake/`) — no external resource to stage and no launch-time parameters, so no `libos_launch_patch_params()` step. Invoked by the shell's `snake` command. Implemented in SCRUM-182 (`src/syscall_launch.c`). |
 | 24 | `exo_launch_doom()`                 | Lifecycle   | ✅     | Build and switch to the Doom LibOS (`src/libos_doom/`, the 79 vendored engine objects plus the libc shim). Shaped like #21 rather than #23: the WAD module is mapped read-only at `LIBOS_WAD_VADDR` and its address/length patched in via `libos_launch_patch_params()`, where `DG_Init` reads them. Invoked by the shell's `doom` command. Implemented in SCRUM-66 (`src/syscall_launch.c`). |
+| 25 | `exo_memstat(stat_out)`             | Introspection | ✅   | Write a page-usage snapshot of the whole PMM to `stat_out`: `{uint32_t total_pages, free_pages, kernel_pages, libos_pages, region_count, reserved}` (24 bytes). Deliberately unscoped — every context's pages, not just the caller's. Returns `0`, or `-EFAULT` if `[stat_out, stat_out + sizeof(exo_memstat_t))` is not entirely inside the LibOS window and mapped writable (same check #4/#6 use). Invoked by the shell's `memstat` command. Implemented in SCRUM-113 (`src/syscall_stat.c`, `src/page_alloc.c`). |
+| 26 | `exo_pslist(out, max)`              | Introspection | ✅   | Write up to `max` `exo_ps_info_t` entries (`{uint16_t id; uint8_t state; uint8_t reserved; uint32_t page_count}`, 8 bytes each) to `out` — one per live LibOS context, the caller included (the shell is itself `context_create()`'d, SCRUM-178). `state` mirrors `context_state_t`: `1`=READY, `2`=RUNNING, `3`=BLOCKED. Returns the number of entries written (`0..max`), `-EINVAL` if `max` exceeds `EXO_PSLIST_MAX` (3, mirroring `CONTEXT_MAX`), or `-EFAULT` if `[out, out + max * sizeof(exo_ps_info_t))` is not entirely inside the LibOS window and mapped writable. Invoked by the shell's `pslist` command. Implemented in SCRUM-113 (`src/syscall_stat.c`, `src/context.c`). |
 
-**Total: 24 syscalls.** This is the complete interface needed to run Doom with
+**Total: 26 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking, plus the three
 LibOS-launch syscalls (#21/#22/#23) that back the shell's interactive demo
-commands.
+commands, plus the two introspection syscalls (#25/#26) that back its
+`memstat`/`pslist` commands.
 
 ### 3.2a Error codes (SCRUM-57)
 
