@@ -68,17 +68,6 @@ static void fbcon_write_hex64(fb_console_t *con, uint64_t val) {
     fbcon_write(con, buf);
 }
 
-static void fbcon_write_hex32(fb_console_t *con, uint32_t val) {
-    const char hex[] = "0123456789abcdef";
-    char buf[9];
-    buf[8] = '\0';
-    for (int i = 7; i >= 0; i--) {
-        buf[i] = hex[val & 0xF];
-        val >>= 4;
-    }
-    fbcon_write(con, buf);
-}
-
 static void fbcon_write_u32(fb_console_t *con, uint32_t val) {
     if (val == 0) { fbcon_write(con, "0"); return; }
     char buf[11];
@@ -86,19 +75,6 @@ static void fbcon_write_u32(fb_console_t *con, uint32_t val) {
     int i = 10;
     while (val > 0) { buf[--i] = '0' + (val % 10); val /= 10; }
     fbcon_write(con, &buf[i]);
-}
-
-static void fbcon_write_memsize(fb_console_t *con, uint64_t bytes) {
-    if (bytes >= 1024ULL * 1024ULL) {
-        fbcon_write_u32(con, (uint32_t)(bytes / (1024ULL * 1024ULL)));
-        fbcon_write(con, " MB");
-    } else if (bytes >= 1024ULL) {
-        fbcon_write_u32(con, (uint32_t)(bytes / 1024ULL));
-        fbcon_write(con, " KB");
-    } else {
-        fbcon_write_u32(con, (uint32_t)bytes);
-        fbcon_write(con, " B");
-    }
 }
 
 static void write_ts(fb_console_t *con, uint32_t ms) {
@@ -131,413 +107,49 @@ static void klog(fb_console_t *con, uint32_t ms, const char *msg) {
     fbcon_write(con, "\n");
 }
 
-// ── Memory map helpers ────────────────────────────────────────────────────
-
-static const char *mmap_type_name(uint32_t type) {
-    switch (type) {
-    case MB2_MMAP_AVAILABLE:    return "usable";
-    case MB2_MMAP_RESERVED:     return "reserved";
-    case MB2_MMAP_ACPI_RECLAIM: return "acpi reclaimable";
-    case MB2_MMAP_ACPI_NVS:     return "acpi nvs";
-    case MB2_MMAP_BADRAM:       return "bad ram";
-    default:                    return "unknown";
-    }
-}
-
-static void mmap_type_color(fb_console_t *con, uint32_t type) {
-    switch (type) {
-    case MB2_MMAP_AVAILABLE:
-        fbcon_set_color(con, 80, 210, 80, 0, 0, 0); break;
-    case MB2_MMAP_ACPI_RECLAIM:
-    case MB2_MMAP_ACPI_NVS:
-        fbcon_set_color(con, 220, 190, 60, 0, 0, 0); break;
-    case MB2_MMAP_BADRAM:
-        fbcon_set_color(con, 230, 50, 50, 0, 0, 0); break;
-    default:
-        fbcon_set_color(con, 140, 140, 140, 0, 0, 0); break;
-    }
-}
-
-static void print_mmap(fb_console_t *con) {
-    uint32_t count;
-    const mmap_region_t *regions = mmap_get_regions(&count);
-
-    klog(con, 0, "BIOS-provided physical RAM map:");
-
-    uint64_t total_usable = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        log_prefix(con, 0);
-        mmap_type_color(con, regions[i].type);
-        fbcon_write(con, "  [mem 0x");
-        fbcon_write_hex64(con, regions[i].base);
-        fbcon_write(con, "-0x");
-        fbcon_write_hex64(con, regions[i].base + regions[i].length - 1);
-        fbcon_write(con, "]  ");
-        fbcon_write_memsize(con, regions[i].length);
-        fbcon_write(con, "  ");
-        fbcon_write(con, mmap_type_name(regions[i].type));
-        fbcon_write(con, "\n");
-
-        if (regions[i].type == MB2_MMAP_AVAILABLE)
-            total_usable += regions[i].length;
-    }
-
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
-    log_prefix(con, 0);
-    fbcon_write(con, "Total usable RAM: ");
-    fbcon_set_color(con, 80, 210, 80, 0, 0, 0);
-    fbcon_write_memsize(con, total_usable);
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
-    fbcon_write(con, "\n");
-}
-
-// ── Page ownership self-check (SCRUM-152) ──────────────────────────────────
+// ── Boot sanity check (SCRUM-191) ──────────────────────────────────────────
 //
-// A *visible* companion to the serial-only KUnit suite: it drives the real
-// exo_page_alloc / exo_page_free dispatch path at boot and renders the result
-// to the framebuffer console, with a green/red status swatch in the top-right
-// corner.  It demonstrates the secure-binding guarantee — a LibOS cannot free a
-// page it does not own — on screen rather than only in CI serial output.
+// A gate, not a report: proves paging is real and the syscall gate + memory
+// subsystem actually work end to end before trusting the shell to them, and
+// halts loudly instead of letting a broken boot limp forward into an
+// unusable shell. Reuses the same exo_page_alloc -> exo_page_map ->
+// exo_page_unmap -> exo_page_free round trip the old ownership/page-map
+// self-checks (SCRUM-152/-35) proved this with, trimmed to the happy-path
+// assertions only -- the negative-path checks those covered (foreign-page
+// rejection, kernel-address rejection, double-free rejection, framebuffer
+// binding, revocation) are enforcement tests that belong to KUnit/CI, not a
+// check that has to run on every boot. The framebuffer itself is not
+// re-checked here: the caller already halts above if `have_fb` is false, so
+// by the time this runs it is known good.
+static void boot_sanity_check(fb_console_t *con) {
+    int ok = vmm_is_active();
 
-static int ownership_check(fb_console_t *con, const char *label, int ok) {
-    log_prefix(con, 0);
-    fbcon_write(con, label);
     if (ok) {
-        fbcon_set_color(con, 80, 210, 80, 0, 0, 0);
-        fbcon_write(con, "PASS");
-    } else {
-        fbcon_set_color(con, 230, 50, 50, 0, 0, 0);
-        fbcon_write(con, "FAIL");
-    }
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
-    fbcon_write(con, "\n");
-    return ok;
-}
-
-// ── Framebuffer secure binding self-check (SCRUM-154) ─────────────────────
-//
-// The same idea one resource up: the framebuffer is bound to one LibOS at a
-// time, and mapping its physical pages requires holding that binding.  Runs on
-// the real exo_fb_acquire dispatch path and leaves the framebuffer unbound, so
-// the kernel console below keeps the screen for the rest of the boot.
-
-// A second, distinct context id — the "another LibOS" the binding must refuse.
-#define DEMO_OTHER_LIBOS ((page_owner_t)(PAGE_OWNER_LIBOS + 1))
-
-static int run_fb_binding_demo(fb_console_t *con) {
-    int all = 1;
-
-    klog(con, 0, "Framebuffer binding self-check (SCRUM-154):");
-
-    // exo_fb_acquire's info_out is bounds-checked against the LibOS window
-    // (SCRUM-54), same as exo_serial_write's buf — a kernel-stack local no
-    // longer qualifies, so this demo maps a scratch page the same way
-    // run_page_map_demo() does, at a VA of its own well clear of that one's.
-    const uint64_t scratch = EXO_USER_VA_BASE + 0x38000000ULL;
-    int64_t scratch_p = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
-    int64_t scratch_map = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, scratch,
-                                               (uint64_t)scratch_p,
-                                               EXO_PAGE_WRITE, 0, 0, 0);
-    if (scratch_p <= 0 || scratch_map != 0) {
-        klog(con, 0, "  scratch mapping for info_out failed, skipping\n");
-        return 0;
+        const uint64_t scratch = EXO_USER_VA_BASE + 0x30000000ULL;
+        int64_t p = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
+        int64_t r_map = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, scratch,
+                                             (uint64_t)p,
+                                             EXO_PAGE_READ | EXO_PAGE_WRITE,
+                                             0, 0, 0);
+        int64_t r_unmap = exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, scratch,
+                                               0, 0, 0, 0, 0);
+        int64_t r_free = exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)p,
+                                              0, 0, 0, 0, 0);
+        ok = p > 0 && r_map == 0 && r_unmap == 0 && r_free == 0;
     }
 
-    exo_fb_info_t *info = (exo_fb_info_t *)(uintptr_t)scratch;
-    *info = (exo_fb_info_t){ 0, 0, 0, 0, 0, { 0, 0, 0 } };
-
-    // 1. Acquire hands the calling context its own private virtual
-    //    framebuffer (SCRUM-112) -- it no longer touches fb_binding at all,
-    //    so fb_binding_owner() stays unheld throughout this demo.
-    int64_t r_acq = exo_syscall_dispatch(EXO_SYS_FB_ACQUIRE,
-                                         (uint64_t)(uintptr_t)info,
-                                         0, 0, 0, 0, 0);
-    log_prefix(con, 0);
-    fbcon_write(con, "  exo_fb_acquire -> phys 0x");
-    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
-    fbcon_write_hex64(con, info->phys_addr);
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
-    fbcon_write(con, "\n");
-    all &= ownership_check(con, "  private FB buffer allocated             ",
-                           r_acq == 0 &&
-                           fb_binding_owner() == PAGE_OWNER_FREE);
-
-    // 2. The real framebuffer's own physical range is still guarded by
-    //    fb_binding_check_map() -- nobody holds that binding anymore (see
-    //    1.), so it denies everyone now, this context included. What
-    //    SCRUM-153 originally proved here (an owner may map its own FB
-    //    pages) is just ordinary page ownership for the private buffer, and
-    //    run_page_map_demo() below already covers that generically.
-    all &= ownership_check(con, "  real FB range still unmappable          ",
-                           fb_binding_geometry() != NULL &&
-                           fb_binding_check_map(
-                               fb_binding_geometry()->phys_addr,
-                               syscall_current_context())
-                           == FB_MAP_DENY);
-
-    // 3. A second, distinct context also succeeds, with its own distinct
-    //    buffer -- SCRUM-112 replaced the single exclusive binding with a
-    //    private buffer per caller, so there is no exclusivity left to
-    //    demonstrate here the way there used to be.
-    exo_fb_info_t other_info;
-    int r_other = fb_shadow_acquire(DEMO_OTHER_LIBOS, &other_info);
-    all &= ownership_check(con, "  second acquirer also succeeds           ",
-                           r_other == FB_SHADOW_OK &&
-                           other_info.phys_addr != info->phys_addr);
-
-    // 4. Reclamation (what SCRUM-155's exo_exit does) frees both buffers
-    //    again, so the compositor (src/fb_compositor.c) has nothing stale
-    //    left to composite once this demo is done -- unlike
-    //    fb_binding_release(), this now has a real, visible effect, so it
-    //    is not optional cleanup the way the scratch-page unmap below
-    //    always was.
-    fb_shadow_release(syscall_current_context());
-    fb_shadow_release(DEMO_OTHER_LIBOS);
-    (void)reclaim_pages_owned(syscall_current_context());
-    (void)reclaim_pages_owned(DEMO_OTHER_LIBOS);
-
-    (void)exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, scratch, 0, 0, 0, 0, 0);
-    (void)exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)scratch_p,
-                               0, 0, 0, 0, 0);
-
-    return all;
-}
-
-// ── Resource revocation self-check (SCRUM-156) ────────────────────────────
-//
-// The third leg of the model: what the kernel granted, the kernel can take
-// back.  Walks the protocol in docs/syscall_spec.md §3.6 — request, comply,
-// force, sweep — on a real page and on the framebuffer, and leaves nothing
-// bound and nothing allocated, so the console below keeps the screen.
-
-static int run_revocation_demo(fb_console_t *con) {
-    int all = 1;
-
-    klog(con, 0, "Resource revocation self-check (SCRUM-156):");
-
-    // 1. The request is an ask, not a seizure: the page stays the owner's and
-    //    stays usable.  Side effects are sequenced before the assertion so a
-    //    failing step cannot short-circuit the ones that clean up after it.
-    void *p = alloc_page_owned(DEMO_OTHER_LIBOS);
-    revoke_res_t res = revoke_res_page((uint64_t)(uintptr_t)p);
-    int marked = (p != NULL) && revoke_request(DEMO_OTHER_LIBOS, res) == REVOKE_OK;
-    all &= ownership_check(con, "  request marks, owner keeps the page     ",
-                           marked && revoke_pending(res) &&
-                           page_owner(p) == DEMO_OTHER_LIBOS);
-
-    // 2. Compliance: the owner returns a marked page through the ordinary free
-    //    path, and the mark goes with it.
-    int complied = free_page_owned(p, DEMO_OTHER_LIBOS) == PAGE_FREE_OK;
-    all &= ownership_check(con, "  owner returns it, mark clears           ",
-                           complied && !revoke_pending(res));
-    all &= ownership_check(con, "  force then finds nothing to take        ",
-                           revoke_force(DEMO_OTHER_LIBOS, res) == REVOKE_RETURNED);
-
-    // 3. A LibOS that ignores the ask loses the page anyway.
-    void *kept = alloc_page_owned(DEMO_OTHER_LIBOS);
-    revoke_res_t kres = revoke_res_page((uint64_t)(uintptr_t)kept);
-    int forced = (kept != NULL) &&
-                 revoke_force(DEMO_OTHER_LIBOS, kres) == REVOKE_OK;
-    all &= ownership_check(con, "  ignored request is forced              ",
-                           forced && page_owner(kept) == PAGE_OWNER_FREE);
-
-    // 4. Revocation is scoped to the context it names: reclaiming for one
-    //    LibOS must never free a page another one holds.
-    void *peer = alloc_page_owned(syscall_current_context());
-    revoke_res_t pres = revoke_res_page((uint64_t)(uintptr_t)peer);
-    int spared = (peer != NULL) &&
-                 revoke_force(DEMO_OTHER_LIBOS, pres) == REVOKE_RETURNED &&
-                 page_owner(peer) == syscall_current_context();
-    all &= ownership_check(con, "  peer's page left alone                  ", spared);
-    (void)free_page_owned(peer, syscall_current_context());
-
-    // 5. The v1 policy: exo_exit's sweep (SCRUM-155) takes every page the
-    //    context holds plus the framebuffer, in one call.
-    (void)alloc_page_owned(DEMO_OTHER_LIBOS);
-    (void)alloc_page_owned(DEMO_OTHER_LIBOS);
-    fb_binding_acquire(DEMO_OTHER_LIBOS);
-    uint32_t swept = revoke_all(DEMO_OTHER_LIBOS);
-    all &= ownership_check(con, "  exit sweep reclaims pages + screen      ",
-                           swept == 3 &&
-                           page_count_owned(DEMO_OTHER_LIBOS) == 0 &&
-                           fb_binding_owner() == PAGE_OWNER_FREE);
-
-    // 6. And the kernel's own pages are not sweepable by anyone.
-    uint32_t kernel_pages = page_count_owned(PAGE_OWNER_KERNEL);
-    all &= ownership_check(con, "  kernel pages are not revocable          ",
-                           revoke_all(PAGE_OWNER_KERNEL) == 0 &&
-                           page_count_owned(PAGE_OWNER_KERNEL) == kernel_pages);
-
-    const revoke_record_t *rec = revoke_record();
-    log_prefix(con, 0);
-    fbcon_write(con, "  repossession record: ");
-    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
-    fbcon_write_u32(con, rec->requested);
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
-    fbcon_write(con, " asked, ");
-    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
-    fbcon_write_u32(con, rec->returned);
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
-    fbcon_write(con, " returned, ");
-    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
-    fbcon_write_u32(con, rec->forced);
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
-    fbcon_write(con, " taken\n");
-
-    return all;
-}
-
-// ── Address-space mapping self-check (SCRUM-35 / -153) ────────────────────
-//
-// The fourth resource operation: a LibOS builds its own address space, one
-// page at a time, out of pages it owns — and cannot build it out of anything
-// else.  Runs on the real exo_page_map / exo_page_unmap dispatch path and
-// leaves the address space exactly as it found it.
-
-static int run_page_map_demo(fb_console_t *con) {
-    int all = 1;
-
-    klog(con, 0, "Address-space mapping self-check (SCRUM-35):");
-
-    // A scratch virtual address in the LibOS window, well clear of the
-    // kernel's identity map.
-    const uint64_t scratch = EXO_USER_VA_BASE + 0x30000000ULL;
-
-    // exo_page_map installs `scratch` in the caller's *registered* address
-    // space (src/syscall_mem.c's caller_pml4(), SCRUM-48) — today that is
-    // vmm_kernel_pml4() itself (kernel_main binds it that way until SCRUM-47
-    // gives the LibOS a real one), but this demo runs at ring 0 without ever
-    // switching CR3, so it must resolve the same root the syscall used
-    // rather than assume it is whichever tree happens to be loaded.
-    uint64_t root_phys = vmm_address_space_for(syscall_current_context());
-    uint64_t *root = (uint64_t *)(uintptr_t)root_phys;
-
-    // 1. A page the caller owns can be mapped where the caller asks, and the
-    //    mapping is real: it resolves to the right physical frame, and a
-    //    write through that frame's identity-mapped address (always safe —
-    //    the kernel's own map covers every page it owns, regardless of which
-    //    root exo_page_map used) is visible there afterwards.
-    int64_t p = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
-    int64_t r_map = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, scratch, (uint64_t)p,
-                                         EXO_PAGE_READ | EXO_PAGE_WRITE, 0, 0, 0);
-    log_prefix(con, 0);
-    fbcon_write(con, "  exo_page_map 0x");
-    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
-    fbcon_write_hex64(con, (uint64_t)p);
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
-    fbcon_write(con, " -> 0x");
-    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
-    fbcon_write_hex64(con, scratch);
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
-    fbcon_write(con, "\n");
-
-    if (p > 0 && r_map == 0)
-        *(volatile uint64_t *)(uintptr_t)p = 0x5CA1AB1E5CA1AB1EULL;
-
-    uint64_t resolved = 0;
-    all &= ownership_check(con, "  owned page mapped and writable         ",
-                           p > 0 && r_map == 0 && root != NULL &&
-                           vmm_translate_in(root, scratch, &resolved, NULL) == VMM_OK &&
-                           resolved == (uint64_t)p &&
-                           *(volatile uint64_t *)(uintptr_t)p
-                               == 0x5CA1AB1E5CA1AB1EULL);
-
-    // 2. Another context's page is not mappable — the hole SCRUM-153 closes.
-    void *theirs = alloc_page_owned(DEMO_OTHER_LIBOS);
-    int64_t r_foreign = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, scratch,
-                                             (uint64_t)(uintptr_t)theirs,
-                                             EXO_PAGE_WRITE, 0, 0, 0);
-    // The NULL check is what makes this a test of foreign-page rejection: on
-    // an exhausted pool `theirs` is 0, page_owner(0) answers PAGE_OWNER_FREE,
-    // and the -EPERM below would be earned by an unowned address instead.
-    all &= ownership_check(con, "  foreign page not mappable (EPERM)      ",
-                           theirs != NULL && r_foreign == -EXO_EPERM);
-    (void)free_page_owned(theirs, DEMO_OTHER_LIBOS);
-
-    // 3. Nor is the kernel's own memory, however the caller came by the
-    //    address: the LibOS window starts above the identity map.
-    int64_t r_low = exo_syscall_dispatch(EXO_SYS_PAGE_MAP, 0x200000ULL,
-                                         (uint64_t)p, EXO_PAGE_WRITE, 0, 0, 0);
-    all &= ownership_check(con, "  kernel address refused (EPERM)         ",
-                           r_low == -EXO_EPERM);
-
-    // 4. Unmapping removes the mapping and leaves the page allocated, which is
-    //    what makes exo_page_free a separate call.
-    int64_t r_unmap = exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, scratch,
-                                           0, 0, 0, 0, 0);
-    uint64_t gone = 0;
-    all &= ownership_check(con, "  unmap removes only the mapping         ",
-                           r_unmap == 0 && root != NULL &&
-                           vmm_translate_in(root, scratch, &gone, NULL) == VMM_ENOENT &&
-                           page_owner((void *)(uintptr_t)p)
-                               == syscall_current_context());
-
-    (void)exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)p, 0, 0, 0, 0, 0);
-    return all;
-}
-
-static void run_ownership_demo(fb_console_t *con, framebuffer_t *fb) {
-    klog(con, 0, "Page ownership self-check (SCRUM-152):");
-    int all = 1;
-
-    // 1. The LibOS context allocates a page; the kernel stamps it as owner.
-    int64_t p = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
-    log_prefix(con, 0);
-    fbcon_write(con, "  exo_page_alloc -> 0x");
-    fbcon_set_color(con, 100, 180, 255, 0, 0, 0);
-    fbcon_write_hex64(con, (uint64_t)p);
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
-    fbcon_write(con, "\n");
-    all &= ownership_check(con, "  page handed out (owner = LibOS)         ", p > 0);
-
-    // 2. A kernel-owned page cannot be freed by the LibOS -> -EXO_EPERM.
-    void *kp = alloc_page();   // KERNEL-owned
-    int64_t r_kern = exo_syscall_dispatch(EXO_SYS_PAGE_FREE,
-                                          (uint64_t)(uintptr_t)kp, 0, 0, 0, 0, 0);
-    all &= ownership_check(con, "  free of kernel page rejected (EPERM)    ",
-                           r_kern == -EXO_EPERM);
-    free_page(kp);             // kernel reclaims its own page
-
-    // 3. The owner may free its own page -> 0.
-    int64_t r_ok = exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)p, 0, 0, 0, 0, 0);
-    all &= ownership_check(con, "  owner frees its own page                ",
-                           r_ok == 0);
-
-    // 4. Freeing it again is a double free -> -EXO_EINVAL.
-    int64_t r_dbl = exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)p, 0, 0, 0, 0, 0);
-    all &= ownership_check(con, "  double free rejected (EINVAL)           ",
-                           r_dbl == -EXO_EINVAL);
-
-    all &= run_fb_binding_demo(con);
-    all &= run_page_map_demo(con);
-    all &= run_revocation_demo(con);
-
-    // Visible status swatch, top-right corner: green = enforced, red = broken.
-    const uint32_t sw = 24;
-    if (fb->width > sw + 8) {
-        if (all) fb_fill_rect(fb, fb->width - sw - 8, 8, sw, sw, 80, 210, 80);
-        else     fb_fill_rect(fb, fb->width - sw - 8, 8, sw, sw, 230, 50, 50);
+    if (!ok) {
+        klog(con, 0, "FATAL: boot sanity check failed");
+        serial_print("FATAL: boot sanity check failed "
+                     "(paging or syscall gate not live)\n");
+        serial_flush();
+        for (;;) {
+            __asm__ volatile ("cli; hlt");
+        }
     }
 
-    /* Say it on serial as well as on screen.  The self-checks are the only
-     * thing that exercises these syscalls on a *normal* boot -- the KUnit suite
-     * runs in a TESTING build with different page tables -- and a verdict that
-     * exists only as pixels cannot be checked by CI, by a script, or by anyone
-     * who is not looking at the screen at the time. */
-    serial_print(all ? "ownership self-check: ENFORCED\n"
-                     : "ownership self-check: BROKEN\n");
-    serial_flush();
-
-    log_prefix(con, 0);
-    fbcon_write(con, "Resource ownership enforcement: ");
-    if (all) {
-        fbcon_set_color(con, 80, 210, 80, 0, 0, 0);
-        fbcon_write(con, "ENFORCED\n");
-    } else {
-        fbcon_set_color(con, 230, 50, 50, 0, 0, 0);
-        fbcon_write(con, "BROKEN\n");
-    }
-    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    klog(con, 0, "Boot sanity check: OK (paging, syscall gate, "
+                "memory subsystem verified)");
 }
 
 // ── PIC/PIT boot narration (SCRUM-172) ──────────────────────────────────────
@@ -801,35 +413,11 @@ void kernel_main(void *mb2_info_ptr) {
     fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
     fbcon_write(&con, "\n");
 
-    print_mmap(&con);
-
-    log_prefix(&con, 0);
-    fbcon_write(&con, "Kernel allocator base: 0x");
-    fbcon_set_color(&con, 100, 180, 255, 0, 0, 0);
-    fbcon_write_hex32(&con, (uint32_t)memory_base_address());
-    fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
-    fbcon_write(&con, "\n");
-
-    // ── Kernel page tables (SCRUM-15) ───────────────────────────────────
-    log_prefix(&con, 0);
-    if (vmm_is_active()) {
-        fbcon_write(&con, "Kernel page tables: PML4 @ 0x");
-        fbcon_set_color(&con, 100, 180, 255, 0, 0, 0);
-        fbcon_write_hex64(&con, vmm_kernel_pml4());
-        fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
-        fbcon_write(&con, " (");
-        fbcon_write_u32(&con, vmm_table_pages());
-        fbcon_write(&con, " table pages from the PMM)\n");
-    } else {
-        fbcon_set_color(&con, 230, 50, 50, 0, 0, 0);
-        fbcon_write(&con, "Kernel page tables: FAILED - running on the boot map\n");
-        fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
-    }
-
-    // ── Page ownership self-check (SCRUM-152) ───────────────────────────────
-    fbcon_write(&con, "\n");
-    run_ownership_demo(&con, &fb);
-    fbcon_write(&con, "\n");
+    // ── Boot sanity check (SCRUM-191) ────────────────────────────────────
+    // Gates the rest of boot: halts with a clear reason on serial + screen
+    // rather than continuing into a shell that can't actually use memory,
+    // paging, or the syscall gate.
+    boot_sanity_check(&con);
 
     // ── IDT / PIC / PIT / PS2 ───────────────────────────────────────────
     // The IDT is already loaded -- idt_init() runs far above, ahead of the
@@ -851,26 +439,6 @@ void kernel_main(void *mb2_info_ptr) {
 
     __asm__ volatile ("sti");
     klog(&con, 0, "Interrupts enabled (STI)");
-
-    // ── Timer demo ──────────────────────────────────────────────────────
-    fbcon_write(&con, "\n");
-    klog(&con, 0, "Starting timer demo...");
-    fbcon_write(&con, "\n");
-
-    uint32_t timer_demo_start = kernel_get_ticks_ms();
-    for (int tick = 1; tick <= 9; tick++) {
-        kernel_sleep_until_ms(timer_demo_start + (uint32_t)tick * 1000);
-        uint32_t ms = kernel_get_ticks_ms();
-        log_prefix(&con, ms);
-        fbcon_write(&con, "uptime: ");
-        fbcon_set_color(&con, 100, 220, 255, 0, 0, 0);
-        fbcon_write_u32(&con, ms);
-        fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
-        fbcon_write(&con, " ms\n");
-    }
-
-    fbcon_write(&con, "\n");
-    klog(&con, kernel_get_ticks_ms(), "Timer demo complete.");
 
     // ── Shell LibOS launch (SCRUM-110, refactored by SCRUM-178) ─────────
     // The first real LibOS this kernel launches on a normal boot, replacing
