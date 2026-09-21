@@ -219,6 +219,22 @@ static void profile_report(uint32_t dt_ms)
  * first maps rather than redone on every row of every frame, so the inner
  * loop here is just two lookups and a 32-bit store.
  *
+ * ── Row-duplicate skip ──────────────────────────────────────────────────
+ *
+ * y_lut maps many consecutive dst rows to the SAME src row whenever the
+ * vertical scale factor is above 1x (768/400 = 1.92x here, and it only gets
+ * larger at bigger framebuffer resolutions -- more duplication, not less).
+ * When `y_lut[dy] == y_lut[dy - 1]`, row dy is byte-for-byte identical to
+ * the row just written: same source row, same x_lut. Rather than redo the
+ * two-lookup-per-pixel walk against DG_ScreenBuffer, that row is produced by
+ * copying the previous destination row's already-computed bytes instead --
+ * one sequential read of adjacent memory and a store per pixel, versus two
+ * independent array lookups (x_lut, then DG_ScreenBuffer at a
+ * scale-dependent, non-sequential offset) and a store. Still one store per
+ * pixel either way -- every row still has to actually reach the framebuffer
+ * -- but the source side gets cheaper and more cache-friendly as the fraction
+ * of duplicate rows grows with resolution.
+ *
  * Written against fb.width/fb.height/fb.pitch rather than 1024/768/4096:
  * the geometry comes from exo_fb_acquire at runtime and GRUB is free to
  * hand us a different mode.
@@ -276,15 +292,26 @@ void DG_DrawFrame(void)
     const uint32_t dst_w = fb.width;
     const uint32_t dst_h = fb.height;
 
-    for (uint32_t dy = 0; dy < dst_h; dy++) {
-        const pixel_t *src_row = DG_ScreenBuffer +
-                                 (size_t)y_lut[dy] * DOOMGENERIC_RESX;
-        uint32_t      *dst_row = (uint32_t *)((uint8_t *)fb.vaddr +
-                                              (size_t)dy * fb.pitch);
+    uint32_t *prev_dst_row = NULL;
 
-        for (uint32_t dx = 0; dx < dst_w; dx++) {
-            dst_row[dx] = (uint32_t)src_row[x_lut[dx]];
+    for (uint32_t dy = 0; dy < dst_h; dy++) {
+        uint32_t *dst_row = (uint32_t *)((uint8_t *)fb.vaddr +
+                                         (size_t)dy * fb.pitch);
+
+        if (prev_dst_row != NULL && y_lut[dy] == y_lut[dy - 1]) {
+            for (uint32_t dx = 0; dx < dst_w; dx++) {
+                dst_row[dx] = prev_dst_row[dx];
+            }
+        } else {
+            const pixel_t *src_row = DG_ScreenBuffer +
+                                     (size_t)y_lut[dy] * DOOMGENERIC_RESX;
+
+            for (uint32_t dx = 0; dx < dst_w; dx++) {
+                dst_row[dx] = (uint32_t)src_row[x_lut[dx]];
+            }
         }
+
+        prev_dst_row = dst_row;
     }
 
     profile_report(DG_GetTicksMs() - t0);
