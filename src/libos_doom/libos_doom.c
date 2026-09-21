@@ -96,7 +96,99 @@ static libos_fb_t fb;
 static int        fb_state = FB_UNTRIED;
 
 /*
- * Blit Doom's frame to the screen (SCRUM-77).
+ * dst_x -> src_x / dst_y -> src_y nearest-neighbour lookup tables (SCRUM-78).
+ *
+ * The per-axis Bresenham walk SCRUM-77 used to redo on every row of every
+ * frame depends only on fb.width/fb.height (via exo_fb_acquire) and
+ * DOOMGENERIC_RESX/RESY -- never on pixel content -- so it produces the exact
+ * same sequence of source indices every single time. Built once, right after
+ * the framebuffer maps successfully, and reused for the life of the process;
+ * see build_scale_lut() below for how they're filled.
+ *
+ * Sized to a ceiling well above any VESA mode this project has ever seen
+ * (1024x768 today); DG_DrawFrame bails out rather than index past them if
+ * exo_fb_acquire ever hands back something larger.
+ */
+#define LIBOS_DOOM_FB_MAX_W 3840
+#define LIBOS_DOOM_FB_MAX_H 2160
+
+static uint32_t x_lut[LIBOS_DOOM_FB_MAX_W];
+static uint32_t y_lut[LIBOS_DOOM_FB_MAX_H];
+
+/*
+ * Fill `lut[0 .. dst_n)` with the nearest-neighbour source index for each
+ * destination index, scaling src_n -> dst_n. Same Bresenham-style
+ * accumulator SCRUM-77 ran inline in the per-pixel loop -- an add, a compare
+ * and a store per destination index -- just run once per axis instead of
+ * once per axis per row per frame.
+ */
+static void build_scale_lut(uint32_t *lut, uint32_t dst_n, uint32_t src_n)
+{
+    uint32_t src_i = 0;
+    uint32_t acc = 0;
+
+    for (uint32_t dst_i = 0; dst_i < dst_n; dst_i++) {
+        lut[dst_i] = src_i;
+
+        acc += src_n;
+        while (acc >= dst_n) {
+            acc -= dst_n;
+            src_i++;
+        }
+        /* Only reachable when the destination axis is NARROWER than Doom's
+         * buffer, where the accumulator can step past the last source index
+         * on the final destination index. Cheap insurance against a mode
+         * nobody has tried rather than a condition seen at 1024x768. */
+        if (src_i >= src_n) {
+            src_i = src_n - 1;
+        }
+    }
+}
+
+/*
+ * Profiling counters for the acceptance criterion (SCRUM-78): "frame blit
+ * takes <5ms measured via serial profiling". The PIT backing DG_GetTicksMs()
+ * is 1ms-resolution and a single frame is expected to be well under that, so
+ * a single before/after pair would mostly just print "0ms" or "1ms" and
+ * prove nothing. Accumulating over many frames and reporting the average
+ * gets sub-ms precision out of ms-granularity ticks -- same approach
+ * docs/drivers/framebuffer.md §9 used to measure SCRUM-162's scroll fix.
+ * The max is tracked separately because an average can hide a single slow
+ * frame, and the acceptance criterion is about worst case, not mean case.
+ */
+#define PROF_WINDOW_FRAMES 35 /* ~1s at Doom's 35 tics/sec */
+
+static uint32_t prof_frames   = 0;
+static uint32_t prof_total_ms = 0;
+static uint32_t prof_max_ms   = 0;
+
+static void profile_report(uint32_t dt_ms)
+{
+    prof_frames++;
+    prof_total_ms += dt_ms;
+    if (dt_ms > prof_max_ms) {
+        prof_max_ms = dt_ms;
+    }
+
+    if (prof_frames < PROF_WINDOW_FRAMES) {
+        return;
+    }
+
+    /* Tenths of a ms via integer math -- no float needed for a ratio this
+     * simple, and this file has no other reason to touch one. */
+    uint32_t avg_x10 = (prof_total_ms * 10) / prof_frames;
+
+    printf("libos_doom: blit avg %u.%ums max %ums over %u frames\n",
+           (unsigned)(avg_x10 / 10), (unsigned)(avg_x10 % 10),
+           (unsigned)prof_max_ms, (unsigned)prof_frames);
+
+    prof_frames   = 0;
+    prof_total_ms = 0;
+    prof_max_ms   = 0;
+}
+
+/*
+ * Blit Doom's frame to the screen (SCRUM-77, LUTs + profiling SCRUM-78).
  *
  * ── Why this is a copy and not a conversion ───────────────────────────
  *
@@ -121,11 +213,11 @@ static int        fb_state = FB_UNTRIED;
  *
  * ── Scaling ───────────────────────────────────────────────────────────
  *
- * Nearest-neighbour, with a Bresenham-style accumulator per axis rather
- * than a multiply-and-divide per pixel: the source index advances by a
- * whole pixel whenever the accumulator passes the destination width, so
- * the inner loop is an add, a compare and a 32-bit store. SCRUM-78 is the
- * ticket for going faster than that if it turns out to matter.
+ * Nearest-neighbour. SCRUM-77 walked a Bresenham-style accumulator per axis
+ * inline in the per-pixel loop; SCRUM-78 hoists that walk out into
+ * x_lut/y_lut (build_scale_lut() above), built once when the framebuffer
+ * first maps rather than redone on every row of every frame, so the inner
+ * loop here is just two lookups and a 32-bit store.
  *
  * Written against fb.width/fb.height/fb.pitch rather than 1024/768/4096:
  * the geometry comes from exo_fb_acquire at runtime and GRUB is free to
@@ -154,6 +246,21 @@ void DG_DrawFrame(void)
             return;
         }
 
+        /* x_lut/y_lut are fixed-size arrays sized for a ceiling no mode this
+         * project has used comes close to -- bail loudly rather than index
+         * past them if that ever changes. */
+        if (fb.width > LIBOS_DOOM_FB_MAX_W || fb.height > LIBOS_DOOM_FB_MAX_H) {
+            fb_state = FB_FAILED;
+            printf("libos_doom: framebuffer %ux%u exceeds the %ux%u scale "
+                   "LUT budget -- running blind.\n",
+                   (unsigned)fb.width, (unsigned)fb.height,
+                   (unsigned)LIBOS_DOOM_FB_MAX_W, (unsigned)LIBOS_DOOM_FB_MAX_H);
+            return;
+        }
+
+        build_scale_lut(x_lut, fb.width, DOOMGENERIC_RESX);
+        build_scale_lut(y_lut, fb.height, DOOMGENERIC_RESY);
+
         fb_state = FB_READY;
         printf("libos_doom: framebuffer %ux%u, pitch %u -- scaling %ux%u\n",
                (unsigned)fb.width, (unsigned)fb.height, (unsigned)fb.pitch,
@@ -164,47 +271,23 @@ void DG_DrawFrame(void)
         return;
     }
 
+    uint32_t t0 = DG_GetTicksMs();
+
     const uint32_t dst_w = fb.width;
     const uint32_t dst_h = fb.height;
 
-    uint32_t src_y = 0;
-    uint32_t y_acc = 0;
-
     for (uint32_t dy = 0; dy < dst_h; dy++) {
         const pixel_t *src_row = DG_ScreenBuffer +
-                                 (size_t)src_y * DOOMGENERIC_RESX;
+                                 (size_t)y_lut[dy] * DOOMGENERIC_RESX;
         uint32_t      *dst_row = (uint32_t *)((uint8_t *)fb.vaddr +
                                               (size_t)dy * fb.pitch);
 
-        uint32_t src_x = 0;
-        uint32_t x_acc = 0;
-
         for (uint32_t dx = 0; dx < dst_w; dx++) {
-            dst_row[dx] = (uint32_t)src_row[src_x];
-
-            x_acc += DOOMGENERIC_RESX;
-            while (x_acc >= dst_w) {
-                x_acc -= dst_w;
-                src_x++;
-            }
-            /* Only reachable when the framebuffer is NARROWER than Doom's
-             * buffer, where the accumulator can step past the last column
-             * on the final pixel. Cheap insurance against a mode nobody
-             * has tried rather than a condition seen at 1024x768. */
-            if (src_x >= DOOMGENERIC_RESX) {
-                src_x = DOOMGENERIC_RESX - 1;
-            }
-        }
-
-        y_acc += DOOMGENERIC_RESY;
-        while (y_acc >= dst_h) {
-            y_acc -= dst_h;
-            src_y++;
-        }
-        if (src_y >= DOOMGENERIC_RESY) {
-            src_y = DOOMGENERIC_RESY - 1;
+            dst_row[dx] = (uint32_t)src_row[x_lut[dx]];
         }
     }
+
+    profile_report(DG_GetTicksMs() - t0);
 }
 
 /*

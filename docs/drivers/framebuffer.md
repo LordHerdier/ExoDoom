@@ -319,42 +319,67 @@ scrolling.
 
 ---
 
-## 7. DG_DrawFrame blit (planned)
+## 7. DG_DrawFrame blit
 
-Sprint 8 (SCRUM-77, SCRUM-78). `DG_DrawFrame` must blit Doom's `DG_ScreenBuffer`
-(640×400 RGBA8888) to the hardware framebuffer (1024×768 BGRX8888) with integer
-scaling.
+Sprint 8 (SCRUM-77, SCRUM-78). `DG_DrawFrame` (`src/libos_doom/libos_doom.c`)
+blits Doom's `DG_ScreenBuffer` to the hardware framebuffer every tick,
+scaling from Doom's resolution up to whatever `exo_fb_acquire` reports
+(1024×768 on the QEMU VESA mode this project targets).
 
-**Scale factor:** 1024/640 = 1.6 — not an integer. Options:
+**Scale factor:** 1024/640 = 1.6 — not an integer, and deliberately not
+letterboxed. Doom renders 320×200 (doomgeneric doubles it to 640×400 —
+"Auto-scaling factor: 2" in its own startup log), and 320×200 was designed
+for a 4:3 display with non-square pixels 1.2× taller than wide. 1024×768
+*is* 4:3, so a full non-integer nearest-neighbour stretch reproduces the
+intended geometry rather than distorting it — preserving the 640×400 pixel
+grid unscaled is what would squash the picture.
 
-- **Integer scale ×2 + letterbox:** Scale to 1280×800 — too large for 1024×768.
-- **Integer scale ×1 + centred:** 640×400 centred in 1024×768 (192px left
-  margin, 184px top margin). Simple, no distortion.
-- **Nearest-neighbour non-integer scale:** Scale to 1024×640, centred vertically
-  (64px top/bottom margin). Slightly distorted but fills width.
+**Format conversion:** none needed. Doom reports its channel offsets at
+startup (red 16, green 8, blue 0, alpha 24), which — little-endian — is B,G,R,X
+in memory: exactly the framebuffer's BGRX8888 layout (empirically confirmed
+on QEMU). Each pixel moves as one unmodified 32-bit word.
 
-SCRUM-77 specifies scaling to 1024×768. The nearest-neighbour approach at
-non-integer scale is the most likely implementation.
+**Scaling (SCRUM-77 → SCRUM-78):** nearest-neighbour throughout, in two
+generations:
 
-**Format conversion per pixel:** Doom outputs RGBA8888 (`0xRRGGBBAA`). The
-hardware expects BGRX8888 (`0x00RRGGBB` as a 32-bit value). The alpha channel is
-unused (always 0xFF from Doom). Per-pixel conversion:
+- **SCRUM-77** walked a Bresenham-style accumulator per axis inline in the
+  per-pixel loop (an add, a compare, a 32-bit store) — no multiply-and-divide,
+  but the same walk was re-derived from scratch on every one of the 768 rows
+  of every one of the ~35 frames/sec, even though it depends only on
+  `fb.width`/`fb.height` and `DOOMGENERIC_RESX`/`RESY`, never on pixel
+  content.
+- **SCRUM-78** hoists that walk out into two lookup tables, `x_lut[dst_x] ->
+  src_x` and `y_lut[dst_y] -> src_y`, built once (`build_scale_lut()`) the
+  first time the framebuffer maps successfully. The per-pixel loop is then
+  just `dst_row[dx] = src_row[x_lut[dx]]` — two array reads and a store, no
+  accumulator state carried across pixels at all.
 
-```c
-// Doom: pixel = 0xRRGGBBAA (big-endian field order, but stored little-endian)
-// Actual 32-bit value in memory: 0xAABBGGRR (little-endian byte order)
-uint32_t doom_px = DG_ScreenBuffer[src_y * 640 + src_x];
-uint8_t r = (doom_px >> 0)  & 0xFF;
-uint8_t g = (doom_px >> 8)  & 0xFF;
-uint8_t b = (doom_px >> 16) & 0xFF;
-// ignore alpha: (doom_px >> 24) & 0xFF
+**Profiling (SCRUM-78's acceptance criterion — "frame blit takes <5ms
+measured via serial profiling"):** `DG_DrawFrame` times its own blit body
+with `DG_GetTicksMs()` and prints an averaged per-frame cost plus the
+observed max every 35 frames (`profile_report()` in `libos_doom.c`) — a
+single before/after pair would mostly just read "0ms" or "1ms" against the
+PIT's 1ms resolution, so this follows the same repeat-and-average approach
+§9's SCRUM-162 writeup used to get sub-ms-granularity numbers out of an
+ms-granularity clock.
 
-uint32_t hw_px = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
-*(uint32_t*)(fb_addr + dst_y * pitch + dst_x * 4) = hw_px;
-```
+Measured on a normal `docker-run-kernel`-style boot (ISO/GRUB, `-display
+none`, keystrokes injected at the shell to launch `doom`), over several
+seconds of gameplay at the Freedoom title/level screen: **average 2.1–2.5ms
+per frame, max 3–5ms**, comfortably and consistently under the 5ms budget on
+average, with rare windows whose single worst frame touches the boundary.
+Comfortably meets the ticket's acceptance criterion as measured.
 
-SCRUM-78 optimises this with 32-bit aligned writes and a precomputed scale table
-to avoid per-pixel division.
+Worth knowing before reading too much into the absolute numbers: **this
+project's QEMU never has KVM acceleration** — no `docker-*` target in
+`Makefile`/`docker/` passes `--device /dev/kvm` or `-accel kvm`, so every
+`make docker-run`/`docker-test`/`docker-ci` boot, this measurement included,
+runs under pure TCG software emulation. That is the project's own standard,
+reproducible measurement environment (the same one §9's SCRUM-162 numbers
+came from), but it means these milliseconds are TCG-emulated-CPU cost, not
+real-hardware or KVM-accelerated cost — real hardware would be markedly
+faster, since the blit is now two array lookups and a store per pixel with
+no per-pixel branch on the happy path.
 
 ---
 
@@ -501,6 +526,13 @@ buffer that tracks a virtual top-of-screen offset instead of physically
 moving pixels remains the option if high-frequency output ever needs more
 headroom than a wide-store loop buys — but the per-scroll cost is no longer
 dominated by single-byte stores.
+
+**`DG_DrawFrame`'s per-row accumulator walk used to be redone every frame
+(SCRUM-78).** Full measurement and the precomputed-LUT fix are in §7 above;
+noted here because it's the same shape of mistake as SCRUM-162's scrolling
+copy — repeated work that doesn't depend on the data being processed, caught
+by the same technique (measure with `DG_GetTicksMs()`/`kernel_get_ticks_ms()`
+around the hot path, averaged over many repeats to beat 1ms PIT resolution).
 
 **Framebuffer is active in the boot path.** The framebuffer is initialised early
 in `kernel_main` (before interrupts) and displays the boot banner, BIOS memory
