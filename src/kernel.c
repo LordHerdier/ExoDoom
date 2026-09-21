@@ -912,7 +912,13 @@ void kernel_main(void *mb2_info_ptr) {
     size_t shell_data_len = (size_t)(_binary_shell_data_bin_end -
                                      _binary_shell_data_bin_start);
 
-    libos_image_t shell_img;
+    /* static, not a stack local: libos_image_t carries one uint64_t per
+     * mappable page, so at SCRUM-66's 192/192/16 page caps it is a little
+     * over 3 KiB -- a fifth of the 16 KiB boot stack (src/boot.s) to spend
+     * on one variable that was a few hundred bytes when this was written.
+     * kernel_main runs once and never reenters, so static costs nothing.
+     * src/syscall_launch.c's handlers do the same, for the same reason. */
+    static libos_image_t shell_img;
     int shell_build_rc = libos_build_image(shell_id,
                                            _binary_shell_code_bin_start,
                                            shell_code_len,
