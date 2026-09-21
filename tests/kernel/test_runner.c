@@ -25,6 +25,7 @@ void suite_syscall_mem_tests(CU_pSuite s);
 void suite_syscall_exit_tests(CU_pSuite s);
 void suite_ownership_tests(CU_pSuite s);
 void suite_page_alloc_tests(CU_pSuite s);
+void suite_memory_isolation_tests(CU_pSuite s);
 void suite_fb_binding_tests(CU_pSuite s);
 void suite_vmm_tests(CU_pSuite s);
 void suite_vmm_fb_wad_tests(CU_pSuite s);
@@ -273,6 +274,12 @@ int run_tests(void)
 
     s = CU_add_suite("page_alloc", NULL, NULL);
     suite_page_alloc_tests(s);
+
+    /* SCRUM-59: exhausts and refills the real PMM through the syscall path
+     * (EXO_SYS_PAGE_ALLOC/_FREE) -- the physical-pool sibling of
+     * "syscall_mem" and "page_alloc" above, kept next to them. */
+    s = CU_add_suite("memory_isolation", NULL, NULL);
+    suite_memory_isolation_tests(s);
 
     s = CU_add_suite("fb_binding", fb_binding_suite_init,
                      fb_binding_suite_cleanup);
