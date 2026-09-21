@@ -1211,6 +1211,33 @@ To add PC speaker sound, there are two options:
 **Option A (minimal):** Keep `FEATURE_SOUND` undefined. Doom runs silently. No
 sound syscalls needed.
 
+> **This is what the port does, and it needed no code (SCRUM-82).** The
+> vendored tree ships `FEATURE_SOUND` undefined already
+> (`src/doom/doomfeatures.h`), so `sound_modules[]` collapses to `{ NULL }`,
+> `InitSfxModule()`/`InitMusicModule()` leave both module pointers `NULL`, and
+> every `I_*` entry point in `src/doom/i_sound.c` takes its existing
+> null-pointer branch: `0` from `I_StartSound`/`I_GetSfxLumpNum`, `false` from
+> `I_SoundIsPlaying`, nothing from `I_StopSound`/`I_UpdateSound`. `s_sound.c`
+> is untroubled by that -- it stores a handle that is never played, and
+> `I_SoundIsPlaying(0)` answering `false` simply retires the channel. So
+> SCRUM-82's acceptance holds without stubbing anything, and stubbing would
+> have meant editing vendored source (which SCRUM-63 exists to avoid) to
+> replace working code with identical behaviour.
+>
+> What SCRUM-82 did add is the thing that makes it stay true: a gate at the
+> end of `docker/scripts/build-doom.sh` that reads `build/doom/i_sound.o` and
+> fails the build if `DG_sound_module`/`DG_music_module`/`Mix_*`/`SDL_*` ever
+> go undefined there, or if any of `I_StartSound`/`I_StopSound`/`I_UpdateSound`
+> stops being defined (`s_sound.c` calls all three unconditionally).
+>
+> It covers the quiet half of the regression. Defining `FEATURE_SOUND` on its
+> own is already loud -- `i_sound.c` includes `<SDL_mixer.h>` under the same
+> guard and the compile pass dies there. But define it with that include
+> bypassed (`-D__DJGPP__`, or an `SDL_mixer.h` appearing on the include path)
+> and the file compiles cleanly while leaving both module symbols undefined;
+> a compile-only pass says nothing, and the first sign would be an undefined
+> symbol during SCRUM-66's link.
+
 **Option B (PC speaker):** Implement a `sound_module_t` with
 `Init`/`StartSound`/`StopSound`/`Update` that maps Doom SFX lump data to PC
 speaker tone frequencies and calls `exo_sound_tone`/`exo_sound_stop`. Define
