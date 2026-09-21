@@ -88,10 +88,18 @@ SHIM_SOURCES=(
 # DG_Init was on this list until SCRUM-73 landed and defined it; pruned
 # here rather than left to the reverse check below, which is what an
 # allowlist entry decaying into an exemption looks like on its first day.
+#
+# NOTE ON THE DG_* ENTRIES (updated SCRUM-66/SCRUM-77): these are no longer
+# "not written yet". All three are implemented, in
+# src/libos_doom/libos_doom.c, which this script deliberately does not
+# compile -- SHIM_SOURCES is the libc shim SCRUM-65 is accountable for, not
+# the Doom LibOS target. So they are still undefined *from this gate's point
+# of view*, and still belong on the list; what changed is why. Dropping them
+# would make the gate fail on a symbol that is fine.
 declare -A ALLOWED=(
-  [DG_DrawFrame]="Sprint 8 -- needs exo_fb_acquire + the BGRX blit"
+  [DG_DrawFrame]="implemented in src/libos_doom/libos_doom.c (SCRUM-77); not compiled by this gate"
   [DG_GetKey]="Sprint 8 -- needs exo_kbd_poll + keycode translation"
-  [DG_SetWindowTitle]="Sprint 8 -- a no-op or a serial line"
+  [DG_SetWindowTitle]="implemented in src/libos_doom/libos_doom.c (SCRUM-66); not compiled by this gate"
   [_GLOBAL_OFFSET_TABLE_]="not a symbol -- ld synthesises this itself"
 )
 
