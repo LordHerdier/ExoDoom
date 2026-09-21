@@ -540,6 +540,29 @@ uint32_t page_count_owned(page_owner_t owner) {
     return count;
 }
 
+void page_alloc_totals(uint32_t* total_out, uint32_t* free_out,
+                       uint32_t* kernel_out, uint32_t* libos_out) {
+    *total_out = 0;
+    *free_out = 0;
+    *kernel_out = 0;
+    *libos_out = 0;
+
+    for (uint32_t r = 0; r < region_count; r++) {
+        page_region_t* reg = &regions[r];
+        *total_out += reg->total_pages;
+
+        for (uint32_t i = 0; i < reg->total_pages; i++) {
+            if (!bitmap_test(reg, i)) {
+                (*free_out)++;
+            } else if (owner_id(reg->owners[i]) == PAGE_OWNER_KERNEL) {
+                (*kernel_out)++;
+            } else {
+                (*libos_out)++;
+            }
+        }
+    }
+}
+
 uintptr_t page_alloc_pool_end(void) {
     if (region_count == 0) {
         return 0;

@@ -138,6 +138,18 @@ uint32_t context_count(void) {
     return count;
 }
 
+uint32_t context_list(context_info_t *out, uint32_t max) {
+    uint32_t count = 0;
+    for (int i = 0; i < CONTEXT_MAX && count < max; i++) {
+        if (contexts[i].state != CONTEXT_STATE_UNUSED) {
+            out[count].id = contexts[i].id;
+            out[count].state = contexts[i].state;
+            count++;
+        }
+    }
+    return count;
+}
+
 int context_set_state(page_owner_t id, context_state_t state) {
     context_t *slot = find_slot(id);
     if (slot == NULL) {

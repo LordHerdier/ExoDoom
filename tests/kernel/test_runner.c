@@ -67,6 +67,12 @@ void suite_syscall_bench_tests(CU_pSuite s);
 void suite_libos_snake_tests(CU_pSuite s);
 void suite_doom_keymap_tests(CU_pSuite s);
 void suite_libos_doom_tests(CU_pSuite s);
+void suite_syscall_stat_tests(CU_pSuite s);
+
+/* Same defensive shape as context_suite_cleanup (test_context_k.c): the
+ * pslist tests create their own scratch contexts and must not leak a PML4
+ * into a later suite if an assertion fails mid-test (SCRUM-113). */
+int syscall_stat_suite_cleanup(void);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -411,6 +417,9 @@ int run_tests(void)
     s = CU_add_suite("libos_doom", libos_doom_suite_init,
                      libos_doom_suite_cleanup);
     suite_libos_doom_tests(s);
+
+    s = CU_add_suite("syscall_stat", NULL, syscall_stat_suite_cleanup);
+    suite_syscall_stat_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not

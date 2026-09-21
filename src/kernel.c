@@ -18,6 +18,7 @@
 #include "syscall_mem.h"
 #include "syscall_fb.h"
 #include "syscall_serial.h"
+#include "syscall_stat.h"
 #include "syscall_kbd.h"
 #include "syscall_pit.h"
 #include "syscall_yield.h"
@@ -682,6 +683,13 @@ void kernel_main(void *mb2_info_ptr) {
     // placement rule as the memory and framebuffer syscalls: after
     // syscall_init, ahead of the TESTING branch.
     syscall_serial_init();
+
+    // ── Introspection syscalls (SCRUM-113) ──────────────────────────────
+    // Binds exo_memstat (#25) and exo_pslist (#26), backing the shell's
+    // `memstat`/`pslist` commands. Same placement rule as the syscalls
+    // above: after syscall_init, ahead of the TESTING branch, so both are
+    // exercisable from the ring-3 test harness too.
+    syscall_stat_init();
 
     // ── Keyboard syscall (SCRUM-39) ───────────────────────────────────────
     // Binds exo_kbd_poll (#6) to the kernel's existing keyboard ring
