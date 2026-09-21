@@ -228,7 +228,13 @@ static int64_t sys_page_map(uint64_t vaddr, uint64_t paddr, uint64_t flags,
     if (flags & EXO_PAGE_WRITE) attrs |= VMM_WRITE;
     if (flags & EXO_PAGE_USER)  attrs |= VMM_USER;
 
-    return vmm_status_to_errno(vmm_map_page_in(root, vaddr, paddr, attrs));
+    /* _owned: table pages this call causes vmm.c to allocate are charged
+     * against the caller's SCRUM-160 quota (VMM_MAX_TABLE_PAGES_PER_CONTEXT)
+     * — see vmm.h. This is the one ring-3-reachable path that can cause an
+     * unbounded number of them; every other vmm_map_page_in() caller is
+     * kernel-internal and stays on the unlimited path. */
+    return vmm_status_to_errno(vmm_map_page_in_owned(root, vaddr, paddr, attrs,
+                                                     syscall_current_context()));
 }
 
 /* #3 — remove the mapping at `vaddr`.  The physical page is left allocated;

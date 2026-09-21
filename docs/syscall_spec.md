@@ -1057,11 +1057,42 @@ A page belonging to the kernel or to another context is still refused.
   `revoke_all` (§3.6) use it on the target context, so repossessing a
   resource — a shadow framebuffer's pages included — actually revokes write
   access to it rather than only updating the ownership table.
-- **No quota on page tables.** Every level `vmm.c` allocates is a
-  `PAGE_OWNER_KERNEL` page that no sweep reclaims, and a caller can walk the
-  128 TiB window installing one mapping per 2 MiB to consume them without
-  bound. Harmless while the only caller is the kernel itself; a per-context
-  quota is required before ring 3 can reach it.
+- **Page-table pages are quota-bounded per context (SCRUM-160), not
+  reclaimed and not reassigned.** Every level `vmm.c` allocates is still a
+  `PAGE_OWNER_KERNEL` page no sweep reclaims (unchanged — see `vmm.c`'s own
+  file header: never switch these to `alloc_page_owned()` with a LibOS id,
+  or a LibOS could `exo_page_free` a page table out from under its own
+  address space), and `vmm_unmap_page()` still never reclaims an empty one
+  (the bullet above this one). What closes the actual exhaustion gap is a
+  *quota*, not either of those: `exo_page_map` (`sys_page_map`,
+  `src/syscall_mem.c`) calls `vmm_map_page_in_owned()` instead of
+  `vmm_map_page_in()`, which charges every table page it causes
+  `alloc_table()` to create against the caller's own slot in `vmm.c`'s
+  per-context address-space registry (`addrspace_binding_t.table_pages_charged`).
+  Once a context's charge reaches `VMM_MAX_TABLE_PAGES_PER_CONTEXT` (64,
+  `src/vmm.h`), `alloc_table()` refuses — before calling `alloc_page()`, so
+  hitting the quota consumes no page — and the failure surfaces as the same
+  `-EXO_ENOMEM` real PMM exhaustion already produces. The charge resets to
+  0 whenever `vmm_bind_address_space()` (re)points that slot at a new
+  `pml4_phys`, which is every real relaunch (`libos_build_image()` always
+  builds a fresh address space first), so a LibOS gets a clean quota each
+  time it starts, not a debt inherited from a previous life of the same
+  context id.
+
+  64 is sized against the largest legitimate ring-3 caller of `exo_page_map`
+  known today — `libos_fb_map()` (`src/libos_fb.c`), which the shell calls
+  once at startup to map the acquired framebuffer a page at a time, a
+  handful of PT pages for a real VESA mode — with several times that much
+  headroom, while still capping a single context's worst-case table growth
+  at 64 pages (256 KiB) rather than unbounded. Kernel-internal callers of
+  `vmm_map_page_in()` — the boot identity map, `libos_launch.c`'s image
+  loader, `libos_wad_map.c` — are untouched: they keep going through the
+  unowned/unlimited path (equivalent to passing `PAGE_OWNER_KERNEL`), exactly
+  as before this ticket, because each is already bounded by its own
+  fixed-size window (`LIBOS_LAUNCH_MAX_CODE_PAGES`/`_DATA_PAGES`/
+  `LIBOS_LAUNCH_STACK_PAGES`, `LIBOS_WAD_MAX_BYTES`). `exo_page_unmap` is
+  also untouched — the split it can trigger stays unowned/unlimited too,
+  since unmapping was never the exhaustion vector this ticket closes.
 - **A page fault reports, from either ring, but nothing recovers.**
   SCRUM-17 put a real handler on vector 14: an access to an unmapped address
   now yields CR2, the decoded error code, the faulting RIP and the live

@@ -509,6 +509,70 @@ static void test_bind_rebind_and_unbind(void)
     CU_ASSERT_EQUAL(vmm_address_space_for(REGISTRY_SCRATCH_OWNER), 0);
 }
 
+/*
+ * SCRUM-160: table pages vmm_map_page_in_owned() allocates on a context's
+ * behalf are bounded (VMM_MAX_TABLE_PAGES_PER_CONTEXT). Mapping the same
+ * physical page at successive 2 MiB-aligned virtual addresses forces a
+ * fresh PT under next_level() each time -- there is nothing at that address
+ * yet, and the previous PT's 2 MiB span does not reach it -- so this drives
+ * the quota directly rather than relying on real physical exhaustion (which
+ * would make the suite itself the resource hog SCRUM-160 exists to stop).
+ */
+#define QUOTA_SCRATCH_VA (EXO_USER_VA_BASE + 0x40000000ULL)
+
+static void test_map_page_in_owned_enforces_table_quota(void)
+{
+    uint64_t new_phys = 0;
+    CU_ASSERT_EQUAL(vmm_create_address_space(&new_phys), VMM_OK);
+    uint64_t *new_pml4 = (uint64_t *)(uintptr_t)new_phys;
+
+    CU_ASSERT_EQUAL(vmm_bind_address_space(TEST_OWNER_VMM_QUOTA, new_phys),
+                    VMM_OK);
+
+    void *page = alloc_page();
+    CU_ASSERT_PTR_NOT_NULL(page);
+    if (page != NULL) {
+        uint64_t phys = (uint64_t)(uintptr_t)page;
+        uint32_t mapped = 0;
+
+        /* One iteration past every table this context could possibly be
+         * charged for (each successful call charges at least 1) is enough
+         * to guarantee the loop hits the quota rather than running out. */
+        for (; mapped <= VMM_MAX_TABLE_PAGES_PER_CONTEXT; mapped++) {
+            uint64_t vaddr = QUOTA_SCRATCH_VA +
+                             (uint64_t)mapped * VMM_LARGE_PAGE_SIZE;
+            int rc = vmm_map_page_in_owned(new_pml4, vaddr, phys,
+                                           VMM_PRESENT | VMM_WRITE,
+                                           TEST_OWNER_VMM_QUOTA);
+            if (rc != VMM_OK) {
+                CU_ASSERT_EQUAL(rc, VMM_ENOMEM);
+                break;
+            }
+        }
+
+        /* The quota was actually hit (the loop broke out before its ceiling,
+         * having mapped at least one page first), and exactly bounds what
+         * got charged -- not "eventually consumes all of physical memory". */
+        CU_ASSERT_TRUE(mapped > 0);
+        CU_ASSERT_TRUE(mapped <= VMM_MAX_TABLE_PAGES_PER_CONTEXT);
+        CU_ASSERT_EQUAL(vmm_table_pages_owned(TEST_OWNER_VMM_QUOTA),
+                        VMM_MAX_TABLE_PAGES_PER_CONTEXT);
+
+        /* The kernel's own allocator is untouched by another context's
+         * quota -- "the kernel survives it with its own allocations
+         * intact" (SCRUM-160 acceptance criteria). */
+        void *kernel_page = alloc_page();
+        CU_ASSERT_PTR_NOT_NULL(kernel_page);
+        if (kernel_page != NULL) {
+            free_page(kernel_page);
+        }
+
+        free_page(page);
+    }
+
+    CU_ASSERT_EQUAL(vmm_destroy_address_space(TEST_OWNER_VMM_QUOTA), VMM_OK);
+}
+
 void suite_vmm_tests(CU_pSuite s)
 {
     CU_add_test(s, "kernel map is live in CR3", test_kernel_map_is_live);
@@ -546,4 +610,6 @@ void suite_vmm_tests(CU_pSuite s)
     CU_add_test(s, "bind rejects FREE and KERNEL",
                 test_bind_rejects_free_and_kernel);
     CU_add_test(s, "bind/rebind/unbind registry", test_bind_rebind_and_unbind);
+    CU_add_test(s, "map_page_in_owned enforces per-context table quota",
+                test_map_page_in_owned_enforces_table_quota);
 }

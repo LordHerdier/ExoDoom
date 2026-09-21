@@ -96,6 +96,44 @@ static uint32_t table_pages = 0;
  * boot map is live and none of our entries are cached). */
 static int map_active = 0;
 
+/*
+ * Per-context address-space registry storage (SCRUM-48) and the
+ * SCRUM-160 quota field on it, both moved up ahead of alloc_table() so
+ * it can charge a table page against its caller without a forward
+ * declaration. The registry's own entry points
+ * (vmm_bind_address_space()/vmm_address_space_for()/
+ * vmm_unbind_address_space()) stay below, by the "Per-context
+ * address-space registry" banner, where SCRUM-48 put them.
+ */
+typedef struct {
+    page_owner_t owner;         /* PAGE_OWNER_FREE marks an empty slot */
+    uint64_t     pml4_phys;
+    uint32_t     table_pages_charged; /* SCRUM-160: see VMM_MAX_TABLE_PAGES_PER_CONTEXT */
+} addrspace_binding_t;
+
+static addrspace_binding_t address_spaces[VMM_MAX_ADDRESS_SPACES];
+
+/* Mirrors page_alloc.c's owner_id(): mask off the revocation bit (SCRUM-156)
+ * so a context under revocation still resolves to its own address space —
+ * revocation marks a resource pending, it does not stop the owner running. */
+static page_owner_t owner_id(page_owner_t owner) {
+    return owner & PAGE_OWNER_ID_MASK;
+}
+
+/* `owner`'s registry slot, or NULL if it has none bound. Same linear scan
+ * vmm_address_space_for() does; kept separate rather than shared so that
+ * function's existing behavior (return a pml4_phys, or the 0 sentinel)
+ * is untouched by this ticket. */
+static addrspace_binding_t *find_binding(page_owner_t owner) {
+    page_owner_t id = owner_id(owner);
+    for (int i = 0; i < VMM_MAX_ADDRESS_SPACES; i++) {
+        if (owner_id(address_spaces[i].owner) == id) {
+            return &address_spaces[i];
+        }
+    }
+    return NULL;
+}
+
 #ifdef TESTING
 /*
  * The two ring-3 probes that predate SCRUM-48 and still execute directly
@@ -126,7 +164,37 @@ static int is_canonical(uint64_t v) {
     return top == 0 || top == 0x1FFFF;
 }
 
-static uint64_t *alloc_table(void) {
+/*
+ * `owner` is who this table is being allocated on behalf of, for the
+ * SCRUM-160 per-context quota — PAGE_OWNER_KERNEL means "no quota", the
+ * behavior every call site had before this ticket. A non-kernel `owner`
+ * with a bound registry slot already at VMM_MAX_TABLE_PAGES_PER_CONTEXT is
+ * refused here, before alloc_page() is ever called, so hitting the quota
+ * consumes no page. `owner` with no bound slot is charged nothing — the
+ * real exo_page_map path only ever reaches this with a root resolved from
+ * vmm_address_space_for(owner), which is non-zero only once a slot exists,
+ * so that case does not arise there; it is not refused outright so that
+ * kernel-internal callers passing a non-PAGE_OWNER_KERNEL owner by mistake
+ * fail loudly (ENOMEM further up) rather than silently.
+ *
+ * PAGE_OWNER_FREE is excluded from the lookup for the same reason
+ * vmm_bind_address_space() refuses it as a bind target: find_binding()'s
+ * scan matches on owner_id(), and an *unbound* registry slot's sentinel
+ * owner field is itself PAGE_OWNER_FREE — so owner == PAGE_OWNER_FREE would
+ * otherwise spuriously match the first empty slot instead of finding
+ * nothing, corrupting whatever context later binds there.
+ */
+static uint64_t *alloc_table(page_owner_t owner) {
+    addrspace_binding_t *slot = NULL;
+    if (owner_id(owner) != PAGE_OWNER_KERNEL &&
+        owner_id(owner) != PAGE_OWNER_FREE) {
+        slot = find_binding(owner);
+        if (slot != NULL &&
+            slot->table_pages_charged >= VMM_MAX_TABLE_PAGES_PER_CONTEXT) {
+            return NULL;
+        }
+    }
+
     void *p = alloc_page();          /* PAGE_OWNER_KERNEL — see file header */
     if (p == NULL) {
         serial_print("vmm: out of pages for a page table\n");
@@ -139,6 +207,9 @@ static uint64_t *alloc_table(void) {
     }
 
     table_pages++;
+    if (slot != NULL) {
+        slot->table_pages_charged++;
+    }
     return table;
 }
 
@@ -186,8 +257,12 @@ static void flush_all(uint64_t *pml4) {
  * An existing link is *upgraded* to user-accessible if the new leaf needs it:
  * a link created for a supervisor mapping would otherwise veto a user leaf
  * mapped later under the same PDPT/PD.
+ *
+ * `owner` is passed straight through to alloc_table() when a new link has to
+ * be created (SCRUM-160) — see that function's comment.
  */
-static uint64_t *next_level(uint64_t *pml4, uint64_t *table, unsigned index, uint64_t leaf_flags) {
+static uint64_t *next_level(uint64_t *pml4, uint64_t *table, unsigned index,
+                            uint64_t leaf_flags, page_owner_t owner) {
     uint64_t entry = table[index];
 
     if (entry & VMM_PRESENT) {
@@ -204,7 +279,7 @@ static uint64_t *next_level(uint64_t *pml4, uint64_t *table, unsigned index, uin
         return NULL;            /* walk only: do not create */
     }
 
-    uint64_t *child = alloc_table();
+    uint64_t *child = alloc_table(owner);
     if (child == NULL) {
         return NULL;
     }
@@ -218,13 +293,21 @@ static uint64_t *next_level(uint64_t *pml4, uint64_t *table, unsigned index, uin
  * single 4 KiB page inside it can be remapped without disturbing its
  * neighbours.  The leaf's flags carry over verbatim (minus PS), which is what
  * makes the split invisible to everything except the page being changed.
+ *
+ * `owner` is threaded through to alloc_table() same as next_level()
+ * (SCRUM-160). The mapping path (map_page_impl()) passes its real caller,
+ * so a split it triggers is charged like any other table page; the unmap
+ * path passes PAGE_OWNER_KERNEL, unowned/unlimited as before this ticket —
+ * exo_page_unmap was never part of this ticket's scope
+ * (docs/syscall_spec.md §3.7).
  */
-static int split_large_page(uint64_t *pml4, uint64_t *pd, unsigned index) {
+static int split_large_page(uint64_t *pml4, uint64_t *pd, unsigned index,
+                            page_owner_t owner) {
     uint64_t entry = pd[index];
     uint64_t base  = entry & ENTRY_ADDR_MASK;
     uint64_t flags = (entry & ENTRY_FLAG_MASK) & ~VMM_HUGE;
 
-    uint64_t *pt = alloc_table();
+    uint64_t *pt = alloc_table(owner);
     if (pt == NULL) {
         return VMM_ENOMEM;
     }
@@ -250,7 +333,15 @@ static int split_large_page(uint64_t *pml4, uint64_t *pd, unsigned index) {
 
 /* ── Mapping ──────────────────────────────────────────────────────────── */
 
-int vmm_map_page_in(uint64_t *pml4, uint64_t vaddr, uint64_t paddr, uint64_t flags) {
+/*
+ * Shared implementation behind vmm_map_page_in() and vmm_map_page_in_owned()
+ * (SCRUM-160): identical to the pre-SCRUM-160 vmm_map_page_in() body, except
+ * every table page it may create is now attributed to `owner` (see
+ * alloc_table()'s comment). vmm_map_page_in() passes PAGE_OWNER_KERNEL —
+ * the unlimited, pre-existing behavior every kernel-internal caller keeps.
+ */
+static int map_page_impl(uint64_t *pml4, uint64_t vaddr, uint64_t paddr,
+                         uint64_t flags, page_owner_t owner) {
     if (pml4 == NULL) {
         return VMM_EINVAL;
     }
@@ -262,7 +353,7 @@ int vmm_map_page_in(uint64_t *pml4, uint64_t vaddr, uint64_t paddr, uint64_t fla
     /* Sanitised once, then used for both the leaf and the links below. */
     uint64_t leaf = (flags & ENTRY_FLAG_MASK) | VMM_PRESENT;
 
-    uint64_t *pdpt = next_level(pml4, pml4, PML4_IDX(vaddr), leaf);
+    uint64_t *pdpt = next_level(pml4, pml4, PML4_IDX(vaddr), leaf, owner);
     if (pdpt == NULL) {
         return VMM_ENOMEM;
     }
@@ -273,7 +364,7 @@ int vmm_map_page_in(uint64_t *pml4, uint64_t vaddr, uint64_t paddr, uint64_t fla
         return VMM_EEXIST;
     }
 
-    uint64_t *pd = next_level(pml4, pdpt, PDPT_IDX(vaddr), leaf);
+    uint64_t *pd = next_level(pml4, pdpt, PDPT_IDX(vaddr), leaf, owner);
     if (pd == NULL) {
         return VMM_ENOMEM;
     }
@@ -288,13 +379,13 @@ int vmm_map_page_in(uint64_t *pml4, uint64_t vaddr, uint64_t paddr, uint64_t fla
             return VMM_EEXIST;
         }
 
-        int rc = split_large_page(pml4, pd, PD_IDX(vaddr));
+        int rc = split_large_page(pml4, pd, PD_IDX(vaddr), owner);
         if (rc != VMM_OK) {
             return rc;
         }
     }
 
-    uint64_t *pt = next_level(pml4, pd, PD_IDX(vaddr), leaf);
+    uint64_t *pt = next_level(pml4, pd, PD_IDX(vaddr), leaf, owner);
     if (pt == NULL) {
         return VMM_ENOMEM;
     }
@@ -311,6 +402,15 @@ int vmm_map_page_in(uint64_t *pml4, uint64_t vaddr, uint64_t paddr, uint64_t fla
     return VMM_OK;
 }
 
+int vmm_map_page_in(uint64_t *pml4, uint64_t vaddr, uint64_t paddr, uint64_t flags) {
+    return map_page_impl(pml4, vaddr, paddr, flags, PAGE_OWNER_KERNEL);
+}
+
+int vmm_map_page_in_owned(uint64_t *pml4, uint64_t vaddr, uint64_t paddr,
+                          uint64_t flags, page_owner_t owner) {
+    return map_page_impl(pml4, vaddr, paddr, flags, owner);
+}
+
 int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
     return vmm_map_page_in(kernel_pml4, vaddr, paddr, flags);
 }
@@ -323,7 +423,10 @@ int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
 static int map_large_page(uint64_t *pml4, uint64_t vaddr, uint64_t paddr, uint64_t flags) {
     uint64_t leaf = (flags & ENTRY_FLAG_MASK) | VMM_PRESENT;
 
-    uint64_t *pdpt = next_level(pml4, pml4, PML4_IDX(vaddr), leaf);
+    /* Only reached from vmm_map_range_in() — a kernel-internal, trusted
+     * caller (boot map, loaders) — never from exo_page_map, so no
+     * SCRUM-160 quota owner applies here. */
+    uint64_t *pdpt = next_level(pml4, pml4, PML4_IDX(vaddr), leaf, PAGE_OWNER_KERNEL);
     if (pdpt == NULL) {
         return VMM_ENOMEM;
     }
@@ -331,7 +434,7 @@ static int map_large_page(uint64_t *pml4, uint64_t vaddr, uint64_t paddr, uint64
         return VMM_EEXIST;
     }
 
-    uint64_t *pd = next_level(pml4, pdpt, PDPT_IDX(vaddr), leaf);
+    uint64_t *pd = next_level(pml4, pdpt, PDPT_IDX(vaddr), leaf, PAGE_OWNER_KERNEL);
     if (pd == NULL) {
         return VMM_ENOMEM;
     }
@@ -408,8 +511,12 @@ int vmm_unmap_page_in(uint64_t *pml4, uint64_t vaddr) {
         return VMM_EINVAL;
     }
 
-    /* 0 = walk only, never create: unmapping must not allocate. */
-    uint64_t *pdpt = next_level(pml4, pml4, PML4_IDX(vaddr), 0);
+    /* 0 = walk only, never create: unmapping must not allocate. Owner is
+     * irrelevant on a walk-only next_level() call (alloc_table() is never
+     * reached), but split_large_page() below does allocate — passed
+     * PAGE_OWNER_KERNEL, unowned/unlimited: exo_page_unmap is not part of
+     * the SCRUM-160 quota (see that function's own comment). */
+    uint64_t *pdpt = next_level(pml4, pml4, PML4_IDX(vaddr), 0, PAGE_OWNER_KERNEL);
     if (pdpt == NULL) {
         return VMM_ENOENT;
     }
@@ -417,20 +524,20 @@ int vmm_unmap_page_in(uint64_t *pml4, uint64_t vaddr) {
         return VMM_EINVAL;      /* 1 GB leaf: splitting is not implemented */
     }
 
-    uint64_t *pd = next_level(pml4, pdpt, PDPT_IDX(vaddr), 0);
+    uint64_t *pd = next_level(pml4, pdpt, PDPT_IDX(vaddr), 0, PAGE_OWNER_KERNEL);
     if (pd == NULL) {
         return VMM_ENOENT;
     }
 
     uint64_t pde = pd[PD_IDX(vaddr)];
     if ((pde & VMM_PRESENT) && (pde & VMM_HUGE)) {
-        int rc = split_large_page(pml4, pd, PD_IDX(vaddr));
+        int rc = split_large_page(pml4, pd, PD_IDX(vaddr), PAGE_OWNER_KERNEL);
         if (rc != VMM_OK) {
             return rc;
         }
     }
 
-    uint64_t *pt = next_level(pml4, pd, PD_IDX(vaddr), 0);
+    uint64_t *pt = next_level(pml4, pd, PD_IDX(vaddr), 0, PAGE_OWNER_KERNEL);
     if (pt == NULL) {
         return VMM_ENOENT;
     }
@@ -485,8 +592,10 @@ uint32_t vmm_unmap_phys_range_in(uint64_t *pml4, uint64_t paddr_lo, uint64_t pad
         return 0;
     }
 
+    /* Walk-only (leaf_flags 0): alloc_table() is never reached, so the
+     * owner passed to next_level() below is inert either way. */
     for (unsigned pi = VMM_LIBOS_PML4_START; pi < VMM_LIBOS_PML4_END; pi++) {
-        uint64_t *pdpt = next_level(pml4, pml4, pi, 0);
+        uint64_t *pdpt = next_level(pml4, pml4, pi, 0, PAGE_OWNER_KERNEL);
         if (pdpt == NULL) {
             continue;
         }
@@ -495,7 +604,7 @@ uint32_t vmm_unmap_phys_range_in(uint64_t *pml4, uint64_t paddr_lo, uint64_t pad
             if (pdpt[di] & VMM_HUGE) {
                 continue;               /* never created in the window */
             }
-            uint64_t *pd = next_level(pml4, pdpt, di, 0);
+            uint64_t *pd = next_level(pml4, pdpt, di, 0, PAGE_OWNER_KERNEL);
             if (pd == NULL) {
                 continue;
             }
@@ -504,7 +613,7 @@ uint32_t vmm_unmap_phys_range_in(uint64_t *pml4, uint64_t paddr_lo, uint64_t pad
                 if (pd[qi] & VMM_HUGE) {
                     continue;           /* never created in the window */
                 }
-                uint64_t *pt = next_level(pml4, pd, qi, 0);
+                uint64_t *pt = next_level(pml4, pd, qi, 0, PAGE_OWNER_KERNEL);
                 if (pt == NULL) {
                     continue;
                 }
@@ -647,7 +756,7 @@ int vmm_init(const struct mb2_info *mb, const struct mb2_tag_framebuffer *fb) {
         return VMM_OK;
     }
 
-    kernel_pml4 = alloc_table();
+    kernel_pml4 = alloc_table(PAGE_OWNER_KERNEL);
     if (kernel_pml4 == NULL) {
         serial_print("vmm: cannot allocate PML4\n");
         return VMM_ENOMEM;
@@ -815,7 +924,7 @@ int vmm_create_address_space(uint64_t *pml4_phys_out) {
         return VMM_EINVAL;      /* nothing to share yet */
     }
 
-    uint64_t *pml4 = alloc_table();     /* PAGE_OWNER_KERNEL, same as kernel_pml4 */
+    uint64_t *pml4 = alloc_table(PAGE_OWNER_KERNEL);     /* PAGE_OWNER_KERNEL, same as kernel_pml4 */
     if (pml4 == NULL) {
         return VMM_ENOMEM;
     }
@@ -915,22 +1024,11 @@ int vmm_switch_address_space(uint64_t pml4_phys) {
  * See vmm.h: keyed on page_owner_t, same id every other ownership table in
  * the kernel already uses, and deliberately a flat linear-scan table rather
  * than anything smarter — SCRUM-147 is expected to replace this once there
- * is more than one entry worth optimizing for.
+ * is more than one entry worth optimizing for. Storage (addrspace_binding_t,
+ * address_spaces[]) and owner_id()/find_binding() now live above
+ * alloc_table() — see the comment there — so only the entry points stay
+ * here.
  */
-
-typedef struct {
-    page_owner_t owner;         /* PAGE_OWNER_FREE marks an empty slot */
-    uint64_t     pml4_phys;
-} addrspace_binding_t;
-
-static addrspace_binding_t address_spaces[VMM_MAX_ADDRESS_SPACES];
-
-/* Mirrors page_alloc.c's owner_id(): mask off the revocation bit (SCRUM-156)
- * so a context under revocation still resolves to its own address space —
- * revocation marks a resource pending, it does not stop the owner running. */
-static page_owner_t owner_id(page_owner_t owner) {
-    return owner & PAGE_OWNER_ID_MASK;
-}
 
 int vmm_bind_address_space(page_owner_t owner, uint64_t pml4_phys) {
     page_owner_t id = owner_id(owner);
@@ -942,6 +1040,11 @@ int vmm_bind_address_space(page_owner_t owner, uint64_t pml4_phys) {
     for (int i = 0; i < VMM_MAX_ADDRESS_SPACES; i++) {
         if (owner_id(address_spaces[i].owner) == id) {
             address_spaces[i].pml4_phys = pml4_phys;
+            /* SCRUM-160: a rebind always means a brand-new pml4_phys —
+             * libos_build_image() calls vmm_create_address_space() before
+             * rebinding — so a stale charge from this owner id's previous
+             * address space must not carry over into the new one. */
+            address_spaces[i].table_pages_charged = 0;
             return VMM_OK;
         }
         if (address_spaces[i].owner == PAGE_OWNER_FREE && free_slot < 0) {
@@ -954,7 +1057,15 @@ int vmm_bind_address_space(page_owner_t owner, uint64_t pml4_phys) {
 
     address_spaces[free_slot].owner = owner;
     address_spaces[free_slot].pml4_phys = pml4_phys;
+    address_spaces[free_slot].table_pages_charged = 0;
     return VMM_OK;
+}
+
+/* How many table pages are charged against `owner`'s quota right now, or 0
+ * if `owner` has no bound address-space slot (SCRUM-160). */
+uint32_t vmm_table_pages_owned(page_owner_t owner) {
+    addrspace_binding_t *slot = find_binding(owner);
+    return slot != NULL ? slot->table_pages_charged : 0;
 }
 
 uint64_t vmm_address_space_for(page_owner_t owner) {
