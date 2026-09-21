@@ -284,15 +284,25 @@ the owned variants.)
 
 `page_alloc_init()` must be called after both `mmap_init()` and `memory_init()`:
 
-1. Allocate bitmap via `kmalloc` — marks all pages as used by default.
-2. Walk the mmap regions: for each `MULTIBOOT_MMAP_AVAILABLE` region, mark pages
-   in that range as free.
-3. Re-mark as used: all pages covered by the kernel image (`_load_start` →
-   `_bss_end`), the bump allocator pool (up to `memory_base_address()`), and the
-   WAD multiboot module region. This is SCRUM-8.
-4. Optionally re-mark the low 1M as used (BIOS/VGA reserved).
+1. Walk the mmap regions: for **every** `MULTIBOOT_MMAP_AVAILABLE` region
+   above 1 MB (not just the first — SCRUM-158), `kmalloc` that region its own
+   bitmap and owner table, up to `MAX_PAGE_REGIONS` regions (32 mmap regions
+   is the ceiling `mmap.h` itself enforces; extras beyond `MAX_PAGE_REGIONS`
+   are logged and skipped, not fatal). Each bitmap starts fully zeroed
+   (free); nothing is pre-marked used region-wide.
+2. Re-mark as used: all pages covered by the kernel image (`_load_start` →
+   `_bss_end`) and the bump allocator pool (up to `memory_base_address()`) —
+   both inside the first registered region — the multiboot info struct, and
+   the WAD multiboot module region. Each reservation resolves the pages it
+   covers to whichever registered region actually contains them, so this
+   still works when the kernel/bump-pool range and the WAD module land in
+   different regions. This is SCRUM-8 (and its SCRUM-158 generalization).
 
-After this, only genuinely free physical RAM is available for allocation.
+After this, only genuinely free physical RAM — in any registered region — is
+available for allocation. A page allocated via `alloc_pages_contig_owned()`
+is still only ever contiguous *within* one region: two mmap regions are
+physically separate spans of RAM, so a run can never be satisfied by
+straddling a region boundary.
 
 ### `alloc_page`
 
@@ -1041,7 +1051,24 @@ be merged or sequenced carefully in review.
 `base` and `length`. On x86_64, the kernel can address the full 64-bit physical
 space, so no regions need to be skipped due to addressing limitations. However,
 the current 4 GB identity map only covers the low 4 GB — regions above this
-would need additional page table entries to be accessible.
+would need additional page table entries to be accessible. SCRUM-158 lifted
+`page_alloc_init()`'s "first region only" limit (below), so the allocator now
+registers every `MULTIBOOT_MMAP_AVAILABLE` region above 1 MB, but a region
+that mmap reports above 4 GB still isn't safely usable until the identity map
+is extended to reach it — that's a separate, still-open gap this ticket does
+not close.
+
+**Page allocator: every usable region, not just the first (SCRUM-158).**
+`page_alloc_init()` used to `return` after registering the first qualifying
+`MULTIBOOT_MMAP_AVAILABLE` region, so a second discontiguous usable block —
+below the 4 GB ceiling above — went entirely unmanaged. It now loops over
+every such region (up to `MAX_PAGE_REGIONS`, `src/page_alloc.c`), giving each
+its own bitmap and owner table; `alloc_page_owned`/`free_page_owned`/
+`page_owner`/the SCRUM-156 revocation API all resolve an address to its
+owning region first. The one behavioral change this brings: `alloc_pages_contig_owned()`'s
+"contiguous" only ever means "within one region" — a run can never be
+satisfied by straddling a region boundary, since two mmap regions are
+physically separate RAM.
 
 **`serial_flush()` before `qemu_exit()`.** In testing mode, `kernel_main` calls
 `serial_flush()` before `qemu_exit()`. This is important: QEMU's
