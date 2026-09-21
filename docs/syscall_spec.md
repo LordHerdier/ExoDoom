@@ -368,10 +368,10 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 20 | `exo_exit(code)`                    | Lifecycle   | ✅     | Terminate calling LibOS. Frees its pages and framebuffer binding (`revoke_all`) and hands off to whatever's next-ready via `context_switch_request()` — leaves the now-resourceless `context_t` row behind rather than destroying it (the outgoing side of that switch still needs it live to capture into); the caller that launched this LibOS is what eventually `context_destroy()`s it, on its own next relaunch (see #21/#22). Does not return. Implemented in SCRUM-155, extended in SCRUM-178 (`src/syscall_exit.c`). |
 | 21 | `exo_launch(app_id)`                | Lifecycle   | ✅     | Build the ring-3 LibOS app named by `app_id` (an `EXO_LAUNCH_APP_*` value: `WAD_VIEWER`, `CLOCK`, `SNAKE`, `DOOM`) as its own context and `context_switch_request()` to it immediately; reclaims (`revoke_all` + `context_destroy`) whatever the previous launch of *that app* left behind first. Apps whose table row sets `LAUNCH_NEEDS_WAD` (the viewer and Doom) also get the WAD module mapped read-only at `LIBOS_WAD_VADDR` and its address/length patched in via `libos_launch_patch_params()`, where `DG_Init` reads them. Like `exo_yield()`, does not return control to the caller until something switches back — the app's own `exo_exit()`/`exo_yield()` round trip, or Ctrl+Tab (SCRUM-111) for an app that never yields, such as the clock. Returns `-EXO_EINVAL` for an unknown `app_id`, `-EXO_ENODEV` if a WAD-needing app has no module, `-EXO_ENOMEM` if the image or a context row will not fit — all of those only if the launch failed before the switch was armed. Invoked by the shell's `wadview`/`clock`/`snake`/`doom` commands. Replaced the four per-app syscalls #21–#24 in SCRUM-184 (`src/syscall_launch.c`). |
 
-**Total: 24 syscalls.** This is the complete interface needed to run Doom with
-save/load, config, sound, and cooperative multitasking, plus the three
-LibOS-launch syscalls (#21/#22/#23) that back the shell's interactive demo
-commands.
+**Total: 22 syscalls.** This is the complete interface needed to run Doom with
+save/load, config, sound, and cooperative multitasking, plus the single
+argument-based LibOS-launch syscall (#21) that backs the shell's interactive
+demo commands.
 
 ### 3.2a Error codes (SCRUM-57)
 
@@ -1207,6 +1207,33 @@ To add PC speaker sound, there are two options:
 
 **Option A (minimal):** Keep `FEATURE_SOUND` undefined. Doom runs silently. No
 sound syscalls needed.
+
+> **This is what the port does, and it needed no code (SCRUM-82).** The
+> vendored tree ships `FEATURE_SOUND` undefined already
+> (`src/doom/doomfeatures.h`), so `sound_modules[]` collapses to `{ NULL }`,
+> `InitSfxModule()`/`InitMusicModule()` leave both module pointers `NULL`, and
+> every `I_*` entry point in `src/doom/i_sound.c` takes its existing
+> null-pointer branch: `0` from `I_StartSound`/`I_GetSfxLumpNum`, `false` from
+> `I_SoundIsPlaying`, nothing from `I_StopSound`/`I_UpdateSound`. `s_sound.c`
+> is untroubled by that -- it stores a handle that is never played, and
+> `I_SoundIsPlaying(0)` answering `false` simply retires the channel. So
+> SCRUM-82's acceptance holds without stubbing anything, and stubbing would
+> have meant editing vendored source (which SCRUM-63 exists to avoid) to
+> replace working code with identical behaviour.
+>
+> What SCRUM-82 did add is the thing that makes it stay true: a gate at the
+> end of `docker/scripts/build-doom.sh` that reads `build/doom/i_sound.o` and
+> fails the build if `DG_sound_module`/`DG_music_module`/`Mix_*`/`SDL_*` ever
+> go undefined there, or if any of `I_StartSound`/`I_StopSound`/`I_UpdateSound`
+> stops being defined (`s_sound.c` calls all three unconditionally).
+>
+> It covers the quiet half of the regression. Defining `FEATURE_SOUND` on its
+> own is already loud -- `i_sound.c` includes `<SDL_mixer.h>` under the same
+> guard and the compile pass dies there. But define it with that include
+> bypassed (`-D__DJGPP__`, or an `SDL_mixer.h` appearing on the include path)
+> and the file compiles cleanly while leaving both module symbols undefined;
+> a compile-only pass says nothing, and the first sign would be an undefined
+> symbol during SCRUM-66's link.
 
 **Option B (PC speaker):** Implement a `sound_module_t` with
 `Init`/`StartSound`/`StopSound`/`Update` that maps Doom SFX lump data to PC

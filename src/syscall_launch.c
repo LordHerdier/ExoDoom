@@ -82,10 +82,10 @@ extern const uint8_t _binary_libos_snake_code_bin_end[];
 extern const uint8_t _binary_libos_snake_data_bin_start[];
 extern const uint8_t _binary_libos_snake_data_bin_end[];
 
-/* Doom's blobs (SCRUM-66). Much the largest of the four: ~390 KiB of
- * code+rodata and ~80 KiB of .data against a ~314 KiB .bss, which is why
- * LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES had to grow from 8/16 to 192/192 in
- * src/libos_launch.h for that ticket. */
+/* Doom's blobs (SCRUM-66), same mechanism. Much the largest of the four:
+ * ~390 KiB of code+rodata and ~80 KiB of .data against a ~314 KiB .bss,
+ * which is why LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES had to grow from 8/16 to
+ * 192/192 in src/libos_launch.h for this ticket. */
 extern const uint8_t _binary_libos_doom_code_bin_start[];
 extern const uint8_t _binary_libos_doom_code_bin_end[];
 extern const uint8_t _binary_libos_doom_data_bin_start[];

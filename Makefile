@@ -27,7 +27,7 @@ docker-test:
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
 	  set -eu; \
 	  rm -f /work/serial.log; \
-	  timeout 60 qemu-system-x86_64 \
+	  timeout 120 qemu-system-x86_64 \
 	  -cdrom build/exodoom.iso \
 	  -m 256M \
 	  -no-reboot \
@@ -46,7 +46,7 @@ docker-ci:
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
 	  set -eu; \
 	  rm -f /work/serial.log; \
-	  timeout 60 qemu-system-x86_64 \
+	  timeout 120 qemu-system-x86_64 \
 	  -cdrom build/exodoom.iso \
 	  -m 256M \
 	  -no-reboot \

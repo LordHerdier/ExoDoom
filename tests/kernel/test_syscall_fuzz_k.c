@@ -10,7 +10,7 @@
  *
  * A triple fault kills QEMU outright, so the "no panic" half of the
  * acceptance criterion is already covered by this suite simply completing
- * — the harness's own timeout (make docker-ci's `timeout 30`) is what would
+ * — the harness's own timeout (make docker-ci's `timeout 120`) is what would
  * catch that. The "no corruption" half needs an explicit check, which
  * test_post_fuzz_integrity() below provides: a known-good page alloc/free
  * round trip, and that it leaves PAGE_OWNER_LIBOS's owned-page count exactly
@@ -37,7 +37,15 @@
  * the app. That makes it cheaper to fuzz than before rather than dearer --
  * a1 here is a random pointer-shaped value, so it is almost always
  * >= EXO_LAUNCH_APP_COUNT and returns -EXO_EINVAL without creating anything.
- * Before the collapse, drawing the number WAS choosing the app.
+ * Before the collapse, drawing the number WAS choosing the app. This also
+ * covers the reason EXO_SYS_LAUNCH_DOOM (formerly #24, SCRUM-66) needed its
+ * own rate limit: its image is by far the largest of the four the old
+ * per-app numbers built (~200 pages against the others' much smaller ones),
+ * so an unrated launch draw turned roughly 1-in-29 of the 1,000,000 draws
+ * into a full Doom image build instead of an occasional probe -- enough to
+ * blow the suite past the QEMU boot's timeout. Now that app selection is an
+ * argument rather than the syscall number itself, one rate limit on
+ * EXO_SYS_LAUNCH covers Doom the same way it covers every other app.
  *
  * EXO_SYS_FB_ACQUIRE (#4), EXO_SYS_KBD_POLL (#6) and EXO_SYS_SERIAL_WRITE
  * (#8) validate their pointer argument with exo_range_in_user_window() only
