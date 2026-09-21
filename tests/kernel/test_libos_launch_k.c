@@ -34,7 +34,7 @@
 #define LIBOS_LAUNCH_TEST_OWNER TEST_OWNER_LIBOS_LAUNCH
 
 #define RESULT_MARKER    0x600DC0DEULL   /* must match libos_launch_probe.s */
-#define FAULT_VADDR      (EXO_USER_VA_BASE + 0x20000ULL) /* ditto */
+#define FAULT_VADDR      LIBOS_LAUNCH_UNMAPPED_VADDR     /* ditto */
 
 extern void libos_launch_probe(void);
 extern void libos_launch_probe_resume(void);

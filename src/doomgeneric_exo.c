@@ -74,6 +74,13 @@
  */
 #define DOOM_PARAMS_UNSET 0xFFFFFFFFFFFFFFFFULL
 
+/*
+ * The filename DG_Init registers the mounted WAD under (SCRUM-66). Must be a
+ * name src/doom/d_iwad.c actually searches for, and must match the module
+ * src/grub.cfg loads -- see the registration call at the end of DG_Init().
+ */
+#define DOOM_IWAD_BLOB_NAME "freedoom2.wad"
+
 libos_wad_params_t g_doom_params = {
     .wad_vaddr = DOOM_PARAMS_UNSET,
     .wad_size  = DOOM_PARAMS_UNSET,
@@ -334,5 +341,42 @@ void DG_Init(void)
          * less legibly. */
         printf("DG_Init: warning -- this is a PWAD (a patch), not a base "
                "IWAD; expect W_Init to fail on a missing lump.\n");
+    }
+
+    /*
+     * Hand the mounted bytes to the libc shim's blob table, so the engine's
+     * own IWAD discovery can find them (SCRUM-66).
+     *
+     * Mounting the WAD (above, SCRUM-73) and being able to *open* it are two
+     * different things, and until this call they were two disconnected halves
+     * of the port. D_DoomMain() does not consult doom_wad_mounted(): it calls
+     * D_FindIWAD() -> M_FileExists() -> fopen() on each name in d_iwad.c's
+     * list, and with nothing registered every one of those misses and it dies
+     * with "Game mode indeterminate.  No IWAD file was found." -- which is
+     * exactly where the first end-to-end launch stopped.
+     *
+     * exo_file_register_blob() (src/stdio.c, SCRUM-65) is the shim built for
+     * this: fopen() matches on the BASENAME of whatever path Doom invents, so
+     * registering the bare filename is enough no matter which directory
+     * d_iwad.c joins onto it. The mechanism was already implemented and
+     * unit-tested -- tests/kernel/test_libc_gaps_k.c registers this very
+     * name -- but nothing in the shipping path had ever called it.
+     *
+     * The name is the one src/grub.cfg loads the module as, and it is on
+     * d_iwad.c's search list. It is hardcoded because the multiboot module
+     * arrives as bytes with no name attached: libos_wad_params_t carries an
+     * address and a length and nothing else. Ship a different IWAD and this
+     * is the line to change; SCRUM-75/SCRUM-190, which move storage onto a
+     * real filesystem, are where it stops being a constant.
+     *
+     * Reported but not fatal: the mount itself succeeded, and D_FindIWAD's
+     * own error is clearer than anything this layer could say about a full
+     * blob table.
+     */
+    if (exo_file_register_blob(DOOM_IWAD_BLOB_NAME,
+                               wad->wad.data, wad->size) != 0) {
+        printf("DG_Init: warning -- could not register '%s' with the file "
+               "shim; D_FindIWAD will not find it.\n",
+               DOOM_IWAD_BLOB_NAME);
     }
 }
