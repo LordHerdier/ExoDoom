@@ -214,11 +214,17 @@ kernel_main  (src/kernel.c)
     ├─ pic_remap()            — remap PIC1→0x20, PIC2→0x28 (avoids BIOS conflict)
     ├─ idt_set_gate(32, irq0_stub) — wire IRQ0 to PIT handler
     ├─ pit_init(1000)         — PIT channel 0 at 1000 Hz (1 ms tick)
+    ├─ boot_sanity_check()    — gate: paging live + a real syscall round
+    │                           trip (alloc/map/unmap/free); halts with a
+    │                           FATAL message on serial + screen otherwise
+    │                           (SCRUM-191)
     ├─ idt_set_gate(33, irq1_stub) — wire IRQ1 to keyboard handler
     ├─ kbd_init()             — PS/2 keyboard initialised, IRQ1 unmasked
     ├─ sti                    — enable interrupts
     │
-    └─ boot demo (banner, memory map, timer countdown) → hlt loop
+    └─ shell LibOS launch (context_create → libos_build_image →
+       vmm_switch_address_space → libos_enter_irq) — does not return;
+       the shell is the rest of this boot (SCRUM-110/-178/-191)
 ```
 
 Key details:
@@ -249,7 +255,10 @@ Key details:
   with `mb2_find_tag()` to locate the framebuffer (type 8), memory map (type 6),
   and modules (type 3).
 - The framebuffer is initialised **before** interrupts, so the boot banner and
-  memory map are displayed on screen during early boot.
+  the `boot_sanity_check()` verdict are displayed on screen during early boot
+  (SCRUM-191) — the boot flow no longer dumps the full memory map or a timer
+  demo on a normal boot; it goes straight into the shell LibOS once the
+  sanity check passes.
 - The WAD file (`freedoom2.wad`) is declared as a GRUB module and is already
   mapped in physical memory by the time `kernel_main` runs. Its address and size
   are in a Multiboot 2 module tag (type 3).
@@ -409,7 +418,8 @@ check.
 **Files:** `src/fb.c`, `src/fb.h`, `src/fb_console.c`, `src/fb_console.h`
 
 **Status:** ✅ Implemented and active — wired into the boot path. The boot
-banner, memory map, and timer demo are displayed on the framebuffer console.
+banner and `boot_sanity_check()` verdict (SCRUM-191) are displayed on the
+framebuffer console before the shell LibOS takes it over.
 
 GRUB sets up a VESA linear framebuffer and passes its physical address, pitch,
 width, height, and bpp in a Multiboot 2 framebuffer tag (type 8). The empirically confirmed
