@@ -121,7 +121,11 @@ static int64_t sys_launch_wad_viewer(uint64_t a1, uint64_t a2, uint64_t a3,
     size_t data_len = (size_t)(_binary_libos_wad_viewer_data_bin_end -
                                _binary_libos_wad_viewer_data_bin_start);
 
-    libos_image_t img;
+    /* static for the same reason sys_launch_doom()'s is -- see the comment
+     * there. libos_image_t grew to ~3.2 KiB when SCRUM-66 raised the page
+     * caps, and these three were left as stack locals on the 16 KiB syscall
+     * stack simply because nobody re-audited them. */
+    static libos_image_t img;
     if (libos_build_image(viewer_id,
                           _binary_libos_wad_viewer_code_bin_start, code_len,
                           _binary_libos_wad_viewer_data_bin_start, data_len,
@@ -239,7 +243,11 @@ static int64_t sys_launch_clock(uint64_t a1, uint64_t a2, uint64_t a3,
     size_t data_len = (size_t)(_binary_libos_clock_data_bin_end -
                                _binary_libos_clock_data_bin_start);
 
-    libos_image_t img;
+    /* static for the same reason sys_launch_doom()'s is -- see the comment
+     * there. libos_image_t grew to ~3.2 KiB when SCRUM-66 raised the page
+     * caps, and these three were left as stack locals on the 16 KiB syscall
+     * stack simply because nobody re-audited them. */
+    static libos_image_t img;
     if (libos_build_image(clock_id,
                           _binary_libos_clock_code_bin_start, code_len,
                           _binary_libos_clock_data_bin_start, data_len,
@@ -300,7 +308,11 @@ static int64_t sys_launch_snake(uint64_t a1, uint64_t a2, uint64_t a3,
     size_t data_len = (size_t)(_binary_libos_snake_data_bin_end -
                                _binary_libos_snake_data_bin_start);
 
-    libos_image_t img;
+    /* static for the same reason sys_launch_doom()'s is -- see the comment
+     * there. libos_image_t grew to ~3.2 KiB when SCRUM-66 raised the page
+     * caps, and these three were left as stack locals on the 16 KiB syscall
+     * stack simply because nobody re-audited them. */
+    static libos_image_t img;
     if (libos_build_image(snake_id,
                           _binary_libos_snake_code_bin_start, code_len,
                           _binary_libos_snake_data_bin_start, data_len,

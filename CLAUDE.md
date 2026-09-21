@@ -471,10 +471,12 @@ convention and calls it from `kernel_main` instead of a test harness.
     |decimal exponent| ≤ 15, worst case 2 ULP.
     The gate is `__SSE2__` and **not `!EXO_KERNEL`**, which is a distinction
     that has already broken a build once: `build.sh`'s `probe_cflags` is the
-    kernel `CFLAGS` with only `-mcmodel` swapped, so **every ring-3 link
-    target today is also `-mno-sse`**. "Not the kernel" does not imply "has
-    SSE". The eventual Doom LibOS target must enable SSE, since Doom cannot
-    compile without it (SCRUM-177) — and then these paths light up on their
+    kernel `CFLAGS` with only `-mcmodel` swapped, so a ring-3 link
+    target inherits `-mno-sse` **unless it asks for otherwise**. "Not the
+    kernel" does not imply "has SSE". As of SCRUM-66 exactly one target asks:
+    `libos_doom` passes `-msse -msse2` through
+    `build_ring3_link_target()`'s `extra_cflags` parameter, because Doom
+    cannot compile without SSE (SCRUM-177) — and then these paths light up on their
     own.
 - **The vendored Doom engine is linked, launches, and runs (SCRUM-66).**
   `src/doom/` holds doomgeneric's core (SCRUM-63). `make docker-build-doom`
