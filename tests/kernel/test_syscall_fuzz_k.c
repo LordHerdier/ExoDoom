@@ -25,12 +25,19 @@
  * that runs after this one. Its argument-independence is already covered by
  * test_syscall_exit_k.c.
  *
- * EXO_SYS_LAUNCH_WAD_VIEWER/_CLOCK (#21/#22) also ignore their arguments,
- * and each does a real context_create() + image copy on every call — bounded
- * by CONTEXT_MAX and shared with every other suite in this boot. They are
- * included in the pool but rate-limited to roughly 1-in-2000 draws (see
- * rare_hit() below) so a garbage-argument call is still proven safe without
- * spending most of the 1,000,000-call budget on context churn.
+ * EXO_SYS_LAUNCH (#21) does a real context_create() + image copy on every
+ * call that succeeds -- bounded by CONTEXT_MAX and shared with every other
+ * suite in this boot. It is included in the pool but rate-limited to roughly
+ * 1-in-2000 draws (see rare_hit() below), so a garbage-argument call is still
+ * proven safe without spending most of the 1,000,000-call budget on context
+ * churn.
+ *
+ * Unlike EXO_SYS_EXIT above, this one does NOT ignore its arguments: since
+ * SCRUM-184 collapsed the four per-app launch syscalls into one, a1 selects
+ * the app. That makes it cheaper to fuzz than before rather than dearer --
+ * a1 here is a random pointer-shaped value, so it is almost always
+ * >= EXO_LAUNCH_APP_COUNT and returns -EXO_EINVAL without creating anything.
+ * Before the collapse, drawing the number WAS choosing the app.
  *
  * EXO_SYS_FB_ACQUIRE (#4), EXO_SYS_KBD_POLL (#6) and EXO_SYS_SERIAL_WRITE
  * (#8) validate their pointer argument with exo_range_in_user_window() only
@@ -128,8 +135,8 @@ static uint64_t next_arg_out_of_window(void)
     return next_u64_random();
 }
 
-/* True roughly 1 draw in 2000 — the rate limit for the two LAUNCH_* numbers
- * (see file comment). */
+/* True roughly 1 draw in 2000 -- the rate limit for EXO_SYS_LAUNCH (see file
+ * comment). Two numbers needed it before SCRUM-184; one does now. */
 static int rare_hit(void)
 {
     return (next_u30() % 2000) == 0;

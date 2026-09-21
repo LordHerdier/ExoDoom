@@ -487,7 +487,9 @@ convention and calls it from `kernel_main` instead of a test harness.
   a ring-3 LibOS: `build.sh`'s `[2f/7]` step builds the `libos_doom` target
   through the same `build_ring3_link_target()` mechanism as every demo LibOS,
   and `src/syscall_launch.c` embeds the resulting blobs and launches them on
-  `exo_launch_doom` (#24), wired to the shell's `doom` command. Doom then
+  `exo_launch(EXO_LAUNCH_APP_DOOM)` (#21, the single argument-based launch
+  syscall SCRUM-184 collapsed the four per-app ones into), wired to the
+  shell's `doom` command. Doom then
   completes its whole startup — `W_Init` over the mounted WAD, `R_Init`,
   `P_Init`, `S_Init`, `HU_Init`, `ST_Init`, `I_InitGraphics` — and runs its
   tick loop. What it cannot yet do is **show** anything or **read a key**:
