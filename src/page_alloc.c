@@ -138,7 +138,8 @@ void page_alloc_init(const struct mb2_info* mb) {
     uint32_t count = 0;
     const mmap_region_t* mmap_regions = mmap_get_regions(&count);
 
-    for (uint32_t i = 0; i < count && region_count < MAX_PAGE_REGIONS; i++) {
+    uint32_t i;
+    for (i = 0; i < count && region_count < MAX_PAGE_REGIONS; i++) {
         if (mmap_regions[i].type != MULTIBOOT_MMAP_AVAILABLE ||
             mmap_regions[i].base < 0x100000 ||
             mmap_regions[i].length < PAGE_SIZE) {
@@ -187,6 +188,18 @@ void page_alloc_init(const struct mb2_info* mb) {
         regions[region_count].bitmap      = rbitmap;
         regions[region_count].owners      = rowners;
         region_count++;
+    }
+
+    if (region_count == MAX_PAGE_REGIONS) {
+        for (uint32_t j = i; j < count; j++) {
+            if (mmap_regions[j].type == MULTIBOOT_MMAP_AVAILABLE &&
+                mmap_regions[j].base >= 0x100000 &&
+                mmap_regions[j].length >= PAGE_SIZE) {
+                serial_print("page_alloc: MAX_PAGE_REGIONS reached, "
+                             "remaining usable regions skipped\n");
+                break;
+            }
+        }
     }
 
     if (region_count == 0) {
