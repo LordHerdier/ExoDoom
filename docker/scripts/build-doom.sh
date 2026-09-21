@@ -139,7 +139,22 @@ sound_o="build/doom/i_sound.o"
 #    Mix_/SDL_ are in the same list because i_sound.c's <SDL_mixer.h> include
 #    sits under the same guard, and an SDL symbol reaching the link is the
 #    same mistake wearing a different hat.
-sound_undef="$(x86_64-elf-nm -u "$sound_o" \
+#
+#    Run nm on its own first, so a tooling failure is distinguishable from
+#    "no matches". This script sets `pipefail`, so with nm inside the
+#    pipeline any nm error fails the whole pipeline -- and the `|| true`
+#    that has to be there for grep (which exits 1 in the ordinary case of
+#    finding nothing) would swallow it, leaving sound_undef empty and this
+#    gate reporting OK for an object it never managed to read. The
+#    defined-symbol check below never had the problem, because it tests
+#    nm's own exit status directly. Review catch on PR #100.
+if ! sound_nm="$(x86_64-elf-nm -u "$sound_o")"; then
+  echo "    ERROR: x86_64-elf-nm failed to read $sound_o."
+  echo "           This gate cannot speak for an object it could not read."
+  exit 1
+fi
+
+sound_undef="$(printf '%s\n' "$sound_nm" \
   | grep -oE 'DG_sound_module|DG_music_module|Mix_[A-Za-z0-9_]*|SDL_[A-Za-z0-9_]*' \
   | sort -u || true)"
 
