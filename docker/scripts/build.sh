@@ -276,6 +276,39 @@ build_ring3_link_target() {
   objs+=("build/${name}_code_blob.o" "build/${name}_data_blob.o")
 }
 
+# -- The IWAD filename is spelled in three places; assert they agree --------
+#
+# DG_Init() registers the mounted WAD with the libc shim's blob table under a
+# hardcoded name (DOOM_IWAD_BLOB_NAME, src/doomgeneric_exo.c), because the
+# multiboot module arrives as bytes with no name attached. Doom then finds it
+# only because D_FindIWAD() happens to fopen() that same string.
+#
+# So three spellings have to agree: the file this script downloads, the module
+# src/grub.cfg loads, and the name the blob is registered under. Rename any one
+# of them alone and nothing fails here -- the failure is at runtime, deep in
+# Doom startup, as "Game mode indeterminate. No IWAD file was found", which
+# says nothing about a filename mismatch. Review feedback on PR #101 called
+# this out as a real fragility; it costs three lines to make it a build error.
+wad_file="$(basename "$WAD_PATH")"
+blob_name="$(sed -n 's/^#define DOOM_IWAD_BLOB_NAME "\(.*\)"$/\1/p' \
+             src/doomgeneric_exo.c)"
+grub_wad="$(sed -n 's@.*module2 /boot/\([^ ]*\).*@\1@p' src/grub.cfg | head -1)"
+
+if [[ -z "$blob_name" ]]; then
+  echo "    ERROR: could not read DOOM_IWAD_BLOB_NAME from src/doomgeneric_exo.c"
+  exit 1
+fi
+if [[ "$wad_file" != "$blob_name" || "$wad_file" != "$grub_wad" ]]; then
+  echo "    ERROR: IWAD filename disagreement --"
+  echo "             downloaded by this script : $wad_file"
+  echo "             loaded by src/grub.cfg     : $grub_wad"
+  echo "             registered by DG_Init      : $blob_name"
+  echo "           All three must match, or Doom's D_FindIWAD() will not find"
+  echo "           the WAD the kernel mounted."
+  exit 1
+fi
+echo "    IWAD name agrees across build.sh, grub.cfg and DG_Init ($wad_file)"
+
 echo "[2c/7] Build shell LibOS (SCRUM-110)"
 # Unlike libos_c_probe/libc_shim_probe (built further down, inside the
 # TESTING=1 block), this target is built UNCONDITIONALLY, and ahead of step
