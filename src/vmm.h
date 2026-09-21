@@ -142,6 +142,58 @@ int vmm_translate_in(uint64_t *pml4, uint64_t vaddr, uint64_t *paddr_out,
                      uint64_t *flags_out);
 
 /*
+ * ── Per-context page-table quota (SCRUM-160) ─────────────────────────────
+ *
+ * alloc_table() (vmm.c) takes every intermediate PDPT/PD/PT page from
+ * alloc_page(), i.e. PAGE_OWNER_KERNEL — see vmm.c's file header for why
+ * that tag must never change to a LibOS id. Untagged does not mean
+ * unbounded, though: without some other limit, a LibOS can walk its own
+ * exo_page_map syscall across the whole 128 TiB window, one call per 2 MiB,
+ * and permanently consume a table page the kernel can never reclaim
+ * (vmm_unmap_page() never reclaims an empty table — deliberate, see
+ * docs/syscall_spec.md §3.7 — and page_reclaim_all()/revoke_all() refuse
+ * PAGE_OWNER_KERNEL pages outright).
+ *
+ * The bound below is charged only against exo_page_map (see
+ * vmm_map_page_in_owned() and syscall_mem.c's sys_page_map) — every
+ * kernel-internal caller of vmm_map_page_in() (the boot identity map,
+ * libos_launch.c's image loader, libos_wad_map.c) keeps going through the
+ * unowned, unlimited path, exactly as before this ticket, because each of
+ * those is already bounded by its own fixed-size window
+ * (LIBOS_LAUNCH_MAX_CODE_PAGES/_DATA_PAGES/LIBOS_LAUNCH_STACK_PAGES,
+ * LIBOS_WAD_MAX_BYTES).
+ *
+ * 64 is picked against the largest legitimate ring-3 caller of
+ * exo_page_map known today: libos_fb_map() (src/libos_fb.c), which the
+ * shell calls once at startup to map the acquired framebuffer one 4 KiB
+ * page at a time — a few MiB on a real VESA mode, i.e. a handful of PT
+ * pages. 64 clears that with several times the headroom while still
+ * capping a single context's worst-case table growth at 64 pages
+ * (256 KiB) instead of unbounded.
+ */
+#define VMM_MAX_TABLE_PAGES_PER_CONTEXT 64
+
+/*
+ * Quota-checked twin of vmm_map_page_in(): identical behavior, except table
+ * pages allocated along the way are charged against `owner`'s quota
+ * (VMM_MAX_TABLE_PAGES_PER_CONTEXT) when `owner` is not PAGE_OWNER_KERNEL
+ * and has a bound address-space slot. Returns VMM_ENOMEM, without
+ * allocating anything, once that quota is spent — the same status
+ * (and, through syscall_mem.c's vmm_status_to_errno(), the same -EXO_ENOMEM)
+ * real PMM exhaustion already produces.
+ *
+ * Any future syscall that can cause vmm.c to create a page table on a
+ * LibOS's behalf should call this, not vmm_map_page_in() — that one stays
+ * the trusted/unlimited path for kernel-internal callers only.
+ */
+int vmm_map_page_in_owned(uint64_t *pml4, uint64_t vaddr, uint64_t paddr,
+                          uint64_t flags, page_owner_t owner);
+
+/* How many table pages are currently charged against `owner`'s quota, or 0
+ * if `owner` has no bound address-space slot. For tests/introspection. */
+uint32_t vmm_table_pages_owned(page_owner_t owner);
+
+/*
  * Unmap every present leaf in `pml4`'s LibOS window whose physical target
  * falls in [paddr_lo, paddr_hi). Pass (0, UINT64_MAX) to clear every mapping
  * in the window regardless of target — the whole-window sweep revoke_all()

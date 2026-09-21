@@ -25,6 +25,7 @@
 /* Scratch virtual addresses in the LibOS window, apart from test_vmm_k.c's. */
 #define SCRATCH   (EXO_USER_VA_BASE + 0x20000000ULL)
 #define SCRATCH_2 (EXO_USER_VA_BASE + 0x24000000ULL)
+#define SCRATCH_QUOTA (EXO_USER_VA_BASE + 0x28000000ULL)
 
 static int64_t do_map(uint64_t vaddr, uint64_t paddr, uint64_t flags)
 {
@@ -362,6 +363,32 @@ int page_map_suite_cleanup(void)
     return 0;
 }
 
+/*
+ * SCRUM-160: exo_page_map is charged against its caller's per-context table
+ * quota, not just vmm_map_page_in_owned() in isolation (test_vmm_k.c drives
+ * the quota itself to exhaustion against a private address space; doing
+ * that here would exhaust it against the shared default test context every
+ * other test in this run maps through, breaking whichever of them runs
+ * next). So this only proves the wiring: a mapping that needs a brand-new
+ * page table charges the caller's quota through the real dispatch path,
+ * exo_syscall_dispatch(EXO_SYS_PAGE_MAP, ...) included.
+ */
+static void test_map_charges_callers_table_quota(void)
+{
+    uint32_t before = vmm_table_pages_owned(syscall_current_context());
+
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    if (p <= 0)
+        return;
+
+    CU_ASSERT_EQUAL(do_map(SCRATCH_QUOTA, (uint64_t)p, MAP_RW), 0);
+    CU_ASSERT(vmm_table_pages_owned(syscall_current_context()) > before);
+
+    CU_ASSERT_EQUAL(do_unmap(SCRATCH_QUOTA), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+}
+
 void suite_page_map_tests(CU_pSuite s)
 {
     CU_add_test(s, "handlers are bound",         test_handlers_are_bound);
@@ -378,4 +405,6 @@ void suite_page_map_tests(CU_pSuite s)
     CU_add_test(s, "framebuffer follows binding", test_framebuffer_follows_the_binding);
     CU_add_test(s, "fb mapping removable after reclaim",
                 test_fb_mapping_removable_after_reclaim);
+    CU_add_test(s, "map charges caller's table quota",
+                test_map_charges_callers_table_quota);
 }
