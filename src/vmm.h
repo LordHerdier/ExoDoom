@@ -210,10 +210,10 @@ int vmm_switch_address_space(uint64_t pml4_phys);
  * context_t (src/context.h — id, saved registers, scheduling state) on top
  * of this registry rather than replacing it, so there remains one source of
  * truth for the page-dir binding itself. VMM_MAX_ADDRESS_SPACES may still
- * grow past 4 later — nothing above this layer should assume the lookup is
+ * grow past 16 later — nothing above this layer should assume the lookup is
  * O(1) or unbounded.
  */
-#define VMM_MAX_ADDRESS_SPACES 4
+#define VMM_MAX_ADDRESS_SPACES 16
 
 /*
  * Bind `owner`'s address space to `pml4_phys` (from
