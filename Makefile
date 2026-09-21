@@ -2,13 +2,18 @@
 
 DEBUG ?= 0
 
+# Which IWAD build.sh fetches/stages -- freedoom2 (auto-downloaded, default)
+# or doom2 (the original commercial IWAD; must be staged by hand at
+# build/doom2.wad first -- not auto-fetched, see docker/scripts/build.sh).
+DOOM_IWAD ?= freedoom2
+
 # Extra flags for the exodoom-build image's buildx invocation, e.g.
 # "--cache-from type=gha --cache-to type=gha,mode=max" in CI. Empty locally.
 BUILDX_CACHE_ARGS ?=
 
 docker-build:
 	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
-	docker run --rm -e DEBUG=$(DEBUG) -v "$(PWD):/work" exodoom-build
+	docker run --rm -e DEBUG=$(DEBUG) -e DOOM_IWAD=$(DOOM_IWAD) -v "$(PWD):/work" exodoom-build
 
 docker-run: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
@@ -22,7 +27,7 @@ docker-run-kernel: docker-build
 
 docker-test:
 	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
-	docker run --rm -e DEBUG=$(DEBUG) -e TESTING=1 -v "$(PWD):/work" exodoom-build
+	docker run --rm -e DEBUG=$(DEBUG) -e TESTING=1 -e DOOM_IWAD=$(DOOM_IWAD) -v "$(PWD):/work" exodoom-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
 	  set -eu; \
@@ -41,7 +46,7 @@ docker-test:
 
 docker-ci:
 	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
-	docker run --rm -e DEBUG=$(DEBUG) -e TESTING=1 -v "$(PWD):/work" exodoom-build
+	docker run --rm -e DEBUG=$(DEBUG) -e TESTING=1 -e DOOM_IWAD=$(DOOM_IWAD) -v "$(PWD):/work" exodoom-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
 	  set -eu; \

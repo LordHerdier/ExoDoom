@@ -6,44 +6,75 @@ cd /work
 mkdir -p build/isodir/boot/grub
 cp /usr/share/grub/unicode.pf2 build/isodir/boot/grub/
 
-echo "[1/7] Fetch freedoom2 IWAD"
-# Fetched at build time and pinned by sha1 rather than committed (SCRUM-164)
-# -- avoids a 29 MB binary in git and makes swapping WADs a URL+hash edit
-# here. build/ is bind-mounted from the host (see Makefile), so a valid
-# download is reused across builds instead of re-fetched every time.
-#
-# Official Freedoom v0.13.0 release (github.com/freedoom/freedoom).
-# ZIP_SHA256 was checked against the project's GPG-signed
-# freedoom-0.13.0-CHECKSUM before pinning; WAD_SHA1 is freedoom2.wad's own
-# hash once extracted from that verified zip. Re-verify both if this pin
-# ever changes.
-ZIP_URL="https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip"
-ZIP_SHA256="3f9b264f3e3ce503b4fb7f6bdcb1f419d93c7b546f4df3e874dd878db9688f59"
-WAD_SHA1="975f781e6d801c0a23e3caa33f70493efe68a880"
-WAD_PATH="build/freedoom2.wad"
-ZIP_PATH="build/freedoom-0.13.0.zip"
-
+DOOM_IWAD="${DOOM_IWAD:-freedoom2}"
 mkdir -p build
-if [[ -f "$WAD_PATH" ]] && echo "${WAD_SHA1}  ${WAD_PATH}" | sha1sum -c - >/dev/null 2>&1; then
-  echo "    cached at $WAD_PATH, sha1 verified"
-else
-  echo "    downloading freedoom-0.13.0.zip..."
-  curl -fsSL "$ZIP_URL" -o "$ZIP_PATH"
-  if ! echo "${ZIP_SHA256}  ${ZIP_PATH}" | sha256sum -c -; then
-    echo "    ERROR: freedoom-0.13.0.zip sha256 mismatch"
+
+if [[ "$DOOM_IWAD" == "freedoom2" ]]; then
+  echo "[1/7] Fetch freedoom2 IWAD"
+  # Fetched at build time and pinned by sha1 rather than committed (SCRUM-164)
+  # -- avoids a 29 MB binary in git and makes swapping WADs a URL+hash edit
+  # here. build/ is bind-mounted from the host (see Makefile), so a valid
+  # download is reused across builds instead of re-fetched every time.
+  #
+  # Official Freedoom v0.13.0 release (github.com/freedoom/freedoom).
+  # ZIP_SHA256 was checked against the project's GPG-signed
+  # freedoom-0.13.0-CHECKSUM before pinning; WAD_SHA1 is freedoom2.wad's own
+  # hash once extracted from that verified zip. Re-verify both if this pin
+  # ever changes.
+  ZIP_URL="https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip"
+  ZIP_SHA256="3f9b264f3e3ce503b4fb7f6bdcb1f419d93c7b546f4df3e874dd878db9688f59"
+  WAD_SHA1="975f781e6d801c0a23e3caa33f70493efe68a880"
+  WAD_PATH="build/freedoom2.wad"
+  ZIP_PATH="build/freedoom-0.13.0.zip"
+
+  if [[ -f "$WAD_PATH" ]] && echo "${WAD_SHA1}  ${WAD_PATH}" | sha1sum -c - >/dev/null 2>&1; then
+    echo "    cached at $WAD_PATH, sha1 verified"
+  else
+    echo "    downloading freedoom-0.13.0.zip..."
+    curl -fsSL "$ZIP_URL" -o "$ZIP_PATH"
+    if ! echo "${ZIP_SHA256}  ${ZIP_PATH}" | sha256sum -c -; then
+      echo "    ERROR: freedoom-0.13.0.zip sha256 mismatch"
+      rm -f "$ZIP_PATH"
+      exit 1
+    fi
+    unzip -p "$ZIP_PATH" "freedoom-0.13.0/freedoom2.wad" > "$WAD_PATH"
     rm -f "$ZIP_PATH"
+    if ! echo "${WAD_SHA1}  ${WAD_PATH}" | sha1sum -c -; then
+      echo "    ERROR: freedoom2.wad sha1 mismatch"
+      echo "           got:  $(sha1sum "$WAD_PATH" | awk '{print $1}')"
+      echo "           want: ${WAD_SHA1}"
+      rm -f "$WAD_PATH"
+      exit 1
+    fi
+    echo "    downloaded and verified"
+  fi
+elif [[ "$DOOM_IWAD" == "doom2" ]]; then
+  echo "[1/7] Use original DOOM2.WAD (DOOM_IWAD=doom2)"
+  # Unlike Freedoom, DOOM2.WAD is a commercial IWAD -- this script does not
+  # fetch it. It must already be staged at WAD_PATH (SCRUM-90); the pinned
+  # sha1 is the copy at https://archive.org/download/DOOM2IWADFILE/DOOM2.WAD
+  # as of 2026-09-21.
+  WAD_SHA1="6d559b7ceece4f5ad457415049711992370d520a"
+  WAD_PATH="build/doom2.wad"
+
+  if [[ ! -f "$WAD_PATH" ]]; then
+    echo "    ERROR: $WAD_PATH not found."
+    echo "           DOOM_IWAD=doom2 requires the original DOOM2.WAD staged"
+    echo "           at $WAD_PATH by hand first, e.g.:"
+    echo "             curl -fL -o $WAD_PATH \\"
+    echo "               https://archive.org/download/DOOM2IWADFILE/DOOM2.WAD"
     exit 1
   fi
-  unzip -p "$ZIP_PATH" "freedoom-0.13.0/freedoom2.wad" > "$WAD_PATH"
-  rm -f "$ZIP_PATH"
-  if ! echo "${WAD_SHA1}  ${WAD_PATH}" | sha1sum -c -; then
-    echo "    ERROR: freedoom2.wad sha1 mismatch"
+  if ! echo "${WAD_SHA1}  ${WAD_PATH}" | sha1sum -c - >/dev/null 2>&1; then
+    echo "    ERROR: $WAD_PATH sha1 mismatch"
     echo "           got:  $(sha1sum "$WAD_PATH" | awk '{print $1}')"
     echo "           want: ${WAD_SHA1}"
-    rm -f "$WAD_PATH"
     exit 1
   fi
-  echo "    downloaded and verified"
+  echo "    staged at $WAD_PATH, sha1 verified"
+else
+  echo "    ERROR: unknown DOOM_IWAD value '$DOOM_IWAD' (expected 'freedoom2' or 'doom2')"
+  exit 1
 fi
 
 if [[ "${DEBUG:-0}" == "1" ]]; then
@@ -640,7 +671,7 @@ fi
 echo "[6/7] Build ISO staging tree"
 mkdir -p build/isodir/boot
 cp build/exodoom build/isodir/boot/exodoom
-cp build/freedoom2.wad build/isodir/boot/freedoom2.wad
+cp "$WAD_PATH" "build/isodir/boot/$wad_file"
 cp src/grub.cfg build/isodir/boot/grub/grub.cfg
 
 echo "[7/7] Create ISO -> build/exodoom.iso"

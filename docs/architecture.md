@@ -610,6 +610,56 @@ implementing any real file I/O for the game's largest data source.
 > step now both exist; before this ticket neither did, so no module tag ever
 > reached the kernel despite `page_alloc.c` already being able to reserve one.
 
+> **SCRUM-90: testing with the original DOOM2.WAD.** The IWAD name is a
+> single hardcoded constant, deliberately spelled in three places that
+> `build.sh`'s "IWAD filename is spelled in three places" check asserts
+> agree: `WAD_PATH` in `docker/scripts/build.sh`, the `module2` line in
+> `src/grub.cfg`, and `DOOM_IWAD_BLOB_NAME` in `src/doomgeneric_exo.c`. There
+> is no runtime IWAD selector — `doomgeneric_exo.c`'s own comment says that's
+> SCRUM-75/SCRUM-190's job — so testing a second IWAD means rebuilding with
+> all three hand-flipped together, not switching at boot.
+>
+> `build.sh` now branches on a `DOOM_IWAD` variable (threaded through the
+> `Makefile` like `DEBUG`/`TESTING`, e.g. `make docker-run DOOM_IWAD=doom2`):
+> `DOOM_IWAD=freedoom2` (default) is unchanged — auto-fetched and
+> hash-verified as above. `DOOM_IWAD=doom2` is **not auto-fetched** — unlike
+> Freedoom, DOOM2.WAD is a commercial IWAD, so the build script only stages
+> and sha1-verifies a copy the user places at `build/doom2.wad` themselves
+> (`build/` is gitignored and host-bind-mounted, same as `freedoom2.wad`).
+> Pinned copy: 14,943,400 bytes, sha1 `6d559b7ceece4f5ad457415049711992370d520a`,
+> magic `IWAD`, fetched 2026-09-21 from
+> `https://archive.org/download/DOOM2IWADFILE/DOOM2.WAD`.
+>
+> Setting `DOOM_IWAD=doom2` alone is not enough to boot it, by design — the
+> three-spellings check will fail until `src/grub.cfg`'s `module2` line and
+> `src/doomgeneric_exo.c`'s `DOOM_IWAD_BLOB_NAME` are also hand-changed to
+> `"doom2.wad"`, exactly per that file's "the line to change" comment. This
+> was verified end-to-end for SCRUM-90: with `build/doom2.wad` staged and
+> both lines flipped, `make docker-build DOOM_IWAD=doom2` produces a bootable
+> ISO with DOOM2.WAD as the linked module (`d_iwad.c`'s IWAD table already
+> lists `"doom2.wad"`, so no engine-side change was needed there); flipping
+> only the `DOOM_IWAD` variable without the two source edits correctly fails
+> the build with the three-way mismatch error instead of shipping a broken
+> pairing.
+>
+> ✅ **Manually verified against real DOOM2.WAD** (interactive `make
+> docker-run`, `doom` at the shell prompt): MAP01 renders correctly (walls,
+> floors, ceilings, sprites, no hall-of-mirrors), keyboard/mouse interaction
+> works, the automap works, demo playback works, and MAP01 → MAP02 level
+> transition works — closing out SCRUM-90's acceptance criterion for both
+> IWADs. This is a manual/visual check, not something `docker-test`'s serial
+> harness can assert: keyboard input reaches the LibOS over PS/2 (via the
+> display backend), not serial, so there's no headless way to drive it.
+>
+> The ticket's stated `getenv("DOOMWADPATH")`/`getenv("DOOMWADDIR")` risk
+> (`src/doom/d_iwad.c:523,583`) turned out not to apply: both call sites are
+> inside `#if ORIGCODE` blocks, and `src/doom/config.h` has `#undef ORIGCODE`,
+> so neither is compiled in — `getenv` isn't even implemented
+> (`src/stdlib.h`'s unimplemented-functions comment lists it) and isn't in
+> `docker/scripts/link-doom.sh`'s allowlist, confirming it's never referenced
+> in the real link. "No getenv dependency" was already true before this
+> ticket; nothing needed changing for it.
+
 ### libc shim scope
 
 doomgeneric requires 82 C source files' worth of standard library. `string.h`
