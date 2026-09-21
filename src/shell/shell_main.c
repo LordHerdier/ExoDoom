@@ -71,13 +71,14 @@ static char shell_banner[] = "ExoDoom Shell\n";
 static char shell_help_text[] = "type 'help' for a list of commands\n";
 static char shell_prompt[] = "exodoom> ";
 static char shell_commands_text[] =
-    "commands: help, clear, about, wadview, clock, snake, doom, memstat, pslist\n";
+    "commands: help, clear, about, wadview, clock, snake, doom, tetris, memstat, pslist\n";
 static char shell_about_text[] = "ExoDoom shell LibOS -- SCRUM-110\n";
 static char shell_unknown_prefix[] = "unknown command: ";
 static char shell_wadview_fail_text[] = "wadview: launch failed\n";
 static char shell_clock_fail_text[] = "clock: launch failed\n";
 static char shell_snake_fail_text[] = "snake: launch failed\n";
 static char shell_doom_fail_text[] = "doom: launch failed\n";
+static char shell_tetris_fail_text[] = "tetris: launch failed\n";
 static char shell_memstat_fail_text[] = "memstat: query failed\n";
 static char shell_pslist_fail_text[] = "pslist: query failed\n";
 
@@ -276,6 +277,17 @@ static void shell_run_command(fb_console_t *con, const char *line) {
             fbcon_clear(con);
         } else {
             fbcon_write(con, shell_doom_fail_text);
+        }
+    } else if (str_eq(line, "tetris")) {
+        /* Same round-trip convention as "snake" above: does not return
+         * until Tetris exits (src/libos_tetris/libos_tetris.c's own
+         * EXO_SYS_EXIT + exo_yield() fallback) and control round-robins
+         * back here. */
+        int64_t rc = exo_launch_tetris();
+        if (rc == 0) {
+            fbcon_clear(con);
+        } else {
+            fbcon_write(con, shell_tetris_fail_text);
         }
     } else if (str_eq(line, "memstat")) {
         shell_run_memstat(con);

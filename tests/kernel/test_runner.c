@@ -69,6 +69,7 @@ void suite_libos_snake_tests(CU_pSuite s);
 void suite_doom_keymap_tests(CU_pSuite s);
 void suite_libos_doom_tests(CU_pSuite s);
 void suite_syscall_stat_tests(CU_pSuite s);
+void suite_libos_tetris_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -211,6 +212,12 @@ int libos_snake_suite_cleanup(void);
  * PAGE_OWNER_LIBOS's address-space binding. */
 int libos_doom_suite_init(void);
 int libos_doom_suite_cleanup(void);
+
+/* Same idea again for libos_tetris (SCRUM-183): builds the real Tetris
+ * image from the embedded blobs, so it needs the same save/restore of
+ * PAGE_OWNER_LIBOS's address-space binding. */
+int libos_tetris_suite_init(void);
+int libos_tetris_suite_cleanup(void);
 
 /* The libos_heap_stress suite (SCRUM-38) runs its whole 2-pass, ~1,000-
  * allocation load in suite init, same reasoning as heap_stress_suite_init
@@ -433,6 +440,10 @@ int run_tests(void)
      * shadow which earlier suite actually broke a handler (SCRUM-115). */
     s = CU_add_suite("syscall_fuzz", NULL, NULL);
     suite_syscall_fuzz_tests(s);
+
+    s = CU_add_suite("libos_tetris", libos_tetris_suite_init,
+                     libos_tetris_suite_cleanup);
+    suite_libos_tetris_tests(s);
 
     /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
 

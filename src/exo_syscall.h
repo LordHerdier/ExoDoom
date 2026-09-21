@@ -100,10 +100,12 @@
 /* Introspection (SCRUM-113) */
 #define EXO_SYS_MEMSTAT      25
 #define EXO_SYS_PSLIST       26
+/* LibOS launch, continued (SCRUM-183) */
+#define EXO_SYS_LAUNCH_TETRIS     27
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense. */
-#define EXO_SYS_COUNT        27
+#define EXO_SYS_COUNT        28
 
 /* ---- Error codes -------------------------------------------------------- */
 /*
@@ -600,6 +602,18 @@ static inline int64_t exo_pslist(exo_ps_info_t *out, uint32_t max)
 {
     return exo_syscall2(EXO_SYS_PSLIST, (uint64_t)(uintptr_t)out,
                         (uint64_t)max);
+}
+
+/* #27 — launch the Tetris LibOS as a second LibOS context and switch to it
+ * immediately (src/syscall_launch.c, SCRUM-183). Same calling convention as
+ * exo_launch_snake(): no arguments, no external resource staged, does not
+ * return control here until something switches back to the caller
+ * (Tetris's own exo_yield() call after exiting via EXO_SYS_EXIT); returns a
+ * negative EXO_E* right away only if the launch failed before the switch
+ * was armed. */
+static inline int64_t exo_launch_tetris(void)
+{
+    return exo_syscall0(EXO_SYS_LAUNCH_TETRIS);
 }
 
 #endif /* !EXO_KERNEL */

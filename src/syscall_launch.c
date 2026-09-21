@@ -9,6 +9,7 @@
 #include "libos_clock/libos_clock_layout.h"
 #include "libos_snake/libos_snake_layout.h"
 #include "libos_doom/libos_doom_layout.h"
+#include "libos_tetris/libos_tetris_layout.h"
 #include "mmap.h"
 #include "page_alloc.h"
 #include "vmm.h"
@@ -50,6 +51,13 @@ extern const uint8_t _binary_libos_doom_code_bin_start[];
 extern const uint8_t _binary_libos_doom_code_bin_end[];
 extern const uint8_t _binary_libos_doom_data_bin_start[];
 extern const uint8_t _binary_libos_doom_data_bin_end[];
+
+/* Embedded Tetris code/data blobs (SCRUM-183) -- same mechanism, produced
+ * by build.sh's "[2g/7]" build_ring3_link_target libos_tetris step. */
+extern const uint8_t _binary_libos_tetris_code_bin_start[];
+extern const uint8_t _binary_libos_tetris_code_bin_end[];
+extern const uint8_t _binary_libos_tetris_data_bin_start[];
+extern const uint8_t _binary_libos_tetris_data_bin_end[];
 
 /* The most recently launched viewer's context id, or PAGE_OWNER_FREE if
  * none is live. `wadview` now exits via exo_exit() on Q/Esc (#20,
@@ -449,10 +457,74 @@ static int64_t sys_launch_doom(uint64_t a1, uint64_t a2, uint64_t a3,
     return 0;
 }
 
+/* Same reclaim-previous-instance pattern as last_snake_id. */
+static page_owner_t last_tetris_id = PAGE_OWNER_FREE;
+
+/* #27 -- build and switch to Tetris as a second, real LibOS context,
+ * invoked from the shell's `tetris` command (src/shell/shell_main.c).
+ * Structurally identical to sys_launch_snake(): no external resource to
+ * stage, no libos_launch_patch_params() call (src/libos_tetris/
+ * libos_tetris.c's own header comment), and the real framebuffer binding
+ * (not FB multiplexing) is handed off the same way. Same return convention
+ * as the other launch handlers. */
+static int64_t sys_launch_tetris(uint64_t a1, uint64_t a2, uint64_t a3,
+                                 uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+
+    if (last_tetris_id != PAGE_OWNER_FREE &&
+       context_lookup(last_tetris_id) != NULL) {
+        revoke_all(last_tetris_id);
+        context_destroy(last_tetris_id);
+    }
+    last_tetris_id = PAGE_OWNER_FREE;
+
+    page_owner_t tetris_id;
+    int create_rc = context_create(vmm_kernel_pml4(), &tetris_id);
+    if (create_rc != CONTEXT_OK) {
+        return create_rc == CONTEXT_ENOMEM ? -EXO_ENOMEM : -EXO_EINVAL;
+    }
+
+    size_t code_len = (size_t)(_binary_libos_tetris_code_bin_end -
+                               _binary_libos_tetris_code_bin_start);
+    size_t data_len = (size_t)(_binary_libos_tetris_data_bin_end -
+                               _binary_libos_tetris_data_bin_start);
+
+    /* static for the same reason sys_launch_doom()'s is -- see the comment
+     * there. */
+    static libos_image_t img;
+    if (libos_build_image(tetris_id,
+                          _binary_libos_tetris_code_bin_start, code_len,
+                          _binary_libos_tetris_data_bin_start, data_len,
+                          LIBOS_TETRIS_BSS_LEN, &img) != VMM_OK) {
+        context_destroy(tetris_id);
+        return -EXO_ENOMEM;
+    }
+
+    /* Same reasoning as sys_launch_snake()'s own comment: without _irq,
+     * Tetris's exo_get_ticks()/exo_kbd_poll()-driven loop would never see a
+     * PIT or keyboard IRQ land. */
+    context_prime_irq(tetris_id, img.entry_vaddr, img.stack_top_vaddr);
+
+    /* Same framebuffer hand-off reasoning as sys_launch_wad_viewer(). */
+    fb_binding_release(fb_binding_owner());
+
+    if (context_switch_request(tetris_id) != CONTEXT_OK) {
+        libos_destroy_image(tetris_id, &img);
+        context_destroy(tetris_id);
+        return -EXO_EINVAL;
+    }
+
+    last_tetris_id = tetris_id;
+
+    return 0;
+}
+
 void syscall_launch_init(void)
 {
     exo_syscall_register(EXO_SYS_LAUNCH_WAD_VIEWER, sys_launch_wad_viewer);
     exo_syscall_register(EXO_SYS_LAUNCH_CLOCK, sys_launch_clock);
     exo_syscall_register(EXO_SYS_LAUNCH_SNAKE, sys_launch_snake);
     exo_syscall_register(EXO_SYS_LAUNCH_DOOM, sys_launch_doom);
+    exo_syscall_register(EXO_SYS_LAUNCH_TETRIS, sys_launch_tetris);
 }

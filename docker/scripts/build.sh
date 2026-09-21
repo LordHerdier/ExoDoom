@@ -466,6 +466,33 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c \
   src/doom/*.c
 
+echo "[2g/7] Build Tetris LibOS (SCRUM-183)"
+# Same reasoning and same mechanism as the Snake step above: built
+# UNCONDITIONALLY and ahead of step 3's C compile loop, because
+# src/syscall_launch.c (the kernel-side #27 handler that launches this LibOS
+# from the shell's "tetris" command) #includes the generated
+# src/libos_tetris/libos_tetris_layout.h this call produces. src/libos_tetris/
+# is its own subdirectory for the same reason src/libos_snake/ is: step 3's
+# plain `src/*.c` glob below must never compile libos_tetris.c with
+# -DEXO_KERNEL.
+#
+# Same shape as Snake: no params struct, so only entry-point placement
+# (.text offset 0) needs libos_tetris.c listed first, matching every other
+# ring-3 target's convention (and its own
+# __attribute__((section(".text.entry"))) belt-and-suspenders fix).
+#
+# src/tetris_logic.c is listed here too, in ADDITION to being picked up
+# unmodified by step 3's plain `src/*.c` glob below -- it lives directly
+# under src/ (not src/libos_tetris/) specifically so it compiles both ways,
+# same as src/fb.c/src/fb_console.c/src/libos_fb.c already do: once here,
+# without -DEXO_KERNEL, into this ring-3 blob, and once via the glob, with
+# -DEXO_KERNEL, into the kernel binary where
+# tests/kernel/test_libos_tetris_k.c can unit-test its line-clear logic
+# directly from ring 0. See that file's own header comment.
+build_ring3_link_target libos_tetris src/libos_tetris "" "" \
+  src/libos_tetris/libos_tetris.c src/tetris_logic.c \
+  src/fb.c src/fb_console.c src/libos_fb.c
+
 echo "[3/7] Compile C sources"
 
 # -DEXO_KERNEL selects the kernel view of src/exo_syscall.h (numbers, shared
