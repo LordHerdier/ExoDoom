@@ -1,4 +1,4 @@
-.PHONY: docker-build docker-run docker-run-kernel docker-test docker-build-doom docker-link-doom clean
+.PHONY: docker-build docker-run docker-run-kernel docker-test docker-build-doom docker-link-doom switch-iwad clean
 
 DEBUG ?= 0
 
@@ -77,6 +77,12 @@ docker-build-doom:
 docker-link-doom:
 	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-build /work/docker/scripts/link-doom.sh
+
+# Flip which IWAD is wired into src/grub.cfg + src/doomgeneric_exo.c
+# (SCRUM-90) -- runs on the host, not in Docker, since it edits tracked
+# source. Usage: make switch-iwad DOOM_IWAD=doom2
+switch-iwad:
+	docker/scripts/switch-iwad.sh $(DOOM_IWAD)
 
 docker-run-debug: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
