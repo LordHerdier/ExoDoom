@@ -19,6 +19,20 @@ static inline uint8_t inb(uint16_t port) {
 }
 
 /*
+ * outw/inw — 16-bit port I/O (ATA's data register, 0x1F0, transfers a
+ * whole sector as 256 words rather than 512 bytes).
+ */
+static inline void outw(uint16_t port, uint16_t val) {
+    __asm__ volatile ("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static inline uint16_t inw(uint16_t port) {
+    uint16_t ret;
+    __asm__ volatile ("inw %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+/*
  * outl — 32-bit port write (used by qemu_exit via isa-debug-exit).
  */
 static inline void outl(uint16_t port, uint32_t val) {
