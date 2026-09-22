@@ -48,12 +48,12 @@ int fb_shadow_suite_init(void)
 
 int fb_shadow_suite_cleanup(void)
 {
+    /* SCRUM-187: fb_shadow_release() now frees the pages it allocated
+     * itself, so no caller-side reclaim_pages_owned() sweep is needed (or
+     * wanted) here anymore — see fb_shadow.h's header comment. */
     fb_shadow_release(syscall_current_context());
     fb_shadow_release(OTHER_LIBOS);
     fb_shadow_release(THIRD_LIBOS);
-    (void)reclaim_pages_owned(syscall_current_context());
-    (void)reclaim_pages_owned(OTHER_LIBOS);
-    (void)reclaim_pages_owned(THIRD_LIBOS);
 
     /* Put the real framebuffer back, exactly as test_fb_binding_k.c's own
      * cleanup does. */
@@ -143,10 +143,10 @@ static void test_two_contexts_get_distinct_buffers(void)
     CU_ASSERT_EQUAL(page_owner((void *)(uintptr_t)b.phys_addr), OTHER_LIBOS);
 }
 
-/* Release clears the directory entry; the pages themselves are ordinary
- * owned pages, left for the generic reclaim sweep (see this file's header
- * and src/fb_shadow.h's own top comment). */
-static void test_release_clears_the_slot(void)
+/* Release clears the directory entry and frees the pages it allocated
+ * (SCRUM-187) — see this file's header and src/fb_shadow.h's own top
+ * comment. */
+static void test_release_frees_the_pages(void)
 {
     install_test_fb();
 
@@ -159,11 +159,12 @@ static void test_release_clears_the_slot(void)
     fb_shadow_release(OTHER_LIBOS);
     CU_ASSERT_NOT_EQUAL(fb_shadow_lookup(OTHER_LIBOS, &phys_base), 0);
 
-    /* Still allocated and still owned -- release does not free pages. */
+    /* Freed, not just released from the directory. */
     CU_ASSERT_EQUAL(page_owner((void *)(uintptr_t)info.phys_addr),
-                    OTHER_LIBOS);
+                    PAGE_OWNER_FREE);
 
-    CU_ASSERT_EQUAL(reclaim_pages_owned(OTHER_LIBOS), 4u);
+    /* Nothing left for a caller-side sweep to find. */
+    CU_ASSERT_EQUAL(reclaim_pages_owned(OTHER_LIBOS), 0u);
 }
 
 /* No published framebuffer, no geometry to size a buffer from. */
@@ -199,7 +200,7 @@ void suite_fb_shadow_tests(CU_pSuite s)
     CU_add_test(s, "reacquire is idempotent", test_reacquire_is_idempotent);
     CU_add_test(s, "two contexts get distinct buffers",
                 test_two_contexts_get_distinct_buffers);
-    CU_add_test(s, "release clears the slot", test_release_clears_the_slot);
+    CU_add_test(s, "release frees the pages", test_release_frees_the_pages);
     CU_add_test(s, "headless reports ENODEV", test_headless_reports_enodev);
     CU_add_test(s, "lookup of unacquired context fails",
                 test_lookup_of_unacquired_context_fails);

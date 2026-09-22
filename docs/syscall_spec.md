@@ -371,7 +371,7 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 23 | `exo_launch_snake()`                | Lifecycle   | ✅     | Same shape as #21, for the Snake LibOS demo (`src/libos_snake/`) — no external resource to stage and no launch-time parameters, so no `libos_launch_patch_params()` step. Invoked by the shell's `snake` command. Implemented in SCRUM-182 (`src/syscall_launch.c`). |
 | 24 | `exo_launch_doom()`                 | Lifecycle   | ✅     | Build and switch to the Doom LibOS (`src/libos_doom/`, the 79 vendored engine objects plus the libc shim). Shaped like #21 rather than #23: the WAD module is mapped read-only at `LIBOS_WAD_VADDR` and its address/length patched in via `libos_launch_patch_params()`, where `DG_Init` reads them. Invoked by the shell's `doom` command. Implemented in SCRUM-66 (`src/syscall_launch.c`). |
 | 25 | `exo_memstat(stat_out)`             | Introspection | ✅   | Write a page-usage snapshot of the whole PMM to `stat_out`: `{uint32_t total_pages, free_pages, kernel_pages, libos_pages, region_count, reserved}` (24 bytes). Deliberately unscoped — every context's pages, not just the caller's. Returns `0`, or `-EFAULT` if `[stat_out, stat_out + sizeof(exo_memstat_t))` is not entirely inside the LibOS window and mapped writable (same check #4/#6 use). Invoked by the shell's `memstat` command. Implemented in SCRUM-113 (`src/syscall_stat.c`, `src/page_alloc.c`). |
-| 26 | `exo_pslist(out, max)`              | Introspection | ✅   | Write up to `max` `exo_ps_info_t` entries (`{uint16_t id; uint8_t state; uint8_t reserved; uint32_t page_count}`, 8 bytes each) to `out` — one per live LibOS context, the caller included (the shell is itself `context_create()`'d, SCRUM-178). `state` mirrors `context_state_t`: `1`=READY, `2`=RUNNING, `3`=BLOCKED. Returns the number of entries written (`0..max`), `-EINVAL` if `max` exceeds `EXO_PSLIST_MAX` (3, mirroring `CONTEXT_MAX`), or `-EFAULT` if `[out, out + max * sizeof(exo_ps_info_t))` is not entirely inside the LibOS window and mapped writable. Invoked by the shell's `pslist` command. Implemented in SCRUM-113 (`src/syscall_stat.c`, `src/context.c`). |
+| 26 | `exo_pslist(out, max)`              | Introspection | ✅   | Write up to `max` `exo_ps_info_t` entries (`{uint16_t id; uint8_t state; uint8_t reserved; uint32_t page_count}`, 8 bytes each) to `out` — one per live LibOS context, the caller included (the shell is itself `context_create()`'d, SCRUM-178). `state` mirrors `context_state_t`: `1`=READY, `2`=RUNNING, `3`=BLOCKED. Returns the number of entries written (`0..max`), `-EINVAL` if `max` exceeds `EXO_PSLIST_MAX` (`#define EXO_PSLIST_MAX CONTEXT_MAX` — `src/exo_syscall.h` `#include`s `src/context.h` rather than restating the number, after a hardcoded copy went stale and silently re-capped this at 3 across SCRUM-193's `CONTEXT_MAX` bump), or `-EFAULT` if `[out, out + max * sizeof(exo_ps_info_t))` is not entirely inside the LibOS window and mapped writable. Invoked by the shell's `pslist` command. Implemented in SCRUM-113 (`src/syscall_stat.c`, `src/context.c`). |
 
 **Total: 26 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking, plus the three
@@ -754,10 +754,16 @@ scheduling (SCRUM-147) invalidates that assumption and will need a lock here.
 > anymore — the real framebuffer is unmappable by any LibOS, full stop.
 > "Reclaim" for the virtual framebuffer is `fb_shadow_release()`, called from
 > the same two places `fb_binding_release()`/`fb_binding_reclaim()` already
-> were (`exo_exit`, `revoke_all()`) — it only drops `fb_shadow.c`'s own
-> directory entry; the underlying pages are ordinary pages owned by the
-> context, already covered by `page_reclaim_all()`'s existing generic sweep.
-> What decides what is actually *visible*: `src/fb_compositor.c` copies
+> were (`exo_exit`, `revoke_all()`). ✅ **SCRUM-187:** it now frees the
+> underlying pages itself, from the exact `phys_base`/`page_count` its own
+> directory entry tracks, rather than leaving that to the caller's
+> owner-wide `reclaim_pages_owned()`/`page_reclaim_all()` sweep — that sweep
+> frees *every* page the owner id holds, not just the shadow buffer's, which
+> is correct at real `exo_exit` (where "free everything" is the intent) but
+> was a hazard anywhere else the same owner id held unrelated pages, as
+> `tests/kernel/test_fb_binding_k.c`'s own scratch page did. `exo_exit`'s
+> subsequent sweep still reclaims the rest of the context's pages exactly as
+> before. What decides what is actually *visible*: `src/fb_compositor.c` copies
 > whichever context is `context_current()`'s virtual framebuffer onto the
 > real one on a throttled PIT tick (`src/pit.c`'s `irq0_handler()`,
 > ~60&nbsp;Hz) — "foreground" is simply "the context currently running,"
