@@ -181,7 +181,13 @@ static void test_ps_info_layout(void)
     CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, id),         0);
     CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, state),      2);
     CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, page_count), 4);
-    CU_ASSERT_EQUAL(EXO_PSLIST_MAX, 3);
+
+    /* EXO_PSLIST_MAX is CONTEXT_MAX itself (src/exo_syscall.h #include's
+     * context.h rather than restating the number) -- this is a tautology by
+     * construction, but it is the regression test for the bug that
+     * construction fixes: a hardcoded copy here silently went stale across
+     * SCRUM-193's CONTEXT_MAX bump and re-capped exo_pslist() at 3 entries. */
+    CU_ASSERT_EQUAL(EXO_PSLIST_MAX, CONTEXT_MAX);
 }
 
 /* ---- Argument constants ------------------------------------------------- */
