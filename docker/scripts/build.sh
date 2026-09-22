@@ -625,6 +625,41 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL
   objs+=("build/doom_tables.o")
 
+  echo "[3b4/7] Compile ExoFS for the kernel-side test suite (SCRUM-189)"
+  # src/libos_fs/ is the ported FAT-like filesystem. It is LibOS-space code
+  # by design (the kernel knows sectors; this library decides what a file
+  # is), so it deliberately lives in a subdirectory, which step 3's
+  # `src/*.c` glob never descends into -- a shipped kernel links none of
+  # it. This step is the only thing that compiles it today, and it is
+  # inside the TESTING block, so that stays true.
+  #
+  # -DEXO_KERNEL, like every other compile in this script, and it is what
+  # picks the in-process exo_syscall_dispatch() form of
+  # src/libos_fs/exofs_blockdev.c's disk I/O rather than the inline
+  # `syscall` stubs (see that file's own #ifdef EXO_KERNEL comment, and
+  # src/libos_page_alloc.c's, for why a ring-0 caller must not execute a
+  # stub: `sysretq` forces CPL 3 on return). That is what lets
+  # tests/kernel/test_exofs_k.c drive the real filesystem from ring 0.
+  #
+  # The mirror-image step does not exist yet: nothing links ExoFS into a
+  # ring-3 target, because no ring-3 app uses it until the shell commands
+  # (SCRUM-202) or exo_file_* (SCRUM-44). These sources are written to
+  # build cleanly WITHOUT -DEXO_KERNEL as well, the same way src/stdlib.c
+  # and src/libos_page_alloc.c are, so that step is a
+  # build_ring3_link_target call and nothing more when it is wanted.
+  _compile_exofs_one() {
+    local c="$1" o="$2"
+    echo "    CC $(basename "$c") (exofs)"
+    x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  }
+  cmds=()
+  for c in src/libos_fs/*.c; do
+    o="build/exofs_$(basename "${c%.c}.o")"
+    objs+=("$o")
+    cmds+=("$(qcmd _compile_exofs_one "$c" "$o")")
+  done
+  run_parallel "${cmds[@]}" || { echo "    ERROR: exofs compile failed"; exit 1; }
+
   echo "[3c/7] Compile kernel test sources"
   # Kernel view by default -- these run in ring 0.  The one TU that needs
   # the LibOS view (test_exo_syscall_k.c, which instantiates the stubs)
