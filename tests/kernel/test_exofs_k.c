@@ -11,9 +11,9 @@
  * See exofs_blockdev.h's top comment.
  *
  * This file currently covers the block-I/O seam, the volume layer
- * (superblock/format/mount) and the FAT layer (block allocation, chain
- * traversal). The layers above it (names, directories, files) land in later
- * steps of SCRUM-189 and add their tests here.
+ * (superblock/format/mount), the FAT layer (block allocation, chain
+ * traversal) and the name area (variable-length names). Directories and
+ * files land in later steps of SCRUM-189 and add their tests here.
  *
  * DISK BINDING. exo_disk_read/exo_disk_write answer -EXO_EBUSY to a caller
  * that does not hold the binding (SCRUM-188), so suite_init acquires it and
@@ -52,6 +52,7 @@
 #include "libos_fs/exofs.h"
 #include "libos_fs/exofs_internal.h"
 #include "libos_fs/exofs_fat.h"
+#include "libos_fs/exofs_name.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -869,6 +870,374 @@ static void test_chain_survives_remount(void)
     exofs_unmount();
 }
 
+/* ---- Name area: variable-length names -----------------------------------
+ *
+ * The ticket's headline fix — cfat capped names at 11 bytes, inline in the
+ * directory entry — so this gets the heaviest coverage in the file.
+ */
+
+/* Fill `buf` with `len` bytes of a pattern that differs at every position,
+ * plus a NUL. Used to build long names whose content is checkable rather
+ * than a run of one character, so a read that returns the right length from
+ * the wrong offset still fails. */
+static void make_name(char *buf, uint32_t len, uint32_t seed)
+{
+    static const char alphabet[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+    for (uint32_t i = 0; i < len; i++) {
+        buf[i] = alphabet[(i * 7u + seed) % (sizeof(alphabet) - 1u)];
+    }
+    buf[len] = '\0';
+}
+
+static void test_name_store_and_read_back(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    char name[EXOFS_MAX_NAME + 1];
+    char back[EXOFS_MAX_NAME + 1];
+
+    /* 1 byte, something ordinary, and the full 255 — the last being the
+     * whole point of the ticket. */
+    const uint32_t lens[] = { 1u, 11u, 12u, 64u, EXOFS_MAX_NAME };
+
+    for (uint32_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+        uint32_t len = lens[i];
+        make_name(name, len, i);
+
+        uint32_t blk = 0; uint16_t off = 0;
+        CU_ASSERT_EQUAL(exofs_name_alloc(v, name, len, &blk, &off), 0);
+
+        CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, len, back), 0);
+        CU_ASSERT_STRING_EQUAL(back, name);
+        CU_ASSERT_EQUAL(exofs_name_equals(v, blk, off, len, name), 1);
+    }
+
+    exofs_unmount();
+}
+
+/* 12 bytes is one past cfat's MAXFILENAME. Called out on its own because
+ * "longer than 11" is the acceptance criterion, not an incidental case. */
+static void test_name_longer_than_cfat_limit(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const char *name = "a-name-much-longer-than-eleven-characters.txt";
+    uint32_t len = (uint32_t)strlen(name);
+    CU_ASSERT_TRUE(len > 11u);
+
+    uint32_t blk = 0; uint16_t off = 0;
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, name, len, &blk, &off), 0);
+
+    char back[EXOFS_MAX_NAME + 1];
+    CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, len, back), 0);
+    CU_ASSERT_STRING_EQUAL(back, name);
+
+    exofs_unmount();
+}
+
+static void test_name_length_limits(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    char name[EXOFS_MAX_NAME + 2];
+    uint32_t blk = 0; uint16_t off = 0;
+
+    make_name(name, EXOFS_MAX_NAME + 1u, 0);
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, name, EXOFS_MAX_NAME + 1u, &blk, &off),
+                    -EXO_EINVAL);
+
+    make_name(name, 1u, 0);
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 0, &blk, &off), -EXO_EINVAL);
+
+    exofs_unmount();
+}
+
+/*
+ * Two names that agree for their first 200 bytes must not be confused. The
+ * case a length-capped or prefix-comparing implementation gets wrong, and
+ * the reason make_name() builds content rather than padding.
+ */
+static void test_long_names_with_common_prefix_are_distinct(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    char a[EXOFS_MAX_NAME + 1];
+    char b[EXOFS_MAX_NAME + 1];
+
+    make_name(a, 250u, 0);
+    make_name(b, 250u, 0);
+    b[249] = (a[249] == 'x') ? 'y' : 'x';   /* differ only in the last byte */
+
+    uint32_t ablk = 0, bblk = 0; uint16_t aoff = 0, boff = 0;
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, a, 250u, &ablk, &aoff), 0);
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, b, 250u, &bblk, &boff), 0);
+
+    CU_ASSERT_EQUAL(exofs_name_equals(v, ablk, aoff, 250u, a), 1);
+    CU_ASSERT_EQUAL(exofs_name_equals(v, ablk, aoff, 250u, b), 0);
+    CU_ASSERT_EQUAL(exofs_name_equals(v, bblk, boff, 250u, b), 1);
+    CU_ASSERT_EQUAL(exofs_name_equals(v, bblk, boff, 250u, a), 0);
+
+    /* And a name that is a strict prefix of another is not equal to it. */
+    char shorter[EXOFS_MAX_NAME + 1];
+    memcpy(shorter, a, 100u);
+    shorter[100] = '\0';
+    CU_ASSERT_EQUAL(exofs_name_equals(v, ablk, aoff, 250u, shorter), 0);
+
+    exofs_unmount();
+}
+
+/*
+ * Reuse, not growth. Create and release the same-sized name repeatedly and
+ * assert the name chain does not grow — the property that keeps SCRUM-104's
+ * save-file rotation from consuming the volume.
+ */
+static void test_name_records_are_reused(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    char name[EXOFS_MAX_NAME + 1];
+    make_name(name, 200u, 3);
+
+    uint32_t blk = 0; uint16_t off = 0;
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 200u, &blk, &off), 0);
+
+    uint32_t chain_after_first = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain_after_first), 0);
+    CU_ASSERT_EQUAL(chain_after_first, 1u);
+
+    uint32_t free_blocks_before = exofs_fat_free_count(v);
+
+    /* 50 cycles at 200 bytes each: without reuse this would need ~20 blocks
+     * and the chain would grow well past 1. */
+    for (uint32_t i = 0; i < 50u; i++) {
+        CU_ASSERT_EQUAL(exofs_name_free(v, blk, off), 0);
+        CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 200u, &blk, &off), 0);
+    }
+
+    uint32_t chain_after_churn = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain_after_churn), 0);
+    CU_ASSERT_EQUAL(chain_after_churn, 1u);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_blocks_before);
+
+    /* The name still reads back correctly after all that churn. */
+    char back[EXOFS_MAX_NAME + 1];
+    CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, 200u, back), 0);
+    CU_ASSERT_STRING_EQUAL(back, name);
+
+    exofs_unmount();
+}
+
+/*
+ * Coalescing. Freeing several adjacent small records must produce one big
+ * free record, not a row of unusable holes — otherwise a block fragments
+ * until nothing fits while its tail is exhausted.
+ */
+static void test_freed_records_coalesce(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    char small[EXOFS_MAX_NAME + 1];
+    char big[EXOFS_MAX_NAME + 1];
+    make_name(small, 20u, 1);
+    make_name(big, 200u, 2);
+
+    /* Ten 20-byte names: 10 * 22 = 220 bytes of the block. */
+    uint32_t blks[10]; uint16_t offs[10];
+    for (uint32_t i = 0; i < 10u; i++) {
+        CU_ASSERT_EQUAL(exofs_name_alloc(v, small, 20u, &blks[i], &offs[i]), 0);
+        CU_ASSERT_EQUAL(blks[i], blks[0]);   /* all in the first block */
+    }
+
+    /* Free them all. Coalescing should hand the space back as one run. */
+    for (uint32_t i = 0; i < 10u; i++) {
+        CU_ASSERT_EQUAL(exofs_name_free(v, blks[i], offs[i]), 0);
+    }
+
+    uint32_t chain_before = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain_before), 0);
+
+    /* A 200-byte name now has to fit in the space those ten vacated. It
+     * only can if the holes merged: the largest single freed record was 20
+     * bytes. */
+    uint32_t bblk = 0; uint16_t boff = 0;
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, big, 200u, &bblk, &boff), 0);
+    CU_ASSERT_EQUAL(bblk, blks[0]);
+
+    uint32_t chain_after = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain_after), 0);
+    CU_ASSERT_EQUAL(chain_after, chain_before);
+
+    char back[EXOFS_MAX_NAME + 1];
+    CU_ASSERT_EQUAL(exofs_name_read(v, bblk, boff, 200u, back), 0);
+    CU_ASSERT_STRING_EQUAL(back, big);
+
+    exofs_unmount();
+}
+
+/* An oversized free record is split, so a short name reusing a long one's
+ * slot does not strand the remainder. */
+static void test_oversized_record_is_split(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    char big[EXOFS_MAX_NAME + 1];
+    char tiny[EXOFS_MAX_NAME + 1];
+    make_name(big, 250u, 4);
+    make_name(tiny, 4u, 5);
+
+    uint32_t bblk = 0; uint16_t boff = 0;
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, big, 250u, &bblk, &boff), 0);
+    CU_ASSERT_EQUAL(exofs_name_free(v, bblk, boff), 0);
+
+    /* Reusing the 250-byte hole for a 4-byte name must leave the remainder
+     * available: two more 100-byte names have to fit in the same block. */
+    uint32_t t1 = 0, t2 = 0, t3 = 0; uint16_t o1 = 0, o2 = 0, o3 = 0;
+    char mid[EXOFS_MAX_NAME + 1];
+    make_name(mid, 100u, 6);
+
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, tiny, 4u, &t1, &o1), 0);
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, mid, 100u, &t2, &o2), 0);
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, mid, 100u, &t3, &o3), 0);
+
+    CU_ASSERT_EQUAL(t1, bblk);
+    CU_ASSERT_EQUAL(t2, bblk);
+    CU_ASSERT_EQUAL(t3, bblk);
+
+    /* All three read back intact — the split did not overlap them. */
+    char back[EXOFS_MAX_NAME + 1];
+    CU_ASSERT_EQUAL(exofs_name_read(v, t1, o1, 4u, back), 0);
+    CU_ASSERT_STRING_EQUAL(back, tiny);
+    CU_ASSERT_EQUAL(exofs_name_read(v, t2, o2, 100u, back), 0);
+    CU_ASSERT_STRING_EQUAL(back, mid);
+    CU_ASSERT_EQUAL(exofs_name_read(v, t3, o3, 100u, back), 0);
+    CU_ASSERT_STRING_EQUAL(back, mid);
+
+    exofs_unmount();
+}
+
+/* More names than one block holds must grow the chain, and every one of
+ * them must still be readable afterwards. */
+static void test_name_area_spans_multiple_blocks(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    /* 40 names of 100 bytes = ~4080 bytes, so at least 8 blocks. */
+    enum { N = 40 };
+    uint32_t blks[N]; uint16_t offs[N];
+    char name[EXOFS_MAX_NAME + 1];
+    char back[EXOFS_MAX_NAME + 1];
+
+    for (uint32_t i = 0; i < N; i++) {
+        make_name(name, 100u, i);
+        CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 100u, &blks[i], &offs[i]), 0);
+    }
+
+    uint32_t chain = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain), 0);
+    CU_ASSERT_TRUE(chain > 1u);
+
+    for (uint32_t i = 0; i < N; i++) {
+        make_name(name, 100u, i);
+        CU_ASSERT_EQUAL(exofs_name_read(v, blks[i], offs[i], 100u, back), 0);
+        if (strcmp(back, name) != 0) {
+            CU_ASSERT_STRING_EQUAL(back, name);
+            break;
+        }
+    }
+
+    exofs_unmount();
+}
+
+/* Names and their chain head must survive a remount — the head lives in the
+ * superblock precisely so it can. */
+static void test_names_survive_remount(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    char name[EXOFS_MAX_NAME + 1];
+    make_name(name, 180u, 9);
+
+    uint32_t blk = 0; uint16_t off = 0;
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 180u, &blk, &off), 0);
+    CU_ASSERT_EQUAL(exofs_sync(), 0);
+
+    uint32_t head_before = v->name_head;
+    CU_ASSERT_NOT_EQUAL(head_before, EXOFS_NO_BLOCK);
+
+    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+
+    v = exofs_vol();
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v == NULL) return;
+
+    CU_ASSERT_EQUAL(v->name_head, head_before);
+
+    char back[EXOFS_MAX_NAME + 1];
+    CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, 180u, back), 0);
+    CU_ASSERT_STRING_EQUAL(back, name);
+
+    exofs_unmount();
+}
+
+/* A dirent carrying a stale or corrupt reference must be refused, not
+ * followed into the middle of another record or past the block. */
+static void test_bad_name_references_rejected(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    char name[EXOFS_MAX_NAME + 1];
+    char back[EXOFS_MAX_NAME + 1];
+    make_name(name, 32u, 11);
+
+    uint32_t blk = 0; uint16_t off = 0;
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 32u, &blk, &off), 0);
+
+    /* An offset with no header before it. */
+    CU_ASSERT_EQUAL(exofs_name_read(v, blk, 0, 32u, back), -EXO_EINVAL);
+
+    /* An offset past the end of the block. */
+    CU_ASSERT_EQUAL(exofs_name_read(v, blk, EXOFS_BLOCK_SIZE, 32u, back),
+                    -EXO_EINVAL);
+
+    /* A length longer than the record actually reserved. */
+    CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, 200u, back), -EXO_EINVAL);
+
+    /* A block index off the volume. */
+    CU_ASSERT_EQUAL(exofs_name_read(v, v->total_blocks, off, 32u, back),
+                    -EXO_EINVAL);
+
+    /* Reading a record after it has been freed. */
+    CU_ASSERT_EQUAL(exofs_name_free(v, blk, off), 0);
+    CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, 32u, back), -EXO_EINVAL);
+
+    /* And freeing it twice. */
+    CU_ASSERT_EQUAL(exofs_name_free(v, blk, off), -EXO_EINVAL);
+
+    exofs_unmount();
+}
+
 void suite_exofs_tests(CU_pSuite s)
 {
     CU_add_test(s, "heap buffer lies in the LibOS window",
@@ -918,4 +1287,23 @@ void suite_exofs_tests(CU_pSuite s)
                 test_exhaustion_reports_enospc);
     CU_add_test(s, "a chain survives a remount",
                 test_chain_survives_remount);
+
+    CU_add_test(s, "names store and read back",
+                test_name_store_and_read_back);
+    CU_add_test(s, "a name longer than cfat's 11-byte cap",
+                test_name_longer_than_cfat_limit);
+    CU_add_test(s, "name length limits enforced", test_name_length_limits);
+    CU_add_test(s, "long names with a common prefix stay distinct",
+                test_long_names_with_common_prefix_are_distinct);
+    CU_add_test(s, "freed name records are reused",
+                test_name_records_are_reused);
+    CU_add_test(s, "freed name records coalesce",
+                test_freed_records_coalesce);
+    CU_add_test(s, "an oversized name record is split",
+                test_oversized_record_is_split);
+    CU_add_test(s, "the name area spans multiple blocks",
+                test_name_area_spans_multiple_blocks);
+    CU_add_test(s, "names survive a remount", test_names_survive_remount);
+    CU_add_test(s, "bad name references rejected",
+                test_bad_name_references_rejected);
 }

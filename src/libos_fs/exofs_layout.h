@@ -95,7 +95,16 @@ typedef struct exofs_super {
     uint32_t fat_blocks;     /* sectors the FAT itself occupies             */
     uint32_t data_lba;       /* absolute LBA of data block 0                */
     uint32_t root_block;     /* EXOFS_ROOT_BLOCK                            */
-    uint8_t  pad[EXOFS_BLOCK_SIZE - 24];
+
+    /* First block of the name-area chain, or EXOFS_NO_BLOCK on a volume
+     * that holds no names yet. It has to live here rather than be derived:
+     * the name area is a chain of ordinary data blocks, and nothing else on
+     * the volume records where it starts. Walking every directory to
+     * rediscover it at mount would be both slow and circular, since
+     * resolving a directory entry needs the name area already. */
+    uint32_t name_head;
+
+    uint8_t  pad[EXOFS_BLOCK_SIZE - 28];
 } exofs_super_t;
 
 _Static_assert(sizeof(exofs_super_t) == EXOFS_BLOCK_SIZE,
@@ -157,27 +166,41 @@ _Static_assert(sizeof(exofs_dirent_t) == 32,
 
 /* ---- Name area ----------------------------------------------------------
  *
- * Names live in ordinary FAT-allocated blocks — there is no separate
- * allocator and no reserved region, so a volume that stores few names does
- * not pay for a big one. A record is:
+ * Names live in ordinary FAT-allocated blocks, chained through the FAT from
+ * the superblock's name_head — there is no separate allocator and no
+ * reserved region, so a volume that stores few names does not pay for a big
+ * one. A record is:
  *
- *     uint16_t len;          low 15 bits = length, high bit = free
- *     uint8_t  bytes[len];   the name, no NUL
+ *     uint16_t hdr;          low 15 bits = CAPACITY, high bit = free
+ *     uint8_t  bytes[cap];   the name, no NUL, left-justified in `cap`
+ *
+ * The header holds the record's capacity, not the name's length. The length
+ * is in the referring exofs_dirent_t's name_len, where it already had to be
+ * — and keeping capacity here is what lets a scan skip a record without
+ * caring whether it is live or free, and lets a free record be reused by a
+ * shorter name without its footprint changing under the scan. A record whose
+ * capacity exceeds the name in it is split on reuse when the leftover is big
+ * enough to hold a record of its own.
+ *
+ * A header of 0 is not a zero-capacity record: it means "unused space from
+ * here to the end of the block". That falls out of exofs_fat_alloc() zeroing
+ * every block it hands out, so a fresh name block needs no initialisation.
  *
  * Records never straddle a block boundary, so reading a name is always one
  * block read. That caps a name at EXOFS_BLOCK_SIZE - 2 bytes by construction;
  * the API advertises EXOFS_MAX_NAME (255, POSIX NAME_MAX) instead, which
  * leaves room to raise the limit later without a format change.
  *
- * Freeing sets EXOFS_NAME_FREE_BIT rather than compacting, and allocation
- * first-fits over free records before bumping into fresh space. That matters
- * for SCRUM-104: Doom's save-file rotation renames constantly, and a
- * bump-only name area would grow without bound.
+ * Freeing sets EXOFS_NAME_FREE_BIT and coalesces with adjacent free records
+ * rather than compacting the block; allocation first-fits over free records
+ * before bumping into unused space. That matters for SCRUM-104: Doom's
+ * save-file rotation renames constantly, and a bump-only name area would
+ * grow without bound.
  */
 #define EXOFS_MAX_NAME       255u
 #define EXOFS_NAME_HDR_SIZE  2u
 #define EXOFS_NAME_FREE_BIT  0x8000u
-#define EXOFS_NAME_LEN_MASK  0x7FFFu
+#define EXOFS_NAME_CAP_MASK  0x7FFFu
 
 _Static_assert(EXOFS_MAX_NAME + EXOFS_NAME_HDR_SIZE <= EXOFS_BLOCK_SIZE,
                "a name record must fit in one block: exofs_name.c reads a "

@@ -258,6 +258,7 @@ int exofs_format(uint32_t base_lba, uint32_t total_sectors)
         sb->fat_blocks   = fat_blocks;
         sb->data_lba     = data_lba;
         sb->root_block   = EXOFS_ROOT_BLOCK;
+        sb->name_head    = EXOFS_NO_BLOCK;   /* no names on a fresh volume */
 
         rc = exofs_bdev_write(base_lba, sb, 1);
     }
@@ -296,6 +297,11 @@ static int validate_super(const exofs_super_t *sb, uint32_t base_lba)
     /* And the data region must start immediately after it. */
     if (sb->data_lba != base_lba + 1u + sb->fat_blocks) return -EXO_EINVAL;
 
+    /* The name chain either does not exist yet or starts at a real block.
+     * Anything else would have exofs_name.c walking off the volume. */
+    if (sb->name_head != EXOFS_NO_BLOCK &&
+        sb->name_head >= sb->total_blocks) return -EXO_EINVAL;
+
     return 0;
 }
 
@@ -320,6 +326,7 @@ int exofs_mount(uint32_t base_lba)
     g_vol.data_lba     = sb->data_lba;
     g_vol.total_blocks = sb->total_blocks;
     g_vol.root_block   = sb->root_block;
+    g_vol.name_head    = sb->name_head;
 
     /* Sized to whole sectors, not to the entry count: the FAT is read with
      * one sector-granular transfer and the last sector is usually only
@@ -363,6 +370,34 @@ out_partial:
 out_buf:
     libos_heap_free(buf);
     return rc;
+}
+
+/*
+ * Rewrite the superblock from the mounted volume's state.
+ *
+ * Only exofs_name.c calls this, and only when the name chain's head changes
+ * — which happens exactly once per volume, the first time a name is stored.
+ * A superblock rewrite is not cheap in the way a FAT mark is (it is an
+ * immediate sector write, not a dirty bit), which is fine at that
+ * frequency and would not be if anything else were recorded here.
+ */
+int exofs_super_update(exofs_volume_t *v)
+{
+    if (v == NULL || !v->mounted) return -EXO_EINVAL;
+    if (v->scratch == NULL)       return -EXO_EINVAL;
+
+    exofs_super_t *sb = (exofs_super_t *)v->scratch;
+    memset(sb, 0, EXOFS_BLOCK_SIZE);
+    sb->magic        = EXOFS_MAGIC;
+    sb->version      = (uint16_t)EXOFS_VERSION;
+    sb->block_size   = (uint16_t)EXOFS_BLOCK_SIZE;
+    sb->total_blocks = v->total_blocks;
+    sb->fat_blocks   = v->fat_blocks;
+    sb->data_lba     = v->data_lba;
+    sb->root_block   = v->root_block;
+    sb->name_head    = v->name_head;
+
+    return exofs_bdev_write(v->base_lba, sb, 1);
 }
 
 int exofs_geometry(exofs_geometry_t *out)

@@ -38,6 +38,11 @@ typedef struct exofs_volume {
     uint32_t total_blocks;   /* data blocks the FAT covers                */
     uint32_t root_block;     /* EXOFS_ROOT_BLOCK                          */
 
+    /* Head of the name-area chain, mirroring the superblock field. Changes
+     * exactly once per volume — the first time a name is stored — and
+     * exofs_super_update() writes it back when it does. */
+    uint32_t name_head;
+
     /*
      * The in-RAM FAT. Allocated fat_blocks * EXOFS_BLOCK_SIZE bytes, NOT
      * total_blocks * sizeof(exofs_fat_t) — the last FAT sector is usually
@@ -95,5 +100,9 @@ int exofs_write_block(uint32_t blk, const void *buf);
  * whoever writes v->fat[idx]; separated from the write itself so a loop that
  * touches many consecutive entries does not repeat the division. */
 void exofs_fat_mark_dirty(exofs_volume_t *v, uint32_t idx);
+
+/* Rewrite the superblock from `v`. See the definition in exofs_volume.c for
+ * why this is a rare, immediate write rather than something batched. */
+int exofs_super_update(exofs_volume_t *v);
 
 #endif /* EXOFS_INTERNAL_H */
