@@ -170,6 +170,120 @@ int exofs_readdir(exofs_dir_t *d, exofs_dirinfo_t *out);
  * one; there is nothing to release, so this only marks it unusable. */
 int exofs_closedir(exofs_dir_t *d);
 
+/* ---- Files -------------------------------------------------------------- */
+
+/* Open modes, combinable. */
+#define EXOFS_O_READ    0x01u
+#define EXOFS_O_WRITE   0x02u
+#define EXOFS_O_CREATE  0x04u   /* create if absent                        */
+#define EXOFS_O_TRUNC   0x08u   /* discard existing contents on open       */
+#define EXOFS_O_APPEND  0x10u   /* every write goes to the end             */
+
+/* Whence values for exofs_seek, matching stdio's SEEK_* ordering — the
+ * FILE* shim (SCRUM-42) sits directly on this. */
+#define EXOFS_SEEK_SET  0u
+#define EXOFS_SEEK_CUR  1u
+#define EXOFS_SEEK_END  2u
+
+/*
+ * An open file. Caller-allocated and opaque.
+ *
+ * DURABILITY. A file's size and the head of its data chain live in its
+ * directory entry, and that entry is rewritten on exofs_close() or
+ * exofs_fflush() — not on every write, which for a 28 MB sequential write
+ * would mean one extra whole-block rewrite per call. So **a handle must be
+ * closed (or flushed) for its writes to be findable again**; an unmounted
+ * volume with an unclosed handle keeps the data blocks but not the size, so
+ * they read as a shorter file. That is the same bargain stdio makes with
+ * fclose(), and it is stated here because the failure is silent.
+ */
+typedef struct exofs_file {
+    int      open;
+    uint32_t flags;
+
+    /* Where the directory entry lives, so close() can write it back. */
+    uint32_t ent_block;
+    uint16_t ent_index;
+
+    uint32_t first_block;   /* head of the data chain, or EXOFS_NO_BLOCK   */
+    uint32_t size;
+    uint32_t pos;
+    int      dirty;         /* metadata differs from the on-disk entry     */
+
+    /*
+     * Cached position in the chain: cur_block is the block at chain index
+     * cur_index, or EXOFS_NO_BLOCK when nothing is cached. Sequential
+     * access then advances one link at a time instead of re-walking from
+     * the head on every call, which is what keeps reading a large file from
+     * being O(blocks²) — the shape that matters for SCRUM-190's ~28 MB
+     * IWAD, where a re-walk per 512-byte read is ~57000 chain steps by the
+     * end of the file.
+     */
+    uint32_t cur_block;
+    uint32_t cur_index;
+} exofs_file_t;
+
+/* What exofs_stat() reports. */
+typedef struct exofs_stat {
+    uint32_t size;
+    uint16_t attributes;
+    uint32_t ctime;         /* exo_get_ticks() at create; see §8 of the doc */
+    uint32_t mtime;
+} exofs_stat_t;
+
+/*
+ * Open `path`. `flags` is a combination of EXOFS_O_*; one of EXOFS_O_READ or
+ * EXOFS_O_WRITE must be present.
+ *
+ * Returns 0, -EXO_ENOENT (absent, without EXOFS_O_CREATE), -EXO_EEXIST is
+ * not used here, -EXO_EISDIR if `path` is a directory, -EXO_ENOTDIR for a
+ * non-directory parent component, -EXO_EINVAL for a malformed path or flags,
+ * -EXO_ENOSPC, or a device error.
+ */
+int exofs_open(const char *path, uint32_t flags, exofs_file_t *out);
+
+/* Write the file's size and chain head back to its directory entry. See the
+ * durability note on exofs_file_t. Also syncs the FAT. */
+int exofs_fflush(exofs_file_t *f);
+
+/* Flush and close. Safe on an already-closed handle. */
+int exofs_close(exofs_file_t *f);
+
+/*
+ * Read up to `n` bytes at the current position, stopping at end of file.
+ * Returns the number of bytes read (0 at EOF), or a negative error.
+ */
+int64_t exofs_read(exofs_file_t *f, void *buf, uint32_t n);
+
+/*
+ * Write `n` bytes at the current position, extending the file if needed.
+ *
+ * Seeking past the end and then writing leaves a hole, which reads as
+ * zeros — not because holes are tracked, but because every block is zeroed
+ * when it is allocated (docs/filesystem.md §1.1). Returns the number of
+ * bytes written, or a negative error.
+ */
+int64_t exofs_write(exofs_file_t *f, const void *buf, uint32_t n);
+
+/*
+ * Move the read/write position. `whence` is one of EXOFS_SEEK_*. Returns the
+ * new absolute position, or a negative error. Seeking past the end is
+ * allowed; seeking before the start is -EXO_EINVAL.
+ */
+int64_t exofs_seek(exofs_file_t *f, int64_t off, uint32_t whence);
+
+/* Report on `path` without opening it. */
+int exofs_stat(const char *path, exofs_stat_t *out);
+
+/*
+ * Remove the file `path`, freeing its data blocks and its name record.
+ *
+ * Returns -EXO_EISDIR for a directory — that is exofs_rmdir()'s job, and
+ * silently removing a directory tree here would be the kind of help nobody
+ * asked for.
+ */
+int exofs_unlink(const char *path);
+
 /* ---- Limits -------------------------------------------------------------
  *
  * EXOFS_MIN_SECTORS: superblock + one FAT sector + one data block, plus

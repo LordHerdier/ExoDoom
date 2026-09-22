@@ -14,11 +14,12 @@ deliberately plain-old-data with no dependency beyond `<stdint.h>` so
 SCRUM-190's host-side image builder can compile against that exact header
 rather than restating the format in a script.
 
-> **Status.** Landed so far: the block-I/O seam, the volume layer
-> (superblock/format/mount/FAT cache), the FAT layer (allocation, chain
-> traversal), the name area, directory entries, path resolution and the
-> directory operations (mkdir/rmdir/opendir/readdir). File operations are in
-> progress under the same ticket. Sections below describe what exists.
+> **Status.** Feature-complete for SCRUM-189: the block-I/O seam, the volume
+> layer (superblock/format/mount/FAT cache), the FAT layer, the name area,
+> directory entries, path resolution, the directory operations
+> (mkdir/rmdir/opendir/readdir) and the file operations
+> (open/read/write/seek/stat/unlink). What remains on the ticket is wiring
+> and documentation, not filesystem behaviour.
 
 ---
 
@@ -211,6 +212,50 @@ if interrupted; the other leaves the parent naming blocks that are back on
 the free list, so the next allocation hands them to another file while a live
 directory entry still points there. One is a wasted block, the other is two
 files sharing storage.
+
+---
+
+## 6c. Files
+
+A file is a FAT chain of blocks plus a byte count in its directory entry.
+Three properties are worth knowing before editing `exofs_file.c`:
+
+**An empty file has no chain.** `first_block` stays `EXOFS_NO_BLOCK` until the
+first byte is written, so a volume full of empty files costs no data blocks.
+Every write path has to cope with that, which is why writing goes through
+`ensure_block()` rather than `exofs_chain_nth()`.
+
+**The chain position is cached in the handle.** Finding the block holding
+offset N means walking N/512 links, and re-walking from the head on every
+call makes sequential I/O O(blocks²) — for SCRUM-190's ~28 MB IWAD that is
+~57000 steps per call by the end of the file. The handle remembers the last
+block it touched and its chain index, so a forward step costs one link and
+only a backwards seek pays for a re-walk.
+
+**Holes are free.** Seeking past the end and writing leaves a gap that reads
+as zeros, with no hole tracking anywhere — every block is zeroed when
+allocated (§1.1), so unwritten bytes inside an allocated block are already
+zero.
+
+### Durability
+
+A file's size and chain head live in its directory entry, rewritten on
+`exofs_close()` or `exofs_fflush()` — **not on every write**, which for a
+28 MB sequential write would mean one extra whole-block rewrite per call. So
+a handle must be closed for its writes to be findable again; an unmounted
+volume with an unclosed handle keeps the data blocks but not the size, so
+they read as a shorter file. That is the bargain stdio makes with `fclose()`,
+and it is worth stating because the failure is silent.
+
+The one exception is `EXOFS_O_TRUNC`, which flushes immediately. Deferring it
+would leave the entry naming a chain that is already back on the free list —
+the dangling case §1 exists to avoid, and the only place in the file layer
+where a deferred metadata write would be unsafe rather than merely lossy.
+
+`unlink` unlinks from the parent before freeing the data chain, the same
+ordering and for the same reason as `rmdir` (§6b). It refuses a directory
+with `-EXO_EISDIR`: that is `rmdir`'s job, and quietly removing a tree here
+is help nobody asked for.
 
 ---
 
