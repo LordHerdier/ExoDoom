@@ -372,15 +372,12 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 24 | `exo_launch_doom()`                 | Lifecycle   | ✅     | Build and switch to the Doom LibOS (`src/libos_doom/`, the 79 vendored engine objects plus the libc shim). Shaped like #21 rather than #23: the WAD module is mapped read-only at `LIBOS_WAD_VADDR` and its address/length patched in via `libos_launch_patch_params()`, where `DG_Init` reads them. Invoked by the shell's `doom` command. Implemented in SCRUM-66 (`src/syscall_launch.c`). |
 | 25 | `exo_memstat(stat_out)`             | Introspection | ✅   | Write a page-usage snapshot of the whole PMM to `stat_out`: `{uint32_t total_pages, free_pages, kernel_pages, libos_pages, region_count, reserved}` (24 bytes). Deliberately unscoped — every context's pages, not just the caller's. Returns `0`, or `-EFAULT` if `[stat_out, stat_out + sizeof(exo_memstat_t))` is not entirely inside the LibOS window and mapped writable (same check #4/#6 use). Invoked by the shell's `memstat` command. Implemented in SCRUM-113 (`src/syscall_stat.c`, `src/page_alloc.c`). |
 | 26 | `exo_pslist(out, max)`              | Introspection | ✅   | Write up to `max` `exo_ps_info_t` entries (`{uint16_t id; uint8_t state; uint8_t reserved; uint32_t page_count}`, 8 bytes each) to `out` — one per live LibOS context, the caller included (the shell is itself `context_create()`'d, SCRUM-178). `state` mirrors `context_state_t`: `1`=READY, `2`=RUNNING, `3`=BLOCKED. Returns the number of entries written (`0..max`), `-EINVAL` if `max` exceeds `EXO_PSLIST_MAX` (`#define EXO_PSLIST_MAX CONTEXT_MAX` — `src/exo_syscall.h` `#include`s `src/context.h` rather than restating the number, after a hardcoded copy went stale and silently re-capped this at 3 across SCRUM-193's `CONTEXT_MAX` bump), or `-EFAULT` if `[out, out + max * sizeof(exo_ps_info_t))` is not entirely inside the LibOS window and mapped writable. Invoked by the shell's `pslist` command. Implemented in SCRUM-113 (`src/syscall_stat.c`, `src/context.c`). |
-| 27 | `exo_disk_read(lba, buf, count)`    | Storage     | ✅     | Read `count` consecutive 512-byte sectors starting at 28-bit LBA `lba` into `buf` (at least `count * 512` bytes), one `ata_read_sector()` call per sector. Returns `count` on success (`count == 0` always succeeds and touches nothing), `-ENODEV` if no drive was detected at boot, `-EINVAL` if `count` exceeds `EXO_DISK_MAX_SECTORS` (128, `src/syscall_disk.h`) or `lba + count - 1` overflows 28-bit LBA space, `-EFAULT` if `[buf, buf + count*512)` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` and mapped writable (same `exo_range_in_user_window`/`exo_user_range_mapped` pair #8 uses), or `-EIO` if a sector faults partway through the transfer (no partial-success byte count — ATA gives no way to tell "this sector failed" from "this sector was never attempted" once a fault stops the loop). **Deliberately no ownership/binding check** — the disk has no binding table yet; that is SCRUM-188, which this ticket unblocks rather than depends on. Sector-addressed only, zero filesystem knowledge — the ported FAT-like fs (SCRUM-189) is LibOS-side, on top of this. Implemented in SCRUM-103 (`src/syscall_disk.c`, on top of the ATA PIO driver, SCRUM-102, `src/ata.c`). |
-| 28 | `exo_disk_write(lba, buf, count)`   | Storage     | ✅     | Same shape as #27, writing `count` sectors from `buf` via `ata_write_sector()`. `buf` is checked readable rather than writable. Same error codes, same no-ownership-check caveat. Implemented in SCRUM-103 (`src/syscall_disk.c`). |
 
-**Total: 29 syscalls.** This is the complete interface needed to run Doom with
+**Total: 26 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking, plus the three
 LibOS-launch syscalls (#21/#22/#23) that back the shell's interactive demo
-commands, the two introspection syscalls (#25/#26) that back its
-`memstat`/`pslist` commands, and the two raw storage syscalls (#27/#28) the
-future FAT-like filesystem (SCRUM-189) will build on.
+commands, plus the two introspection syscalls (#25/#26) that back its
+`memstat`/`pslist` commands.
 
 ### 3.2a Error codes (SCRUM-57)
 
@@ -400,17 +397,16 @@ pass-through rather than a translation table.
 | --- | --- | --- | --- |
 | `EXO_EPERM` | 1 | Operation not permitted for this LibOS | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3) |
 | `EXO_ENOENT` | 2 | No such file | not yet — reserved for `exo_file_*` (#9-16) |
-| `EXO_EIO` | 5 | Disk I/O fault partway through a sector transfer | `exo_disk_read`/`exo_disk_write` (#27/#28) |
 | `EXO_EBADF` | 9 | Bad file descriptor | not yet — reserved for `exo_file_*` |
 | `EXO_ENOMEM` | 12 | Out of physical pages / heap | `exo_page_alloc` (#0), `exo_page_map` (#2, no page for an intermediate table), `exo_page_unmap` (#3, split requires a page), `exo_fb_acquire` (#4, no contiguous run free for the virtual framebuffer, SCRUM-112) |
 | `EXO_EACCES` | 13 | Permission denied | not yet bound to a handler |
-| `EXO_EFAULT` | 14 | Pointer argument outside the caller's address space | `exo_fb_acquire` (#4), `exo_kbd_poll` (#6), `exo_serial_write` (#8), `exo_disk_read`/`exo_disk_write` (#27/#28) |
+| `EXO_EFAULT` | 14 | Pointer argument outside the caller's address space | `exo_fb_acquire` (#4), `exo_kbd_poll` (#6), `exo_serial_write` (#8) |
 | `EXO_EBUSY` | 16 | Resource held by another LibOS | not currently returned by any bound handler — `exo_fb_acquire` (#4) returned this pre-SCRUM-112, when the framebuffer was a single exclusive binding rather than a private buffer per caller |
 | `EXO_EEXIST` | 17 | File already exists | not yet — reserved for `exo_file_open`/`exo_file_rename` |
-| `EXO_ENODEV` | 19 | The hardware resource does not exist on this machine | `exo_fb_acquire` (#4, no framebuffer), `exo_disk_read`/`exo_disk_write` (#27/#28, no drive detected at boot) |
+| `EXO_ENODEV` | 19 | The hardware resource does not exist on this machine | `exo_fb_acquire` (#4, no framebuffer) |
 | `EXO_ENOTDIR` | 20 | Not a directory | not yet — reserved for `exo_file_*` |
 | `EXO_EISDIR` | 21 | Is a directory | not yet — reserved for `exo_file_*` |
-| `EXO_EINVAL` | 22 | Malformed or out-of-range argument | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3), `exo_serial_write` (#8, `len` over `SERIAL_WRITE_MAX_LEN`), `exo_disk_read`/`exo_disk_write` (#27/#28, `count` over `EXO_DISK_MAX_SECTORS` or LBA range overflow) |
+| `EXO_EINVAL` | 22 | Malformed or out-of-range argument | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3), `exo_serial_write` (#8, `len` over `SERIAL_WRITE_MAX_LEN`) |
 | `EXO_ENFILE` | 23 | System-wide open-file table full | not yet — reserved for `exo_file_open` |
 | `EXO_EMFILE` | 24 | Per-context file descriptor table full | not yet — reserved for `exo_file_open` |
 | `EXO_EFBIG` | 27 | File too large | not yet — reserved for `exo_file_write` |
@@ -419,9 +415,9 @@ pass-through rather than a translation table.
 | `EXO_EROFS` | 30 | Write attempted on a read-only filesystem | not yet — reserved for `exo_file_write` (e.g. a memory-mapped WAD reader, §4.1) |
 | `EXO_ENOSYS` | 38 | Syscall number not implemented, or out of range | `exo_syscall_dispatch` (`src/syscall.c`) for every unbound number — #7, #9-20 today |
 
-**"0 on success" is the default, not a universal rule.** Several bound
-syscalls document a positive success value instead of `0`, because the value
-itself *is* the answer the caller asked for, not a status flag:
+**"0 on success" is the default, not a universal rule.** Four bound syscalls
+document a positive success value instead of `0`, because the value itself
+*is* the answer the caller asked for, not a status flag:
 
 | Syscall | Success return | Why not `0` |
 | --- | --- | --- |
@@ -429,7 +425,6 @@ itself *is* the answer the caller asked for, not a status flag:
 | `exo_get_ticks` (#5) | milliseconds since boot | the syscall's entire purpose is returning this number |
 | `exo_kbd_poll` (#6) | `1` if an event was dequeued, `0` if the queue was empty | "queue empty" is not a failure — it is the expected steady state between keystrokes |
 | `exo_serial_write` (#8) | bytes written (`len`, since COM1 never partially writes) | mirrors POSIX `write()`; `0` would be indistinguishable from "wrote nothing" |
-| `exo_disk_read`/`exo_disk_write` (#27/#28) | sectors transferred (`count`, since success means every sector transferred) | mirrors `exo_serial_write`'s reasoning; `count == 0` is itself the no-op case, not an error |
 
 Every other bound syscall (`exo_page_free`, `exo_page_map`, `exo_page_unmap`,
 `exo_fb_acquire`) returns exactly `0` on success, matching the acceptance
