@@ -32,6 +32,19 @@
  * than sequential with it, because D_Display() is what calls I_FinishUpdate()
  * -> DG_DrawFrame(). DOOM_PROF_TOTAL wraps the whole of doomgeneric_Tick()
  * and is the slot that answers the ticket's literal acceptance criterion.
+ *
+ * DOOM_PROF_TIC_WAIT/_TIC_RUN (SCRUM-87 follow-up) split DOOM_PROF_SIM's own
+ * two phases, bracketed inside TryRunTics() itself (src/doom/d_loop.c):
+ * DOOM_PROF_TIC_WAIT is the pacing loop that busy-waits (I_Sleep(1), a
+ * DG_SleepMs busy-spin) for the next ~28.57ms tic boundary to become due --
+ * necessary because doomgeneric_Tick() runs in an uncapped loop
+ * (src/libos_doom/libos_doom.c) with no pacing of its own, so most calls to
+ * TryRunTics() land in this wait rather than doing anything. DOOM_PROF_TIC_RUN
+ * is the loop that actually calls RunTic() (G_Ticker, the real simulation)
+ * once the wait is satisfied. Both nest inside DOOM_PROF_SIM's window, the
+ * same relationship DOOM_PROF_BLIT has to DOOM_PROF_RENDER -- SCRUM-87's
+ * benchmark found DOOM_PROF_SIM's average suspiciously close to a uniform
+ * wait for a 28.57ms boundary, and this is what confirms or refutes that.
  */
 typedef enum {
     DOOM_PROF_SIM = 0,
@@ -39,6 +52,8 @@ typedef enum {
     DOOM_PROF_RENDER,
     DOOM_PROF_BLIT,
     DOOM_PROF_TOTAL,
+    DOOM_PROF_TIC_WAIT,
+    DOOM_PROF_TIC_RUN,
     DOOM_PROF_COUNT,
 } doom_prof_slot_t;
 

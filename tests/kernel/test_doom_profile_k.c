@@ -82,6 +82,37 @@ static void test_slots_are_independent(void)
 }
 
 /*
+ * DOOM_PROF_TIC_WAIT/_TIC_RUN (SCRUM-87 follow-up) are the two newest slots
+ * -- exercised on their own so a slot-table mistake (e.g. the designated
+ * initializer in doom_profile.c missing one of them) shows up here rather
+ * than only at the printf call site.
+ */
+static void test_tic_wait_and_run_slots_are_independent(void)
+{
+    uint32_t wait_frames, wait_total, wait_max;
+    uint32_t run_frames, run_total, run_max;
+
+    reset_all();
+
+    doom_profile_mark(DOOM_PROF_TIC_WAIT, 12);
+    doom_profile_mark(DOOM_PROF_TIC_WAIT, 15);
+    doom_profile_mark(DOOM_PROF_TIC_RUN, 1);
+
+    doom_profile_test_state(DOOM_PROF_TIC_WAIT, &wait_frames, &wait_total,
+                             &wait_max);
+    doom_profile_test_state(DOOM_PROF_TIC_RUN, &run_frames, &run_total,
+                             &run_max);
+
+    CU_ASSERT_EQUAL(wait_frames, 2);
+    CU_ASSERT_EQUAL(wait_total, 27);
+    CU_ASSERT_EQUAL(wait_max, 15);
+
+    CU_ASSERT_EQUAL(run_frames, 1);
+    CU_ASSERT_EQUAL(run_total, 1);
+    CU_ASSERT_EQUAL(run_max, 1);
+}
+
+/*
  * The window is exactly DOOM_PROF_WINDOW_FRAMES (35) marks wide: the 35th
  * mark must both fold into the report AND reset the counter for the next
  * window, so frame 36 starts from zero again rather than compounding.
@@ -135,6 +166,8 @@ void suite_doom_profile_tests(CU_pSuite s)
     CU_add_test(s, "state starts clear", test_state_starts_clear);
     CU_add_test(s, "accumulates within window", test_accumulates_within_window);
     CU_add_test(s, "slots are independent", test_slots_are_independent);
+    CU_add_test(s, "tic_wait/tic_run slots are independent",
+                test_tic_wait_and_run_slots_are_independent);
     CU_add_test(s, "window closes and resets", test_window_closes_and_resets);
     CU_add_test(s, "out-of-range slot is a no-op",
                 test_out_of_range_slot_is_noop);

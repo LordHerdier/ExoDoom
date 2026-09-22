@@ -29,6 +29,13 @@
 #include "i_timer.h"
 #include "i_video.h"
 
+/* ExoDoom (SCRUM-87 follow-up): TryRunTics's own wait-vs-run split. The
+ * machinery lives in src/doom_profile.c -- outside the vendored tree, same
+ * reasoning as SCRUM-83's doom_panic.h in i_system.c and SCRUM-87's own
+ * include in d_main.c. */
+#include "doomgeneric_exo.h"
+#include "doom_profile.h"
+
 #include "m_argv.h"
 #include "m_fixed.h"
 
@@ -764,6 +771,14 @@ void TryRunTics (void)
 
     // wait for new tics if needed
 
+    // ExoDoom (SCRUM-87 follow-up): the sim bucket's frame-time average
+    // came out suspiciously close to a uniform-random wait for the next
+    // ~28.57ms tic boundary, which is exactly what this loop is -- so its
+    // own time is split from the actual tic-execution loop below rather
+    // than lumped into one "sim" number. See src/doom_profile.h.
+    {
+    uint32_t exo_prof_wait_t0 = DG_GetTicksMs();
+
     while (!PlayersInGame() || lowtic < gametic/ticdup + counts)
     {
 	NetUpdate ();
@@ -778,19 +793,29 @@ void TryRunTics (void)
 
 	if (I_GetTime() / ticdup - entertic > 0)
 	{
+	    doom_profile_mark(DOOM_PROF_TIC_WAIT,
+	                       DG_GetTicksMs() - exo_prof_wait_t0);
 	    return;
 	}
 
         I_Sleep(1);
     }
 
+    doom_profile_mark(DOOM_PROF_TIC_WAIT, DG_GetTicksMs() - exo_prof_wait_t0);
+    }
+
     // run the count * ticdup dics
+    {
+    uint32_t exo_prof_run_t0 = DG_GetTicksMs();
+
     while (counts--)
     {
         ticcmd_set_t *set;
 
         if (!PlayersInGame())
         {
+            doom_profile_mark(DOOM_PROF_TIC_RUN,
+                               DG_GetTicksMs() - exo_prof_run_t0);
             return;
         }
 
@@ -817,6 +842,9 @@ void TryRunTics (void)
 	}
 
 	NetUpdate ();	// check for new console commands
+    }
+
+    doom_profile_mark(DOOM_PROF_TIC_RUN, DG_GetTicksMs() - exo_prof_run_t0);
     }
 }
 
