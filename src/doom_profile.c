@@ -26,11 +26,13 @@ typedef struct {
 } doom_prof_counter_t;
 
 static const char *const doom_prof_slot_name[DOOM_PROF_COUNT] = {
-    [DOOM_PROF_SIM]    = "sim",
-    [DOOM_PROF_SOUND]  = "sound",
-    [DOOM_PROF_RENDER] = "render",
-    [DOOM_PROF_BLIT]   = "blit",
-    [DOOM_PROF_TOTAL]  = "total",
+    [DOOM_PROF_SIM]      = "sim",
+    [DOOM_PROF_SOUND]    = "sound",
+    [DOOM_PROF_RENDER]   = "render",
+    [DOOM_PROF_BLIT]     = "blit",
+    [DOOM_PROF_TOTAL]    = "total",
+    [DOOM_PROF_TIC_WAIT] = "tic_wait",
+    [DOOM_PROF_TIC_RUN]  = "tic_run",
 };
 
 static doom_prof_counter_t doom_prof_counters[DOOM_PROF_COUNT];
