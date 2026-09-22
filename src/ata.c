@@ -32,23 +32,32 @@
 /* Bounded busy-wait, not a PIT-timed one: on real/QEMU hardware BSY/DRQ
  * resolve in microseconds, and tying this to kernel_get_ticks_ms() would
  * give ata.c a dependency on pit.c for no benefit -- see the ticket's plan
- * notes. Large enough that it never fires spuriously against QEMU, small
- * enough that a genuinely wedged drive doesn't hang boot forever. */
-#define ATA_POLL_ITERS 100000
+ * notes. 10,000,000, not 100,000 (SCRUM-102, PR #122): CI's shared runners
+ * reproducibly hit ATA_ETIMEOUT at the smaller bound on a genuinely working
+ * drive -- confirmed by printing the real rc, not guessed -- while three
+ * local docker-test runs never came close to either bound. Both local and
+ * CI QEMU run under the same software emulation (docker/scripts never pass
+ * /dev/kvm through), so this is CI's shared-runner contention costing real
+ * wall-clock time per busy-spin iteration, not a difference in what's being
+ * emulated. Still bounded, not unbounded: a genuinely wedged drive reports
+ * ATA_ETIMEOUT rather than hanging boot forever, just after a larger budget
+ * than the smaller constant gave local runs credit for. */
+#define ATA_POLL_ITERS 10000000
 
 /* A drive does not assert BSY the instant it receives a new command -- the
  * well-known ~400ns turnaround (OSDev wiki, "ATA PIO Mode": "you need to
  * wait at least 400 nanoseconds ... before reading the Status register").
  * Polling ATA_STATUS immediately after outb(ATA_COMMAND, ...) can therefore
  * still observe the *previous* command's status (BSY already clear from
- * before this one was issued), which lets ata_wait_not_busy() return
- * ATA_OK before the new command has actually started -- intermittently, not
- * always, which is exactly the shape of the CI-only ata_write_sector()
- * failure this was added to fix (SCRUM-102: passed locally, failed under
- * CI's scheduling). Four throwaway reads of the alternate status register
- * (0x3F6, not 0x1F7 -- reading the primary status register can also clear a
- * pending IRQ, which this must not do) is the standard way to force that
- * delay: each I/O read takes on the order of 100ns on real hardware. */
+ * before this one was issued), which would let ata_wait_not_busy() return
+ * ATA_OK before the new command has actually started. Correct per spec
+ * regardless, but note this alone did *not* explain PR #122's CI failure --
+ * that turned out to be ATA_ETIMEOUT from ATA_POLL_ITERS being too small
+ * for CI's contention, fixed above. Four throwaway reads of the alternate
+ * status register (0x3F6, not 0x1F7 -- reading the primary status register
+ * can also clear a pending IRQ, which this must not do) is the standard way
+ * to force the delay: each I/O read takes on the order of 100ns on real
+ * hardware. */
 static void ata_delay_400ns(void) {
     (void)inb(ATA_CONTROL);
     (void)inb(ATA_CONTROL);

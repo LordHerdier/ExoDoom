@@ -17,7 +17,6 @@
 #include "kunit.h"
 #include "ata.h"
 #include "string.h"
-#include "serial.h"
 
 #include <stdint.h>
 
@@ -41,27 +40,11 @@ static void test_write_then_read_round_trips(void)
         write_buf[i] = (uint8_t)(i * 3 + 7);
     }
 
-    /* SCRUM-102 (PR #122): CI reproduces a write failure that never shows
-     * up locally. Diagnostic-only -- prints the real rc so the CI serial
-     * log says ETIMEOUT vs EIO vs something else, instead of just "not
-     * ATA_OK". Remove once the root cause is confirmed and fixed. */
-    int write_rc = ata_write_sector(TEST_LBA, write_buf);
-    if (write_rc != ATA_OK) {
-        serial_print("DEBUG ata_write_sector rc=");
-        serial_print_hex64((uint64_t)(int64_t)write_rc);
-        serial_print("\n");
-    }
-    CU_ASSERT_EQUAL(write_rc, ATA_OK);
+    CU_ASSERT_EQUAL(ata_write_sector(TEST_LBA, write_buf), ATA_OK);
 
     uint8_t read_buf[512];
     memset(read_buf, 0, sizeof(read_buf));
-    int read_rc = ata_read_sector(TEST_LBA, read_buf);
-    if (read_rc != ATA_OK) {
-        serial_print("DEBUG ata_read_sector rc=");
-        serial_print_hex64((uint64_t)(int64_t)read_rc);
-        serial_print("\n");
-    }
-    CU_ASSERT_EQUAL(read_rc, ATA_OK);
+    CU_ASSERT_EQUAL(ata_read_sector(TEST_LBA, read_buf), ATA_OK);
 
     CU_ASSERT_EQUAL(memcmp(write_buf, read_buf, 512), 0);
 }
