@@ -297,3 +297,34 @@ difference.
 - **Timestamps are `exo_get_ticks()`** — monotonic milliseconds since boot,
   not a wall-clock date. There is no clock to ask. They order writes within
   one boot and nothing more, so nothing should compare them across a mount.
+
+---
+
+## 9. Source map
+
+| File | What it holds |
+|---|---|
+| `exofs_layout.h` | The on-disk format. POD only, no dependency beyond `<stdint.h>`, so SCRUM-190's image builder compiles against this exact header rather than restating it. |
+| `exofs.h` | The public API and its error contract. |
+| `exofs_internal.h` | The mounted volume's in-memory state, shared between ExoFS's own translation units. Not for the image builder. |
+| `exofs_blockdev.c/.h` | The only file that knows a syscall exists: acquire, chunked sector read/write, and the tick source. ExoFS's single `#ifdef EXO_KERNEL`. |
+| `exofs_volume.c` | Superblock, geometry, `format`/`mount`/`sync`/`unmount`, the FAT cache and its writeback. |
+| `exofs_fat.c/.h` | Block allocation and chain traversal. |
+| `exofs_name.c/.h` | The variable-length name area (§6). |
+| `exofs_dirent.c/.h` | Entry storage, the positional iterator, lookup/add/remove. |
+| `exofs_path.c/.h` | Path parsing and resolution (§7). |
+| `exofs_dir.c/.h` | `mkdir`/`rmdir`/`opendir`/`readdir`, and the `.`/`..` bootstrap (§6b). |
+| `exofs_file.c` | `open`/`read`/`write`/`seek`/`stat`/`unlink` (§6c). |
+| `tests/kernel/test_exofs_k.c` | The whole suite, 66 tests, ending in the ticket's end-to-end acceptance path. |
+
+### Building it
+
+`src/libos_fs/` is a **subdirectory**, which is what keeps it out of
+`docker/scripts/build.sh`'s `src/*.c` glob — the same opt-out
+`tests/kernel/libos_c_probe/` uses. It is compiled only under `TESTING=1`, by
+step `[3b4/7]`, so a shipped kernel links none of it.
+
+Nothing links ExoFS into a ring-3 target yet. SCRUM-202 (shell filesystem
+commands) or SCRUM-44 (`exo_file_*`) is what will, and the sources already
+build cleanly without `-DEXO_KERNEL`, so that step is a
+`build_ring3_link_target` call and nothing more.

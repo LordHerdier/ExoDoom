@@ -210,6 +210,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
 | Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h` |
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer), `src/disk_binding.c/h` (disk, SCRUM-188) |
+| LibOS-space filesystem (ExoFS, over the disk syscalls) | `src/libos_fs/` (SCRUM-189) — **not part of the kernel**; see `docs/filesystem.md` |
 | Resource revocation (repossession) | `src/revoke.c/h` (protocol), the `page_revoke_*`/`fb_binding_revoke_*`/`disk_binding_revoke_*` primitives |
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
 | Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`, `src/fpconv.c/h` (float↔decimal); header-only: `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/types.h`, `src/sys/stat.h` |
@@ -413,6 +414,59 @@ convention and calls it from `kernel_main` instead of a test harness.
   boot. There is **no upcall to the LibOS** and no compliance deadline — phase
   1 cannot yet tell anyone it happened, which is SCRUM-147's job. Full design
   note: `docs/syscall_spec.md` §3.6.
+- **There is a filesystem, and it is deliberately not in the kernel
+  (SCRUM-189).** `src/libos_fs/` is ExoFS, the team's `cfat` FAT-like
+  filesystem ported to run as LibOS code over `exo_disk_read`/`exo_disk_write`
+  — the kernel knows sectors and nothing above them (`docs/syscall_spec.md`
+  §3.2 #27 says so in as many words), and this library is what decides some
+  of those sectors are a file. **`docs/syscall_spec.md` §4's old
+  "recommended approach" of an in-kernel ramdisk is superseded** by the
+  2026-09-19 storage decision; that section now carries a note saying so.
+  Four things to know before touching it:
+  - **It is compiled only under `TESTING=1`**, by `build.sh` step `[3b4/7]`,
+    and a shipped kernel links none of it. That works because `src/libos_fs/`
+    is a *subdirectory*, which step 3's `src/*.c` glob never descends into —
+    the same opt-out mechanism `tests/kernel/libos_c_probe/` uses. Nothing
+    links it into a ring-3 target yet; SCRUM-202 (shell commands) or
+    SCRUM-44 (`exo_file_*`) is what will, and the sources already build
+    without `-DEXO_KERNEL` so that step is a `build_ring3_link_target` call
+    and nothing more.
+  - **`src/libos_fs/exofs_blockdev.c` is the only file with an `#ifdef
+    EXO_KERNEL`**, and it is the same dual-compile seam `src/libos_page_alloc.c`
+    documents at length: `exo_syscall_dispatch()` in the kernel build so a
+    ring-0 KUnit suite can drive the whole filesystem, the inline `syscall`
+    stubs in a ring-3 build. Not a convenience — a stub's `sysretq` forces
+    CPL 3 on return, so a ring-0 caller executing one drops the rest of the
+    boot to ring 3.
+  - **Disk buffers come from `libos_heap_alloc()`, never `malloc()`.**
+    `exo_disk_read` rejects any buffer outside
+    `[EXO_USER_VA_BASE, EXO_USER_VA_END)` with `-EXO_EFAULT`, and it does so
+    under `EXO_KERNEL` too, because it is the same handler — where `malloc()`
+    is `kmalloc()`, a kernel bump address. This is the single most likely
+    thing to go wrong when adding a test.
+  - **Write ordering is load-bearing**, and `docs/filesystem.md` §1 is the
+    written-down rule: with no journal and no transactions, ordering is the
+    only tool for making a failure partway through leave a state the
+    filesystem already handles. Allocation zeroes a block before claiming it;
+    chain teardown validates before it frees; `format` writes the superblock
+    last; `rmdir`/`unlink` unlink from the parent before freeing blocks.
+    Reversing any of them turns a harmless leak into two files sharing
+    storage. Do not "tidy" these into a more natural-looking order.
+- **`format()` mounts the volume it just wrote**, which surprises people
+  reading `exofs_volume.c`. Creating a directory entry allocates a name
+  record, which needs the FAT cache and the superblock's `name_head`, so the
+  root's `.`/`..` cannot be laid down by the code writing raw sectors — cfat's
+  `createfs()` called `createRootDirectory()` at the same point for the same
+  reason. Practical consequence when reading a fresh volume's FAT: **two
+  blocks are in use**, the root and one name block, not one.
+- **`KUNIT_MAX_TESTS_PER_SUITE` has the same silent-overflow mode as
+  `KUNIT_MAX_SUITES`** and bit for the same reason (SCRUM-189): `CU_add_test`
+  returns `NULL` past the cap, `test_runner.c` does not check it, the dropped
+  tests never run, and `ALL TESTS PASSED` prints anyway. The exofs suite hit
+  64 and silently lost its last two tests, including that ticket's own
+  acceptance test. Raised to 128. **If `make docker-test`'s test count is
+  lower than the `CU_add_test` call count, this is why** — check both
+  ceilings before assuming every test ran.
 - **The GDT in `src/boot.s` has a layout `sysret` forces, not one we chose** —
   kernel code/data at `0x08`/`0x10`, then user code32 (`0x18`, a placeholder
   long mode never loads), user data (`0x20`), user code64 (`0x28`). `sysretq`

@@ -1251,6 +1251,24 @@ anything above this layer starts allocating pages in a hot loop.
 
 ## 4. Architectural decision: file I/O strategy
 
+> **Superseded in part (2026-09-19 team decision, SCRUM-189).** The
+> "recommended approach" at the end of this section — a minimal ramdisk
+> filesystem *in the kernel*, exposed through `exo_file_*` — is no longer
+> what the port does, and implementing it now would be a step backwards.
+> Storage moved to a real device-backed model: the kernel knows sectors and
+> nothing above them (`exo_disk_read`/`exo_disk_write`, §3.2 #27/#28), and a
+> **LibOS-space** filesystem decides what a file is (`src/libos_fs/`,
+> `docs/filesystem.md`). Putting a filesystem in the kernel would put policy
+> back where this project exists to keep it out of.
+>
+> What still holds: the three *use cases* below (WAD, config, saves) and
+> their differing requirements, which is why they are kept. `exo_file_*`
+> (#9–16) remains the planned syscall surface for SCRUM-44, but it will be
+> implemented on top of the LibOS filesystem rather than on a kernel
+> ramdisk. §4.1's memory-mapped WAD shortcut is what `fopen` does today
+> (SCRUM-65) and is itself due to be retired by SCRUM-190, which moves the
+> IWAD onto the disk and drops the multiboot module.
+
 Doom uses `FILE*` I/O for three distinct purposes. Each can be handled
 differently.
 
@@ -1285,11 +1303,20 @@ semantics.
 - Goes through `exo_file_*` syscalls.
 - The save path also uses `remove()` and `rename()` for safe file rotation.
 
-**Recommended approach:** Implement a minimal ramdisk filesystem in the kernel
-(flat list of named files with read/write/seek), exposed through `exo_file_*`
-syscalls. The LibOS libc shim translates `FILE*` to file descriptors. WAD
-reading uses the memory-mapped shortcut. Later, add ATA persistence behind the
-same syscall interface.
+**Recommended approach (historical — see the note at the head of §4):**
+Implement a minimal ramdisk filesystem in the kernel (flat list of named files
+with read/write/seek), exposed through `exo_file_*` syscalls. The LibOS libc
+shim translates `FILE*` to file descriptors. WAD reading uses the
+memory-mapped shortcut. Later, add ATA persistence behind the same syscall
+interface.
+
+**What the port actually does instead:** the ATA driver (SCRUM-102) and
+`exo_disk_read`/`exo_disk_write` (SCRUM-103) give the kernel sector access
+and no more; ExoFS (SCRUM-189, `src/libos_fs/`, `docs/filesystem.md`) is a
+FAT-like filesystem linked as LibOS code on top of those syscalls; and
+`exo_file_*` / the `FILE*` shim (SCRUM-44/42) will sit on ExoFS. The libc
+shim still translates `FILE*` to descriptors, exactly as above — only the
+layer underneath it changed sides of the kernel boundary.
 
 ---
 
