@@ -10,9 +10,9 @@
  * would force CPL 3 on return and drop the rest of the test run to ring 3.
  * See exofs_blockdev.h's top comment.
  *
- * This file currently covers the block-I/O seam only. The filesystem layers
- * above it (superblock/mount, FAT, names, directories, files) land in later
- * steps of SCRUM-189 and add their tests here.
+ * This file currently covers the block-I/O seam and the volume layer
+ * (superblock/format/mount). The layers above it (FAT, names, directories,
+ * files) land in later steps of SCRUM-189 and add their tests here.
  *
  * DISK BINDING. exo_disk_read/exo_disk_write answer -EXO_EBUSY to a caller
  * that does not hold the binding (SCRUM-188), so suite_init acquires it and
@@ -48,6 +48,8 @@
 
 #include "libos_fs/exofs_layout.h"
 #include "libos_fs/exofs_blockdev.h"
+#include "libos_fs/exofs.h"
+#include "libos_fs/exofs_internal.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -60,6 +62,15 @@
  * later exofs_format() at the base will not be testing against bytes these
  * tests left behind. */
 #define SEAM_LBA (EXOFS_TEST_BASE_LBA + 64u)
+
+/*
+ * Sectors handed to exofs_format() in the volume tests. The scratch image is
+ * 8 MiB = 16384 sectors and this region starts at 8192, so 8192 is the whole
+ * rest of it. Deliberately the real remainder rather than a round number: a
+ * geometry bug that only shows up when total_blocks is not a multiple of
+ * EXOFS_FAT_PER_BLOCK would hide behind a convenient size.
+ */
+#define VOL_SECTORS 8192u
 
 static int drive_present(void)
 {
@@ -74,8 +85,22 @@ int exofs_suite_init(void)
 
 int exofs_suite_cleanup(void)
 {
+    /* Leave nothing mounted for the next suite, even if a test failed
+     * partway through with a volume up. */
+    exofs_unmount();
     disk_binding_release(syscall_current_context());
     return 0;
+}
+
+/* Format + mount, or bail out of the calling test. Every volume test starts
+ * from a freshly formatted region rather than inheriting whatever the last
+ * one left, so a failure names its own cause. */
+static int fresh_volume(void)
+{
+    exofs_unmount();
+    if (exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS) != 0) return 0;
+    if (exofs_mount(EXOFS_TEST_BASE_LBA) != 0) return 0;
+    return 1;
 }
 
 /* ---- The buffer rule ----------------------------------------------------
@@ -288,6 +313,255 @@ static void test_foreign_owner_blocks_transfers(void)
     libos_heap_free(buf);
 }
 
+/* ---- Volume layer: format, superblock, mount ---------------------------- */
+
+static void test_format_then_mount(void)
+{
+    if (!drive_present()) return;
+
+    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_TRUE(exofs_is_mounted());
+
+    exofs_geometry_t g;
+    CU_ASSERT_EQUAL(exofs_geometry(&g), 0);
+
+    CU_ASSERT_EQUAL(g.base_lba, EXOFS_TEST_BASE_LBA);
+    CU_ASSERT_EQUAL(g.root_block, EXOFS_ROOT_BLOCK);
+
+    /* The three geometry invariants format() is supposed to establish, each
+     * checked against the others rather than against a hardcoded number —
+     * the point is that they agree, not that they equal what this test
+     * guessed. */
+    CU_ASSERT_EQUAL(g.fat_blocks,
+                    (g.total_blocks + EXOFS_FAT_PER_BLOCK - 1u)
+                        / EXOFS_FAT_PER_BLOCK);
+    CU_ASSERT_EQUAL(g.data_lba, EXOFS_TEST_BASE_LBA + 1u + g.fat_blocks);
+    CU_ASSERT_TRUE(1u + g.fat_blocks + g.total_blocks <= VOL_SECTORS);
+
+    /* And it should not have given away space it did not have to: one more
+     * data block would have to overflow the region. */
+    CU_ASSERT_TRUE(1u + ((g.total_blocks + 1u + EXOFS_FAT_PER_BLOCK - 1u)
+                            / EXOFS_FAT_PER_BLOCK)
+                      + (g.total_blocks + 1u) > VOL_SECTORS);
+
+    exofs_unmount();
+    CU_ASSERT_FALSE(exofs_is_mounted());
+}
+
+static void test_mount_survives_remount(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_geometry_t first;
+    CU_ASSERT_EQUAL(exofs_geometry(&first), 0);
+    exofs_unmount();
+
+    /* Mounting again reads the same superblock off the disk rather than
+     * anything left in memory — which is the property SCRUM-190's
+     * prebuilt image depends on entirely. */
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+
+    exofs_geometry_t second;
+    CU_ASSERT_EQUAL(exofs_geometry(&second), 0);
+    CU_ASSERT_EQUAL(first.total_blocks, second.total_blocks);
+    CU_ASSERT_EQUAL(first.fat_blocks,   second.fat_blocks);
+    CU_ASSERT_EQUAL(first.data_lba,     second.data_lba);
+
+    exofs_unmount();
+}
+
+/*
+ * The superblock's entire reason for existing: an unformatted region must be
+ * refused, not interpreted. cfat had no such check and would read a blank
+ * disk as a FAT full of zeros.
+ */
+static void test_mount_unformatted_region_rejected(void)
+{
+    if (!drive_present()) return;
+
+    /* Zero a sector somewhere else in the scratch image and try to mount
+     * there. Well clear of the formatted volume and of the seam tests. */
+    const uint32_t blank_lba = EXOFS_TEST_BASE_LBA + 4096u;
+
+    uint8_t *zero = libos_heap_alloc(EXOFS_BLOCK_SIZE);
+    CU_ASSERT_PTR_NOT_NULL(zero);
+    if (zero == NULL) return;
+    for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) zero[i] = 0;
+
+    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_bdev_write(blank_lba, zero, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(blank_lba), -EXO_EINVAL);
+    CU_ASSERT_FALSE(exofs_is_mounted());
+
+    /* And garbage that is not merely zero, in case "all zeros" were being
+     * special-cased somewhere rather than the magic actually being read. */
+    for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) zero[i] = (uint8_t)(i | 1u);
+    CU_ASSERT_EQUAL(exofs_bdev_write(blank_lba, zero, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(blank_lba), -EXO_EINVAL);
+    CU_ASSERT_FALSE(exofs_is_mounted());
+
+    libos_heap_free(zero);
+}
+
+/*
+ * A superblock with the right magic but inconsistent geometry must also be
+ * refused. This is the case a corrupted sector produces, and the one where
+ * "it has our magic, trust it" would hand every layer above a data_lba
+ * pointing at nothing.
+ */
+static void test_mount_inconsistent_geometry_rejected(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_geometry_t g;
+    CU_ASSERT_EQUAL(exofs_geometry(&g), 0);
+    exofs_unmount();
+
+    uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
+    CU_ASSERT_PTR_NOT_NULL(buf);
+    if (buf == NULL) return;
+
+    CU_ASSERT_EQUAL(exofs_bdev_read(EXOFS_TEST_BASE_LBA, buf, 1), 0);
+    exofs_super_t *sb = (exofs_super_t *)buf;
+    CU_ASSERT_EQUAL(sb->magic, EXOFS_MAGIC);
+
+    const uint32_t good_fat  = sb->fat_blocks;
+    const uint32_t good_data = sb->data_lba;
+    const uint16_t good_ver  = sb->version;
+
+    /* fat_blocks that does not match total_blocks. */
+    sb->fat_blocks = good_fat + 1u;
+    CU_ASSERT_EQUAL(exofs_bdev_write(EXOFS_TEST_BASE_LBA, sb, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), -EXO_EINVAL);
+    sb->fat_blocks = good_fat;
+
+    /* data_lba that does not follow the FAT. */
+    sb->data_lba = good_data + 1u;
+    CU_ASSERT_EQUAL(exofs_bdev_write(EXOFS_TEST_BASE_LBA, sb, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), -EXO_EINVAL);
+    sb->data_lba = good_data;
+
+    /* A version this build does not know. */
+    sb->version = (uint16_t)(good_ver + 1u);
+    CU_ASSERT_EQUAL(exofs_bdev_write(EXOFS_TEST_BASE_LBA, sb, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), -EXO_EINVAL);
+    sb->version = good_ver;
+
+    /* Restored, the same sector mounts again — proving the rejections above
+     * were about the fields changed and not about the sector being touched. */
+    CU_ASSERT_EQUAL(exofs_bdev_write(EXOFS_TEST_BASE_LBA, sb, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    exofs_unmount();
+
+    libos_heap_free(buf);
+}
+
+static void test_double_mount_rejected(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    /* One volume at a time (exofs.h). A second mount must not silently
+     * leak the first volume's FAT allocation. */
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), -EXO_EBUSY);
+    CU_ASSERT_TRUE(exofs_is_mounted());
+
+    exofs_unmount();
+}
+
+static void test_format_rejects_tiny_volume(void)
+{
+    /* No drive needed: the size check is ahead of any transfer. */
+    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, 0), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, 1), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA,
+                                 EXOFS_MIN_SECTORS - 1u), -EXO_EINVAL);
+}
+
+static void test_unmounted_calls_rejected(void)
+{
+    exofs_unmount();
+    CU_ASSERT_FALSE(exofs_is_mounted());
+
+    exofs_geometry_t g;
+    CU_ASSERT_EQUAL(exofs_geometry(&g), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_sync(), -EXO_EINVAL);
+
+    /* And unmounting nothing is a no-op rather than a fault — cleanup paths
+     * call it unconditionally. */
+    exofs_unmount();
+}
+
+/*
+ * The FAT cache's writeback path, exercised without the FAT layer that will
+ * normally drive it: dirty an entry by hand, sync, remount, and confirm the
+ * change reached the disk. Remounting is what makes this a test of
+ * writeback rather than of the in-memory array.
+ */
+static void test_fat_writeback_survives_remount(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_volume_t *v = exofs_vol();
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v == NULL) return;
+
+    /* Two entries in different FAT sectors, so the flush has to handle a
+     * non-contiguous dirty set rather than one run. */
+    const uint32_t a = 5u;
+    const uint32_t b = EXOFS_FAT_PER_BLOCK + 9u;
+    CU_ASSERT_TRUE(b < v->total_blocks);
+
+    v->fat[a] = EXOFS_BLOCK_EOC;
+    exofs_fat_mark_dirty(v, a);
+    v->fat[b] = 1234u;
+    exofs_fat_mark_dirty(v, b);
+
+    CU_ASSERT_EQUAL(exofs_sync(), 0);
+    exofs_unmount();
+
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    v = exofs_vol();
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v == NULL) return;
+
+    CU_ASSERT_EQUAL(v->fat[a], EXOFS_BLOCK_EOC);
+    CU_ASSERT_EQUAL(v->fat[b], 1234u);
+
+    /* An entry nobody touched must still be free — a flush that wrote back
+     * more than it was asked to would show up here. */
+    CU_ASSERT_EQUAL(v->fat[b + 1u], EXOFS_BLOCK_FREE);
+
+    exofs_unmount();
+}
+
+/* A fresh format leaves the root's chain terminated and every other block
+ * free. mount() already refuses a volume whose root entry is free, so this
+ * checks the other half: that format did not mark anything else. */
+static void test_fresh_volume_fat_is_empty(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_volume_t *v = exofs_vol();
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v == NULL) return;
+
+    CU_ASSERT_EQUAL(v->fat[EXOFS_ROOT_BLOCK], EXOFS_BLOCK_EOC);
+
+    uint32_t allocated = 0;
+    for (uint32_t i = 1; i < v->total_blocks; i++) {
+        if (v->fat[i] != EXOFS_BLOCK_FREE) allocated++;
+    }
+    CU_ASSERT_EQUAL(allocated, 0u);
+
+    exofs_unmount();
+}
+
 void suite_exofs_tests(CU_pSuite s)
 {
     CU_add_test(s, "heap buffer lies in the LibOS window",
@@ -304,4 +578,20 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "acquire is idempotent", test_acquire_is_idempotent);
     CU_add_test(s, "foreign owner blocks transfers",
                 test_foreign_owner_blocks_transfers);
+
+    CU_add_test(s, "format then mount", test_format_then_mount);
+    CU_add_test(s, "mount survives remount", test_mount_survives_remount);
+    CU_add_test(s, "mount rejects an unformatted region",
+                test_mount_unformatted_region_rejected);
+    CU_add_test(s, "mount rejects inconsistent geometry",
+                test_mount_inconsistent_geometry_rejected);
+    CU_add_test(s, "double mount rejected", test_double_mount_rejected);
+    CU_add_test(s, "format rejects a tiny volume",
+                test_format_rejects_tiny_volume);
+    CU_add_test(s, "calls without a mount rejected",
+                test_unmounted_calls_rejected);
+    CU_add_test(s, "FAT writeback survives remount",
+                test_fat_writeback_survives_remount);
+    CU_add_test(s, "a fresh volume's FAT is empty",
+                test_fresh_volume_fat_is_empty);
 }
