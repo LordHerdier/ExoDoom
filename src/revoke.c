@@ -1,5 +1,6 @@
 #include "revoke.h"
 
+#include "disk_binding.h"
 #include "fb_binding.h"
 #include "fb_shadow.h"
 #include "page_alloc.h"
@@ -71,6 +72,11 @@ int revoke_request(page_owner_t who, revoke_res_t what)
                                                            : REVOKE_ENOENT;
         break;
 
+    case REVOKE_DISK:
+        rc = (disk_binding_revoke_mark(who) == DISK_REVOKE_OK) ? REVOKE_OK
+                                                               : REVOKE_ENOENT;
+        break;
+
     default:
         rc = REVOKE_EINVAL;
         break;
@@ -103,6 +109,11 @@ int revoke_withdraw(page_owner_t who, revoke_res_t what)
                                                             : REVOKE_ENOENT;
         break;
 
+    case REVOKE_DISK:
+        rc = (disk_binding_revoke_clear(who) == DISK_REVOKE_OK) ? REVOKE_OK
+                                                                : REVOKE_ENOENT;
+        break;
+
     default:
         rc = REVOKE_EINVAL;
         break;
@@ -119,6 +130,7 @@ int revoke_pending(revoke_res_t what)
     switch (what.kind) {
     case REVOKE_PAGE:        return page_revoke_pending(page_of(what));
     case REVOKE_FRAMEBUFFER: return fb_binding_revoke_pending();
+    case REVOKE_DISK:        return disk_binding_revoke_pending();
     default:                 return 0;
     }
 }
@@ -169,6 +181,18 @@ int revoke_force(page_owner_t who, revoke_res_t what)
         record.returned++;
         return REVOKE_RETURNED;
 
+    case REVOKE_DISK:
+        /* No page-table teardown needed here, unlike REVOKE_FRAMEBUFFER
+         * above: the disk binding gates a syscall path (src/syscall_disk.c),
+         * not a mapping into the caller's address space. */
+        if (disk_binding_reclaim(who) == DISK_REVOKE_OK) {
+            record.forced++;
+            record.disk_reclaimed++;
+            return REVOKE_OK;
+        }
+        record.returned++;
+        return REVOKE_RETURNED;
+
     default:
         return REVOKE_EINVAL;
     }
@@ -197,6 +221,12 @@ uint32_t revoke_all(page_owner_t who)
 
     if (fb_binding_reclaim(who) == FB_REVOKE_OK) {
         record.fb_reclaimed++;
+        record.forced++;
+        total++;
+    }
+
+    if (disk_binding_reclaim(who) == DISK_REVOKE_OK) {
+        record.disk_reclaimed++;
         record.forced++;
         total++;
     }
@@ -235,4 +265,5 @@ void revoke_record_reset(void)
     record.returned        = 0;
     record.pages_reclaimed = 0;
     record.fb_reclaimed    = 0;
+    record.disk_reclaimed  = 0;
 }

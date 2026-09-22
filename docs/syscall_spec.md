@@ -25,6 +25,7 @@ Derived from static analysis of
    - [3.4 Entry path](#34-entry-path-scrum-32)
    - [3.4a FPU/SSE state across kernel entry](#34a-fpusse-state-across-kernel-entry-scrum-177)
    - [3.5 Framebuffer binding](#35-framebuffer-binding-scrum-154)
+   - [3.5a Disk binding](#35a-disk-binding-scrum-188)
    - [3.6 Revocation & repossession](#36-revocation--repossession-scrum-156)
    - [3.7 Address-space mapping](#37-address-space-mapping-scrum-35)
 4. [Architectural decision: file I/O strategy](#4-architectural-decision-file-io-strategy)
@@ -372,14 +373,15 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 24 | `exo_launch_doom()`                 | Lifecycle   | ✅     | Build and switch to the Doom LibOS (`src/libos_doom/`, the 79 vendored engine objects plus the libc shim). Shaped like #21 rather than #23: the WAD module is mapped read-only at `LIBOS_WAD_VADDR` and its address/length patched in via `libos_launch_patch_params()`, where `DG_Init` reads them. Invoked by the shell's `doom` command. Implemented in SCRUM-66 (`src/syscall_launch.c`). |
 | 25 | `exo_memstat(stat_out)`             | Introspection | ✅   | Write a page-usage snapshot of the whole PMM to `stat_out`: `{uint32_t total_pages, free_pages, kernel_pages, libos_pages, region_count, reserved}` (24 bytes). Deliberately unscoped — every context's pages, not just the caller's. Returns `0`, or `-EFAULT` if `[stat_out, stat_out + sizeof(exo_memstat_t))` is not entirely inside the LibOS window and mapped writable (same check #4/#6 use). Invoked by the shell's `memstat` command. Implemented in SCRUM-113 (`src/syscall_stat.c`, `src/page_alloc.c`). |
 | 26 | `exo_pslist(out, max)`              | Introspection | ✅   | Write up to `max` `exo_ps_info_t` entries (`{uint16_t id; uint8_t state; uint8_t reserved; uint32_t page_count}`, 8 bytes each) to `out` — one per live LibOS context, the caller included (the shell is itself `context_create()`'d, SCRUM-178). `state` mirrors `context_state_t`: `1`=READY, `2`=RUNNING, `3`=BLOCKED. Returns the number of entries written (`0..max`), `-EINVAL` if `max` exceeds `EXO_PSLIST_MAX` (`#define EXO_PSLIST_MAX CONTEXT_MAX` — `src/exo_syscall.h` `#include`s `src/context.h` rather than restating the number, after a hardcoded copy went stale and silently re-capped this at 3 across SCRUM-193's `CONTEXT_MAX` bump), or `-EFAULT` if `[out, out + max * sizeof(exo_ps_info_t))` is not entirely inside the LibOS window and mapped writable. Invoked by the shell's `pslist` command. Implemented in SCRUM-113 (`src/syscall_stat.c`, `src/context.c`). |
-| 27 | `exo_disk_read(lba, buf, count)`    | Storage     | ✅     | Read `count` consecutive 512-byte sectors starting at 28-bit LBA `lba` into `buf` (at least `count * 512` bytes), one `ata_read_sector()` call per sector. Returns `count` on success (`count == 0` always succeeds and touches nothing), `-ENODEV` if no drive was detected at boot, `-EINVAL` if `count` exceeds `EXO_DISK_MAX_SECTORS` (128, `src/syscall_disk.h`) or `lba + count - 1` overflows 28-bit LBA space, `-EFAULT` if `[buf, buf + count*512)` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` and mapped writable (same `exo_range_in_user_window`/`exo_user_range_mapped` pair #8 uses), or `-EIO` if a sector faults partway through the transfer (no partial-success byte count — ATA gives no way to tell "this sector failed" from "this sector was never attempted" once a fault stops the loop). **Deliberately no ownership/binding check** — the disk has no binding table yet; that is SCRUM-188, which this ticket unblocks rather than depends on. Sector-addressed only, zero filesystem knowledge — the ported FAT-like fs (SCRUM-189) is LibOS-side, on top of this. Implemented in SCRUM-103 (`src/syscall_disk.c`, on top of the ATA PIO driver, SCRUM-102, `src/ata.c`). |
-| 28 | `exo_disk_write(lba, buf, count)`   | Storage     | ✅     | Same shape as #27, writing `count` sectors from `buf` via `ata_write_sector()`. `buf` is checked readable rather than writable. Same error codes, same no-ownership-check caveat. Implemented in SCRUM-103 (`src/syscall_disk.c`). |
+| 27 | `exo_disk_read(lba, buf, count)`    | Storage     | ✅     | Read `count` consecutive 512-byte sectors starting at 28-bit LBA `lba` into `buf` (at least `count * 512` bytes), one `ata_read_sector()` call per sector. Returns `count` on success (`count == 0` always succeeds and touches nothing, checked before everything else below), `-EINVAL` if `count` exceeds `EXO_DISK_MAX_SECTORS` (128, `src/syscall_disk.h`) or `lba + count - 1` overflows 28-bit LBA space, `-ENODEV` if no drive was detected at boot, `-EBUSY` if the caller does not hold the disk binding (§3.5a — a headless machine answers `-ENODEV` rather than `-EBUSY`, same precedence `exo_disk_acquire` uses), `-EFAULT` if `[buf, buf + count*512)` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` and mapped writable (same `exo_range_in_user_window`/`exo_user_range_mapped` pair #8 uses — checked last, so a caller with no claim on the disk learns nothing about whether its buffer pointer happens to be valid), or `-EIO` if a sector faults partway through the transfer (no partial-success byte count — ATA gives no way to tell "this sector failed" from "this sector was never attempted" once a fault stops the loop). Sector-addressed only, zero filesystem knowledge — the ported FAT-like fs (SCRUM-189) is LibOS-side, on top of this. Implemented in SCRUM-103 (`src/syscall_disk.c`, on top of the ATA PIO driver, SCRUM-102, `src/ata.c`); ownership enforcement SCRUM-188 (`src/disk_binding.c`). |
+| 28 | `exo_disk_write(lba, buf, count)`   | Storage     | ✅     | Same shape as #27, writing `count` sectors from `buf` via `ata_write_sector()`. `buf` is checked readable rather than writable. Same error codes, same binding check. Implemented in SCRUM-103 (`src/syscall_disk.c`); ownership enforcement SCRUM-188. |
+| 29 | `exo_disk_acquire()`                | Storage     | ✅     | Bind the disk to the caller — one exclusive owner at a time, the same pre-SCRUM-112 shape `exo_fb_acquire` (#4) originally had (§3.5a). Must succeed before #27/#28 will do anything for the caller. Returns `0` (including a re-acquire by the current owner), `-EBUSY` if another context holds it, or `-ENODEV` if this machine has no drive. Implemented in SCRUM-188 (`src/syscall_disk.c`, `src/disk_binding.c`). |
 
-**Total: 29 syscalls.** This is the complete interface needed to run Doom with
+**Total: 30 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking, plus the three
 LibOS-launch syscalls (#21/#22/#23) that back the shell's interactive demo
 commands, the two introspection syscalls (#25/#26) that back its
-`memstat`/`pslist` commands, and the two raw storage syscalls (#27/#28) the
+`memstat`/`pslist` commands, and the three storage syscalls (#27/#28/#29) the
 future FAT-like filesystem (SCRUM-189) will build on.
 
 ### 3.2a Error codes (SCRUM-57)
@@ -405,9 +407,9 @@ pass-through rather than a translation table.
 | `EXO_ENOMEM` | 12 | Out of physical pages / heap | `exo_page_alloc` (#0), `exo_page_map` (#2, no page for an intermediate table), `exo_page_unmap` (#3, split requires a page), `exo_fb_acquire` (#4, no contiguous run free for the virtual framebuffer, SCRUM-112) |
 | `EXO_EACCES` | 13 | Permission denied | not yet bound to a handler |
 | `EXO_EFAULT` | 14 | Pointer argument outside the caller's address space | `exo_fb_acquire` (#4), `exo_kbd_poll` (#6), `exo_serial_write` (#8), `exo_disk_read`/`exo_disk_write` (#27/#28) |
-| `EXO_EBUSY` | 16 | Resource held by another LibOS | not currently returned by any bound handler — `exo_fb_acquire` (#4) returned this pre-SCRUM-112, when the framebuffer was a single exclusive binding rather than a private buffer per caller |
+| `EXO_EBUSY` | 16 | Resource held by another LibOS | `exo_disk_acquire`/`exo_disk_read`/`exo_disk_write` (#27/#28/#29, SCRUM-188) — `exo_fb_acquire` (#4) returned this too, pre-SCRUM-112, when the framebuffer was a single exclusive binding rather than a private buffer per caller |
 | `EXO_EEXIST` | 17 | File already exists | not yet — reserved for `exo_file_open`/`exo_file_rename` |
-| `EXO_ENODEV` | 19 | The hardware resource does not exist on this machine | `exo_fb_acquire` (#4, no framebuffer), `exo_disk_read`/`exo_disk_write` (#27/#28, no drive detected at boot) |
+| `EXO_ENODEV` | 19 | The hardware resource does not exist on this machine | `exo_fb_acquire` (#4, no framebuffer), `exo_disk_read`/`exo_disk_write`/`exo_disk_acquire` (#27/#28/#29, no drive detected at boot) |
 | `EXO_ENOTDIR` | 20 | Not a directory | not yet — reserved for `exo_file_*` |
 | `EXO_EISDIR` | 21 | Is a directory | not yet — reserved for `exo_file_*` |
 | `EXO_EINVAL` | 22 | Malformed or out-of-range argument | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3), `exo_serial_write` (#8, `len` over `SERIAL_WRITE_MAX_LEN`), `exo_disk_read`/`exo_disk_write` (#27/#28, `count` over `EXO_DISK_MAX_SECTORS` or LBA range overflow) |
@@ -852,13 +854,70 @@ scheduling (SCRUM-147) invalidates that assumption and will need a lock here.
 > loop that the test harness deliberately never launches (see
 > `tests/kernel/test_shell_libos_k.c`'s own comment).
 
+### 3.5a Disk binding (SCRUM-188)
+
+`exo_disk_read`/`exo_disk_write` (§3.2 #27/#28, SCRUM-103) shipped with no
+ownership concept: the raw disk was the one exokernel resource any LibOS
+could touch regardless of who else was using it. This section closes that
+gap the same way §3.5 closed it for the framebuffer — except the disk stays
+at the *pre-SCRUM-112* shape: a single exclusive owner, established by an
+explicit acquire call. There is no per-context multiplexing here and none is
+planned — a disk head cannot be virtualized into one private copy per caller
+the way a framebuffer can (`src/fb_shadow.c`). Implemented in
+`src/disk_binding.c` (the ownership table, ABI-agnostic, structurally a
+trimmed `fb_binding.c` with no geometry to publish) and `src/syscall_disk.c`
+(the `#27`/`#28`/`#29` handlers and the `-EXO_E*` mapping), tested in
+`tests/kernel/test_disk_binding_k.c` and `tests/kernel/test_syscall_disk_k.c`.
+
+**Publication.** `syscall_disk_init(drive_present)` calls
+`disk_binding_init(drive_present)` before registering any of `#27`/`#28`/`#29`,
+with `drive_present` the `ata_init()` result. `disk_binding_present()` is then
+the single source of truth for whether a drive exists — `src/syscall_disk.c`
+reads it rather than keeping a second copy of the flag, so the two can never
+disagree. A machine with no drive answers `-EXO_ENODEV` from `exo_disk_acquire`
+and from `exo_disk_read`/`exo_disk_write` (checked ahead of the binding check
+below) rather than `-EXO_ENOSYS` — the syscalls exist, the hardware
+does not.
+
+**Establish.** `exo_disk_acquire` (`#29`) records
+`syscall_current_context()` as the owner. A re-acquire by the current owner
+succeeds, same "not punished for calling twice" rule §3.2 states for
+`exo_fb_acquire`; only "another LibOS holds it" is `-EXO_EBUSY`.
+
+**Enforce.** `exo_disk_read`/`exo_disk_write` check
+`disk_binding_owner() == syscall_current_context()` after the count/LBA
+shape check (`validate_disk_shape()`) and the drive-presence check, but
+*before* the buffer check (`validate_disk_buf()`) — so `count == 0`'s
+no-op-success contract runs first as before, a headless machine still
+answers `-ENODEV` rather than `-EBUSY` (the same precedence
+`exo_disk_acquire` uses), and a caller with no claim on the disk learns
+nothing about whether its own buffer pointer happens to be valid. An unheld
+or someone-else's binding is not public property, same rule
+`fb_binding_check_map()` enforces for the framebuffer; both cases answer
+`-EXO_EBUSY`.
+
+**Reclaim.** `disk_binding_release(who)` drops the binding if `who` holds it
+and is a no-op otherwise, mirroring `fb_binding_release()`. It is the
+*voluntary* return in §3.6's protocol; the kernel-driven form is
+`disk_binding_reclaim(who)`. `revoke_all()` (`src/revoke.h`) reclaims the
+disk binding alongside the framebuffer and the context's pages; until
+SCRUM-155 binds `#20`, nothing calls it on the boot path, so a LibOS that
+exits without releasing keeps the binding for the rest of the boot.
+
+**No locking**, for the same reason as §3.5: syscalls run with `IF` cleared
+by `IA32_FMASK` (§3.4) and the entry path is single-threaded, so the
+read-modify-write in `disk_binding_acquire()` cannot be interleaved.
+Preemptive multi-LibOS scheduling (SCRUM-147) invalidates that assumption
+the same way it does for the framebuffer.
+
 ### 3.6 Revocation & repossession (SCRUM-156)
 
 §3.3 states that the kernel may take a granted resource back. This section is
 the design note for how — the protocol in full, what of it exists today, and
 what the multi-LibOS work still has to add. Implemented in `src/revoke.c` (the
-protocol), `src/page_alloc.c` and `src/fb_binding.c` (the per-resource
-mechanisms), and tested in `tests/kernel/test_revoke_k.c`.
+protocol), `src/page_alloc.c`, `src/fb_binding.c` and `src/disk_binding.c`
+(the per-resource mechanisms, the last added by SCRUM-188), and tested in
+`tests/kernel/test_revoke_k.c` and `tests/kernel/test_disk_binding_k.c`.
 
 **Why an exokernel needs this.** Secure binding answers "may this LibOS touch
 this resource?". Revocation answers the question that makes binding *safe to

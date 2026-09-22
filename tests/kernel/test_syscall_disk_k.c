@@ -1,11 +1,12 @@
 /*
- * test_syscall_disk_k.c — exo_disk_read/exo_disk_write (SCRUM-103).
+ * test_syscall_disk_k.c — exo_disk_read/exo_disk_write/exo_disk_acquire
+ * (SCRUM-103, binding SCRUM-188).
  *
  * Drives the real dispatch path, exo_syscall_dispatch(EXO_SYS_DISK_READ/
- * WRITE, ...). The handlers are bound in kernel_main by syscall_disk_init()
- * before run_tests(), with drive presence latched from ata_init()'s own
- * result at that point -- see docker-test/docker-ci's scratch -drive, the
- * same one test_ata_k.c exercises.
+ * WRITE/ACQUIRE, ...). The handlers are bound in kernel_main by
+ * syscall_disk_init() before run_tests(), with drive presence latched from
+ * ata_init()'s own result at that point -- see docker-test/docker-ci's
+ * scratch -drive, the same one test_ata_k.c exercises.
  *
  * Round-trip assertions use LBA 3072, well clear of test_ata_k.c's LBA
  * 2048/2049 range on the same scratch image. A non-CI run with no drive
@@ -14,11 +15,20 @@
  * (zero count, oversized count, out-of-window/unmapped buffers, LBA
  * overflow) still run unconditionally, since they reject before ever
  * reaching ata.c.
+ *
+ * SCRUM-188 added an ownership check to #27/#28 themselves: every real
+ * transfer here now needs the suite's own context to hold the disk binding
+ * first, so syscall_disk_suite_init()/_cleanup() acquire/release it around
+ * the whole suite. Binding *enforcement* itself (a foreign owner blocking
+ * this context, revocation, etc.) is test_disk_binding_k.c's job -- this
+ * file only needs enough of it to keep its existing hardware tests working,
+ * plus the one case this ticket's acceptance criteria calls out directly.
  */
 
 #include "kunit.h"
 #include "syscall.h"
 #include "syscall_disk.h"
+#include "disk_binding.h"
 #include "exo_syscall.h"
 #include "ata.h"
 
@@ -35,9 +45,36 @@
 
 #define TEST_LBA 3072
 
+/* A second, distinct LibOS id, same convention test_fb_binding_k.c and
+ * test_disk_binding_k.c use for "another context". */
+#define OTHER_LIBOS ((page_owner_t)(PAGE_OWNER_LIBOS + 1))
+
 static int drive_present(void)
 {
     return ata_init() == ATA_OK;
+}
+
+static int64_t do_disk_acquire(void)
+{
+    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, 0, 0, 0, 0, 0);
+}
+
+/* Acquire the binding for this suite's own context before the existing
+ * hardware/round-trip tests run -- without this, every one of them would
+ * now fail with the -EXO_EBUSY this ticket adds. A headless build has
+ * nothing to acquire (disk_binding_acquire reports ENODEV), which is fine:
+ * every test below already guards on drive_present() before touching
+ * hardware. */
+int syscall_disk_suite_init(void)
+{
+    do_disk_acquire();
+    return 0;
+}
+
+int syscall_disk_suite_cleanup(void)
+{
+    disk_binding_release(syscall_current_context());
+    return 0;
 }
 
 static int64_t do_disk_read(uint64_t lba, uint64_t buf, uint64_t count)
@@ -173,6 +210,30 @@ static void test_no_drive_reports_enodev(void)
     CU_ASSERT_EQUAL(do_disk_write(TEST_LBA, 0, 1), -EXO_ENODEV);
 }
 
+/* SCRUM-188's literal acceptance criterion: a second context's read/write
+ * calls fail until the first releases. Only meaningful with a drive
+ * attached (headless already returns -EXO_ENODEV before the ownership
+ * check ever runs, on either count == 0 or otherwise). */
+static void test_foreign_owner_blocks_read_write(void)
+{
+    if (!drive_present())
+        return;
+
+    page_owner_t me = syscall_current_context();
+
+    /* syscall_disk_suite_init() already acquired this for `me`; hand it to
+     * another context to observe the block, then give it back. */
+    disk_binding_release(me);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA, 0, 1), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(do_disk_write(TEST_LBA, 0, 1), -EXO_EBUSY);
+
+    disk_binding_release(OTHER_LIBOS);
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+}
+
 void suite_syscall_disk_tests(CU_pSuite s)
 {
     CU_add_test(s, "handlers are bound", test_handlers_are_bound);
@@ -187,4 +248,6 @@ void suite_syscall_disk_tests(CU_pSuite s)
     CU_add_test(s, "write then read round-trips",
                test_write_then_read_round_trips);
     CU_add_test(s, "no drive reports ENODEV", test_no_drive_reports_enodev);
+    CU_add_test(s, "foreign owner blocks read/write",
+               test_foreign_owner_blocks_read_write);
 }

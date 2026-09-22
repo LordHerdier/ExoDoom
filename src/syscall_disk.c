@@ -2,16 +2,13 @@
 #include "syscall.h"
 #include "exo_syscall.h"
 #include "ata.h"
+#include "disk_binding.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 /* 28-bit LBA addressing only (src/ata.h) -- the highest valid sector. */
 #define ATA_MAX_LBA 0x0FFFFFFFu
-
-/* Set by syscall_disk_init() from ata_init()'s own result, so every call
- * answers -EXO_ENODEV without re-probing the bus. */
-static int g_disk_present = 0;
 
 static int64_t ata_err_to_exo(int rc)
 {
@@ -34,26 +31,21 @@ static int ata_write_sector_adapter(uint32_t lba, uint8_t *buf)
     return ata_write_sector(lba, buf);
 }
 
-/* Shared bounds/validation for both handlers. `count`/`lba` are taken as the
- * full 64-bit values the dispatcher hands every handler -- not the narrower
- * uint32_t the exo_disk_read/exo_disk_write C stubs pass -- because a caller
- * that drives the raw syscall ABI directly could put an out-of-range value
- * in the high bits, and truncating before this check would silently drop
- * exactly the bits that made it invalid. `writable` is 1 for a read (the
- * kernel writes through buf) and 0 for a write (the kernel only reads it) --
- * same convention exo_user_range_mapped() itself uses.
+/* First half of the shared validation: pure argument shape, no buffer, no
+ * hardware, no binding. `count`/`lba` are taken as the full 64-bit values
+ * the dispatcher hands every handler -- not the narrower uint32_t the
+ * exo_disk_read/exo_disk_write C stubs pass -- because a caller that drives
+ * the raw syscall ABI directly could put an out-of-range value in the high
+ * bits, and truncating before this check would silently drop exactly the
+ * bits that made it invalid.
  *
- * Checked in this order deliberately: every argument-shape rejection
- * (count == 0, oversized count, LBA range, bad buffer) happens before the
- * drive-presence check, not after -- so `count == 0`'s "always succeeds and
- * touches nothing" contract (docs/syscall_spec.md #27/#28) and every other
- * bounds rejection hold regardless of whether a drive is attached, matching
+ * count == 0's "always succeeds and touches nothing" contract
+ * (docs/syscall_spec.md #27/#28) runs ahead of every other rejection below
+ * it in both handlers -- ownership included -- matching
  * exo_fb_acquire's own rule of validating the caller's arguments before
  * touching the resource (src/syscall_fb.c: "checked before anything is
- * allocated"). -EXO_ENODEV is reserved for the one thing that genuinely
- * needs the hardware: an argument-valid request with nothing to serve it. */
-static int64_t validate_disk_args(uint64_t lba, uint64_t buf, uint64_t count,
-                                  int writable)
+ * allocated"). */
+static int64_t validate_disk_shape(uint64_t lba, uint64_t count)
 {
     if (count == 0)
         return 0; /* handled specially by callers: no-op success */
@@ -69,13 +61,20 @@ static int64_t validate_disk_args(uint64_t lba, uint64_t buf, uint64_t count,
     if (lba > ATA_MAX_LBA || lba + count - 1 > ATA_MAX_LBA)
         return -EXO_EINVAL;
 
+    return 1; /* shape validated, proceed */
+}
+
+/* Final check: the buffer, once shape, device presence and (SCRUM-188)
+ * ownership have already passed. `writable` is 1 for a read (the kernel
+ * writes through buf) and 0 for a write (the kernel only reads it) -- same
+ * convention exo_user_range_mapped() itself uses. */
+static int64_t validate_disk_buf(uint64_t buf, uint64_t count, int writable)
+{
     uint64_t len = count * 512u;
+
     if (!exo_range_in_user_window(buf, len) ||
         !exo_user_range_mapped(buf, len, writable))
         return -EXO_EFAULT;
-
-    if (!g_disk_present)
-        return -EXO_ENODEV;
 
     return 1; /* validated, proceed */
 }
@@ -98,13 +97,36 @@ static int64_t disk_transfer(uint32_t lba, uint64_t buf, uint32_t count,
     return (int64_t)count;
 }
 
+/* SCRUM-188: shared ownership gate for both handlers, run after shape and
+ * device-presence checks and before the buffer check -- "no such device" is
+ * more fundamental than "you don't own it" (a headless machine answers
+ * -EXO_ENODEV, not -EXO_EBUSY, the same precedence exo_disk_acquire uses),
+ * and an unheld or someone-else's binding is not public property, same rule
+ * fb_binding_check_map() enforces for the framebuffer -- a caller with no
+ * claim on the disk learns nothing about whether its buffer pointer happens
+ * to be valid. */
+static int owns_disk(void)
+{
+    return disk_binding_owner() == syscall_current_context();
+}
+
 /* #27 -- read `count` sectors starting at `lba` into `buf`. */
 static int64_t sys_disk_read(uint64_t lba, uint64_t buf, uint64_t count,
                              uint64_t a4, uint64_t a5, uint64_t a6)
 {
     (void)a4; (void)a5; (void)a6;
 
-    int64_t v = validate_disk_args(lba, buf, count, 1);
+    int64_t v = validate_disk_shape(lba, count);
+    if (v <= 0)
+        return v;
+
+    if (!disk_binding_present())
+        return -EXO_ENODEV;
+
+    if (!owns_disk())
+        return -EXO_EBUSY;
+
+    v = validate_disk_buf(buf, count, 1);
     if (v <= 0)
         return v;
 
@@ -118,7 +140,17 @@ static int64_t sys_disk_write(uint64_t lba, uint64_t buf, uint64_t count,
 {
     (void)a4; (void)a5; (void)a6;
 
-    int64_t v = validate_disk_args(lba, buf, count, 0);
+    int64_t v = validate_disk_shape(lba, count);
+    if (v <= 0)
+        return v;
+
+    if (!disk_binding_present())
+        return -EXO_ENODEV;
+
+    if (!owns_disk())
+        return -EXO_EBUSY;
+
+    v = validate_disk_buf(buf, count, 0);
     if (v <= 0)
         return v;
 
@@ -126,9 +158,23 @@ static int64_t sys_disk_write(uint64_t lba, uint64_t buf, uint64_t count,
                          ata_write_sector_adapter);
 }
 
+/* #29 -- bind the disk to the caller. */
+static int64_t sys_disk_acquire(uint64_t a1, uint64_t a2, uint64_t a3,
+                                uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+
+    switch (disk_binding_acquire(syscall_current_context())) {
+    case DISK_BIND_OK:     return 0;
+    case DISK_BIND_EBUSY:  return -EXO_EBUSY;
+    default:                return -EXO_ENODEV;
+    }
+}
+
 void syscall_disk_init(int drive_present)
 {
-    g_disk_present = drive_present;
+    disk_binding_init(drive_present);
     exo_syscall_register(EXO_SYS_DISK_READ, sys_disk_read);
     exo_syscall_register(EXO_SYS_DISK_WRITE, sys_disk_write);
+    exo_syscall_register(EXO_SYS_DISK_ACQUIRE, sys_disk_acquire);
 }
