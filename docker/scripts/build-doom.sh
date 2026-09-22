@@ -18,6 +18,9 @@ set -uo pipefail
 cd /work
 mkdir -p build/doom
 
+# shellcheck source=parallel.sh
+source "$(dirname "${BASH_SOURCE[0]}")/parallel.sh"
+
 # -I src puts the freestanding libc shim headers (src/stdio.h, src/string.h,
 # src/strings.h, src/inttypes.h, src/errno.h, ...) on the include path. Their
 # absence — not anything wrong with the vendored source — is what used to stop
@@ -56,22 +59,46 @@ mkdir -p build/doom
 # from the *kernel's* CFLAGS, as opposed to this file's, would break that.
 CFLAGS=(-std=gnu99 -ffreestanding -O2 -Wall -Wextra -mno-red-zone -mcmodel=small -mno-mmx -I src/doom -I src)
 
-pass=0
-fail=0
-failed_files=()
+# Each file's pass/fail is independent, so the 79 compiles run in parallel
+# (docker/scripts/parallel.sh) instead of one at a time; a job can't hand a
+# pass/fail count back to this shell directly (it runs in a forked
+# subshell), so each one appends its own "OK <name>"/"FAIL <name>" line to a
+# shared results file instead, and this shell tallies it after run_parallel
+# returns.
+results="$(mktemp)"
 
+_compile_doom_gate_one() {
+  local c="$1" o="$2" name="$3"
+  if x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" 2>"build/doom/${name}.log"; then
+    echo "OK $name" >> "$results"
+  else
+    echo "FAIL $name" >> "$results"
+  fi
+}
+
+cmds=()
 for c in src/doom/*.c; do
   name="$(basename "${c%.c}")"
   o="build/doom/${name}.o"
-  if x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" 2>"build/doom/${name}.log"; then
-    echo "    OK   $(basename "$c")"
+  cmds+=("$(qcmd _compile_doom_gate_one "$c" "$o" "$name")")
+done
+run_parallel "${cmds[@]}"
+
+pass=0
+fail=0
+failed_files=()
+while read -r status name; do
+  [[ -z "$status" ]] && continue
+  if [[ "$status" == OK ]]; then
+    echo "    OK   ${name}.c"
     pass=$((pass + 1))
   else
-    echo "    FAIL $(basename "$c")"
+    echo "    FAIL ${name}.c"
     fail=$((fail + 1))
     failed_files+=("$name")
   fi
-done
+done < <(sort -k2 "$results")
+rm -f "$results"
 
 echo ""
 echo "doom core compile: $pass passed, $fail failed (out of $((pass + fail)))"

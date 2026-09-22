@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd /work
 
+# shellcheck source=parallel.sh
+source "$(dirname "${BASH_SOURCE[0]}")/parallel.sh"
+
 mkdir -p build/isodir/boot/grub
 cp /usr/share/grub/unicode.pf2 build/isodir/boot/grub/
 
@@ -207,17 +210,35 @@ build_ring3_link_target() {
     target_cflags+=($extra_cflags)
   fi
 
-  local target_objs=()
-  for c in "${srcs[@]}"; do
-    local o="build/${name}_$(basename "${c%.c}.o")"
+  # Compiling one source is independent of every other -- only the final
+  # `x86_64-elf-ld` command line below is order-sensitive (see this
+  # function's own top comment), so target_objs is built up-front, in
+  # source order, and the actual `gcc -c` calls run in parallel via
+  # run_parallel (docker/scripts/parallel.sh). _compile_ring3_one is a
+  # closure over target_cflags/extra_inc through bash's normal dynamic
+  # scoping -- run_parallel's subshells are forks of this function's own
+  # shell, not separate processes, so they see it without having to
+  # serialize it into the job string.
+  _compile_ring3_one() {
+    local c="$1" o="$2"
     echo "    CC $(basename "$c") (${name}, ring 3)"
     if [[ -n "$extra_inc" ]]; then
       x86_64-elf-gcc -c "$c" -o "$o" "${target_cflags[@]}" -I src/ -I "$extra_inc"
     else
       x86_64-elf-gcc -c "$c" -o "$o" "${target_cflags[@]}" -I src/
     fi
+  }
+
+  local target_objs=() cmds=()
+  for c in "${srcs[@]}"; do
+    local o="build/${name}_$(basename "${c%.c}.o")"
     target_objs+=("$o")
+    cmds+=("$(qcmd _compile_ring3_one "$c" "$o")")
   done
+  run_parallel "${cmds[@]}" || {
+    echo "    ERROR: one or more ${name} sources failed to compile"
+    exit 1
+  }
 
   # ld's expression syntax has no C integer-suffix notion, so LIBOS_LAUNCH_*'s
   # ULL literals (src/libos_launch.h) survive cpp expansion intact and then
@@ -485,12 +506,19 @@ echo "[3/7] Compile C sources"
 # includes and is unaffected; src/ holds no header that shadows one of GCC's
 # freestanding four (stddef/stdint/stdarg/limits), so nothing is redirected
 # by this that was not already coming from src/.
-for c in src/*.c; do
-  o="build/$(basename "${c%.c}.o")"
+_compile_kernel_c_one() {
+  local c="$1" o="$2"
   echo "    CC $(basename "$c")"
   x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src -DEXO_KERNEL
+}
+
+cmds=()
+for c in src/*.c; do
+  o="build/$(basename "${c%.c}.o")"
   objs+=("$o")
+  cmds+=("$(qcmd _compile_kernel_c_one "$c" "$o")")
 done
+run_parallel "${cmds[@]}" || { echo "    ERROR: kernel C compile failed"; exit 1; }
 
 # Assemble every other src/*.s.  boot.s is excluded because it is handled
 # above with its own flags; everything else (isr.s, syscall_entry.s, ...) is
@@ -503,15 +531,22 @@ done
 # hand-copied literal that can drift from it, the same reason the test-probe
 # loop already does this. A file with nothing to include still assembles
 # fine: cpp with no macros used is a no-op.
+_assemble_kernel_s_one() {
+  local s="$1" pp="$2" o="$3"
+  echo "    AS $(basename "$s")"
+  x86_64-elf-gcc -E -P -x assembler-with-cpp -I src -DEXO_KERNEL "$s" -o "$pp"
+  x86_64-elf-as "$pp" -o "$o"
+}
+
+cmds=()
 for s in src/*.s; do
   [[ "$s" == "src/boot.s" ]] && continue
   pp="build/$(basename "${s%.s}.pp.s")"
   o="build/$(basename "${s%.s}.o")"
-  echo "    AS $(basename "$s")"
-  x86_64-elf-gcc -E -P -x assembler-with-cpp -I src -DEXO_KERNEL "$s" -o "$pp"
-  x86_64-elf-as "$pp" -o "$o"
   objs+=("$o")
+  cmds+=("$(qcmd _assemble_kernel_s_one "$s" "$pp" "$o")")
 done
+run_parallel "${cmds[@]}" || { echo "    ERROR: kernel assembly failed"; exit 1; }
 
 if [[ "${TESTING:-0}" == "1" ]]; then
   echo "[3b/7] Build LibOS C probe (SCRUM-173)"
@@ -591,15 +626,21 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   objs+=("build/doom_tables.o")
 
   echo "[3c/7] Compile kernel test sources"
+  # Kernel view by default -- these run in ring 0.  The one TU that needs
+  # the LibOS view (test_exo_syscall_k.c, which instantiates the stubs)
+  # #undefs it before its first include.
+  _compile_test_c_one() {
+    local c="$1" o="$2"
+    echo "    CC $(basename "$c")"
+    x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  }
+  cmds=()
   for c in tests/kernel/*.c; do
     o="build/$(basename "${c%.c}.o")"
-    echo "    CC $(basename "$c")"
-    # Kernel view by default -- these run in ring 0.  The one TU that needs
-    # the LibOS view (test_exo_syscall_k.c, which instantiates the stubs)
-    # #undefs it before its first include.
-    x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
     objs+=("$o")
+    cmds+=("$(qcmd _compile_test_c_one "$c" "$o")")
   done
+  run_parallel "${cmds[@]}" || { echo "    ERROR: kernel test C compile failed"; exit 1; }
 
   # Test-only assembly (ring3_probe.s, libos_launch_probe.s, ...).  Lives
   # under tests/ rather than src/ so it cannot leak into a shipped kernel.
@@ -614,15 +655,21 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # -- plain C with inline asm inside, which `as` cannot parse -- is skipped
   # here exactly as it is for a normal kernel .c file. A probe with nothing
   # to include still assembles fine: cpp with no macros used is a no-op.
+  _assemble_test_s_one() {
+    local s="$1" pp="$2" o="$3"
+    echo "    AS $(basename "$s")"
+    x86_64-elf-gcc -E -P -x assembler-with-cpp -I src/ -DEXO_KERNEL "$s" -o "$pp"
+    x86_64-elf-as "$pp" -o "$o"
+  }
+  cmds=()
   for s in tests/kernel/*.s; do
     [ -e "$s" ] || continue
     pp="build/$(basename "${s%.s}.pp.s")"
     o="build/$(basename "${s%.s}.o")"
-    echo "    AS $(basename "$s")"
-    x86_64-elf-gcc -E -P -x assembler-with-cpp -I src/ -DEXO_KERNEL "$s" -o "$pp"
-    x86_64-elf-as "$pp" -o "$o"
     objs+=("$o")
+    cmds+=("$(qcmd _assemble_test_s_one "$s" "$pp" "$o")")
   done
+  run_parallel "${cmds[@]}" || { echo "    ERROR: kernel test assembly failed"; exit 1; }
 fi
 
 echo "[4/7] Link kernel -> build/exodoom"
