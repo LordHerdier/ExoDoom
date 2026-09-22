@@ -18,8 +18,21 @@
  * Copy context_current()'s shadow framebuffer (src/fb_shadow.h) onto the
  * real hardware framebuffer (src/fb_binding.h's published geometry). A
  * quiet no-op if either is absent: no real framebuffer published yet, or
- * the running context never called exo_fb_acquire. Called from
- * irq0_handler() (src/pit.c), throttled — see that call site's own comment
- * for why.
+ * the running context never called exo_fb_acquire. Called by
+ * fb_compositor_service() below -- not directly from irq0_handler()
+ * anymore, see that function's own comment (SCRUM-181).
  */
 void fb_compositor_tick(void);
+
+/*
+ * SCRUM-181: consumes pit_take_composite_pending() (src/pit.h) and, if a
+ * tick is due, runs fb_compositor_tick(). Meant to be called from ordinary
+ * syscall-dispatch context (src/syscall.c's exo_syscall_dispatch()), which
+ * runs constantly since every LibOS polls exo_kbd_poll()/exo_get_ticks() in
+ * its own loop -- not from inside an ISR, so the copy no longer holds
+ * irq0_handler()'s own hardware IDT gate (and the PIT's EOI) hostage for
+ * the whole memcpy the way it used to. IF stays off for the call, same as
+ * the rest of the syscall it runs inside of; see fb_compositor.c for why it
+ * must NOT be re-enabled here.
+ */
+void fb_compositor_service(void);

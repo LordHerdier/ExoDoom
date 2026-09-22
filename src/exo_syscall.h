@@ -251,13 +251,25 @@ typedef struct {
     uint8_t  reserved;      /* zeroed by the kernel                         */
     uint32_t page_count;    /* pages currently owned by this context        */
 } exo_ps_info_t;
-#endif /* __ASSEMBLER__ */
 
-/* EXO_PSLIST_MAX mirrors CONTEXT_MAX (src/context.h), restated here because
- * context.h is kernel-only (it pulls in vmm.h) and unreachable from the
- * LibOS side of this header.  A #define, not wrapped in __ASSEMBLER__ —
- * consistent with every other numeric constant in this file. */
-#define EXO_PSLIST_MAX 3
+/* EXO_PSLIST_MAX *is* CONTEXT_MAX (src/context.h) — included here rather than
+ * restated as a separate literal, so the two can never drift the way they
+ * did across SCRUM-193: that ticket raised VMM_MAX_ADDRESS_SPACES (and so
+ * CONTEXT_MAX) from 4 to 16 without touching this file, and a hardcoded
+ * EXO_PSLIST_MAX silently kept capping exo_pslist() at 3 live contexts
+ * regardless of how many actually existed.
+ *
+ * context.h has no EXO_KERNEL gating of its own, nor do vmm.h/page_alloc.h
+ * underneath it — all three are plain declarations, so this compiles
+ * identically whether exo_syscall.h is being read as the kernel's own view
+ * or a LibOS's. Kept inside this file's __ASSEMBLER__ guard regardless:
+ * docker/scripts/build.sh's `-x assembler-with-cpp` pass over the .s probes
+ * only ever wants #define numbers out of this header (see this file's own
+ * top comment), and context.h's typedefs/prototypes are exactly the kind of
+ * content that convention exists to keep out of assembly text. */
+#include "context.h"
+#define EXO_PSLIST_MAX CONTEXT_MAX
+#endif /* __ASSEMBLER__ */
 
 #ifndef __ASSEMBLER__
 /* Layout is ABI — break it and the kernel and LibOS silently disagree. */

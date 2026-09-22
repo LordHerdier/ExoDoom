@@ -101,11 +101,13 @@ int fb_binding_suite_cleanup(void)
      * allocates a real shadow framebuffer (hundreds of PMM pages) owned by
      * whichever id acquired it. Drop the directory entries and return the
      * pages, so a later suite's own allocations are not competing with
-     * leftover multi-hundred-page runs this suite made. */
+     * leftover multi-hundred-page runs this suite made. fb_shadow_release()
+     * frees exactly those pages itself now (SCRUM-187) -- no caller-side
+     * reclaim_pages_owned() sweep needed, and using one here would risk
+     * freeing this suite's own scratch_paddr below (the exact bug this
+     * ticket fixed). */
     fb_shadow_release(syscall_current_context());
     fb_shadow_release(OTHER_LIBOS);
-    (void)reclaim_pages_owned(syscall_current_context());
-    (void)reclaim_pages_owned(OTHER_LIBOS);
 
     exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP, SCRATCH_INFO_VA, 0, 0, 0, 0, 0);
     exo_syscall_dispatch(EXO_SYS_PAGE_FREE, scratch_paddr, 0, 0, 0, 0, 0);
@@ -195,7 +197,6 @@ static void test_acquire_describes_a_private_buffer(void)
     CU_ASSERT_EQUAL(info->reserved[2], 0);
 
     fb_shadow_release(syscall_current_context());
-    (void)reclaim_pages_owned(syscall_current_context());
 }
 
 /* A second, distinct caller no longer gets -EXO_EBUSY: SCRUM-112 replaced
@@ -218,9 +219,7 @@ static void test_second_acquirer_also_succeeds(void)
     CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
 
     fb_shadow_release(OTHER_LIBOS);
-    (void)reclaim_pages_owned(OTHER_LIBOS);
     fb_shadow_release(syscall_current_context());
-    (void)reclaim_pages_owned(syscall_current_context());
 }
 
 /* Re-acquiring is idempotent: it succeeds and re-fills the struct with the
@@ -240,7 +239,6 @@ static void test_owner_may_reacquire(void)
     CU_ASSERT_EQUAL(info->phys_addr, first_phys_addr);
 
     fb_shadow_release(syscall_current_context());
-    (void)reclaim_pages_owned(syscall_current_context());
 }
 
 /* A bad info_out is rejected before the binding is taken — otherwise a caller
@@ -483,6 +481,45 @@ static void test_release_by_non_owner_is_a_noop(void)
     CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
 }
 
+/* SCRUM-187 regression: fb_binding_suite_init()'s own scratch page
+ * (scratch_paddr, mapped at SCRATCH_INFO_VA for this whole suite's life)
+ * shares its owner id with the shadow framebuffer -- exo_page_alloc always
+ * tags a page with syscall_current_context(), which is also who acquires the
+ * shadow buffer below, and stays that way for the rest of the suite. Before
+ * this ticket, every test's cleanup paired fb_shadow_release(me) with a
+ * caller-side reclaim_pages_owned(me) sweep to return the shadow buffer's
+ * pages -- but that sweep frees *every* page `me` owns, scratch_paddr
+ * included, since scratch_paddr legitimately stays tagged `me` for the whole
+ * suite. A later EXO_SYS_PAGE_ALLOC could then be handed that identical
+ * physical page straight back (observed on serial as
+ * "alloc p=0x1EC0000 scratch_paddr=0x1EC0000"). There is no fix that keeps
+ * calling reclaim_pages_owned(me) here -- it is unconditionally dangerous
+ * whenever `me` legitimately holds any other page, which this suite's own
+ * scratch page always does. The actual fix is that fb_shadow_release() now
+ * frees exactly the pages it allocated itself, so nothing needs to sweep by
+ * owner id here at all: a plain fb_shadow_release(me), by itself, must
+ * leave scratch_paddr untouched. */
+static void test_shadow_release_does_not_free_unrelated_pages(void)
+{
+    install_test_fb();
+    page_owner_t me = syscall_current_context();
+
+    CU_ASSERT_EQUAL(page_owner((void *)(uintptr_t)scratch_paddr), me);
+
+    exo_fb_info_t *info = scratch_info();
+    CU_ASSERT_EQUAL(do_fb_acquire(info), 0);
+
+    fb_shadow_release(me);
+
+    CU_ASSERT_EQUAL(page_owner((void *)(uintptr_t)scratch_paddr), me);
+
+    int64_t fresh = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
+    CU_ASSERT_TRUE(fresh > 0);
+    CU_ASSERT_NOT_EQUAL((uint64_t)fresh, scratch_paddr);
+    if (fresh > 0)
+        exo_syscall_dispatch(EXO_SYS_PAGE_FREE, (uint64_t)fresh, 0, 0, 0, 0, 0);
+}
+
 void suite_fb_binding_tests(CU_pSuite s)
 {
     CU_add_test(s, "boot published the framebuffer",
@@ -513,4 +550,6 @@ void suite_fb_binding_tests(CU_pSuite s)
                 test_release_lets_another_context_acquire);
     CU_add_test(s, "release by non-owner is a no-op",
                 test_release_by_non_owner_is_a_noop);
+    CU_add_test(s, "shadow release does not free unrelated pages",
+                test_shadow_release_does_not_free_unrelated_pages);
 }

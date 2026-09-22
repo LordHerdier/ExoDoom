@@ -28,7 +28,7 @@ docker-test:
 	  set -eu; \
 	  rm -f /work/serial.log; \
 	  dd if=/dev/zero of=/work/build/ata_scratch.img bs=1M count=8 status=none; \
-	  timeout 120 qemu-system-x86_64 \
+	  timeout 180 qemu-system-x86_64 \
 	  -cdrom build/exodoom.iso \
 	  -drive file=/work/build/ata_scratch.img,format=raw,if=ide \
 	  -m 256M \
@@ -49,7 +49,7 @@ docker-ci:
 	  set -eu; \
 	  rm -f /work/serial.log; \
 	  dd if=/dev/zero of=/work/build/ata_scratch.img bs=1M count=8 status=none; \
-	  timeout 120 qemu-system-x86_64 \
+	  timeout 180 qemu-system-x86_64 \
 	  -cdrom build/exodoom.iso \
 	  -drive file=/work/build/ata_scratch.img,format=raw,if=ide \
 	  -m 256M \

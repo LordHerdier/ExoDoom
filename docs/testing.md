@@ -46,8 +46,9 @@ string is absent or if `TESTS FAILED` is present.
 
 ### Time budget
 
-Both `docker-test` and `docker-ci` run QEMU under `timeout 120` (raised from
-60 in SCRUM-66 for headroom — see below). It is a hard ceiling, and a suite
+Both `docker-test` and `docker-ci` run QEMU under `timeout 180` (raised from
+120 in SCRUM-102, which itself raised it from 60 in SCRUM-66 — see below). It
+is a hard ceiling, and a suite
 that blows through it looks like a *truncated serial log*, not like a
 failure: the grep for `ALL TESTS PASSED` simply finds nothing, CI reports the
 completion signal as missing, and QEMU's own serial output (already
@@ -71,6 +72,17 @@ left unrated it turned roughly 1-in-29 of the million draws into a full
 suite added *before* it also eats into its share of the timeout, and adding
 an unrated expensive syscall is worse still. Re-measure the full run rather
 than assuming the headroom is still there.
+
+**SCRUM-102 (ATA driver) is the concrete case that warning was written
+for.** `docker-test`/`docker-ci` now attach a scratch IDE drive
+(`-drive ...,if=ide`, `Makefile`) so the new `ata` suite can exercise real
+hardware, and QEMU's own IDE probing at boot plus that suite's own runtime
+were enough to push a clean run from comfortably under the old 120s ceiling
+to ~112s — leaving almost no margin, and a genuinely truncated (not failed)
+run on any CI host slower or more loaded than usual. Raised to 180s rather
+than re-measuring a tighter number, since the next storage ticket
+(`exo_disk_read`/`exo_disk_write`, SCRUM-103, plus the disk-image-attach
+work in SCRUM-190) will only add more drive-touching suites here, not fewer.
 
 ---
 
