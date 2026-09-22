@@ -30,12 +30,20 @@
  * VMM_MAX_ADDRESS_SPACES is a real bound, not an arbitrary one.
  *
  * The pages themselves are ordinary PMM pages tagged owned by `who` (see
- * alloc_pages_contig_owned(), src/page_alloc.h) — freeing them is not this
- * module's job. The existing generic sweep (page_reclaim_all(), what
- * revoke_all() already calls) reclaims them exactly like any other page a
- * context owns. fb_shadow_release() only clears this directory's own entry,
- * so a stale slot cannot outlive its context or be handed to whichever new
- * context reuses that id later.
+ * alloc_pages_contig_owned(), src/page_alloc.h). fb_shadow_release() frees
+ * exactly the pages the matching fb_shadow_acquire() allocated (tracked in
+ * the slot itself) before clearing the directory entry, so a stale slot
+ * cannot outlive its context or be handed to whichever new context reuses
+ * that id later.
+ *
+ * SCRUM-187: release used to leave the underlying pages for a caller-side
+ * reclaim_pages_owned(who)/page_reclaim_all(who) sweep instead of freeing
+ * them itself. That sweep frees *every* page `who` owns, not just this
+ * buffer's — fine at real process exit, where "free everything this context
+ * owns" is the intent, but a hazard anywhere else `who` might hold other,
+ * unrelated pages under the same owner id (as tests/kernel/test_fb_binding_k.c
+ * did with its own scratch page). Freeing precisely the tracked
+ * phys_base/page_count range here closes that.
  */
 
 /* fb_shadow_acquire() outcomes, mirroring the -EXO_E* codes syscall_fb.c
@@ -58,9 +66,9 @@
 int fb_shadow_acquire(page_owner_t who, exo_fb_info_t *info_out);
 
 /*
- * Drop `who`'s directory entry. A no-op if `who` never acquired one, so exit
- * and revocation paths can call it unconditionally. Does not free the
- * underlying pages — see this header's own top comment.
+ * Drop `who`'s directory entry and free the underlying pages (SCRUM-187) —
+ * see this header's own top comment. A no-op if `who` never acquired one, so
+ * exit and revocation paths can call it unconditionally.
  */
 void fb_shadow_release(page_owner_t who);
 
