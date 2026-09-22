@@ -58,8 +58,11 @@ void irq0_handler() {
      * anything else in the kernel does synchronously, risking delayed IRQ1
      * (keyboard) servicing and PIT jitter. Setting a flag here instead and
      * letting fb_compositor_service() (src/fb_compositor.c) consume it from
-     * syscall-dispatch context -- with IF deliberately re-enabled for the
-     * copy -- gets the memcpy out from under this ISR entirely. Just a flag
+     * syscall-dispatch context -- IF stays off for that copy too (see that
+     * function's own comment for why re-enabling it would race
+     * context_switch_request()), but it's the syscall's IF=0 window rather
+     * than the timer ISR's -- gets the memcpy out from under this ISR
+     * entirely. Just a flag
      * write, so unlike the old direct call this needs no #ifndef TESTING
      * guard: the framebuffer/fb_binding/fb_shadow init state that guard
      * protected against only matters to the consumer, not to setting a
