@@ -60,7 +60,7 @@ COPY --from=builder /opt/cross /opt/cross
 ENV PATH="/opt/cross/bin:$PATH"
 
 WORKDIR /work
-COPY scripts/build.sh /usr/local/bin/build.sh
+COPY scripts/build.sh scripts/parallel.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/build.sh
 
 ENTRYPOINT ["/usr/local/bin/build.sh"]

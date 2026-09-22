@@ -28,6 +28,9 @@ set -uo pipefail
 cd /work
 mkdir -p build/doom build/shim
 
+# shellcheck source=parallel.sh
+source "$(dirname "${BASH_SOURCE[0]}")/parallel.sh"
+
 # Same flags as build-doom.sh. -mno-sse is absent for the same reason it is
 # absent there: m_config.c's M_GetFloatVariable() returns a float and the
 # x86_64 SysV ABI has no SSE-free encoding for that (SCRUM-177).
@@ -103,31 +106,40 @@ declare -A ALLOWED=(
 )
 
 echo "[1/3] Compile vendored Doom engine"
-fail=0
+_compile_doom_link_one() {
+  local c="$1" o="$2" name="$3"
+  if ! x86_64-elf-gcc -c "$c" -o "$o" "${DOOM_CFLAGS[@]}" 2>"build/doom/${name}.log"; then
+    echo "    FAIL $(basename "$c")"
+    return 1
+  fi
+}
+cmds=()
 for c in src/doom/*.c; do
   name="$(basename "${c%.c}")"
-  if ! x86_64-elf-gcc -c "$c" -o "build/doom/${name}.o" "${DOOM_CFLAGS[@]}" \
-         2>"build/doom/${name}.log"; then
-    echo "    FAIL $(basename "$c")"
-    fail=$((fail + 1))
-  fi
+  cmds+=("$(qcmd _compile_doom_link_one "$c" "build/doom/${name}.o" "$name")")
 done
-if [[ $fail -gt 0 ]]; then
-  echo "    $fail file(s) failed to compile -- see build/doom/<name>.log"
+if ! run_parallel "${cmds[@]}"; then
+  echo "    one or more files failed to compile -- see build/doom/<name>.log"
   echo "    (docker/scripts/build-doom.sh is the gate for this; fix there first)"
   exit 1
 fi
 echo "    79 objects"
 
 echo "[2/3] Compile libc shim for the ring-3 LibOS view"
+_compile_shim_one() {
+  local c="$1" o="$2"
+  echo "    CC $(basename "$c")"
+  x86_64-elf-gcc -c "$c" -o "$o" "${SHIM_CFLAGS[@]}"
+}
+cmds=()
 for c in "${SHIM_SOURCES[@]}"; do
   name="$(basename "${c%.c}")"
-  echo "    CC $(basename "$c")"
-  if ! x86_64-elf-gcc -c "$c" -o "build/shim/${name}.o" "${SHIM_CFLAGS[@]}"; then
-    echo "    ERROR: the libc shim itself does not compile for ring 3."
-    exit 1
-  fi
+  cmds+=("$(qcmd _compile_shim_one "$c" "build/shim/${name}.o")")
 done
+if ! run_parallel "${cmds[@]}"; then
+  echo "    ERROR: the libc shim itself does not compile for ring 3."
+  exit 1
+fi
 
 echo "[3/3] Resolve symbols"
 
