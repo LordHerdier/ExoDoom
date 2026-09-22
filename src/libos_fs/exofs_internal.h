@@ -63,6 +63,16 @@ typedef struct exofs_volume {
      * the second themselves.
      */
     uint8_t  *scratch;
+
+    /*
+     * Where the next free-block search starts. cfat rescanned the FAT from
+     * block 0 on every allocation, making a run of N blocks O(N * total)
+     * — on a 128 MiB volume, 262144 entries rescanned per block. The search
+     * resumes here and wraps once, so allocating a run costs one pass in
+     * total rather than one pass per block. Purely an optimisation: it is
+     * never trusted, since a stale hint only costs a longer scan.
+     */
+    uint32_t next_free_hint;
 } exofs_volume_t;
 
 /* The one mounted volume, or NULL when nothing is mounted. */

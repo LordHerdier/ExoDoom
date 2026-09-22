@@ -10,9 +10,10 @@
  * would force CPL 3 on return and drop the rest of the test run to ring 3.
  * See exofs_blockdev.h's top comment.
  *
- * This file currently covers the block-I/O seam and the volume layer
- * (superblock/format/mount). The layers above it (FAT, names, directories,
- * files) land in later steps of SCRUM-189 and add their tests here.
+ * This file currently covers the block-I/O seam, the volume layer
+ * (superblock/format/mount) and the FAT layer (block allocation, chain
+ * traversal). The layers above it (names, directories, files) land in later
+ * steps of SCRUM-189 and add their tests here.
  *
  * DISK BINDING. exo_disk_read/exo_disk_write answer -EXO_EBUSY to a caller
  * that does not hold the binding (SCRUM-188), so suite_init acquires it and
@@ -50,6 +51,7 @@
 #include "libos_fs/exofs_blockdev.h"
 #include "libos_fs/exofs.h"
 #include "libos_fs/exofs_internal.h"
+#include "libos_fs/exofs_fat.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -562,6 +564,311 @@ static void test_fresh_volume_fat_is_empty(void)
     exofs_unmount();
 }
 
+/* ---- FAT layer: allocation and chains ----------------------------------- */
+
+/* Every FAT test needs a mounted volume and the volume pointer. This folds
+ * the two guards into one so the tests below read as their subject rather
+ * than as setup. Returns NULL if the caller should bail. */
+static exofs_volume_t *fat_test_volume(void)
+{
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return NULL; }
+
+    exofs_volume_t *v = exofs_vol();
+    CU_ASSERT_PTR_NOT_NULL(v);
+    return v;
+}
+
+static void test_alloc_and_free_one_block(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    uint32_t before = exofs_fat_free_count(v);
+
+    uint32_t blk = 0;
+    CU_ASSERT_EQUAL(exofs_fat_alloc(v, &blk), 0);
+    CU_ASSERT_TRUE(blk > 0);                 /* never the root block */
+    CU_ASSERT_TRUE(blk < v->total_blocks);
+
+    uint32_t ent = 0;
+    CU_ASSERT_EQUAL(exofs_fat_get(v, blk, &ent), 0);
+    CU_ASSERT_EQUAL(ent, EXOFS_BLOCK_EOC);   /* a one-block chain */
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), before - 1u);
+
+    CU_ASSERT_EQUAL(exofs_fat_free(v, blk), 0);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), before);
+
+    /* Freeing it twice is an error, not a no-op: it means a chain was
+     * walked twice or a block was double-owned. */
+    CU_ASSERT_EQUAL(exofs_fat_free(v, blk), -EXO_EINVAL);
+
+    exofs_unmount();
+}
+
+/*
+ * A newly allocated block must read back as zeros even when its previous
+ * owner left data in it. For a directory block those stale bytes would be
+ * read as live entries — see exofs_fat.h.
+ */
+static void test_alloc_zeroes_the_block(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    uint32_t blk = 0;
+    CU_ASSERT_EQUAL(exofs_fat_alloc(v, &blk), 0);
+
+    uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
+    CU_ASSERT_PTR_NOT_NULL(buf);
+    if (buf == NULL) return;
+
+    /* Dirty it thoroughly, then give it back. */
+    for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) buf[i] = (uint8_t)(i | 0x80u);
+    CU_ASSERT_EQUAL(exofs_write_block(blk, buf), 0);
+    CU_ASSERT_EQUAL(exofs_fat_free(v, blk), 0);
+
+    /* The hint points back at the block just freed, so this reallocates the
+     * same one — which is exactly the case that matters. */
+    uint32_t again = 0;
+    CU_ASSERT_EQUAL(exofs_fat_alloc(v, &again), 0);
+    CU_ASSERT_EQUAL(again, blk);
+
+    for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) buf[i] = 0xFFu;
+    CU_ASSERT_EQUAL(exofs_read_block(blk, buf), 0);
+
+    for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) {
+        if (buf[i] != 0) { CU_ASSERT_EQUAL(buf[i], 0); break; }
+    }
+
+    libos_heap_free(buf);
+    exofs_unmount();
+}
+
+static void test_chain_extend_walk_and_free(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    uint32_t before = exofs_fat_free_count(v);
+
+    uint32_t head = 0;
+    CU_ASSERT_EQUAL(exofs_fat_alloc(v, &head), 0);
+
+    /* Grow to 5 blocks and remember them, so nth/last can be checked
+     * against the real identities rather than against each other. */
+    uint32_t want[5];
+    want[0] = head;
+    for (uint32_t i = 1; i < 5; i++) {
+        CU_ASSERT_EQUAL(exofs_chain_extend(v, head, &want[i]), 0);
+    }
+
+    uint32_t len = 0;
+    CU_ASSERT_EQUAL(exofs_chain_len(v, head, &len), 0);
+    CU_ASSERT_EQUAL(len, 5u);
+
+    uint32_t last = 0;
+    CU_ASSERT_EQUAL(exofs_chain_last(v, head, &last), 0);
+    CU_ASSERT_EQUAL(last, want[4]);
+
+    for (uint32_t i = 0; i < 5; i++) {
+        uint32_t nth = 0;
+        CU_ASSERT_EQUAL(exofs_chain_nth(v, head, i, &nth), 0);
+        CU_ASSERT_EQUAL(nth, want[i]);
+    }
+
+    /* Past the end is -EXO_EINVAL (a bad request), not -EXO_EIO (a bad
+     * disk) — the distinction a file read past EOF depends on. */
+    uint32_t past = 0;
+    CU_ASSERT_EQUAL(exofs_chain_nth(v, head, 5u, &past), -EXO_EINVAL);
+
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), before - 5u);
+    CU_ASSERT_EQUAL(exofs_chain_free(v, head), 0);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), before);
+
+    exofs_unmount();
+}
+
+/*
+ * The hardening cfat does not have: a FAT with a loop in it must be
+ * reported, not spun on. cfat's chain walks are unbounded
+ * `while (FAT[i] != USHRT_MAX)` loops and hang forever on this input.
+ *
+ * The cycle is built by hand because nothing the allocator does can produce
+ * one — which is the point: this is what a torn write or a corrupted sector
+ * leaves behind, and the filesystem reads from a real disk now.
+ */
+static void test_chain_cycle_is_reported_not_hung(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    uint32_t a = 0, b = 0, c = 0;
+    CU_ASSERT_EQUAL(exofs_fat_alloc(v, &a), 0);
+    CU_ASSERT_EQUAL(exofs_chain_extend(v, a, &b), 0);
+    CU_ASSERT_EQUAL(exofs_chain_extend(v, a, &c), 0);
+
+    /* Close the loop: c now points back at a. */
+    CU_ASSERT_EQUAL(exofs_fat_set(v, c, a), 0);
+
+    uint32_t out = 0;
+    CU_ASSERT_EQUAL(exofs_chain_last(v, a, &out), -EXO_EIO);
+    CU_ASSERT_EQUAL(exofs_chain_len(v, a, &out), -EXO_EIO);
+    CU_ASSERT_EQUAL(exofs_chain_free(v, a), -EXO_EIO);
+
+    /* chain_free refused, so it must not have freed anything — the
+     * corruption is left intact rather than turned into a half-freed
+     * chain. */
+    uint32_t ent = 0;
+    CU_ASSERT_EQUAL(exofs_fat_get(v, a, &ent), 0);
+    CU_ASSERT_NOT_EQUAL(ent, EXOFS_BLOCK_FREE);
+    CU_ASSERT_EQUAL(exofs_fat_get(v, b, &ent), 0);
+    CU_ASSERT_NOT_EQUAL(ent, EXOFS_BLOCK_FREE);
+
+    exofs_unmount();
+}
+
+/* A chain link pointing at a free block is corruption too: the chain claims
+ * a block the allocator thinks nobody owns. */
+static void test_chain_into_free_block_is_reported(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    uint32_t a = 0, b = 0;
+    CU_ASSERT_EQUAL(exofs_fat_alloc(v, &a), 0);
+    CU_ASSERT_EQUAL(exofs_chain_extend(v, a, &b), 0);
+
+    /* Free b behind the chain's back. */
+    CU_ASSERT_EQUAL(exofs_fat_set(v, b, EXOFS_BLOCK_FREE), 0);
+
+    uint32_t out = 0;
+    CU_ASSERT_EQUAL(exofs_chain_last(v, a, &out), -EXO_EIO);
+    CU_ASSERT_EQUAL(exofs_chain_len(v, a, &out), -EXO_EIO);
+
+    exofs_unmount();
+}
+
+/* Out-of-range block indices must be refused rather than indexing past the
+ * FAT array — the failure mode a corrupted link would otherwise cause. */
+static void test_out_of_range_blocks_rejected(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    uint32_t out = 0;
+    CU_ASSERT_EQUAL(exofs_fat_get(v, v->total_blocks, &out), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_fat_get(v, 0xFFFFFFFFu, &out), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_fat_set(v, v->total_blocks, 1u), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_fat_free(v, v->total_blocks), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_chain_last(v, v->total_blocks, &out), -EXO_EINVAL);
+
+    /* The FAT array is sized to whole sectors, so indices between
+     * total_blocks and the end of the last sector are real memory but not
+     * real blocks. Those are exactly the ones a naive bounds check on the
+     * allocation size would let through. */
+    uint32_t past_end = v->fat_blocks * EXOFS_FAT_PER_BLOCK - 1u;
+    if (past_end >= v->total_blocks) {
+        CU_ASSERT_EQUAL(exofs_fat_get(v, past_end, &out), -EXO_EINVAL);
+    }
+
+    exofs_unmount();
+}
+
+/* Filling the volume must report -EXO_ENOSPC rather than calling exit(),
+ * which is what cfat's findFreeBlock() did. */
+static void test_exhaustion_reports_enospc(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    /*
+     * Allocating every block of a 4 MiB volume means ~8000 zeroing writes,
+     * which is minutes of polled PIO and well past docs/testing.md's CI
+     * budget. So the FAT is filled directly and only the last block is
+     * allocated for real — the allocator's search and its full-volume
+     * answer are what is under test, not the disk.
+     */
+    uint32_t last_free = 0;
+    uint32_t free_seen = 0;
+    for (uint32_t i = 1; i < v->total_blocks; i++) {
+        if (v->fat[i] == EXOFS_BLOCK_FREE) {
+            last_free = i;
+            free_seen++;
+        }
+    }
+    CU_ASSERT_TRUE(free_seen > 1u);
+
+    for (uint32_t i = 1; i < v->total_blocks; i++) {
+        if (i != last_free) v->fat[i] = EXOFS_BLOCK_EOC;
+    }
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), 1u);
+
+    /* One block left: it must be found wherever the hint happens to be,
+     * which is what the wrap in the search exists for. */
+    v->next_free_hint = v->total_blocks - 1u;
+    uint32_t blk = 0;
+    CU_ASSERT_EQUAL(exofs_fat_alloc(v, &blk), 0);
+    CU_ASSERT_EQUAL(blk, last_free);
+
+    /* And now there are none. */
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), 0u);
+    CU_ASSERT_EQUAL(exofs_fat_alloc(v, &blk), -EXO_ENOSPC);
+    CU_ASSERT_EQUAL(exofs_chain_extend(v, last_free, &blk), -EXO_ENOSPC);
+
+    /* A failed extend must not have linked anything: last_free is still a
+     * one-block chain. */
+    uint32_t ent = 0;
+    CU_ASSERT_EQUAL(exofs_fat_get(v, last_free, &ent), 0);
+    CU_ASSERT_EQUAL(ent, EXOFS_BLOCK_EOC);
+
+    exofs_unmount();
+}
+
+/* Chain changes are FAT changes, so they have to survive a sync/remount the
+ * same way a hand-dirtied entry does. */
+static void test_chain_survives_remount(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    uint32_t head = 0;
+    CU_ASSERT_EQUAL(exofs_fat_alloc(v, &head), 0);
+
+    uint32_t want[4];
+    want[0] = head;
+    for (uint32_t i = 1; i < 4; i++) {
+        CU_ASSERT_EQUAL(exofs_chain_extend(v, head, &want[i]), 0);
+    }
+
+    CU_ASSERT_EQUAL(exofs_sync(), 0);
+    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+
+    v = exofs_vol();
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v == NULL) return;
+
+    uint32_t len = 0;
+    CU_ASSERT_EQUAL(exofs_chain_len(v, head, &len), 0);
+    CU_ASSERT_EQUAL(len, 4u);
+
+    for (uint32_t i = 0; i < 4; i++) {
+        uint32_t nth = 0;
+        CU_ASSERT_EQUAL(exofs_chain_nth(v, head, i, &nth), 0);
+        CU_ASSERT_EQUAL(nth, want[i]);
+    }
+
+    exofs_unmount();
+}
+
 void suite_exofs_tests(CU_pSuite s)
 {
     CU_add_test(s, "heap buffer lies in the LibOS window",
@@ -594,4 +901,21 @@ void suite_exofs_tests(CU_pSuite s)
                 test_fat_writeback_survives_remount);
     CU_add_test(s, "a fresh volume's FAT is empty",
                 test_fresh_volume_fat_is_empty);
+
+    CU_add_test(s, "allocate and free one block",
+                test_alloc_and_free_one_block);
+    CU_add_test(s, "allocation zeroes the block",
+                test_alloc_zeroes_the_block);
+    CU_add_test(s, "chain extend, walk and free",
+                test_chain_extend_walk_and_free);
+    CU_add_test(s, "a FAT cycle is reported, not hung",
+                test_chain_cycle_is_reported_not_hung);
+    CU_add_test(s, "a chain into a free block is reported",
+                test_chain_into_free_block_is_reported);
+    CU_add_test(s, "out-of-range blocks rejected",
+                test_out_of_range_blocks_rejected);
+    CU_add_test(s, "exhaustion reports ENOSPC",
+                test_exhaustion_reports_enospc);
+    CU_add_test(s, "a chain survives a remount",
+                test_chain_survives_remount);
 }
