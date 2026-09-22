@@ -571,7 +571,17 @@ static void test_ctrl_tab_switches_context(void)
     CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
     CU_ASSERT_EQUAL(ev.key, KEY_CTRL);
 
-    CU_ASSERT_EQUAL(context_current(), id_b);
+    /* SCRUM-179: context_current() must NOT flip here. context_switch_
+     * request() only *stages* the switch (context_switch_in_id below);
+     * context_current() keeps naming id_a -- whose CR3 is still actually
+     * loaded -- until context_switch_tail (src/context_switch.s) really
+     * performs the swap on id_a's own next syscall, which this test never
+     * drives. Before this ticket's fix, context_current() flipped to id_b
+     * immediately, which misattributed any syscall id_a made in the
+     * meantime to id_b. */
+    CU_ASSERT_EQUAL(context_current(), id_a);
+    CU_ASSERT_EQUAL(context_switch_pending, 1);
+    CU_ASSERT_EQUAL(context_switch_in_id, id_b);
     CU_ASSERT_EQUAL(context_lookup(id_a)->state, CONTEXT_STATE_READY);
     CU_ASSERT_EQUAL(context_lookup(id_b)->state, CONTEXT_STATE_RUNNING);
 
@@ -612,7 +622,10 @@ static void test_right_ctrl_tab_also_switches(void)
     CU_ASSERT_EQUAL(kbd_dequeue(&ev), 1);
     CU_ASSERT_TRUE(ev.modifiers & MOD_RCTRL);
 
-    CU_ASSERT_EQUAL(context_current(), id_b);
+    /* SCRUM-179: see test_ctrl_tab_switches_context()'s own comment --
+     * context_current() stays id_a until a real switch commits. */
+    CU_ASSERT_EQUAL(context_current(), id_a);
+    CU_ASSERT_EQUAL(context_switch_in_id, id_b);
 
     /* See test_ctrl_tab_switches_context()'s own comment: context_switch_
      * pending is armed but never consumed here, and must not leak into a

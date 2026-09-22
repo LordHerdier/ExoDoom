@@ -215,12 +215,18 @@ static page_owner_t current_context = PAGE_OWNER_LIBOS;
 /* Definitions for the raw externs context.h declares for
  * src/context_switch.s / src/syscall_entry.s -- see their shared comment in
  * context.h. context_switch_pending starts 0 (no switch armed); the other
- * three are only ever read by context_switch_tail after
- * context_switch_request() has set all four together. */
+ * four are only ever read by context_switch_tail after
+ * context_switch_request() has set all five together. context_switch_in_id
+ * (SCRUM-179) is what lets context_switch_tail call context_set_current()
+ * itself, at the point the switch actually commits, instead of
+ * context_switch_request() declaring the new current context up front --
+ * see context_switch_request()'s own comment below for why that eager
+ * update was wrong. */
 uint64_t context_switch_pending = 0;
 context_regs_t *context_switch_out_regs = NULL;
 context_regs_t *context_switch_in_regs = NULL;
 uint64_t context_switch_in_pml4 = 0;
+uint64_t context_switch_in_id = 0;
 
 page_owner_t context_current(void) {
     return current_context;
@@ -240,13 +246,26 @@ int context_switch_request(page_owner_t to_id) {
         return CONTEXT_ENOENT;
     }
 
+    /* current_context is deliberately NOT updated here (SCRUM-179).
+     * context_switch_tail (src/context_switch.s) is the only place the real
+     * CR3/register swap happens, so it is the only place context_current()
+     * may start reporting `to_id` -- every caller of this function used to
+     * be running as the outgoing context itself inside a syscall handler,
+     * where the request and the tail ran back-to-back with nothing able to
+     * observe the gap. Ctrl+Tab (src/ps2.c) broke that: it arms a switch
+     * from IRQ1 while the outgoing context keeps running, so
+     * context_current() flipping here would misattribute every syscall the
+     * still-running outgoing context makes before its own next real switch
+     * to the new target instead. context_switch_in_id below is what lets
+     * context_switch_tail commit the id itself once the swap has actually
+     * happened. */
     from->state = CONTEXT_STATE_READY;
     to->state = CONTEXT_STATE_RUNNING;
-    current_context = to_id;
 
     context_switch_out_regs = &from->regs;
     context_switch_in_regs = &to->regs;
     context_switch_in_pml4 = vmm_address_space_for(to_id);
+    context_switch_in_id = to_id;
     context_switch_pending = 1;
 
     return CONTEXT_OK;

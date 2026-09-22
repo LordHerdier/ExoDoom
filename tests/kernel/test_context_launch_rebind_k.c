@@ -98,12 +98,37 @@ static void test_create_then_rebind_contexts_switch_both_ways(void)
     context_set_current(shell_like);
     context_set_state(shell_like, CONTEXT_STATE_RUNNING);
 
+    /* SCRUM-179: context_switch_request() only *stages* the switch --
+     * context_current() keeps naming the outgoing context until
+     * context_switch_tail (src/context_switch.s) actually commits it,
+     * which this test never drives. Simulate that commit by hand via
+     * context_set_current(), the same seam this test already uses to
+     * declare the very first running context above. */
     CU_ASSERT_EQUAL(context_switch_request(viewer_like), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_current(), shell_like);
+    context_set_current(viewer_like);
     CU_ASSERT_EQUAL(context_current(), viewer_like);
 
     CU_ASSERT_EQUAL(context_next_ready(viewer_like), shell_like);
     CU_ASSERT_EQUAL(context_switch_request(shell_like), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_current(), viewer_like);
+    context_set_current(shell_like);
     CU_ASSERT_EQUAL(context_current(), shell_like);
+
+    /* Neither context_switch_request() call above was ever driven through a
+     * real context_switch_tail commit -- both are only simulated by hand via
+     * context_set_current() -- so context_switch_pending is still armed from
+     * the second call, with context_switch_out_regs/_in_regs/_in_pml4/_in_id
+     * all pointing at these two contexts. Left set, the next real switch
+     * anywhere later in the run (e.g. test_syscall_bench_k.c's real ring-3
+     * benchmarks) would take context_switch_tail using these now-destroyed
+     * contexts' dangling regs pointers and a freed physical page as the PML4
+     * to load into CR3 -- silently harmless before SCRUM-179 (nothing read
+     * context_switch_in_id), but a real, visible corruption now that
+     * context_switch_tail also commits it via context_set_current(). Same
+     * fixup tests/kernel/test_kbd_ring.c and test_syscall_exit_k.c already
+     * need for the same reason. */
+    context_switch_pending = 0;
 
     /* Restore the default every other suite assumes (test_context_switch_k.c
      * and test_syscall_yield_k.c both do the same after driving a real

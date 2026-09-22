@@ -780,14 +780,25 @@ scheduling (SCRUM-147) invalidates that assumption and will need a lock here.
 > `irq0_handler()` already calls `fb_compositor_tick()` directly (`src/
 > pit.c`). The chord is swallowed, never enqueued, so it never reaches an
 > app as ordinary input. No new "foreground" state was needed after all:
-> `context_switch_request()` already updates `context_current()`
-> synchronously, so the compositor above picks up the new foreground
-> immediately. What *is* still deferred is the low-level register-save/
+> the compositor and the syscall path both simply read `context_current()`
+> already. What *is* still deferred is the low-level register-save/
 > CR3-swap itself — `context_switch_pending` is only actually carried out
 > at the currently-running context's next syscall (`src/syscall_entry.s`'s
 > epilogue), so there is a bounded window, up to one syscall long, where
-> the display has already flipped but the outgoing context is still
-> executing its own code. In practice this is sub-frame: every LibOS
+> the outgoing context is still executing its own code on its own CR3.
+> ✅ **SCRUM-179** closed the correctness half of that window:
+> `context_switch_request()` no longer updates `context_current()` itself —
+> it only stages the target id (`context_switch_in_id`) — so
+> `context_current()`/`syscall_current_context()` keep naming whichever
+> context's CR3 is actually loaded for the whole deferred window, and
+> `context_switch_tail` (`src/context_switch.s`) is the only place that
+> calls `context_set_current()`, right after it swaps CR3. Before this fix,
+> any syscall the still-running outgoing context made in that window —
+> including the very syscall whose dispatch return finally consumes
+> `context_switch_pending` — resolved `syscall_current_context()` to the
+> new target and misattributed its effects (page ownership, framebuffer
+> shadow allocation, etc.) to the wrong context. The remaining latency is
+> unchanged and still sub-frame in practice: every LibOS
 > today (`shell_main.c`, the WAD viewer) polls `exo_kbd_poll()`/
 > `exo_get_ticks()` every loop iteration. Genuine zero-latency preemption
 > — switching before the running context's next syscall, from arbitrary

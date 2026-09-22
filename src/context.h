@@ -310,12 +310,18 @@ void context_set_current(page_owner_t id);
  * table slot that does not exist.
  *
  * On success: flips the current context to CONTEXT_STATE_READY and `to_id`
- * to CONTEXT_STATE_RUNNING, updates context_current(), and arms
- * context_switch_pending so src/syscall_entry.s takes the
- * context_switch_tail exit instead of its normal pop+sysretq epilogue the
- * next time exo_syscall_dispatch() returns to it -- the actual register
- * capture/CR3 swap/restore happens there (src/context_switch.s), not here;
- * this call only decides and records that it will.
+ * to CONTEXT_STATE_RUNNING, stages `to_id`/its regs/its pml4 for
+ * context_switch_tail, and arms context_switch_pending so
+ * src/syscall_entry.s takes the context_switch_tail exit instead of its
+ * normal pop+sysretq epilogue the next time exo_syscall_dispatch() returns
+ * to it -- the actual register capture/CR3 swap/restore happens there
+ * (src/context_switch.s), not here; this call only decides and records that
+ * it will. Deliberately does NOT update context_current() itself (SCRUM-179)
+ * -- see context_switch_in_id's own comment below for why: context_current()
+ * must keep naming whichever context's CR3 is actually loaded until
+ * context_switch_tail really performs the swap, or a context that keeps
+ * running after this call (as Ctrl+Tab's IRQ1 caller lets it) would have its
+ * own syscalls misattributed to the not-yet-running target.
  *
  * Returns CONTEXT_OK, or CONTEXT_ENOENT if `to_id` is not a live READY
  * context or the current context has no row in this table.
@@ -354,14 +360,21 @@ page_owner_t context_next_ready(page_owner_t current);
  * is. Nonzero context_switch_pending, set by context_switch_request(), tells
  * syscall_entry.s to jump to context_switch_tail (src/context_switch.s)
  * instead of its normal epilogue; that routine reads
- * context_switch_out_regs/_in_regs/_in_pml4 (also set by
+ * context_switch_out_regs/_in_regs/_in_pml4/_in_id (also set by
  * context_switch_request()) to do the actual save/CR3-swap/restore. See
  * src/context_switch.s's own comment for the register-capture invariants
- * this depends on. */
+ * this depends on.
+ *
+ * context_switch_in_id (SCRUM-179) is read exactly once, by
+ * context_switch_tail right after it swaps CR3, to call
+ * context_set_current(context_switch_in_id) itself -- the point the switch
+ * actually commits, rather than context_switch_request() declaring the new
+ * current context up front. */
 extern uint64_t context_switch_pending;
 extern context_regs_t *context_switch_out_regs;
 extern context_regs_t *context_switch_in_regs;
 extern uint64_t context_switch_in_pml4;
+extern uint64_t context_switch_in_id;
 
 #define CONTEXT_OK      0
 #define CONTEXT_ENOMEM  (-1)
