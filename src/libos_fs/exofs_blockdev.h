@@ -82,4 +82,19 @@ int exofs_bdev_acquire(void);
 int exofs_bdev_read(uint32_t lba, void *buf, uint32_t count);
 int exofs_bdev_write(uint32_t lba, const void *buf, uint32_t count);
 
+/*
+ * Monotonic milliseconds since boot, for directory-entry timestamps
+ * (exo_get_ticks, #5). Lives here rather than beside its caller for the same
+ * reason the transfers do: it is a syscall, so it needs the dual-compile
+ * seam, and there should be exactly one file in ExoFS that knows that.
+ *
+ * Not a wall clock — there is none — so this is only ever an ordering within
+ * one boot. exofs_layout.h's "Time" note has the consequence: a volume
+ * carried across a reboot holds timestamps from a previous boot's tick
+ * count, so nothing should compare them across a mount. Returns 0 rather
+ * than failing if the syscall errors; a timestamp is not worth failing an
+ * otherwise good create over.
+ */
+uint32_t exofs_bdev_ticks(void);
+
 #endif /* EXOFS_BLOCKDEV_H */

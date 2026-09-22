@@ -157,11 +157,20 @@ _Static_assert(sizeof(exofs_dirent_t) == 32,
 
 /* flags.
  *
- * EXOFS_ENT_LAST terminates a directory early, the way cfat's `isLast` did.
  * EXOFS_ENT_FREE has no cfat equivalent — cfat never reclaimed an entry
- * slot, so a create-delete-create cycle grew the directory forever. A free
- * slot is reused before the directory is extended. */
-#define EXOFS_ENT_LAST       0x01u
+ * slot, so a create-delete-create cycle grew a directory forever. A free
+ * slot is reused before the directory is extended.
+ *
+ * THERE IS NO "LAST ENTRY" FLAG, and that is a deliberate departure from
+ * cfat's `isLast`. A directory's extent is its FAT chain, full stop: a slot
+ * is live iff its attributes are non-zero and EXOFS_ENT_FREE is clear, and
+ * iteration walks every slot of every block in the chain. cfat instead
+ * marked one entry as the terminator, which meant every insert and every
+ * delete had to find and fix up that mark — an invariant its own
+ * removeDirectoryEntry() had to hand-repair, and one that silently
+ * truncates a directory if it is ever wrong. Early exit is what the flag
+ * bought, and a directory block holds 16 entries, so it bought very little.
+ */
 #define EXOFS_ENT_FREE       0x02u
 
 /* ---- Name area ----------------------------------------------------------

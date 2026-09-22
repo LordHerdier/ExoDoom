@@ -12,8 +12,9 @@
  *
  * This file currently covers the block-I/O seam, the volume layer
  * (superblock/format/mount), the FAT layer (block allocation, chain
- * traversal) and the name area (variable-length names). Directories and
- * files land in later steps of SCRUM-189 and add their tests here.
+ * traversal), the name area (variable-length names), directory entries and
+ * path resolution. The directory and file operations built on them land in
+ * later steps of SCRUM-189 and add their tests here.
  *
  * DISK BINDING. exo_disk_read/exo_disk_write answer -EXO_EBUSY to a caller
  * that does not hold the binding (SCRUM-188), so suite_init acquires it and
@@ -53,6 +54,8 @@
 #include "libos_fs/exofs_internal.h"
 #include "libos_fs/exofs_fat.h"
 #include "libos_fs/exofs_name.h"
+#include "libos_fs/exofs_dirent.h"
+#include "libos_fs/exofs_path.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -1238,6 +1241,457 @@ static void test_bad_name_references_rejected(void)
     exofs_unmount();
 }
 
+/* ---- Directory entries --------------------------------------------------
+ *
+ * These drive exofs_dir_add/lookup/remove against the ROOT block directly.
+ * The root has no `.`/`..` yet — exofs_dir.c writes those in the next step —
+ * so a freshly formatted root is an empty directory, which is exactly the
+ * clean starting point these need.
+ */
+
+/* Count the live entries in a directory, via the iterator. Also serves as
+ * the iterator's own smoke test in every case that uses it. */
+static int count_entries(exofs_volume_t *v, uint32_t head, uint32_t *out)
+{
+    exofs_dir_iter_t it;
+    exofs_dir_iter_init(&it, head);
+
+    uint32_t n = 0;
+    for (;;) {
+        int rc = exofs_dir_iter_next(v, &it, NULL, NULL);
+        if (rc < 0) return rc;
+        if (rc == 0) break;
+        n++;
+    }
+    *out = n;
+    return 0;
+}
+
+static void test_dirent_add_lookup_remove(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+    uint32_t n = 0;
+
+    CU_ASSERT_EQUAL(count_entries(v, root, &n), 0);
+    CU_ASSERT_EQUAL(n, 0u);
+
+    exofs_entry_ref_t ref;
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, "hello.txt", EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 0, &ref), 0);
+
+    CU_ASSERT_EQUAL(count_entries(v, root, &n), 0);
+    CU_ASSERT_EQUAL(n, 1u);
+
+    exofs_dirent_t e;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, root, "hello.txt", NULL, &e), 0);
+    CU_ASSERT_EQUAL(e.attributes, EXOFS_ATTR_FILE);
+    CU_ASSERT_EQUAL(e.name_len, 9u);
+    CU_ASSERT_TRUE(exofs_dirent_is_live(&e));
+
+    /* The name really went through the name area. */
+    char back[EXOFS_MAX_NAME + 1];
+    CU_ASSERT_EQUAL(exofs_name_read(v, e.name_block, e.name_off, e.name_len,
+                                    back), 0);
+    CU_ASSERT_STRING_EQUAL(back, "hello.txt");
+
+    /* A name that is not there. */
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, root, "nope.txt", NULL, NULL),
+                    -EXO_ENOENT);
+
+    /* Duplicates refused, and the refusal costs nothing: still one entry. */
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, "hello.txt", EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 0, NULL), -EXO_EEXIST);
+    CU_ASSERT_EQUAL(count_entries(v, root, &n), 0);
+    CU_ASSERT_EQUAL(n, 1u);
+
+    CU_ASSERT_EQUAL(exofs_dir_remove(v, &ref), 0);
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, root, "hello.txt", NULL, NULL),
+                    -EXO_ENOENT);
+    CU_ASSERT_EQUAL(count_entries(v, root, &n), 0);
+    CU_ASSERT_EQUAL(n, 0u);
+
+    exofs_unmount();
+}
+
+/* Removing an entry must release its name record too, or every create/delete
+ * cycle leaks name bytes nothing can reach again. */
+static void test_remove_releases_the_name(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+    char name[EXOFS_MAX_NAME + 1];
+    make_name(name, 200u, 21);
+
+    exofs_entry_ref_t ref;
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, name, EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 0, &ref), 0);
+
+    exofs_dirent_t e;
+    CU_ASSERT_EQUAL(exofs_dirent_read(v, &ref, &e), 0);
+    uint32_t nblk = e.name_block; uint16_t noff = e.name_off;
+
+    CU_ASSERT_EQUAL(exofs_dir_remove(v, &ref), 0);
+
+    /* The record is gone, so reading it is refused rather than returning
+     * stale bytes. */
+    char back[EXOFS_MAX_NAME + 1];
+    CU_ASSERT_EQUAL(exofs_name_read(v, nblk, noff, 200u, back), -EXO_EINVAL);
+
+    /* And 50 add/remove cycles do not grow the name chain — the entry layer
+     * has to be returning records, not just forgetting them. */
+    uint32_t chain_before = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain_before), 0);
+
+    for (uint32_t i = 0; i < 50u; i++) {
+        CU_ASSERT_EQUAL(exofs_dir_add(v, root, name, EXOFS_ATTR_FILE,
+                                      EXOFS_NO_BLOCK, 0, &ref), 0);
+        CU_ASSERT_EQUAL(exofs_dir_remove(v, &ref), 0);
+    }
+
+    uint32_t chain_after = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain_after), 0);
+    CU_ASSERT_EQUAL(chain_after, chain_before);
+
+    exofs_unmount();
+}
+
+/* A removed slot must be reused before the directory is extended — cfat
+ * never reclaimed one, so create/delete/create grew a directory forever. */
+static void test_freed_slots_are_reused(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+
+    /* Fill the root's single block exactly. */
+    exofs_entry_ref_t refs[EXOFS_ENTS_PER_BLOCK];
+    char name[32];
+    for (uint32_t i = 0; i < EXOFS_ENTS_PER_BLOCK; i++) {
+        make_name(name, 8u, i);
+        CU_ASSERT_EQUAL(exofs_dir_add(v, root, name, EXOFS_ATTR_FILE,
+                                      EXOFS_NO_BLOCK, 0, &refs[i]), 0);
+        CU_ASSERT_EQUAL(refs[i].block, root);
+    }
+
+    uint32_t len_full = 0;
+    CU_ASSERT_EQUAL(exofs_chain_len(v, root, &len_full), 0);
+    CU_ASSERT_EQUAL(len_full, 1u);
+
+    /* Free one in the middle and add another: it must land in the hole, not
+     * in a newly allocated block. */
+    const uint32_t victim = 7u;
+    CU_ASSERT_EQUAL(exofs_dir_remove(v, &refs[victim]), 0);
+
+    exofs_entry_ref_t fresh;
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, "reused", EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 0, &fresh), 0);
+    CU_ASSERT_EQUAL(fresh.block, refs[victim].block);
+    CU_ASSERT_EQUAL(fresh.index, refs[victim].index);
+
+    uint32_t len_after = 0;
+    CU_ASSERT_EQUAL(exofs_chain_len(v, root, &len_after), 0);
+    CU_ASSERT_EQUAL(len_after, 1u);
+
+    exofs_unmount();
+}
+
+/* Past 16 entries the directory has to grow, and every entry must still be
+ * findable across the block boundary. */
+static void test_directory_spans_multiple_blocks(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+    enum { N = 40 };   /* > 2 blocks' worth */
+    char name[64];
+
+    for (uint32_t i = 0; i < N; i++) {
+        make_name(name, 20u, i);
+        CU_ASSERT_EQUAL(exofs_dir_add(v, root, name, EXOFS_ATTR_FILE,
+                                      EXOFS_NO_BLOCK, i, NULL), 0);
+    }
+
+    uint32_t chain = 0;
+    CU_ASSERT_EQUAL(exofs_chain_len(v, root, &chain), 0);
+    CU_ASSERT_TRUE(chain > 1u);
+
+    uint32_t n = 0;
+    CU_ASSERT_EQUAL(count_entries(v, root, &n), 0);
+    CU_ASSERT_EQUAL(n, (uint32_t)N);
+
+    /* Each one still resolves, and to the right entry — `size` carries the
+     * index so a lookup returning the wrong entry is caught. */
+    for (uint32_t i = 0; i < N; i++) {
+        make_name(name, 20u, i);
+        exofs_dirent_t e;
+        int rc = exofs_dir_lookup(v, root, name, NULL, &e);
+        if (rc != 0 || e.size != i) {
+            CU_ASSERT_EQUAL(rc, 0);
+            CU_ASSERT_EQUAL(e.size, i);
+            break;
+        }
+    }
+
+    exofs_unmount();
+}
+
+/*
+ * Two entries whose names differ only past byte 11 — the case cfat could not
+ * represent at all, since its names stopped at 11 bytes. Also the case its
+ * strcmp-based iteration got wrong.
+ */
+static void test_entries_with_long_similar_names(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+    const char *a = "same-prefix-aaaa.txt";
+    const char *b = "same-prefix-bbbb.txt";
+
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, a, EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 111u, NULL), 0);
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, b, EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 222u, NULL), 0);
+
+    exofs_dirent_t e;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, root, a, NULL, &e), 0);
+    CU_ASSERT_EQUAL(e.size, 111u);
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, root, b, NULL, &e), 0);
+    CU_ASSERT_EQUAL(e.size, 222u);
+
+    exofs_unmount();
+}
+
+/* Entries survive a remount: the whole point of writing them to disk. */
+static void test_entries_survive_remount(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+    char name[EXOFS_MAX_NAME + 1];
+    make_name(name, 255u, 33);
+
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, name, EXOFS_ATTR_DIRECTORY,
+                                  42u, 7u, NULL), 0);
+    CU_ASSERT_EQUAL(exofs_sync(), 0);
+
+    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    v = exofs_vol();
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v == NULL) return;
+
+    exofs_dirent_t e;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, v->root_block, name, NULL, &e), 0);
+    CU_ASSERT_EQUAL(e.attributes, EXOFS_ATTR_DIRECTORY);
+    CU_ASSERT_EQUAL(e.first_block, 42u);
+    CU_ASSERT_EQUAL(e.size, 7u);
+    CU_ASSERT_EQUAL(e.name_len, 255u);
+
+    exofs_unmount();
+}
+
+/* ---- Path parsing and resolution ---------------------------------------- */
+
+static void test_path_iterator(void)
+{
+    exofs_path_iter_t it;
+    char comp[EXOFS_MAX_NAME + 1];
+
+    /* Repeated and trailing separators are skipped, not turned into empty
+     * components. */
+    exofs_path_iter_init(&it, "//a///bb//ccc/");
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&it, comp), 1);
+    CU_ASSERT_STRING_EQUAL(comp, "a");
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&it, comp), 1);
+    CU_ASSERT_STRING_EQUAL(comp, "bb");
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&it, comp), 1);
+    CU_ASSERT_STRING_EQUAL(comp, "ccc");
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&it, comp), 0);
+
+    /* "/" has no components at all. */
+    exofs_path_iter_init(&it, "/");
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&it, comp), 0);
+
+    /*
+     * Two iterators interleaved. This is the case cfat could not do: its
+     * path walks used strtok(), whose state is a single static, so a nested
+     * or interleaved walk silently destroyed the outer one.
+     */
+    exofs_path_iter_t a, b;
+    char ca[EXOFS_MAX_NAME + 1], cb[EXOFS_MAX_NAME + 1];
+    exofs_path_iter_init(&a, "/one/two");
+    exofs_path_iter_init(&b, "/red/blue");
+
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&a, ca), 1);
+    CU_ASSERT_STRING_EQUAL(ca, "one");
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&b, cb), 1);
+    CU_ASSERT_STRING_EQUAL(cb, "red");
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&a, ca), 1);
+    CU_ASSERT_STRING_EQUAL(ca, "two");
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&b, cb), 1);
+    CU_ASSERT_STRING_EQUAL(cb, "blue");
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&a, ca), 0);
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&b, cb), 0);
+}
+
+static void test_path_validation(void)
+{
+    CU_ASSERT_EQUAL(exofs_path_validate("/"), 0);
+    CU_ASSERT_EQUAL(exofs_path_validate("/a/b/c"), 0);
+
+    CU_ASSERT_EQUAL(exofs_path_validate(NULL), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_path_validate(""), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_path_validate("relative/path"), -EXO_EINVAL);
+
+    /* An over-long component is reported rather than truncated: a truncated
+     * component would resolve to a different file. */
+    char big[EXOFS_MAX_NAME + 8];
+    big[0] = '/';
+    for (uint32_t i = 1; i < EXOFS_MAX_NAME + 3u; i++) big[i] = 'x';
+    big[EXOFS_MAX_NAME + 3u] = '\0';
+    CU_ASSERT_EQUAL(exofs_path_validate(big), -EXO_EINVAL);
+}
+
+static void test_path_resolve(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+
+    /* Build /dir -> /dir/file.txt by hand: exofs_dir.c does not exist yet,
+     * so the subdirectory gets a chain of its own the same way mkdir will. */
+    uint32_t dirblk = 0;
+    CU_ASSERT_EQUAL(exofs_fat_alloc(v, &dirblk), 0);
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, "dir", EXOFS_ATTR_DIRECTORY,
+                                  dirblk, 0, NULL), 0);
+    CU_ASSERT_EQUAL(exofs_dir_add(v, dirblk, "file.txt", EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 99u, NULL), 0);
+
+    /* "/" is the synthetic root, with no slot to write back to. */
+    exofs_entry_ref_t ref;
+    exofs_dirent_t e;
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/", &ref, &e), 0);
+    CU_ASSERT_EQUAL(ref.block, EXOFS_NO_BLOCK);
+    CU_ASSERT_EQUAL(e.first_block, root);
+    CU_ASSERT_EQUAL(e.attributes, EXOFS_ATTR_DIRECTORY);
+
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/dir", NULL, &e), 0);
+    CU_ASSERT_EQUAL(e.first_block, dirblk);
+
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/dir/file.txt", NULL, &e), 0);
+    CU_ASSERT_EQUAL(e.size, 99u);
+
+    /* Redundant separators resolve the same way. */
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "//dir//file.txt", NULL, &e), 0);
+    CU_ASSERT_EQUAL(e.size, 99u);
+
+    /* Missing components, and descending through a file. The second is
+     * -EXO_ENOTDIR rather than -EXO_ENOENT: "your path is wrong" is a
+     * different answer from "it isn't there". */
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/nope", NULL, NULL), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/dir/nope", NULL, NULL),
+                    -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/dir/file.txt/x", NULL, NULL),
+                    -EXO_ENOTDIR);
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "relative", NULL, NULL),
+                    -EXO_EINVAL);
+
+    exofs_unmount();
+}
+
+static void test_path_resolve_parent(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+
+    uint32_t dirblk = 0;
+    CU_ASSERT_EQUAL(exofs_fat_alloc(v, &dirblk), 0);
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, "dir", EXOFS_ATTR_DIRECTORY,
+                                  dirblk, 0, NULL), 0);
+
+    exofs_dirent_t parent;
+    char leaf[EXOFS_MAX_NAME + 1];
+
+    /* A leaf directly under the root. */
+    CU_ASSERT_EQUAL(exofs_path_resolve_parent(v, "/newfile.txt", &parent,
+                                              leaf), 0);
+    CU_ASSERT_EQUAL(parent.first_block, root);
+    CU_ASSERT_STRING_EQUAL(leaf, "newfile.txt");
+
+    /* A leaf one level down — the parent must be the subdirectory, which is
+     * the off-by-one this function exists to get right. */
+    CU_ASSERT_EQUAL(exofs_path_resolve_parent(v, "/dir/newfile.txt", &parent,
+                                              leaf), 0);
+    CU_ASSERT_EQUAL(parent.first_block, dirblk);
+    CU_ASSERT_STRING_EQUAL(leaf, "newfile.txt");
+
+    /* The leaf need not exist — that is the point, for create. */
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, parent.first_block, leaf, NULL, NULL),
+                    -EXO_ENOENT);
+
+    /* But intermediate components must. */
+    CU_ASSERT_EQUAL(exofs_path_resolve_parent(v, "/nope/x", &parent, leaf),
+                    -EXO_ENOENT);
+
+    /* The root has no parent, and saying so beats quietly returning the root
+     * and letting a caller create an entry named "". */
+    CU_ASSERT_EQUAL(exofs_path_resolve_parent(v, "/", &parent, leaf),
+                    -EXO_EINVAL);
+
+    exofs_unmount();
+}
+
+/* A directory chain with a cycle must be reported by the iterator, not spun
+ * on — the same hardening the FAT layer has, at the level above it. */
+static void test_directory_cycle_is_reported(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+
+    /* Fill the root and force it to grow, then loop the second block back
+     * to the first. */
+    char name[32];
+    for (uint32_t i = 0; i < EXOFS_ENTS_PER_BLOCK + 1u; i++) {
+        make_name(name, 8u, i);
+        CU_ASSERT_EQUAL(exofs_dir_add(v, root, name, EXOFS_ATTR_FILE,
+                                      EXOFS_NO_BLOCK, 0, NULL), 0);
+    }
+
+    uint32_t second = 0;
+    CU_ASSERT_EQUAL(exofs_fat_get(v, root, &second), 0);
+    CU_ASSERT_NOT_EQUAL(second, EXOFS_BLOCK_EOC);
+    CU_ASSERT_EQUAL(exofs_fat_set(v, second, root), 0);
+
+    uint32_t n = 0;
+    CU_ASSERT_EQUAL(count_entries(v, root, &n), -EXO_EIO);
+
+    exofs_unmount();
+}
+
 void suite_exofs_tests(CU_pSuite s)
 {
     CU_add_test(s, "heap buffer lies in the LibOS window",
@@ -1306,4 +1760,23 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "names survive a remount", test_names_survive_remount);
     CU_add_test(s, "bad name references rejected",
                 test_bad_name_references_rejected);
+
+    CU_add_test(s, "entry add, lookup and remove",
+                test_dirent_add_lookup_remove);
+    CU_add_test(s, "removing an entry releases its name",
+                test_remove_releases_the_name);
+    CU_add_test(s, "freed entry slots are reused",
+                test_freed_slots_are_reused);
+    CU_add_test(s, "a directory spans multiple blocks",
+                test_directory_spans_multiple_blocks);
+    CU_add_test(s, "entries with long, similar names",
+                test_entries_with_long_similar_names);
+    CU_add_test(s, "entries survive a remount",
+                test_entries_survive_remount);
+    CU_add_test(s, "path component iterator", test_path_iterator);
+    CU_add_test(s, "path validation", test_path_validation);
+    CU_add_test(s, "path resolution", test_path_resolve);
+    CU_add_test(s, "parent path resolution", test_path_resolve_parent);
+    CU_add_test(s, "a directory cycle is reported",
+                test_directory_cycle_is_reported);
 }

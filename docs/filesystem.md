@@ -15,9 +15,10 @@ SCRUM-190's host-side image builder can compile against that exact header
 rather than restating the format in a script.
 
 > **Status.** Landed so far: the block-I/O seam, the volume layer
-> (superblock/format/mount/FAT cache) and the FAT layer (allocation, chain
-> traversal). The name area, directories and files are in progress under the
-> same ticket. Sections below describe what exists.
+> (superblock/format/mount/FAT cache), the FAT layer (allocation, chain
+> traversal), the name area, directory entries and path resolution. The
+> directory and file operations built on them are in progress under the same
+> ticket. Sections below describe what exists.
 
 ---
 
@@ -152,8 +153,12 @@ in the original rather than a matter of taste:
 | Block 0 kept out of the allocator only by `FAT[0]` never reading as free | the search starts at block 1, so the root cannot be handed out even if the on-disk FAT says it is free |
 | 16-bit FAT entries, capping a volume at 32 MiB | 32-bit entries. SCRUM-190 must fit a ~28 MB IWAD once the multiboot WAD module is retired |
 | `MAXFILENAME 11` (8.3), inline in the directory entry | variable-length names through an indirection (§6) |
-| Directory iteration finds "the next entry" by `strcmp`-ing names — O(n) per step, and wrong outright with duplicate names | positional `(block, index)` cursor |
+| Directory iteration finds "the next entry" by `strcmp`-ing names — O(n) per step, so a full walk is O(n²), and wrong outright with duplicate names | positional `(block, index)` cursor |
 | Entry slots never reclaimed; create/delete/create grows a directory forever | `EXOFS_ENT_FREE` slots reused before the directory is extended |
+| One entry marked `isLast` terminates a directory — an invariant every insert and delete has to repair, and one that silently truncates the directory if it is ever wrong | no terminator flag at all. A directory's extent is its FAT chain; a slot is live iff its attributes are non-zero and `EXOFS_ENT_FREE` is clear. Early exit was all the flag bought, over 16 entries per block |
+| Paths tokenised with `strtok()`, whose state is a single static — and both `findEntryFromPath()` and `findParentFromPath()` use it, so a nested walk silently destroys the outer one | an iterator carrying its own cursor; two walks can interleave, which `test_path_iterator` checks directly |
+| Path copied into `char path[MAXPATH]` with `strcpy()` — an unchecked copy of caller-supplied data into a 255-byte stack buffer | the path is never copied; the iterator walks it in place and copies one component at a time into a buffer whose size it is told |
+| No cycle detection anywhere | every chain walk bounded, at the FAT layer and again at the directory iterator |
 
 ---
 
@@ -172,7 +177,30 @@ name area would grow without bound.
 
 ---
 
-## 7. Limits and scope
+## 7. Paths
+
+**Absolute only.** A path must start with `/`. There is no working directory
+in this library and there should not be one: a shell that wants a `cd` keeps
+the state itself and passes absolute paths down, which is also the only
+arrangement that still works when two callers share a mounted volume.
+
+Repeated separators (`//`) and a trailing `/` are skipped rather than
+producing empty components. A component longer than `EXOFS_MAX_NAME` is
+**reported, not truncated** — a truncated component resolves to a different
+file, which is worse than failing.
+
+`.` and `..` are not special-cased in the path code. They are resolved
+through the directory's own entries, so they mean whatever the directory says
+they mean, which is what makes `..` work once those entries exist.
+
+Descending through a non-directory is `-EXO_ENOTDIR`, distinct from
+`-EXO_ENOENT` for a component that is simply absent: "your path is wrong" and
+"it isn't there" are different answers and a caller can act on the
+difference.
+
+---
+
+## 8. Limits and scope
 
 - **One volume at a time.** The mounted volume is a single static state.
   This is not a simplification awaiting removal: the disk binding

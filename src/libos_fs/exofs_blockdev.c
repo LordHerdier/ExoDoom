@@ -44,6 +44,11 @@ static int64_t bdev_write_raw(uint32_t lba, const void *buf, uint32_t count)
                                 0, 0, 0);
 }
 
+static int64_t bdev_ticks_raw(void)
+{
+    return exo_syscall_dispatch(EXO_SYS_GET_TICKS, 0, 0, 0, 0, 0, 0);
+}
+
 #else /* !EXO_KERNEL — the real LibOS build */
 
 static int64_t bdev_acquire_raw(void)
@@ -61,7 +66,18 @@ static int64_t bdev_write_raw(uint32_t lba, const void *buf, uint32_t count)
     return exo_disk_write(lba, buf, count);
 }
 
+static int64_t bdev_ticks_raw(void)
+{
+    return exo_get_ticks();
+}
+
 #endif /* EXO_KERNEL */
+
+uint32_t exofs_bdev_ticks(void)
+{
+    int64_t t = bdev_ticks_raw();
+    return (t < 0) ? 0u : (uint32_t)t;
+}
 
 /* ---- Chunked transfer ---------------------------------------------------
  *
