@@ -71,6 +71,7 @@ void suite_doom_keymap_tests(CU_pSuite s);
 void suite_libos_doom_tests(CU_pSuite s);
 void suite_syscall_stat_tests(CU_pSuite s);
 void suite_ata_tests(CU_pSuite s);
+void suite_doom_profile_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -435,6 +436,11 @@ int run_tests(void)
 
     s = CU_add_suite("ata", NULL, NULL);
     suite_ata_tests(s);
+
+    /* Pure counter/window math over one static array -- no hardware, no
+     * state to seed (SCRUM-87). */
+    s = CU_add_suite("doom_profile", NULL, NULL);
+    suite_doom_profile_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not
