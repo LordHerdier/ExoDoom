@@ -455,9 +455,12 @@ void ps2_process_scancode(uint8_t scancode) {
      * request() are the exact same round-robin switch exo_yield already
      * uses (src/syscall_yield.c's sys_yield(), including its
      * PAGE_OWNER_FREE no-op check for "nothing else is READY"); calling
-     * them straight from the IRQ1 path mirrors how irq0_handler() already
-     * calls fb_compositor_tick() directly (src/pit.c). The actual
-     * CR3/register swap is deferred to the current context's next syscall
+     * them straight from the IRQ1 path mirrors how irq0_handler() used to
+     * call fb_compositor_tick() directly (src/pit.c) -- as of SCRUM-181
+     * irq0_handler() only sets a flag there, and the actual copy runs from
+     * fb_compositor_service() in syscall-dispatch context instead, but this
+     * IRQ1 path still calls straight into context.c the same direct way.
+     * The actual CR3/register swap is deferred to the current context's next syscall
      * (src/syscall_entry.s's epilogue), not immediate -- see
      * docs/syscall_spec.md §3.5's SCRUM-111 note.
      *

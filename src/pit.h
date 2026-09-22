@@ -5,6 +5,16 @@ void pit_init(uint32_t hz);
 uint32_t kernel_get_ticks_ms();
 uint8_t pit_take_print_pending();
 
+/*
+ * SCRUM-181: clear-on-read flag set by irq0_handler() when a ~60 Hz
+ * compositor tick is due, mirroring pit_take_print_pending() above. Kept
+ * unconditional (not TESTING-gated) since it's just a flag, unlike the
+ * framebuffer memcpy it used to trigger directly -- see fb_compositor.c's
+ * fb_compositor_service(), which consumes it from syscall-dispatch context
+ * instead of from inside this ISR.
+ */
+uint8_t pit_take_composite_pending();
+
 #ifdef TESTING
 /*
  * SCRUM-170: the stack pointer irq0_handler() observed the last time it ran,

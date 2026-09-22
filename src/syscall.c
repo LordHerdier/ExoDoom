@@ -4,6 +4,14 @@
 #include "msr.h"
 #include "vmm.h"
 
+#ifndef TESTING
+/* SCRUM-181: fb_compositor_service() is called from exo_syscall_dispatch()
+ * below. Guarded like pit.c's old direct call used to be -- the
+ * framebuffer, fb_binding and fb_shadow are never initialized under a
+ * TESTING build (src/kernel.c exits before that). */
+#include "fb_compositor.h"
+#endif
+
 /*
  * syscall.c — MSR setup and syscall dispatch (SCRUM-32).
  *
@@ -137,6 +145,16 @@ int64_t exo_syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2,
                              uint64_t a3, uint64_t a4, uint64_t a5,
                              uint64_t a6)
 {
+#ifndef TESTING
+    /* SCRUM-181: every LibOS syscall re-enters here, and every LibOS today
+     * polls exo_kbd_poll()/exo_get_ticks() every loop iteration (docs/
+     * syscall_spec.md §3.5), so this is a frequent, already-there hook to
+     * service a deferred compositor tick from -- unconditionally, ahead of
+     * the range check below, so it runs regardless of which syscall number
+     * got us here, mirroring irq0_handler()'s old unconditional call. */
+    fb_compositor_service();
+#endif
+
     /* The number arrives as a full 64-bit RAX straight from ring 3, so the
      * range check is the only thing standing between a hostile LibOS and an
      * arbitrary read off the end of the table.  Unsigned compare — a
