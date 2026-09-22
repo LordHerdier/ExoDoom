@@ -13,6 +13,9 @@
 #define ATA_DRIVE_HEAD  0x1F6
 #define ATA_STATUS      0x1F7  /* read */
 #define ATA_COMMAND     0x1F7  /* write */
+#define ATA_CONTROL     0x3F6  /* write: device control; read: alternate
+                                 * status (same bits as ATA_STATUS, but
+                                 * reading it never clears a pending IRQ) */
 
 #define ATA_STATUS_ERR  0x01
 #define ATA_STATUS_DRQ  0x08
@@ -32,6 +35,26 @@
  * notes. Large enough that it never fires spuriously against QEMU, small
  * enough that a genuinely wedged drive doesn't hang boot forever. */
 #define ATA_POLL_ITERS 100000
+
+/* A drive does not assert BSY the instant it receives a new command -- the
+ * well-known ~400ns turnaround (OSDev wiki, "ATA PIO Mode": "you need to
+ * wait at least 400 nanoseconds ... before reading the Status register").
+ * Polling ATA_STATUS immediately after outb(ATA_COMMAND, ...) can therefore
+ * still observe the *previous* command's status (BSY already clear from
+ * before this one was issued), which lets ata_wait_not_busy() return
+ * ATA_OK before the new command has actually started -- intermittently, not
+ * always, which is exactly the shape of the CI-only ata_write_sector()
+ * failure this was added to fix (SCRUM-102: passed locally, failed under
+ * CI's scheduling). Four throwaway reads of the alternate status register
+ * (0x3F6, not 0x1F7 -- reading the primary status register can also clear a
+ * pending IRQ, which this must not do) is the standard way to force that
+ * delay: each I/O read takes on the order of 100ns on real hardware. */
+static void ata_delay_400ns(void) {
+    (void)inb(ATA_CONTROL);
+    (void)inb(ATA_CONTROL);
+    (void)inb(ATA_CONTROL);
+    (void)inb(ATA_CONTROL);
+}
 
 /* Poll until BSY clears. Returns ATA_OK, or ATA_ETIMEOUT if it never does. */
 static int ata_wait_not_busy(void) {
@@ -95,6 +118,7 @@ int ata_init(void) {
     outb(ATA_LBA_MID, 0);
     outb(ATA_LBA_HI, 0);
     outb(ATA_COMMAND, ATA_CMD_IDENTIFY);
+    ata_delay_400ns();
 
     uint8_t status = inb(ATA_STATUS);
     if (status == 0) {
@@ -125,6 +149,7 @@ int ata_init(void) {
 int ata_read_sector(uint32_t lba, uint8_t *buf) {
     ata_select_sector(lba);
     outb(ATA_COMMAND, ATA_CMD_READ_SECTORS);
+    ata_delay_400ns();
 
     int rc = ata_wait_not_busy();
     if (rc != ATA_OK) {
@@ -152,6 +177,7 @@ int ata_read_sector(uint32_t lba, uint8_t *buf) {
 int ata_write_sector(uint32_t lba, const uint8_t *buf) {
     ata_select_sector(lba);
     outb(ATA_COMMAND, ATA_CMD_WRITE_SECTORS);
+    ata_delay_400ns();
 
     int rc = ata_wait_not_busy();
     if (rc != ATA_OK) {
@@ -182,5 +208,6 @@ int ata_write_sector(uint32_t lba, const uint8_t *buf) {
      * ERR/DF, so a flush the drive actually rejected is reported as
      * ATA_EIO rather than silently coming back ATA_OK. */
     outb(ATA_COMMAND, ATA_CMD_CACHE_FLUSH);
+    ata_delay_400ns();
     return ata_wait_ready();
 }
