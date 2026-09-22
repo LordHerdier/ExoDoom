@@ -100,10 +100,13 @@
 /* Introspection (SCRUM-113) */
 #define EXO_SYS_MEMSTAT      25
 #define EXO_SYS_PSLIST       26
+/* Disk (SCRUM-103) */
+#define EXO_SYS_DISK_READ    27
+#define EXO_SYS_DISK_WRITE   28
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense. */
-#define EXO_SYS_COUNT        27
+#define EXO_SYS_COUNT        29
 
 /* ---- Error codes -------------------------------------------------------- */
 /*
@@ -612,6 +615,29 @@ static inline int64_t exo_pslist(exo_ps_info_t *out, uint32_t max)
 {
     return exo_syscall2(EXO_SYS_PSLIST, (uint64_t)(uintptr_t)out,
                         (uint64_t)max);
+}
+
+/* #27 — read `count` consecutive 512-byte sectors starting at 28-bit LBA
+ * `lba` into `buf` (at least `count * 512` bytes). Returns `count` on
+ * success, or -EXO_ENODEV (no drive), -EXO_EINVAL (count == 0 is NOT an
+ * error and returns 0; count over EXO_DISK_MAX_SECTORS or lba+count
+ * overflowing 28-bit LBA space are), -EXO_EFAULT (buf outside the LibOS
+ * window or not mapped writable) or -EXO_EIO (a sector faulted partway
+ * through). No ownership/binding check yet -- see SCRUM-188. */
+static inline int64_t exo_disk_read(uint32_t lba, void *buf, uint32_t count)
+{
+    return exo_syscall3(EXO_SYS_DISK_READ, (uint64_t)lba,
+                        (uint64_t)(uintptr_t)buf, (uint64_t)count);
+}
+
+/* #28 — write `count` consecutive 512-byte sectors starting at 28-bit LBA
+ * `lba` from `buf`. Same return/error contract as exo_disk_read, with `buf`
+ * checked readable rather than writable. */
+static inline int64_t exo_disk_write(uint32_t lba, const void *buf,
+                                     uint32_t count)
+{
+    return exo_syscall3(EXO_SYS_DISK_WRITE, (uint64_t)lba,
+                        (uint64_t)(uintptr_t)buf, (uint64_t)count);
 }
 
 #endif /* !EXO_KERNEL */

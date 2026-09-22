@@ -29,6 +29,7 @@
 
 #define EXO_EPERM     1   /* operation not permitted for this LibOS        */
 #define EXO_ENOENT    2   /* no such file                                  */
+#define EXO_EIO       5   /* disk I/O fault (exo_disk_read/exo_disk_write) */
 #define EXO_EBADF     9   /* bad file descriptor                           */
 #define EXO_ENOMEM   12   /* out of physical pages / heap                  */
 #define EXO_EACCES   13   /* permission denied                             */
