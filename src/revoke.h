@@ -20,6 +20,9 @@
  *                (src/page_alloc.h — the mark is a bit in the owner tag)
  *   framebuffer  fb_binding_revoke_mark / fb_binding_reclaim
  *                (src/fb_binding.h — the mark is a flag beside the binding)
+ *   disk         disk_binding_revoke_mark / disk_binding_reclaim
+ *                (src/disk_binding.h — same shape as the framebuffer, one
+ *                exclusive owner and a flag beside it, SCRUM-188)
  *
  * The layering matches page_alloc.c / syscall_mem.c: everything here is
  * ABI-agnostic and speaks REVOKE_* status codes.  Nothing in this header is a
@@ -50,6 +53,7 @@
 typedef enum {
     REVOKE_PAGE        = 0,   /* one 4 KiB physical page, named by `paddr` */
     REVOKE_FRAMEBUFFER = 1,   /* the framebuffer binding                   */
+    REVOKE_DISK        = 2,   /* the disk binding (SCRUM-188)              */
 } revoke_kind_t;
 
 typedef struct {
@@ -91,6 +95,16 @@ static inline revoke_res_t revoke_res_fb(void)
     return r;
 }
 
+static inline revoke_res_t revoke_res_disk(void)
+{
+    revoke_res_t r;
+
+    r.kind  = REVOKE_DISK;
+    r.paddr = 0;
+
+    return r;
+}
+
 /*
  * Phase 1 — ask `who` for `what` back.  Marks the resource in the ownership
  * table and leaves it entirely usable by its owner: a marked page can still be
@@ -127,10 +141,11 @@ int revoke_force(page_owner_t who, revoke_res_t what);
 
 /*
  * Reclaim everything `who` holds — every page tagged with its id, plus the
- * framebuffer if it holds it — and return how many resources were taken
- * (pages + framebuffer).  This is the whole of the v1 revocation policy and
- * the hook SCRUM-155's exo_exit calls; nothing on the boot path calls it yet,
- * so a LibOS that exits today keeps its pages and the screen.
+ * framebuffer and the disk if it holds them — and return how many resources
+ * were taken (pages + framebuffer + disk).  This is the whole of the v1
+ * revocation policy and the hook SCRUM-155's exo_exit calls; nothing on the
+ * boot path calls it yet, so a LibOS that exits today keeps its pages, the
+ * screen and the disk.
  *
  * PAGE_OWNER_FREE and PAGE_OWNER_KERNEL are refused (0): neither names a
  * revocable context, and sweeping the kernel would free the page bitmap, the
@@ -158,6 +173,7 @@ typedef struct {
     uint32_t returned;
     uint32_t pages_reclaimed;  /* pages taken, revoke_all sweeps included     */
     uint32_t fb_reclaimed;     /* framebuffer bindings taken                  */
+    uint32_t disk_reclaimed;   /* disk bindings taken (SCRUM-188)             */
 } revoke_record_t;
 
 /* The live record.  The pointer is to module-static storage and stays valid

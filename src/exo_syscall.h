@@ -100,10 +100,14 @@
 /* Introspection (SCRUM-113) */
 #define EXO_SYS_MEMSTAT      25
 #define EXO_SYS_PSLIST       26
+/* Disk (SCRUM-103, binding SCRUM-188) */
+#define EXO_SYS_DISK_READ    27
+#define EXO_SYS_DISK_WRITE   28
+#define EXO_SYS_DISK_ACQUIRE 29
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense. */
-#define EXO_SYS_COUNT        27
+#define EXO_SYS_COUNT        30
 
 /* ---- Error codes -------------------------------------------------------- */
 /*
@@ -612,6 +616,39 @@ static inline int64_t exo_pslist(exo_ps_info_t *out, uint32_t max)
 {
     return exo_syscall2(EXO_SYS_PSLIST, (uint64_t)(uintptr_t)out,
                         (uint64_t)max);
+}
+
+/* #27 — read `count` consecutive 512-byte sectors starting at 28-bit LBA
+ * `lba` into `buf` (at least `count * 512` bytes). Returns `count` on
+ * success, or -EXO_ENODEV (no drive), -EXO_EINVAL (count == 0 is NOT an
+ * error and returns 0; count over EXO_DISK_MAX_SECTORS or lba+count
+ * overflowing 28-bit LBA space are), -EXO_EFAULT (buf outside the LibOS
+ * window or not mapped writable), -EXO_EBUSY (caller does not hold the disk
+ * binding -- see exo_disk_acquire, SCRUM-188) or -EXO_EIO (a sector faulted
+ * partway through). */
+static inline int64_t exo_disk_read(uint32_t lba, void *buf, uint32_t count)
+{
+    return exo_syscall3(EXO_SYS_DISK_READ, (uint64_t)lba,
+                        (uint64_t)(uintptr_t)buf, (uint64_t)count);
+}
+
+/* #28 — write `count` consecutive 512-byte sectors starting at 28-bit LBA
+ * `lba` from `buf`. Same return/error contract as exo_disk_read, with `buf`
+ * checked readable rather than writable. */
+static inline int64_t exo_disk_write(uint32_t lba, const void *buf,
+                                     uint32_t count)
+{
+    return exo_syscall3(EXO_SYS_DISK_WRITE, (uint64_t)lba,
+                        (uint64_t)(uintptr_t)buf, (uint64_t)count);
+}
+
+/* #29 — bind the disk to the caller (SCRUM-188). Must succeed before
+ * exo_disk_read/exo_disk_write will do anything for this caller. Returns 0
+ * (including a re-acquire by the current owner), -EXO_EBUSY if another
+ * context holds it, or -EXO_ENODEV if this machine has no drive. */
+static inline int64_t exo_disk_acquire(void)
+{
+    return exo_syscall0(EXO_SYS_DISK_ACQUIRE);
 }
 
 #endif /* !EXO_KERNEL */
