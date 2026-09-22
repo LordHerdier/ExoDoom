@@ -19,6 +19,7 @@
 #include "exofs_internal.h"
 #include "exofs_layout.h"
 #include "exofs_blockdev.h"
+#include "exofs_dir.h"      /* exofs_dir_init_root — see step 4 of format() */
 
 #include "exo_errno.h"
 #include "libos_heap.h"
@@ -199,6 +200,11 @@ void exofs_unmount(void)
  */
 int exofs_format(uint32_t base_lba, uint32_t total_sectors)
 {
+    /* Formatting under a live mount would leave that mount describing a
+     * volume that no longer exists — its cached FAT, its geometry and its
+     * name-chain head all stale. Refuse rather than corrupt. */
+    if (g_vol.mounted) return -EXO_EBUSY;
+
     uint32_t total_blocks = 0, fat_blocks = 0;
     int rc = compute_geometry(total_sectors, &total_blocks, &fat_blocks);
     if (rc < 0) return rc;
@@ -229,16 +235,8 @@ int exofs_format(uint32_t base_lba, uint32_t total_sectors)
         fat0[0] = 0;                        /* back to all-zero for reuse */
     }
 
-    /* 2. The root directory block itself, zeroed.
-     *
-     *    A zeroed block is a directory with no entries: the first entry's
-     *    flags are 0, so it is neither EXOFS_ENT_LAST nor EXOFS_ENT_FREE,
-     *    and name_len is 0. The `.` and `..` entries that a directory is
-     *    supposed to start with are written by the directory layer, which
-     *    does not exist yet — exofs_dir.c will hook in here rather than
-     *    leaving format() to hand-assemble entries it does not own. Until
-     *    then a freshly formatted volume mounts and reports correct
-     *    geometry, which is what this step is for.
+    /* 2. The root directory block itself, zeroed. Its "." and ".." are
+     *    written at the end of this function — see step 4.
      *
      *    exofs_bdev_write() directly rather than exofs_write_block(): that
      *    helper resolves a block index through the *mounted* volume, and
@@ -261,7 +259,30 @@ int exofs_format(uint32_t base_lba, uint32_t total_sectors)
         sb->name_head    = EXOFS_NO_BLOCK;   /* no names on a fresh volume */
 
         rc = exofs_bdev_write(base_lba, sb, 1);
+        if (rc < 0) goto out;
     }
+
+    /*
+     * 4. The root's "." and "..".
+     *
+     * This needs a mounted volume, because creating a directory entry
+     * allocates a name record and that needs the FAT cache and the
+     * superblock's name_head — so format mounts what it has just written,
+     * bootstraps the root, syncs and unmounts. cfat's createfs() called
+     * createRootDirectory() at the same point and for the same reason.
+     *
+     * It has to be last: everything above is what makes the volume
+     * mountable in the first place.
+     */
+    rc = exofs_mount(base_lba);
+    if (rc < 0) goto out;
+
+    rc = exofs_dir_init_root(&g_vol);
+    if (rc == 0) rc = fat_flush(&g_vol);
+
+    /* Unmount unconditionally: format's contract is that it leaves nothing
+     * mounted, whether or not the bootstrap succeeded. */
+    exofs_unmount();
 
 out:
     libos_heap_free(zero);

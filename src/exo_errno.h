@@ -47,3 +47,9 @@
 #define EXO_ESPIPE   29   /* seek on a non-seekable descriptor             */
 #define EXO_EROFS    30   /* write attempted on a read-only filesystem     */
 #define EXO_ENOSYS   38   /* syscall number not implemented                */
+
+/* Added by SCRUM-189 for ExoFS's rmdir. The first code here whose caller is
+ * a LibOS-space library rather than a syscall handler, which is fine: the
+ * point of this file is that a value means the same thing everywhere, and
+ * the filesystem hands these to the same callers the syscalls do. */
+#define EXO_ENOTEMPTY 39  /* directory not empty (rmdir)                   */

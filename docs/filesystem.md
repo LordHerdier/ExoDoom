@@ -16,9 +16,9 @@ rather than restating the format in a script.
 
 > **Status.** Landed so far: the block-I/O seam, the volume layer
 > (superblock/format/mount/FAT cache), the FAT layer (allocation, chain
-> traversal), the name area, directory entries and path resolution. The
-> directory and file operations built on them are in progress under the same
-> ticket. Sections below describe what exists.
+> traversal), the name area, directory entries, path resolution and the
+> directory operations (mkdir/rmdir/opendir/readdir). File operations are in
+> progress under the same ticket. Sections below describe what exists.
 
 ---
 
@@ -174,6 +174,43 @@ Records never straddle a block boundary, so reading a name is always one
 block read. Freed records are marked and reused rather than compacted,
 because SCRUM-104's save-file rotation renames constantly and a bump-only
 name area would grow without bound.
+
+---
+
+## 6b. Directories
+
+`.` and `..` are **real entries**, not synthesised during iteration. That is
+what lets path resolution handle them with no special case at all: it looks
+them up in the directory like any other name, so they mean whatever the
+directory says they mean. The cost is two slots and two name records per
+directory, plus the obligation that anything which ever *moves* a directory
+must fix its `..` — nothing moves directories yet, and a future rename owns
+that.
+
+The root's `..` points at the root. There is nowhere above it, and a
+self-loop makes `/..` resolve to `/` the way every other filesystem behaves,
+without the path code needing to know the root is special.
+
+This is why **`exofs_format()` mounts the volume it has just written**:
+creating an entry allocates a name record, which needs the FAT cache and the
+superblock's `name_head`, so the root's `.`/`..` cannot be laid down by the
+same code that writes raw sectors. Format writes the superblock, mounts,
+bootstraps the root, syncs and unmounts. cfat's `createfs()` called
+`createRootDirectory()` at the same point for the same reason. A consequence
+worth knowing: **a freshly formatted volume has two blocks in use**, the root
+and one name block.
+
+`exofs_readdir()` reports `.` and `..`, as POSIX does. They are ordinary
+entries here, a shell listing wants them, and filtering them would cost a
+name comparison on every iteration to hide something the caller can skip for
+free.
+
+**`rmdir` unlinks from the parent before freeing the directory's blocks** —
+§1's rule at its sharpest. This order leaks a block chain nothing references
+if interrupted; the other leaves the parent naming blocks that are back on
+the free list, so the next allocation hands them to another file while a live
+directory entry still points there. One is a wasted block, the other is two
+files sharing storage.
 
 ---
 

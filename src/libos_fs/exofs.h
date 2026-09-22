@@ -98,6 +98,78 @@ typedef struct exofs_geometry {
 
 int exofs_geometry(exofs_geometry_t *out);
 
+/* ---- Directories --------------------------------------------------------
+ *
+ * Paths are absolute — they must start with '/'. See docs/filesystem.md §7
+ * for why there is no working directory here.
+ */
+
+/*
+ * Create the directory `path`. Its "." and ".." are written before it is
+ * linked into its parent, so a directory is never visible in a half-made
+ * state.
+ *
+ * Returns 0, -EXO_EEXIST if the name is taken, -EXO_ENOENT if a parent
+ * component is missing, -EXO_ENOTDIR if one is not a directory,
+ * -EXO_EINVAL for a malformed path or an over-long component,
+ * -EXO_ENOSPC, or a device error.
+ */
+int exofs_mkdir(const char *path);
+
+/*
+ * Remove the empty directory `path`.
+ *
+ * Returns 0, -EXO_ENOENT, -EXO_ENOTDIR if `path` is not a directory,
+ * -EXO_ENOTEMPTY if it holds anything besides "." and "..", -EXO_EBUSY for
+ * the root (which has no parent to be removed from), or a device error.
+ */
+int exofs_rmdir(const char *path);
+
+/* One entry, as reported by exofs_readdir(). */
+typedef struct exofs_dirinfo {
+    char     name[EXOFS_MAX_NAME + 1];
+    uint32_t size;          /* bytes, for a file; 0 for a directory */
+    uint16_t attributes;    /* EXOFS_ATTR_*                         */
+} exofs_dirinfo_t;
+
+/*
+ * An open directory. Caller-allocated and opaque; there is no descriptor
+ * table here, because the layer with an ABI to defend (exo_file_*,
+ * SCRUM-44) is where one belongs.
+ */
+typedef struct exofs_dir {
+    int      open;
+    uint32_t head;
+    /* Iteration state. Deliberately not exofs_dir_iter_t by name: exofs.h
+     * is the public header and must not drag in the internal ones. The
+     * fields mirror it exactly and exofs_dir.c does the conversion. */
+    uint32_t block;
+    uint16_t index;
+    uint32_t steps;
+    int      done;
+} exofs_dir_t;
+
+/*
+ * Open `path` for reading. Returns 0, -EXO_ENOENT, -EXO_ENOTDIR if `path`
+ * is not a directory, or a negative error.
+ */
+int exofs_opendir(const char *path, exofs_dir_t *out);
+
+/*
+ * Read the next entry into `out`.
+ *
+ * Returns 1 with an entry, 0 at the end of the directory, or a negative
+ * error. "." and ".." ARE reported, the way POSIX readdir does — they are
+ * ordinary entries here (exofs_dir.h), a shell listing wants them, and
+ * filtering them would cost a name comparison on every single iteration to
+ * hide something the caller can skip for free.
+ */
+int exofs_readdir(exofs_dir_t *d, exofs_dirinfo_t *out);
+
+/* Close a directory opened with exofs_opendir(). Safe on an already-closed
+ * one; there is nothing to release, so this only marks it unusable. */
+int exofs_closedir(exofs_dir_t *d);
+
 /* ---- Limits -------------------------------------------------------------
  *
  * EXOFS_MIN_SECTORS: superblock + one FAT sector + one data block, plus

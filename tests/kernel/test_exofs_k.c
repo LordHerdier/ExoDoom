@@ -56,6 +56,7 @@
 #include "libos_fs/exofs_name.h"
 #include "libos_fs/exofs_dirent.h"
 #include "libos_fs/exofs_path.h"
+#include "libos_fs/exofs_dir.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -559,11 +560,18 @@ static void test_fresh_volume_fat_is_empty(void)
 
     CU_ASSERT_EQUAL(v->fat[EXOFS_ROOT_BLOCK], EXOFS_BLOCK_EOC);
 
+    /* Exactly one block beyond the root is in use: the name block holding
+     * the root's own "." and "..", allocated when format() bootstraps it.
+     * Asserting the count rather than "nothing else" is the point — a
+     * format that allocated two blocks, or none, is equally wrong. */
+    CU_ASSERT_NOT_EQUAL(v->name_head, EXOFS_NO_BLOCK);
+    CU_ASSERT_EQUAL(v->fat[v->name_head], EXOFS_BLOCK_EOC);
+
     uint32_t allocated = 0;
     for (uint32_t i = 1; i < v->total_blocks; i++) {
         if (v->fat[i] != EXOFS_BLOCK_FREE) allocated++;
     }
-    CU_ASSERT_EQUAL(allocated, 0u);
+    CU_ASSERT_EQUAL(allocated, 1u);
 
     exofs_unmount();
 }
@@ -1267,6 +1275,26 @@ static int count_entries(exofs_volume_t *v, uint32_t head, uint32_t *out)
     return 0;
 }
 
+/* Live entries excluding "." and "..". Every directory has those two from
+ * the moment it exists (exofs_dir.h), so this is what "how many things are
+ * in here" means to a test. */
+static int count_real_entries(exofs_volume_t *v, uint32_t head, uint32_t *out)
+{
+    exofs_dir_iter_t it;
+    exofs_dir_iter_init(&it, head);
+
+    uint32_t n = 0;
+    for (;;) {
+        exofs_dirent_t e;
+        int rc = exofs_dir_iter_next(v, &it, NULL, &e);
+        if (rc < 0) return rc;
+        if (rc == 0) break;
+        if (!exofs_dir_is_dot(v, &e)) n++;
+    }
+    *out = n;
+    return 0;
+}
+
 static void test_dirent_add_lookup_remove(void)
 {
     if (!drive_present()) return;
@@ -1276,14 +1304,14 @@ static void test_dirent_add_lookup_remove(void)
     const uint32_t root = v->root_block;
     uint32_t n = 0;
 
-    CU_ASSERT_EQUAL(count_entries(v, root, &n), 0);
+    CU_ASSERT_EQUAL(count_real_entries(v, root, &n), 0);
     CU_ASSERT_EQUAL(n, 0u);
 
     exofs_entry_ref_t ref;
     CU_ASSERT_EQUAL(exofs_dir_add(v, root, "hello.txt", EXOFS_ATTR_FILE,
                                   EXOFS_NO_BLOCK, 0, &ref), 0);
 
-    CU_ASSERT_EQUAL(count_entries(v, root, &n), 0);
+    CU_ASSERT_EQUAL(count_real_entries(v, root, &n), 0);
     CU_ASSERT_EQUAL(n, 1u);
 
     exofs_dirent_t e;
@@ -1305,13 +1333,13 @@ static void test_dirent_add_lookup_remove(void)
     /* Duplicates refused, and the refusal costs nothing: still one entry. */
     CU_ASSERT_EQUAL(exofs_dir_add(v, root, "hello.txt", EXOFS_ATTR_FILE,
                                   EXOFS_NO_BLOCK, 0, NULL), -EXO_EEXIST);
-    CU_ASSERT_EQUAL(count_entries(v, root, &n), 0);
+    CU_ASSERT_EQUAL(count_real_entries(v, root, &n), 0);
     CU_ASSERT_EQUAL(n, 1u);
 
     CU_ASSERT_EQUAL(exofs_dir_remove(v, &ref), 0);
     CU_ASSERT_EQUAL(exofs_dir_lookup(v, root, "hello.txt", NULL, NULL),
                     -EXO_ENOENT);
-    CU_ASSERT_EQUAL(count_entries(v, root, &n), 0);
+    CU_ASSERT_EQUAL(count_real_entries(v, root, &n), 0);
     CU_ASSERT_EQUAL(n, 0u);
 
     exofs_unmount();
@@ -1372,10 +1400,12 @@ static void test_freed_slots_are_reused(void)
 
     const uint32_t root = v->root_block;
 
-    /* Fill the root's single block exactly. */
-    exofs_entry_ref_t refs[EXOFS_ENTS_PER_BLOCK];
+    /* Fill the root's single block exactly. "." and ".." already hold two
+     * of its slots, so it takes EXOFS_ENTS_PER_BLOCK - 2 more. */
+    enum { FILL = EXOFS_ENTS_PER_BLOCK - 2 };
+    exofs_entry_ref_t refs[FILL];
     char name[32];
-    for (uint32_t i = 0; i < EXOFS_ENTS_PER_BLOCK; i++) {
+    for (uint32_t i = 0; i < FILL; i++) {
         make_name(name, 8u, i);
         CU_ASSERT_EQUAL(exofs_dir_add(v, root, name, EXOFS_ATTR_FILE,
                                       EXOFS_NO_BLOCK, 0, &refs[i]), 0);
@@ -1427,7 +1457,7 @@ static void test_directory_spans_multiple_blocks(void)
     CU_ASSERT_TRUE(chain > 1u);
 
     uint32_t n = 0;
-    CU_ASSERT_EQUAL(count_entries(v, root, &n), 0);
+    CU_ASSERT_EQUAL(count_real_entries(v, root, &n), 0);
     CU_ASSERT_EQUAL(n, (uint32_t)N);
 
     /* Each one still resolves, and to the right entry — `size` carries the
@@ -1692,6 +1722,303 @@ static void test_directory_cycle_is_reported(void)
     exofs_unmount();
 }
 
+/* ---- Directory operations ----------------------------------------------- */
+
+/* Whether `name` appears in the directory `path`, via the public readdir. */
+static int readdir_contains(const char *path, const char *name, int *found)
+{
+    exofs_dir_t d;
+    int rc = exofs_opendir(path, &d);
+    if (rc < 0) return rc;
+
+    *found = 0;
+    for (;;) {
+        exofs_dirinfo_t info;
+        rc = exofs_readdir(&d, &info);
+        if (rc < 0) { exofs_closedir(&d); return rc; }
+        if (rc == 0) break;
+        if (strcmp(info.name, name) == 0) *found = 1;
+    }
+
+    return exofs_closedir(&d);
+}
+
+/* A freshly formatted root already has "." and "..", written by format()
+ * itself -- which is why format has to mount the volume it just laid down. */
+static void test_fresh_root_has_dot_entries(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_volume_t *v = exofs_vol();
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v == NULL) return;
+
+    exofs_dirent_t dot, dotdot;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, v->root_block, ".", NULL, &dot), 0);
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, v->root_block, "..", NULL, &dotdot), 0);
+
+    CU_ASSERT_EQUAL(dot.attributes, EXOFS_ATTR_DIRECTORY);
+    CU_ASSERT_EQUAL(dot.first_block, v->root_block);
+
+    /* The root's ".." points at the root: there is nowhere above it, and a
+     * self-loop makes "/.." resolve to "/" with no special case in the path
+     * code. */
+    CU_ASSERT_EQUAL(dotdot.first_block, v->root_block);
+
+    uint32_t real = 0;
+    CU_ASSERT_EQUAL(count_real_entries(v, v->root_block, &real), 0);
+    CU_ASSERT_EQUAL(real, 0u);
+
+    exofs_unmount();
+}
+
+static void test_mkdir_and_readdir(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_EQUAL(exofs_mkdir("/docs"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/docs/notes"), 0);
+
+    /* A long name, since that is what this ticket is for. */
+    char longname[EXOFS_MAX_NAME + 1];
+    make_name(longname, 200u, 44);
+    char longpath[EXOFS_MAX_NAME + 16];
+    longpath[0] = '/';
+    memcpy(longpath + 1, longname, 201u);
+    CU_ASSERT_EQUAL(exofs_mkdir(longpath), 0);
+
+    int found = 0;
+    CU_ASSERT_EQUAL(readdir_contains("/", "docs", &found), 0);
+    CU_ASSERT_TRUE(found);
+    CU_ASSERT_EQUAL(readdir_contains("/", longname, &found), 0);
+    CU_ASSERT_TRUE(found);
+    CU_ASSERT_EQUAL(readdir_contains("/docs", "notes", &found), 0);
+    CU_ASSERT_TRUE(found);
+
+    /* readdir reports "." and "..", the way POSIX does. */
+    CU_ASSERT_EQUAL(readdir_contains("/docs", ".", &found), 0);
+    CU_ASSERT_TRUE(found);
+    CU_ASSERT_EQUAL(readdir_contains("/docs", "..", &found), 0);
+    CU_ASSERT_TRUE(found);
+
+    /* And the new directory is reachable by path. */
+    exofs_volume_t *v = exofs_vol();
+    exofs_dirent_t e;
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/docs/notes", NULL, &e), 0);
+    CU_ASSERT_EQUAL(e.attributes, EXOFS_ATTR_DIRECTORY);
+
+    exofs_unmount();
+}
+
+static void test_mkdir_errors(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_EQUAL(exofs_mkdir("/a"), 0);
+
+    CU_ASSERT_EQUAL(exofs_mkdir("/a"), -EXO_EEXIST);
+    CU_ASSERT_EQUAL(exofs_mkdir("/missing/b"), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_mkdir("relative"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_mkdir("/"), -EXO_EINVAL);
+
+    /* Descending through a non-directory. Built by hand because there are
+     * no files yet -- exofs_file.c is the next step. */
+    exofs_volume_t *v = exofs_vol();
+    CU_ASSERT_EQUAL(exofs_dir_add(v, v->root_block, "afile", EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 0, NULL), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/afile/b"), -EXO_ENOTDIR);
+
+    exofs_unmount();
+}
+
+/*
+ * ".." really navigates upwards, with no special case in the path code --
+ * the payoff for storing it as a real entry.
+ */
+static void test_dotdot_navigates_upward(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_EQUAL(exofs_mkdir("/x"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/x/y"), 0);
+
+    exofs_volume_t *v = exofs_vol();
+    exofs_dirent_t root_e, up_e, back_e;
+
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/", NULL, &root_e), 0);
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/x/y/..", NULL, &up_e), 0);
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/x", NULL, &back_e), 0);
+    CU_ASSERT_EQUAL(up_e.first_block, back_e.first_block);
+
+    /* Two levels up lands on the root. */
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/x/y/../..", NULL, &up_e), 0);
+    CU_ASSERT_EQUAL(up_e.first_block, root_e.first_block);
+
+    /* "/.." is the root, because the root's ".." points at itself. */
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/..", NULL, &up_e), 0);
+    CU_ASSERT_EQUAL(up_e.first_block, root_e.first_block);
+
+    /* And "." stays put. */
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/x/./y", NULL, &up_e), 0);
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/x/y", NULL, &back_e), 0);
+    CU_ASSERT_EQUAL(up_e.first_block, back_e.first_block);
+
+    exofs_unmount();
+}
+
+static void test_rmdir(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_volume_t *v = exofs_vol();
+    uint32_t free_before = exofs_fat_free_count(v);
+
+    CU_ASSERT_EQUAL(exofs_mkdir("/tmp"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/tmp/inner"), 0);
+
+    /* A directory with something in it is refused. */
+    CU_ASSERT_EQUAL(exofs_rmdir("/tmp"), -EXO_ENOTEMPTY);
+
+    /* The root cannot be removed: it has no parent to be removed from. */
+    CU_ASSERT_EQUAL(exofs_rmdir("/"), -EXO_EBUSY);
+
+    /* Not there. */
+    CU_ASSERT_EQUAL(exofs_rmdir("/nope"), -EXO_ENOENT);
+
+    CU_ASSERT_EQUAL(exofs_rmdir("/tmp/inner"), 0);
+    CU_ASSERT_EQUAL(exofs_rmdir("/tmp"), 0);
+
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/tmp", NULL, NULL), -EXO_ENOENT);
+
+    /* Everything both directories held is back: their blocks AND their
+     * name records. A rmdir that forgot the "."/".." names would leak two
+     * records per directory, which this catches because the name area
+     * would have had to grow. */
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
+
+    exofs_unmount();
+}
+
+/*
+ * mkdir/rmdir in a loop must return everything it took, every time. The
+ * cycle that would expose a leaked name record, a leaked block or an
+ * un-reused entry slot -- all three of which cfat had.
+ */
+static void test_mkdir_rmdir_cycle_leaks_nothing(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_volume_t *v = exofs_vol();
+
+    /* One cycle first, so the name area has reached its steady size before
+     * the baseline is taken. */
+    CU_ASSERT_EQUAL(exofs_mkdir("/cycle"), 0);
+    CU_ASSERT_EQUAL(exofs_rmdir("/cycle"), 0);
+
+    uint32_t free_before = exofs_fat_free_count(v);
+    uint32_t names_before = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &names_before), 0);
+
+    for (uint32_t i = 0; i < 30u; i++) {
+        CU_ASSERT_EQUAL(exofs_mkdir("/cycle"), 0);
+        CU_ASSERT_EQUAL(exofs_rmdir("/cycle"), 0);
+    }
+
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
+
+    uint32_t names_after = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &names_after), 0);
+    CU_ASSERT_EQUAL(names_after, names_before);
+
+    uint32_t real = 0;
+    CU_ASSERT_EQUAL(count_real_entries(v, v->root_block, &real), 0);
+    CU_ASSERT_EQUAL(real, 0u);
+
+    exofs_unmount();
+}
+
+/* A directory tree has to survive a remount -- this is the acceptance
+ * criterion's "list a root-directory entry" half, through the public API. */
+static void test_directories_survive_remount(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    char longname[EXOFS_MAX_NAME + 1];
+    make_name(longname, 255u, 77);
+    char longpath[EXOFS_MAX_NAME + 16];
+    longpath[0] = '/';
+    memcpy(longpath + 1, longname, 256u);
+
+    CU_ASSERT_EQUAL(exofs_mkdir("/keep"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/keep/deeper"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(longpath), 0);
+    CU_ASSERT_EQUAL(exofs_sync(), 0);
+
+    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+
+    int found = 0;
+    CU_ASSERT_EQUAL(readdir_contains("/", "keep", &found), 0);
+    CU_ASSERT_TRUE(found);
+    CU_ASSERT_EQUAL(readdir_contains("/", longname, &found), 0);
+    CU_ASSERT_TRUE(found);
+    CU_ASSERT_EQUAL(readdir_contains("/keep", "deeper", &found), 0);
+    CU_ASSERT_TRUE(found);
+
+    exofs_volume_t *v = exofs_vol();
+    exofs_dirent_t e;
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/keep/deeper", NULL, &e), 0);
+    CU_ASSERT_EQUAL(e.attributes, EXOFS_ATTR_DIRECTORY);
+
+    exofs_unmount();
+}
+
+static void test_opendir_errors(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_dir_t d;
+    CU_ASSERT_EQUAL(exofs_opendir("/nope", &d), -EXO_ENOENT);
+
+    exofs_volume_t *v = exofs_vol();
+    CU_ASSERT_EQUAL(exofs_dir_add(v, v->root_block, "plainfile",
+                                  EXOFS_ATTR_FILE, EXOFS_NO_BLOCK, 0, NULL),
+                    0);
+    CU_ASSERT_EQUAL(exofs_opendir("/plainfile", &d), -EXO_ENOTDIR);
+
+    /* Reading a closed directory is a bad handle, not a crash. */
+    CU_ASSERT_EQUAL(exofs_opendir("/", &d), 0);
+    CU_ASSERT_EQUAL(exofs_closedir(&d), 0);
+
+    exofs_dirinfo_t info;
+    CU_ASSERT_EQUAL(exofs_readdir(&d, &info), -EXO_EBADF);
+
+    exofs_unmount();
+}
+
+/* Formatting under a live mount would leave that mount describing a volume
+ * that no longer exists. */
+static void test_format_under_a_mount_refused(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_TRUE(exofs_is_mounted());
+    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS),
+                    -EXO_EBUSY);
+    CU_ASSERT_TRUE(exofs_is_mounted());
+
+    exofs_unmount();
+}
+
 void suite_exofs_tests(CU_pSuite s)
 {
     CU_add_test(s, "heap buffer lies in the LibOS window",
@@ -1779,4 +2106,18 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "parent path resolution", test_path_resolve_parent);
     CU_add_test(s, "a directory cycle is reported",
                 test_directory_cycle_is_reported);
+
+    CU_add_test(s, "a fresh root has . and ..",
+                test_fresh_root_has_dot_entries);
+    CU_add_test(s, "mkdir and readdir", test_mkdir_and_readdir);
+    CU_add_test(s, "mkdir error cases", test_mkdir_errors);
+    CU_add_test(s, ".. navigates upward", test_dotdot_navigates_upward);
+    CU_add_test(s, "rmdir", test_rmdir);
+    CU_add_test(s, "mkdir/rmdir cycles leak nothing",
+                test_mkdir_rmdir_cycle_leaks_nothing);
+    CU_add_test(s, "directories survive a remount",
+                test_directories_survive_remount);
+    CU_add_test(s, "opendir error cases", test_opendir_errors);
+    CU_add_test(s, "format under a live mount is refused",
+                test_format_under_a_mount_refused);
 }
