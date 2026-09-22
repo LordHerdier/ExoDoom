@@ -11,6 +11,7 @@
 #include "pic.h"
 #include "pit.h"
 #include "ps2.h"
+#include "ata.h"
 #include "sleep.h"
 #include "fb.h"
 #include "fb_console.h"
@@ -331,6 +332,22 @@ void kernel_main(void *mb2_info_ptr) {
     pic_remap();
     idt_set_gate(32, (uintptr_t)irq0_stub);
     pit_init(1000);
+
+    // ── ATA PIO driver (SCRUM-102) ───────────────────────────────────────
+    // Polled, ring-0 only, no syscall surface -- that boundary is SCRUM-103.
+    // Ahead of the TESTING branch so the KUnit suite can exercise a live
+    // drive attached via docker-test/docker-ci's scratch -drive. A missing
+    // drive (docker-run/docker-run-kernel, which attach none) is not fatal:
+    // ata_init() returns ATA_ENODEV and boot continues, same soft-fail
+    // pattern as vmm_init() above.
+    int ata_rc = ata_init();
+    if (ata_rc != ATA_OK) {
+        serial_print("ATA: no drive detected (rc=");
+        serial_print_hex64((uint64_t)(int64_t)ata_rc);
+        serial_print(")\n");
+    } else {
+        serial_print("ATA: primary master drive detected\n");
+    }
 
     // ── Timer syscall (SCRUM-172) ────────────────────────────────────────
     // Binds exo_get_ticks (#5). After pit_init() -- the handler reports
