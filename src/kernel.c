@@ -349,13 +349,14 @@ void kernel_main(void *mb2_info_ptr) {
         serial_print("ATA: primary master drive detected\n");
     }
 
-    // ── Disk syscalls (SCRUM-103) ────────────────────────────────────────
-    // Binds exo_disk_read/exo_disk_write (#27/#28) in front of the ATA
-    // driver above, passing along whether a drive actually answered so the
-    // handlers can return -EXO_ENODEV without re-probing the bus. Same
-    // placement rule as every other syscall *_init(): after syscall_init(),
-    // ahead of the TESTING branch. No ownership/binding check yet -- that is
-    // SCRUM-188, which this ticket unblocks rather than depends on.
+    // ── Disk syscalls (SCRUM-103/SCRUM-188) ─────────────────────────────
+    // Binds exo_disk_read/exo_disk_write/exo_disk_acquire (#27/#28/#29) in
+    // front of the ATA driver above, passing along whether a drive actually
+    // answered so the handlers can return -EXO_ENODEV without re-probing the
+    // bus. Same placement rule as every other syscall *_init(): after
+    // syscall_init(), ahead of the TESTING branch. syscall_disk_init() also
+    // calls disk_binding_init() before registering any of the three, so the
+    // ownership/binding gate (SCRUM-188) is live from the first syscall.
     syscall_disk_init(ata_rc == ATA_OK);
 
     // ── Timer syscall (SCRUM-172) ────────────────────────────────────────
