@@ -475,8 +475,11 @@ acquired a virtual framebuffer yet at that point.
 request a switch, not just the running context itself, so §5.6's IRQ1
 handler calls it directly on the chord. See §5.6 and
 `docs/syscall_spec.md` §3.5's SCRUM-111 note for the mechanism and its one
-caveat (the low-level switch itself still lands on the outgoing context's
-next syscall, not instantly).
+remaining caveat (the low-level CR3/register swap itself still lands on
+the outgoing context's next syscall, not instantly) — SCRUM-179 fixed the
+correctness half of that same window (`context_current()` used to flip
+before the swap actually happened, misattributing the outgoing context's
+own syscalls in the meantime).
 
 ---
 
@@ -514,7 +517,11 @@ PS/2 mouse (IRQ12, port `0x60`/`0x64`, 3-byte packets) follows in Sprint 2
 > mirrors `irq0_handler()`'s existing direct call to
 > `fb_compositor_tick()` (`src/pit.c`, SCRUM-112). See §5.5's SCRUM-111
 > note and `docs/syscall_spec.md` §3.5 for why no new "foreground" state
-> was needed and what the one remaining latency caveat is.
+> was needed, what the one remaining latency caveat is, and how SCRUM-179
+> closed the correctness gap this hotkey originally opened
+> (`context_current()` used to flip before the real CR3/register swap,
+> misattributing the outgoing context's own syscalls in the deferred
+> window).
 
 ---
 
@@ -1013,7 +1020,7 @@ sprint number that was never assigned:
 | Epic | Status | What it actually covers |
 | --- | --- | --- |
 | SCRUM-151 Resource Protection & Secure Binding | To Do (epic), but its stories are almost entirely done | Page ownership table ✅ SCRUM-152, ownership enforcement in `exo_page_map`/`_unmap` ✅ SCRUM-153, framebuffer secure binding ✅ SCRUM-154, ownership-driven reclamation on `exo_exit` ✅ SCRUM-155, revocation protocol stub ✅ SCRUM-156, isolation test ✅ SCRUM-157, mapping teardown on free/revocation ✅ SCRUM-159, quota page-table pages per LibOS ✅ SCRUM-160; still open: manage all usable memory regions ⬜ SCRUM-158, `split_large_page` PAT-bit bug ⬜ SCRUM-161 |
-| SCRUM-147 Multi-LibOS & Scheduling | To Do (epic), core mechanism done, hardening ongoing | Context table ✅ SCRUM-107, context switch ✅ SCRUM-108, `exo_yield` ✅ SCRUM-109, shell LibOS ✅ SCRUM-110, Ctrl+Tab hotkey ✅ SCRUM-111, FB multiplexing ✅ SCRUM-112; **in progress:** per-context FB binding + VA window replacing the single global ones — SCRUM-166; still open: two Ctrl+Tab race bugs (`context_current()` flipped before the real switch) — SCRUM-179, SCRUM-180, moving the compositor's FB copy out of `irq0_handler` — SCRUM-181, `swapgs`/per-CPU rework — SCRUM-176, generalized single-syscall launch dispatch — SCRUM-184, preemptive (stretch) — SCRUM-127 |
+| SCRUM-147 Multi-LibOS & Scheduling | To Do (epic), core mechanism done, hardening ongoing | Context table ✅ SCRUM-107, context switch ✅ SCRUM-108, `exo_yield` ✅ SCRUM-109, shell LibOS ✅ SCRUM-110, Ctrl+Tab hotkey ✅ SCRUM-111, FB multiplexing ✅ SCRUM-112; **in progress:** per-context FB binding + VA window replacing the single global ones — SCRUM-166; Ctrl+Tab's `context_current()`-flipped-before-the-real-switch race ✅ fixed for syscall attribution — SCRUM-179 (`context_switch_request()` no longer updates `context_current()` itself; `context_switch_tail` commits it after the real CR3 swap); SCRUM-180 (the same root cause, for `fb_compositor`'s foreground pick) likely resolved as a side effect but not yet verified/closed; still open: moving the compositor's FB copy out of `irq0_handler` — SCRUM-181, `swapgs`/per-CPU rework — SCRUM-176, generalized single-syscall launch dispatch — SCRUM-184, preemptive (stretch) — SCRUM-127 |
 | SCRUM-142 Ring 3 & LibOS Runtime | **In Progress** (epic) | LibOS launch mechanism, entry convention, link target, and app-loading convention (SCRUM-47/48/49/50/51/173/175) are all done; the WAD/flat/automap viewer (SCRUM-165/178) and the demo-app line (clock ✅ SCRUM-168, Snake — **In Review**, SCRUM-182, calculator ⬜ SCRUM-169, Tetris ⬜ SCRUM-183) are what's currently exercising it |
 | SCRUM-144/145 Doom Port & Gameplay Verification | To Do | Everything from linking the Doom ELF (SCRUM-66) through E1M1 playability (SCRUM-81/84–96) — none of this has started; Doom is still not linked into `build/exodoom` |
 | SCRUM-146 Audio | To Do | PC speaker driver, SFX mapping, `exo_sound_play` (SCRUM-98–101) — untouched, and off the critical path: sound is a verified no-op (SCRUM-82, `docs/syscall_spec.md` §6 Option A) |

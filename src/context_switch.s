@@ -104,6 +104,8 @@
 .extern context_switch_out_regs
 .extern context_switch_in_regs
 .extern context_switch_in_pml4
+.extern context_switch_in_id
+.extern context_set_current
 .extern saved_user_rsp
 
 context_switch_tail:
@@ -162,6 +164,22 @@ context_switch_tail:
      * switch. */
     movq context_switch_in_pml4(%rip), %rax
     movq %rax, %cr3
+
+    /* SCRUM-179: commit context_current() itself here, not eagerly inside
+     * context_switch_request() -- this is the one point where the
+     * outgoing context's CR3 is already gone but nothing depending on the
+     * incoming context's registers has run yet, so it is the correct place
+     * to declare "who is running now" for context_current()/
+     * syscall_current_context() purposes. Safe to `call` an ordinary C
+     * function here: %rsp is still the 16-aligned value it was on entry to
+     * context_switch_tail (nothing has pushed anything yet), and every
+     * caller-saved register (rax/rcx/rdx/rsi/rdi/r8-r11) is dead scratch at
+     * this exact point -- the outgoing context's state is already written
+     * to memory above, and the incoming context's callee-saved GPRs
+     * (rbx/rbp/r12-r15) haven't been touched yet, so the call's own
+     * caller-saved clobbers cost nothing live. */
+    movq context_switch_in_id(%rip), %rdi
+    call context_set_current
 
     /* Restore the incoming context's callee-saved GPRs. */
     movq context_switch_in_regs(%rip), %rax

@@ -94,9 +94,18 @@ static void test_exit_blocks_outgoing_context_from_round_robin(void)
         exo_syscall_dispatch(EXO_SYS_EXIT, 0, 0, 0, 0, 0, 0),
         0);
 
+    /* SCRUM-179: this test drives sys_exit() via a direct C call to
+     * exo_syscall_dispatch(), not a real ring-3 `syscall` -- so
+     * context_switch_tail (src/context_switch.s), the only place
+     * context_current() actually commits now, never runs here.
+     * context_current() therefore stays id_a (the real hand-off is only
+     * staged, in context_switch_in_id) until some later real syscall
+     * commits it -- which this test does not drive, exactly like
+     * tests/kernel/test_kbd_ring.c's Ctrl+Tab tests. */
+    CU_ASSERT_EQUAL(context_current(), id_a);
+    CU_ASSERT_EQUAL(context_switch_in_id, id_b);
     /* Handed off to id_b, but id_a is BLOCKED, not READY -- context_next_
      * ready() already skips BLOCKED rows, so it must not come back. */
-    CU_ASSERT_EQUAL(context_current(), id_b);
     CU_ASSERT_EQUAL(context_lookup(id_a)->state, CONTEXT_STATE_BLOCKED);
     CU_ASSERT_EQUAL(context_next_ready(id_b), PAGE_OWNER_FREE);
 

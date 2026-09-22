@@ -250,10 +250,59 @@ static void test_switch_rejects_bad_target(void)
     context_set_current(PAGE_OWNER_LIBOS);
 }
 
+/* SCRUM-179 regression: context_switch_request() must stage the switch
+ * without updating context_current() itself -- that must wait for
+ * context_switch_tail to actually run (src/context_switch.s), or a context
+ * that keeps executing after the request (as Ctrl+Tab's IRQ1 caller lets it,
+ * src/ps2.c) has its own syscalls misattributed to the not-yet-running
+ * target. Exercised at the context.c level directly, with no ring-3 probes
+ * needed: context_switch_tail's real commit (a `call context_set_current`
+ * right after the CR3 swap) is simulated by hand the same way, mirroring
+ * what test_switch_preserves_state_both_ways already proves end to end via
+ * real ring-3 execution. */
+static void test_switch_defers_current_until_commit(void)
+{
+    uint64_t phys_a = 0, phys_b = 0;
+    CU_ASSERT_EQUAL(vmm_create_address_space(&phys_a), VMM_OK);
+    CU_ASSERT_EQUAL(vmm_create_address_space(&phys_b), VMM_OK);
+
+    page_owner_t id_a = PAGE_OWNER_FREE, id_b = PAGE_OWNER_FREE;
+    CU_ASSERT_EQUAL(context_create(phys_a, &id_a), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_create(phys_b, &id_b), CONTEXT_OK);
+
+    context_set_current(id_a);
+    CU_ASSERT_EQUAL(context_set_state(id_a, CONTEXT_STATE_RUNNING), CONTEXT_OK);
+
+    CU_ASSERT_EQUAL(context_switch_request(id_b), CONTEXT_OK);
+
+    /* The regression check: context_current() must still be id_a -- whose
+     * CR3 is actually loaded -- not id_b, even though the switch has been
+     * accepted and staged. */
+    CU_ASSERT_EQUAL(context_current(), id_a);
+    CU_ASSERT_EQUAL(context_switch_pending, 1);
+    CU_ASSERT_EQUAL(context_switch_in_id, id_b);
+
+    /* Scheduling state is not deferred -- only "who does context_current()
+     * report" is the misattribution bug. */
+    CU_ASSERT_EQUAL(context_lookup(id_a)->state, CONTEXT_STATE_READY);
+    CU_ASSERT_EQUAL(context_lookup(id_b)->state, CONTEXT_STATE_RUNNING);
+
+    /* Simulate context_switch_tail's real commit. */
+    context_switch_pending = 0;
+    context_set_current(id_b);
+    CU_ASSERT_EQUAL(context_current(), id_b);
+
+    CU_ASSERT_EQUAL(context_destroy(id_a), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_destroy(id_b), CONTEXT_OK);
+    context_set_current(PAGE_OWNER_LIBOS);
+}
+
 void suite_context_switch_tests(CU_pSuite s)
 {
     CU_add_test(s, "switch preserves state both ways",
                test_switch_preserves_state_both_ways);
     CU_add_test(s, "switch rejects a bad target",
                test_switch_rejects_bad_target);
+    CU_add_test(s, "switch defers context_current until commit",
+               test_switch_defers_current_until_commit);
 }
