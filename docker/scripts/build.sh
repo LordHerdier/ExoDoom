@@ -563,6 +563,7 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/libos_doom/doom_midi.c src/libos_doom/doom_genmidi.c \
   src/libos_doom/doom_opl.c src/nuked_opl3/opl3.c \
   src/libos_doom/doom_sound_music.c \
+  src/doom_profile.c \
   src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c \
   src/doom/*.c
 

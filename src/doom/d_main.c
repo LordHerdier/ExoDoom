@@ -58,6 +58,14 @@
 #include "i_timer.h"
 #include "i_video.h"
 
+/* ExoDoom (SCRUM-87): per-subsystem frame-time profiling. The machinery
+ * lives in src/doom_profile.c -- outside the vendored tree, same reasoning
+ * as SCRUM-83's doom_panic.h include in i_system.c. DG_GetTicksMs() is
+ * doomgeneric's own platform clock (src/doomgeneric_exo.c), already what
+ * this port's timing goes through everywhere else. */
+#include "doomgeneric_exo.h"
+#include "doom_profile.h"
+
 #include "g_game.h"
 
 #include "hu_stuff.h"
@@ -404,18 +412,34 @@ boolean D_GrabMouseCallback(void)
 
 void doomgeneric_Tick()
 {
+    // ExoDoom (SCRUM-87): per-subsystem frame-time profiling. Each
+    // doom_profile_mark() brackets exactly the call it follows -- see
+    // src/doom_profile.h for why DOOM_PROF_RENDER and DOOM_PROF_BLIT nest
+    // rather than sum, and why this is the seam that's timed rather than
+    // something inside D_Display().
+    uint32_t exo_prof_tick_t0 = DG_GetTicksMs();
+    uint32_t exo_prof_t0;
+
     // frame syncronous IO operations
     I_StartFrame ();
 
+    exo_prof_t0 = DG_GetTicksMs();
     TryRunTics (); // will run at least one tic
+    doom_profile_mark(DOOM_PROF_SIM, DG_GetTicksMs() - exo_prof_t0);
 
+    exo_prof_t0 = DG_GetTicksMs();
     S_UpdateSounds (players[consoleplayer].mo);// move positional sounds
+    doom_profile_mark(DOOM_PROF_SOUND, DG_GetTicksMs() - exo_prof_t0);
 
     // Update display, next frame, with current state.
     if (screenvisible)
     {
+        exo_prof_t0 = DG_GetTicksMs();
         D_Display ();
+        doom_profile_mark(DOOM_PROF_RENDER, DG_GetTicksMs() - exo_prof_t0);
     }
+
+    doom_profile_mark(DOOM_PROF_TOTAL, DG_GetTicksMs() - exo_prof_tick_t0);
 }
 
 //

@@ -94,6 +94,10 @@ SHIM_SOURCES=(
   src/nuked_opl3/opl3.c
   # SCRUM-220: Doom music_module_t logic over doom_midi + doom_opl + the stream.
   src/libos_doom/doom_sound_music.c
+  # SCRUM-87's per-subsystem frame-time profiling. src/doom/d_main.c's
+  # doomgeneric_Tick() calls doom_profile_mark(), so merging SCRUM-87 leaves
+  # that symbol undefined here without this file, same as doom_panic.c above.
+  src/doom_profile.c
   src/libos_heap.c
   src/libos_page_alloc.c
   src/libos_fb.c

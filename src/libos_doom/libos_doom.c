@@ -53,6 +53,7 @@
 
 #include "exo_syscall.h"
 #include "doomgeneric_exo.h"
+#include "doom_profile.h"
 #include "libos_fb.h"
 #include "doom_keymap.h"
 #include "doom/doomgeneric.h"
@@ -146,46 +147,20 @@ static void build_scale_lut(uint32_t *lut, uint32_t dst_n, uint32_t src_n)
 }
 
 /*
- * Profiling counters for the acceptance criterion (SCRUM-78): "frame blit
- * takes <5ms measured via serial profiling". The PIT backing DG_GetTicksMs()
- * is 1ms-resolution and a single frame is expected to be well under that, so
- * a single before/after pair would mostly just print "0ms" or "1ms" and
- * prove nothing. Accumulating over many frames and reporting the average
- * gets sub-ms precision out of ms-granularity ticks -- same approach
+ * Profiling for the acceptance criterion (SCRUM-78): "frame blit takes <5ms
+ * measured via serial profiling". The PIT backing DG_GetTicksMs() is
+ * 1ms-resolution and a single frame is expected to be well under that, so a
+ * single before/after pair would mostly just print "0ms" or "1ms" and prove
+ * nothing. Accumulating over many frames and reporting the average gets
+ * sub-ms precision out of ms-granularity ticks -- same approach
  * docs/drivers/framebuffer.md §9 used to measure SCRUM-162's scroll fix.
- * The max is tracked separately because an average can hide a single slow
- * frame, and the acceptance criterion is about worst case, not mean case.
+ *
+ * SCRUM-87 generalized the windowed avg/max counter this used to keep as
+ * three private statics (prof_frames/prof_total_ms/prof_max_ms) into
+ * doom_profile.c's DOOM_PROF_BLIT slot, shared with the sim/sound/render/
+ * total slots src/doom/d_main.c's doomgeneric_Tick() now marks -- one
+ * windowing/reporting implementation instead of one per subsystem.
  */
-#define PROF_WINDOW_FRAMES 35 /* ~1s at Doom's 35 tics/sec */
-
-static uint32_t prof_frames   = 0;
-static uint32_t prof_total_ms = 0;
-static uint32_t prof_max_ms   = 0;
-
-static void profile_report(uint32_t dt_ms)
-{
-    prof_frames++;
-    prof_total_ms += dt_ms;
-    if (dt_ms > prof_max_ms) {
-        prof_max_ms = dt_ms;
-    }
-
-    if (prof_frames < PROF_WINDOW_FRAMES) {
-        return;
-    }
-
-    /* Tenths of a ms via integer math -- no float needed for a ratio this
-     * simple, and this file has no other reason to touch one. */
-    uint32_t avg_x10 = (prof_total_ms * 10) / prof_frames;
-
-    printf("libos_doom: blit avg %u.%ums max %ums over %u frames\n",
-           (unsigned)(avg_x10 / 10), (unsigned)(avg_x10 % 10),
-           (unsigned)prof_max_ms, (unsigned)prof_frames);
-
-    prof_frames   = 0;
-    prof_total_ms = 0;
-    prof_max_ms   = 0;
-}
 
 /*
  * Blit Doom's frame to the screen (SCRUM-77, LUTs + profiling SCRUM-78).
@@ -314,7 +289,7 @@ void DG_DrawFrame(void)
         prev_dst_row = dst_row;
     }
 
-    profile_report(DG_GetTicksMs() - t0);
+    doom_profile_mark(DOOM_PROF_BLIT, DG_GetTicksMs() - t0);
 }
 
 /*
