@@ -95,7 +95,7 @@ int exofs_suite_cleanup(void)
     /* Leave nothing mounted for the next suite, even if a test failed
      * partway through with a volume up. */
     exofs_unmount();
-    disk_binding_release(syscall_current_context());
+    exofs_bdev_release();
     return 0;
 }
 

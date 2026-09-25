@@ -288,6 +288,16 @@ difference.
   This is not a simplification awaiting removal: the disk binding
   (SCRUM-188) is exclusive, so only one context can reach the disk at all,
   and that context has one disk.
+- **Unmount before releasing the binding.** `exofs_bdev_release()`
+  (`exo_disk_release`, #27) drops the binding immediately; it cannot know a
+  filesystem was mounted on top of it. The FAT is resident and written back
+  a sector at a time as it changes (§1), so releasing with dirty FAT
+  sectors still cached loses them silently, and the next holder of the disk
+  sees an allocation table that disagrees with the directory entries. Call
+  `exofs_unmount()` (which flushes) or at least `exofs_sync()` first. This
+  matters for any caller that hands the disk to somebody else and keeps
+  running — the shell launching a child that needs the disk is the case
+  that motivated #27.
 - **No threading.** There is no preemption inside a LibOS today, and a lock
   here would not help if there were — the FAT cache would need one too.
 - **`EXOFS_MAX_BLOCKS` = 262144** (a 128 MiB volume, 1 MiB of FAT). The cap
@@ -307,7 +317,7 @@ difference.
 | `exofs_layout.h` | The on-disk format. POD only, no dependency beyond `<stdint.h>`, so SCRUM-190's image builder compiles against this exact header rather than restating it. |
 | `exofs.h` | The public API and its error contract. |
 | `exofs_internal.h` | The mounted volume's in-memory state, shared between ExoFS's own translation units. Not for the image builder. |
-| `exofs_blockdev.c/.h` | The only file that knows a syscall exists: acquire, chunked sector read/write, and the tick source. ExoFS's single `#ifdef EXO_KERNEL`. |
+| `exofs_blockdev.c/.h` | The only file that knows a syscall exists: acquire/release, chunked sector read/write, and the tick source. ExoFS's single `#ifdef EXO_KERNEL`. |
 | `exofs_volume.c` | Superblock, geometry, `format`/`mount`/`sync`/`unmount`, the FAT cache and its writeback. |
 | `exofs_fat.c/.h` | Block allocation and chain traversal. |
 | `exofs_name.c/.h` | The variable-length name area (§6). |

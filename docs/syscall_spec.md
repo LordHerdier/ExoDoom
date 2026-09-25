@@ -373,13 +373,14 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 24 | `exo_disk_read(lba, buf, count)`    | Storage     | ✅     | Read `count` consecutive 512-byte sectors starting at 28-bit LBA `lba` into `buf` (at least `count * 512` bytes), one `ata_read_sector()` call per sector. Returns `count` on success (`count == 0` always succeeds and touches nothing, checked before everything else below), `-EINVAL` if `count` exceeds `EXO_DISK_MAX_SECTORS` (128, `src/syscall_disk.h`) or `lba + count - 1` overflows 28-bit LBA space, `-ENODEV` if no drive was detected at boot, `-EBUSY` if the caller does not hold the disk binding (§3.5a — a headless machine answers `-ENODEV` rather than `-EBUSY`, same precedence `exo_disk_acquire` uses), `-EFAULT` if `[buf, buf + count*512)` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` and mapped writable (same `exo_range_in_user_window`/`exo_user_range_mapped` pair #8 uses — checked last, so a caller with no claim on the disk learns nothing about whether its buffer pointer happens to be valid), or `-EIO` if a sector faults partway through the transfer (no partial-success byte count — ATA gives no way to tell "this sector failed" from "this sector was never attempted" once a fault stops the loop). Sector-addressed only, zero filesystem knowledge — the ported FAT-like fs (SCRUM-189) is LibOS-side, on top of this. Implemented in SCRUM-103 (`src/syscall_disk.c`, on top of the ATA PIO driver, SCRUM-102, `src/ata.c`); ownership enforcement SCRUM-188 (`src/disk_binding.c`). |
 | 25 | `exo_disk_write(lba, buf, count)`   | Storage     | ✅     | Same shape as #24, writing `count` sectors from `buf` via `ata_write_sector()`. `buf` is checked readable rather than writable. Same error codes, same binding check. Implemented in SCRUM-103 (`src/syscall_disk.c`); ownership enforcement SCRUM-188. |
 | 26 | `exo_disk_acquire()`                | Storage     | ✅     | Bind the disk to the caller — one exclusive owner at a time, the same pre-SCRUM-112 shape `exo_fb_acquire` (#4) originally had (§3.5a). Must succeed before #24/#25 will do anything for the caller. Returns `0` (including a re-acquire by the current owner), `-EBUSY` if another context holds it, or `-ENODEV` if this machine has no drive. Implemented in SCRUM-188 (`src/syscall_disk.c`, `src/disk_binding.c`). |
+| 27 | `exo_disk_release()`                | Storage     | ✅     | Give the binding back — the voluntary counterpart to #26, and the only way a LibOS can perform §3.6's phase 2 for this resource. Always returns `0`: releasing a binding the caller does not hold is a no-op rather than an error, mirroring #26's "a re-acquire by the current owner is success" rule, so a LibOS unwinding an error path can release unconditionally without first working out whether its acquire succeeded. Unlike #24/#25/#26 this does **not** answer `-ENODEV` on a headless machine — a caller there cannot be holding a binding, so the release is a no-op either way and failing would break exactly that unconditional-cleanup pattern; nothing in the handler touches the ATA bus. Flushing whatever sat above the binding is the caller's job, not the kernel's — ExoFS calls `exofs_unmount()` before `exofs_bdev_release()` because dropping the binding with dirty FAT sectors cached loses them silently. Implemented in SCRUM-189 (`src/syscall_disk.c`, `src/disk_binding.c`). |
 
-**Total: 27 syscalls.** This is the complete interface needed to run Doom with
+**Total: 28 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking, plus the single
 argument-based LibOS-launch syscall (#21) that backs the shell's interactive
 demo commands, the two introspection syscalls (#22/#23) that back its
-`memstat`/`pslist` commands, and the three storage syscalls (#24/#25/#26) the
-future FAT-like filesystem (SCRUM-189) will build on.
+`memstat`/`pslist` commands, and the four storage syscalls (#24–#27) the
+FAT-like filesystem (SCRUM-189) builds on.
 
 ### 3.2a Error codes (SCRUM-57)
 
@@ -851,7 +852,7 @@ scheduling (SCRUM-147) invalidates that assumption and will need a lock here.
 > loop that the test harness deliberately never launches (see
 > `tests/kernel/test_shell_libos_k.c`'s own comment).
 
-### 3.5a Disk binding (SCRUM-188)
+### 3.5a Disk binding (SCRUM-188, release SCRUM-189)
 
 `exo_disk_read`/`exo_disk_write` (§3.2 #24/#25, SCRUM-103) shipped with no
 ownership concept: the raw disk was the one exokernel resource any LibOS
@@ -863,11 +864,12 @@ planned — a disk head cannot be virtualized into one private copy per caller
 the way a framebuffer can (`src/fb_shadow.c`). Implemented in
 `src/disk_binding.c` (the ownership table, ABI-agnostic, structurally a
 trimmed `fb_binding.c` with no geometry to publish) and `src/syscall_disk.c`
-(the `#24`/`#25`/`#26` handlers and the `-EXO_E*` mapping), tested in
+(the `#24`/`#25`/`#26`/`#27` handlers and the `-EXO_E*` mapping), tested in
 `tests/kernel/test_disk_binding_k.c` and `tests/kernel/test_syscall_disk_k.c`.
 
 **Publication.** `syscall_disk_init(drive_present)` calls
-`disk_binding_init(drive_present)` before registering any of `#24`/`#25`/`#26`,
+`disk_binding_init(drive_present)` before registering any of
+`#24`/`#25`/`#26`/`#27`,
 with `drive_present` the `ata_init()` result. `disk_binding_present()` is then
 the single source of truth for whether a drive exists — `src/syscall_disk.c`
 reads it rather than keeping a second copy of the flag, so the two can never
@@ -893,10 +895,23 @@ or someone-else's binding is not public property, same rule
 `fb_binding_check_map()` enforces for the framebuffer; both cases answer
 `-EXO_EBUSY`.
 
+**Release.** `exo_disk_release` (`#27`, SCRUM-189) calls
+`disk_binding_release(syscall_current_context())` and returns `0`
+unconditionally. It exists because `disk_binding_release()` is a kernel
+function: until SCRUM-189 there was no instruction sequence in ring 3 that
+reached it, so a LibOS could take the disk and never voluntarily give it
+back. That made §3.6's phase 2 — *the LibOS complying* — unreachable for
+this one resource, leaving `disk_binding_reclaim()` (phase 3) as the only
+way the disk ever changed hands. The framebuffer and pages never had that
+hole. Releasing what the caller does not hold is success, and so is
+releasing on a machine with no drive; see the `#27` row in §3.2 for why
+both are deliberate.
+
 **Reclaim.** `disk_binding_release(who)` drops the binding if `who` holds it
 and is a no-op otherwise, mirroring `fb_binding_release()`. It is the
-*voluntary* return in §3.6's protocol; the kernel-driven form is
-`disk_binding_reclaim(who)`. `revoke_all()` (`src/revoke.h`) reclaims the
+*voluntary* return in §3.6's protocol — reached from ring 3 through `#27`
+above, and scoped to `who`, so a release never evicts another context's
+binding; the kernel-driven form is `disk_binding_reclaim(who)`. `revoke_all()` (`src/revoke.h`) reclaims the
 disk binding alongside the framebuffer and the context's pages; until
 SCRUM-155 binds `#20`, nothing calls it on the boot path, so a LibOS that
 exits without releasing keeps the binding for the rest of the boot.

@@ -30,6 +30,11 @@ static int64_t bdev_acquire_raw(void)
     return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, 0, 0, 0, 0, 0);
 }
 
+static int64_t bdev_release_raw(void)
+{
+    return exo_syscall_dispatch(EXO_SYS_DISK_RELEASE, 0, 0, 0, 0, 0, 0);
+}
+
 static int64_t bdev_read_raw(uint32_t lba, void *buf, uint32_t count)
 {
     return exo_syscall_dispatch(EXO_SYS_DISK_READ, (uint64_t)lba,
@@ -54,6 +59,11 @@ static int64_t bdev_ticks_raw(void)
 static int64_t bdev_acquire_raw(void)
 {
     return exo_disk_acquire();
+}
+
+static int64_t bdev_release_raw(void)
+{
+    return exo_disk_release();
 }
 
 static int64_t bdev_read_raw(uint32_t lba, void *buf, uint32_t count)
@@ -146,4 +156,9 @@ int exofs_bdev_acquire(void)
 {
     int64_t r = bdev_acquire_raw();
     return (r < 0) ? (int)r : 0;
+}
+
+void exofs_bdev_release(void)
+{
+    (void)bdev_release_raw();
 }

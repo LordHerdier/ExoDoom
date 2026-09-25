@@ -74,6 +74,11 @@ int disk_binding_acquire(page_owner_t who);
  * (docs/syscall_spec.md §3.6) and clears any pending mark along with the
  * binding. Kernel-driven reclamation goes through revoke_all() in
  * src/revoke.h.
+ *
+ * Reachable from ring 3 through exo_disk_release (#27, SCRUM-189), which is
+ * what makes phase 2 possible for the disk at all: this is a kernel
+ * function, so before that syscall existed a LibOS could acquire the disk
+ * and had no way to give it back short of exiting.
  */
 void disk_binding_release(page_owner_t who);
 
@@ -103,7 +108,8 @@ int disk_binding_revoke_clear(page_owner_t who);
 int disk_binding_revoke_pending(void);
 
 /* Phase 3 — take the disk back from `who`, marked or not. (Phase 2 is `who`
- * complying, via disk_binding_release().) Returns DISK_REVOKE_OK if it was
+ * complying, via disk_binding_release() -- exo_disk_release, #27, from ring
+ * 3.) Returns DISK_REVOKE_OK if it was
  * taken, DISK_REVOKE_ENOENT if `who` did not hold it (it complied, or
  * another context has since acquired — in which case the reclaim must leave
  * that context's binding alone). disk_binding_release() is the voluntary

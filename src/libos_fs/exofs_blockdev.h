@@ -8,8 +8,9 @@
  * (SCRUM-189).
  *
  * Everything above this file works in blocks and LBAs; this file turns those
- * into exo_disk_read/exo_disk_write/exo_disk_acquire (#24/#25/#26,
- * docs/syscall_spec.md §3.2, src/syscall_disk.c). Keeping that in one place
+ * into exo_disk_read/exo_disk_write/exo_disk_acquire/exo_disk_release
+ * (#24/#25/#26/#27, docs/syscall_spec.md §3.2, src/syscall_disk.c).
+ * Keeping that in one place
  * is what makes the rest of the filesystem testable from ring 0 — see the
  * dual-compile note below — and it is also the seam a future ramdisk or
  * image-file backend would replace.
@@ -62,6 +63,28 @@
  * (this machine has no drive).
  */
 int exofs_bdev_acquire(void);
+
+/*
+ * Give the binding back (#27, SCRUM-189).
+ *
+ * The counterpart to exofs_bdev_acquire, and the reason #27 exists at all:
+ * disk_binding_release() lives in the kernel, so without a syscall in front
+ * of it a LibOS could acquire the disk but never voluntarily return it, and
+ * the only way it would ever change hands is a forced reclaim.
+ *
+ * No return value. Releasing a binding this context does not hold is a
+ * no-op rather than an error, so there is nothing a caller could do
+ * differently -- the same reason exofs_bdev_acquire's re-acquire case is
+ * success.
+ *
+ * CALL exofs_unmount() (or at least exofs_sync()) FIRST. The FAT lives in
+ * RAM and is written back a sector at a time as it changes
+ * (exofs_internal.h); dropping the binding with dirty FAT sectors still
+ * cached loses them silently, and the next holder of the disk sees a
+ * volume whose allocation table disagrees with its directory entries.
+ * Nothing here can enforce that -- this file knows LBAs, not volumes.
+ */
+void exofs_bdev_release(void);
 
 /*
  * Read/write `count` consecutive 512-byte sectors at absolute LBA `lba`.

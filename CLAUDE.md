@@ -418,11 +418,11 @@ convention and calls it from `kernel_main` instead of a test harness.
   (SCRUM-189).** `src/libos_fs/` is ExoFS, the team's `cfat` FAT-like
   filesystem ported to run as LibOS code over `exo_disk_read`/`exo_disk_write`
   — the kernel knows sectors and nothing above them (`docs/syscall_spec.md`
-  §3.2 #27 says so in as many words), and this library is what decides some
+  §3.2 #24 says so in as many words), and this library is what decides some
   of those sectors are a file. **`docs/syscall_spec.md` §4's old
   "recommended approach" of an in-kernel ramdisk is superseded** by the
   2026-09-19 storage decision; that section now carries a note saying so.
-  Four things to know before touching it:
+  Five things to know before touching it:
   - **It is compiled only under `TESTING=1`**, by `build.sh` step `[3b4/7]`,
     and a shipped kernel links none of it. That works because `src/libos_fs/`
     is a *subdirectory*, which step 3's `src/*.c` glob never descends into —
@@ -430,7 +430,14 @@ convention and calls it from `kernel_main` instead of a test harness.
     links it into a ring-3 target yet; SCRUM-202 (shell commands) or
     SCRUM-44 (`exo_file_*`) is what will, and the sources already build
     without `-DEXO_KERNEL` so that step is a `build_ring3_link_target` call
-    and nothing more.
+    and nothing more. **Step `[3b5/7]` is what keeps that last claim true
+    rather than merely asserted**: it compiles the same sources a second
+    time with `probe_cflags` and *without* `-DEXO_KERNEL`, then fails the
+    build if the undefined symbols stray outside what a ring-3 target
+    provides (today: `memcpy`/`memset`/`memcmp`/`strlen` and
+    `libos_heap_alloc`/`_free`). Without it, ExoFS could pick up a
+    kernel-only dependency and nobody would find out until the first real
+    ring-3 consumer, tickets away.
   - **`src/libos_fs/exofs_blockdev.c` is the only file with an `#ifdef
     EXO_KERNEL`**, and it is the same dual-compile seam `src/libos_page_alloc.c`
     documents at length: `exo_syscall_dispatch()` in the kernel build so a
@@ -444,6 +451,16 @@ convention and calls it from `kernel_main` instead of a test harness.
     under `EXO_KERNEL` too, because it is the same handler — where `malloc()`
     is `kmalloc()`, a kernel bump address. This is the single most likely
     thing to go wrong when adding a test.
+  - **`exo_disk_release` (#27) exists because of this filesystem**, and it
+    is the counterpart `exo_disk_acquire` shipped without. The binding is
+    whole-device exclusive and `disk_binding_release()` is a kernel
+    function, so before SCRUM-189 a LibOS could take the disk and had no way
+    to give it back short of exiting — which made §3.6's phase 2 (*the LibOS
+    complying*) unreachable for this one resource, leaving forced reclaim as
+    the only way it ever changed hands. `exofs_bdev_release()` is the ExoFS
+    side. **Call `exofs_unmount()` first**: the release drops the binding
+    immediately and cannot know a volume was mounted on it, so dirty FAT
+    sectors still cached are lost silently.
   - **Write ordering is load-bearing**, and `docs/filesystem.md` §1 is the
     written-down rule: with no journal and no transactions, ordering is the
     only tool for making a failure partway through leave a state the
