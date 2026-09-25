@@ -14,7 +14,7 @@ Complete (SCRUM-9, SCRUM-10) **Last updated:** 20 Apr 2026
 5. [Tick counter and millisecond clock](#5-tick-counter-and-millisecond-clock)
 6. [Sleep](#6-sleep)
 7. [API reference](#7-api-reference)
-8. [Future: PC speaker (channel 2)](#8-future-pc-speaker-channel-2)
+8. [PC speaker (channel 2)](#8-pc-speaker-channel-2)
 9. [Design decisions and gotchas](#9-design-decisions-and-gotchas)
 
 ---
@@ -222,28 +222,13 @@ period).
 
 ---
 
-## 8. Future: PC speaker (channel 2)
+## 8. PC speaker (channel 2)
 
-Sprint 11 (SCRUM-98) adds PC speaker tone generation using PIT channel 2.
-Channel 2's output is ANDed with port `0x61` bit 1 and drives the speaker.
-Programming it does not interfere with channel 0.
-
-```c
-// To play a tone at freq Hz (pseudocode, not yet implemented):
-uint32_t divisor = 1193180 / freq;
-outb(0x43, 0xB6);              // channel 2, lobyte/hibyte, mode 3
-outb(0x42, divisor & 0xFF);
-outb(0x42, (divisor >> 8) & 0xFF);
-outb(0x61, inb(0x61) | 0x03); // enable speaker gate + channel 2 gate
-
-// To stop:
-outb(0x61, inb(0x61) & ~0x03);
-```
-
-This will be exposed via `exo_sound_tone(freq, dur_ms)` and `exo_sound_stop()`
-syscalls (SCRUM-100). The kernel manages the duration timer internally (likely
-using the tick counter) so `exo_sound_tone` is non-blocking from the LibOS's
-perspective.
+Channel 2 drives the PC speaker and is programmed by `src/speaker.c`
+(SCRUM-98), not by this file. The only coupling is that `irq0_handler()`
+calls `speaker_tick()` every tick so a timed tone ends on its own, which is
+what keeps `exo_sound_tone` (SCRUM-100) non-blocking. See
+[`speaker.md`](speaker.md).
 
 ---
 

@@ -386,8 +386,11 @@ This timer feeds directly into `DG_GetTicksMs` and `DG_SleepMs` once the LibOS
 is wired up. The game loop runs at 35 tics/second and calls `DG_GetTicksMs` ~35
 times per second.
 
-**Future (Sprint 11):** PIT channel 2 will be used for PC speaker tone
-generation (`exo_sound_tone`) without interfering with channel 0.
+**PC speaker (SCRUM-98):** PIT channel 2 generates PC speaker tones
+(`src/speaker.c/h`, `docs/drivers/speaker.md`) without interfering with
+channel 0. `speaker_tone(freq, dur_ms)` returns immediately; `irq0_handler()`
+calls `speaker_tick()` each tick to end a timed tone, so the future
+`exo_sound_tone` syscall (SCRUM-100) is non-blocking.
 
 ---
 
@@ -1023,7 +1026,7 @@ sprint number that was never assigned:
 | SCRUM-147 Multi-LibOS & Scheduling | To Do (epic), core mechanism done, hardening ongoing | Context table ✅ SCRUM-107, context switch ✅ SCRUM-108, `exo_yield` ✅ SCRUM-109, shell LibOS ✅ SCRUM-110, Ctrl+Tab hotkey ✅ SCRUM-111, FB multiplexing ✅ SCRUM-112; **in progress:** per-context FB binding + VA window replacing the single global ones — SCRUM-166; Ctrl+Tab's `context_current()`-flipped-before-the-real-switch race ✅ fixed for syscall attribution — SCRUM-179 (`context_switch_request()` no longer updates `context_current()` itself; `context_switch_tail` commits it after the real CR3 swap); SCRUM-180 (the same root cause, for `fb_compositor`'s foreground pick) likely resolved as a side effect but not yet verified/closed; still open: moving the compositor's FB copy out of `irq0_handler` — SCRUM-181, `swapgs`/per-CPU rework — SCRUM-176, generalized single-syscall launch dispatch — SCRUM-184, preemptive (stretch) — SCRUM-127 |
 | SCRUM-142 Ring 3 & LibOS Runtime | **In Progress** (epic) | LibOS launch mechanism, entry convention, link target, and app-loading convention (SCRUM-47/48/49/50/51/173/175) are all done; the WAD/flat/automap viewer (SCRUM-165/178) and the demo-app line (clock ✅ SCRUM-168, Snake — **In Review**, SCRUM-182, calculator ⬜ SCRUM-169, Tetris ⬜ SCRUM-183) are what's currently exercising it |
 | SCRUM-144/145 Doom Port & Gameplay Verification | To Do | Everything from linking the Doom ELF (SCRUM-66) through E1M1 playability (SCRUM-81/84–96) — none of this has started; Doom is still not linked into `build/exodoom` |
-| SCRUM-146 Audio | To Do | PC speaker driver, SFX mapping, `exo_sound_play` (SCRUM-98–101) — untouched, and off the critical path: sound is a verified no-op (SCRUM-82, `docs/syscall_spec.md` §6 Option A) |
+| SCRUM-146 Audio | In Progress | PC speaker driver ✅ SCRUM-98 (`src/speaker.c/h`, PIT channel 2, non-blocking duration via IRQ0); still open: SFX mapping ⬜ SCRUM-99, `exo_sound_tone` syscall ⬜ SCRUM-100, Doom `sound_module_t` wiring ⬜ SCRUM-101. Off the critical path: Doom itself is still a verified no-op for sound (SCRUM-82, `docs/syscall_spec.md` §6 Option A) |
 | SCRUM-143 Storage & File I/O | To Do (epic), ATA driver + disk syscalls now done | ATA PIO driver ✅ SCRUM-102 (`src/ata.c/h`, polled, primary bus/master); `exo_disk_read`/`exo_disk_write` syscalls ✅ SCRUM-103 (`src/syscall_disk.c/h`, #24/#25, sector-addressed, no filesystem knowledge, no ownership check yet); still open: disk ownership/binding table ⬜ SCRUM-188 (now unblocked), ported FAT-like fs ⬜ SCRUM-189, FAT-formatted QEMU disk image ⬜ SCRUM-190, `exo_file_*` syscalls, ramdisk save persistence (SCRUM-42/44/75/92/93/104/106) |
 | SCRUM-148 Testing, CI & Isolation | Mostly done | CI pipeline ✅ SCRUM-120 (Docker build + QEMU boot + serial suite on push, now a required status check on `main`); test harness ✅ SCRUM-58, regression suite ✅ SCRUM-114, syscall fuzzing ✅ SCRUM-115, syscall benchmarks ✅ SCRUM-60; still open: memory isolation stress test — SCRUM-59 (PR #110 open), IWAD compat suite — SCRUM-116 |
 | SCRUM-149 Documentation & Delivery | Mostly to do, one piece done | README refresh ✅ SCRUM-167; final architecture doc, contributor guide, release tag, demo video, client presentation, post-mortem (SCRUM-91, 119, 121–132) all still To Do |
