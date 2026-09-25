@@ -9,7 +9,7 @@
  * input, exo_get_ticks for timing, exo_serial_write for diagnostics.
  *
  * Launched from the shell's "wadview" command (src/shell/shell_main.c) via
- * exo_launch_wad_viewer() (#21, src/syscall_launch.c), not by kernel_main
+ * exo_launch(EXO_LAUNCH_APP_WAD_VIEWER) (#21, src/syscall_launch.c), not by kernel_main
  * hardcoding it as the one boot-time LibOS the way an earlier version of
  * this file did: the kernel-side handler builds this code+data blob into
  * its own fresh address space with libos_build_image() and

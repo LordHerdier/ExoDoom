@@ -299,7 +299,7 @@ void kernel_main(void *mb2_info_ptr) {
     syscall_serial_init();
 
     // ── Introspection syscalls (SCRUM-113) ──────────────────────────────
-    // Binds exo_memstat (#25) and exo_pslist (#26), backing the shell's
+    // Binds exo_memstat (#22) and exo_pslist (#23), backing the shell's
     // `memstat`/`pslist` commands. Same placement rule as the syscalls
     // above: after syscall_init, ahead of the TESTING branch, so both are
     // exercisable from the ring-3 test harness too.
@@ -350,7 +350,7 @@ void kernel_main(void *mb2_info_ptr) {
     }
 
     // ── Disk syscalls (SCRUM-103/SCRUM-188) ─────────────────────────────
-    // Binds exo_disk_read/exo_disk_write/exo_disk_acquire (#27/#28/#29) in
+    // Binds exo_disk_read/exo_disk_write/exo_disk_acquire (#24/#25/#26) in
     // front of the ATA driver above, passing along whether a drive actually
     // answered so the handlers can return -EXO_ENODEV without re-probing the
     // bus. Same placement rule as every other syscall *_init(): after
@@ -373,7 +373,7 @@ void kernel_main(void *mb2_info_ptr) {
     syscall_yield_init();
 
     // ── WAD viewer launch syscall (SCRUM-178) ────────────────────────────
-    // Binds exo_launch_wad_viewer (#21): stages the WAD module read-only
+    // Binds exo_launch (#21): stages the WAD module read-only
     // into a fresh LibOS address space and context_switch_request()s to it,
     // so the shell's `wadview` command can invoke it as an ordinary program.
     // Same placement rule as every other syscall *_init(): after

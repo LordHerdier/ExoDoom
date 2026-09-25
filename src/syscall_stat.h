@@ -3,7 +3,7 @@
 /*
  * syscall_stat.h — introspection syscall handlers (SCRUM-113).
  *
- * Binds exo_memstat (#25) and exo_pslist (#26) to the dispatcher in
+ * Binds exo_memstat (#22) and exo_pslist (#23) to the dispatcher in
  * src/syscall.c. Both are read-only snapshots of state src/page_alloc.c and
  * src/context.c already track for other reasons (ownership enforcement,
  * scheduling) — this file only translates it into the ABI structs in

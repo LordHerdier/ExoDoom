@@ -25,15 +25,27 @@
  * that runs after this one. Its argument-independence is already covered by
  * test_syscall_exit_k.c.
  *
- * EXO_SYS_LAUNCH_WAD_VIEWER/_CLOCK/_DOOM (#21/#22/#24) also ignore their
- * arguments, and each does a real context_create() + image copy on every
- * call — bounded by CONTEXT_MAX and shared with every other suite in this
- * boot. EXO_SYS_LAUNCH_DOOM's image is by far the largest of the three
- * (~200 pages against WAD_VIEWER's/CLOCK's much smaller ones), so it is the
- * one that actually made unrated inclusion expensive. All three are
- * included in the pool but rate-limited to roughly 1-in-2000 draws (see
- * rare_hit() below) so a garbage-argument call is still proven safe without
- * spending most of the 1,000,000-call budget on context churn.
+ * EXO_SYS_LAUNCH (#21) does a real context_create() + image copy on every
+ * call that succeeds -- bounded by CONTEXT_MAX and shared with every other
+ * suite in this boot. It is included in the pool but rate-limited to roughly
+ * 1-in-2000 draws (see rare_hit() below), so a garbage-argument call is still
+ * proven safe without spending most of the 1,000,000-call budget on context
+ * churn.
+ *
+ * Unlike EXO_SYS_EXIT above, this one does NOT ignore its arguments: since
+ * SCRUM-184 collapsed the four per-app launch syscalls into one, a1 selects
+ * the app. That makes it cheaper to fuzz than before rather than dearer --
+ * a1 here is a random pointer-shaped value, so it is almost always
+ * >= EXO_LAUNCH_APP_COUNT and returns -EXO_EINVAL without creating anything.
+ * Before the collapse, drawing the number WAS choosing the app. This also
+ * covers the reason EXO_SYS_LAUNCH_DOOM (formerly #24, SCRUM-66) needed its
+ * own rate limit: its image is by far the largest of the four the old
+ * per-app numbers built (~200 pages against the others' much smaller ones),
+ * so an unrated launch draw turned roughly 1-in-29 of the 1,000,000 draws
+ * into a full Doom image build instead of an occasional probe -- enough to
+ * blow the suite past the QEMU boot's timeout. Now that app selection is an
+ * argument rather than the syscall number itself, one rate limit on
+ * EXO_SYS_LAUNCH covers Doom the same way it covers every other app.
  *
  * EXO_SYS_FB_ACQUIRE (#4), EXO_SYS_KBD_POLL (#6) and EXO_SYS_SERIAL_WRITE
  * (#8) validate their pointer argument with exo_range_in_user_window() only
@@ -131,8 +143,8 @@ static uint64_t next_arg_out_of_window(void)
     return next_u64_random();
 }
 
-/* True roughly 1 draw in 2000 — the rate limit for the rate-limited LAUNCH_*
- * numbers (see file comment). */
+/* True roughly 1 draw in 2000 -- the rate limit for EXO_SYS_LAUNCH (see file
+ * comment). Two numbers needed it before SCRUM-184; one does now. */
 static int rare_hit(void)
 {
     return (next_u30() % 2000) == 0;
@@ -140,12 +152,19 @@ static int rare_hit(void)
 
 /* A syscall number to dispatch: uniform over [0, EXO_SYS_COUNT + 4), the
  * +4 slack covering the out-of-range -EXO_ENOSYS path, with EXO_SYS_EXIT
- * excluded outright and the WAD viewer/clock/Doom LAUNCH_* numbers
- * rate-limited (SCRUM-66: EXO_SYS_LAUNCH_DOOM does a real context_create()
- * plus a ~200-page image copy, same as WAD_VIEWER/CLOCK's own reasoning in
- * the file comment — left unguarded it turns roughly 1-in-29 of the
- * 1,000,000 draws into a full Doom image build instead of an occasional
- * probe, which is what was blowing the suite past the QEMU boot's timeout). */
+ * excluded outright and EXO_SYS_LAUNCH rate-limited.
+ *
+ * The rate limit used to name two numbers (EXO_SYS_LAUNCH_WAD_VIEWER and
+ * EXO_SYS_LAUNCH_CLOCK) and now names one, because SCRUM-184 collapsed the
+ * per-app launch syscalls into EXO_SYS_LAUNCH with an app-id argument. The
+ * limit still matters for the same reason it always did: a launch that
+ * SUCCEEDS arms a context switch and the fuzzer does not come back.
+ *
+ * Worth noting that this change makes a successful launch far less likely
+ * rather than more. The app id is a1, which the loop below fills with a
+ * random pointer-shaped value, so it is almost always >= EXO_LAUNCH_APP_COUNT
+ * and comes straight back as -EXO_EINVAL. Before, picking the number *was*
+ * picking the app. */
 static uint64_t next_syscall_num(void)
 {
     for (;;) {
@@ -154,8 +173,7 @@ static uint64_t next_syscall_num(void)
         if (n == EXO_SYS_EXIT)
             continue;
 
-        if ((n == EXO_SYS_LAUNCH_WAD_VIEWER || n == EXO_SYS_LAUNCH_CLOCK ||
-             n == EXO_SYS_LAUNCH_DOOM) && !rare_hit())
+        if (n == EXO_SYS_LAUNCH && !rare_hit())
             continue;
 
         return n;

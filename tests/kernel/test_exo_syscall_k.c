@@ -50,15 +50,12 @@ static void test_numbers_match_spec(void)
     CU_ASSERT_EQUAL(EXO_SYS_SOUND_STOP,   18);
     CU_ASSERT_EQUAL(EXO_SYS_YIELD,        19);
     CU_ASSERT_EQUAL(EXO_SYS_EXIT,         20);
-    CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_WAD_VIEWER, 21);
-    CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_CLOCK, 22);
-    CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_SNAKE,  23);
-    CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_DOOM,   24);
-    CU_ASSERT_EQUAL(EXO_SYS_MEMSTAT,       25);
-    CU_ASSERT_EQUAL(EXO_SYS_PSLIST,        26);
-    CU_ASSERT_EQUAL(EXO_SYS_DISK_READ,     27);
-    CU_ASSERT_EQUAL(EXO_SYS_DISK_WRITE,    28);
-    CU_ASSERT_EQUAL(EXO_SYS_DISK_ACQUIRE,  29);
+    CU_ASSERT_EQUAL(EXO_SYS_LAUNCH,        21);
+    CU_ASSERT_EQUAL(EXO_SYS_MEMSTAT,       22);
+    CU_ASSERT_EQUAL(EXO_SYS_PSLIST,        23);
+    CU_ASSERT_EQUAL(EXO_SYS_DISK_READ,     24);
+    CU_ASSERT_EQUAL(EXO_SYS_DISK_WRITE,    25);
+    CU_ASSERT_EQUAL(EXO_SYS_DISK_ACQUIRE,  26);
 }
 
 /* The dispatcher will range-check against EXO_SYS_COUNT, so it has to stay one
@@ -66,7 +63,7 @@ static void test_numbers_match_spec(void)
 static void test_count_is_one_past_last(void)
 {
     CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_DISK_ACQUIRE + 1);
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 30);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 27);
 }
 
 /* Two syscalls sharing a number would route silently to the wrong handler. */
@@ -80,9 +77,8 @@ static void test_numbers_are_unique(void)
         EXO_SYS_FILE_WRITE,   EXO_SYS_FILE_SEEK,   EXO_SYS_FILE_STAT,
         EXO_SYS_FILE_REMOVE,  EXO_SYS_FILE_RENAME, EXO_SYS_SOUND_TONE,
         EXO_SYS_SOUND_STOP,   EXO_SYS_YIELD,       EXO_SYS_EXIT,
-        EXO_SYS_LAUNCH_WAD_VIEWER, EXO_SYS_LAUNCH_CLOCK, EXO_SYS_LAUNCH_SNAKE,
-        EXO_SYS_LAUNCH_DOOM,       EXO_SYS_MEMSTAT,      EXO_SYS_PSLIST,
-        EXO_SYS_DISK_READ,         EXO_SYS_DISK_WRITE,   EXO_SYS_DISK_ACQUIRE,
+        EXO_SYS_LAUNCH,       EXO_SYS_MEMSTAT,     EXO_SYS_PSLIST,
+        EXO_SYS_DISK_READ,    EXO_SYS_DISK_WRITE,  EXO_SYS_DISK_ACQUIRE,
     };
     /* 64-bit so the mask keeps working as the table grows; the assert makes
      * the ceiling explicit rather than letting the shift go undefined. */
@@ -263,11 +259,9 @@ static void *const volatile stub_addresses[] = {
     (void *)exo_file_write,   (void *)exo_file_seek,   (void *)exo_file_stat,
     (void *)exo_file_remove,  (void *)exo_file_rename, (void *)exo_sound_tone,
     (void *)exo_sound_stop,   (void *)exo_yield,       (void *)exo_exit,
-    (void *)exo_launch_wad_viewer, (void *)exo_launch_clock,
-    (void *)exo_launch_snake,      (void *)exo_launch_doom,
-    (void *)exo_memstat,           (void *)exo_pslist,
-    (void *)exo_disk_read,         (void *)exo_disk_write,
-    (void *)exo_disk_acquire,
+    (void *)exo_launch,            (void *)exo_memstat,
+    (void *)exo_pslist,            (void *)exo_disk_read,
+    (void *)exo_disk_write,        (void *)exo_disk_acquire,
 };
 
 static void test_every_syscall_has_a_stub(void)
@@ -289,8 +283,51 @@ static void test_every_syscall_has_a_stub(void)
     }
 }
 
+/*
+ * The app ids are their own dense, ordered ABI now that they, rather than
+ * syscall numbers, are what distinguishes one launchable LibOS from another
+ * (SCRUM-184). Same reasoning as the syscall-number test above: the kernel's
+ * launch_apps[] table (src/syscall_launch.c) is indexed directly by these
+ * values and bounds-checks against COUNT, so a gap, a duplicate or a COUNT
+ * that has drifted is an out-of-range index or an unreachable app.
+ */
+static void test_launch_app_ids_are_dense_and_ordered(void)
+{
+    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_WAD_VIEWER, 0);
+    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_CLOCK,      1);
+    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_SNAKE,      2);
+    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_DOOM,       3);
+
+    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_COUNT, EXO_LAUNCH_APP_DOOM + 1);
+    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_COUNT, 4);
+}
+
+/*
+ * An unknown app id must be rejected, and rejected as EINVAL rather than
+ * ENOSYS. The distinction is the whole point of the change: with a syscall
+ * number per app an unknown app was an unknown *syscall*, and the dispatcher
+ * answered -EXO_ENOSYS before any handler ran. Now the number is always
+ * valid and the handler itself has to do the bounds check.
+ */
+static void test_launch_rejects_unknown_app_id(void)
+{
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_LAUNCH, EXO_LAUNCH_APP_COUNT,
+                                         0, 0, 0, 0, 0),
+                    -EXO_EINVAL);
+
+    /* A "negative" id arrives as a huge unsigned value; same comparison
+     * catches it. */
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_LAUNCH, (uint64_t)-1,
+                                         0, 0, 0, 0, 0),
+                    -EXO_EINVAL);
+}
+
 void suite_exo_syscall_tests(CU_pSuite s)
 {
+    CU_add_test(s, "launch app ids are dense and ordered",
+                test_launch_app_ids_are_dense_and_ordered);
+    CU_add_test(s, "launch rejects an unknown app id",
+                test_launch_rejects_unknown_app_id);
     CU_add_test(s, "numbers_match_spec",   test_numbers_match_spec);
     CU_add_test(s, "count_one_past_last",  test_count_is_one_past_last);
     CU_add_test(s, "numbers_unique_dense", test_numbers_are_unique);

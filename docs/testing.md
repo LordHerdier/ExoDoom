@@ -57,17 +57,21 @@ process — which can look like a pile of failures even when every one of
 those lines is an expected rejection from whichever suite was still running.
 
 The expensive suite is `syscall_fuzz` (SCRUM-115): it drives 1,000,000 random
-syscalls through the dispatcher. Three of those syscall numbers —
-`EXO_SYS_LAUNCH_WAD_VIEWER`/`_CLOCK`/`_DOOM` — do a real `context_create()`
-plus a full image copy instead of a cheap validation check, so
-`test_syscall_fuzz_k.c`'s `next_syscall_num()` deliberately rate-limits all
-three to roughly 1-in-2000 draws rather than letting them land at their
-natural ~1-in-29 frequency. **Any new `EXO_SYS_LAUNCH_*` number must be added
-to that rate limit when it's introduced** — SCRUM-66 added
+syscalls through the dispatcher. One of those syscall numbers —
+`EXO_SYS_LAUNCH` — can do a real `context_create()` plus a full image copy
+instead of a cheap validation check, so `test_syscall_fuzz_k.c`'s
+`next_syscall_num()` deliberately rate-limits it to roughly 1-in-2000 draws
+rather than letting it land at its natural ~1-in-31 frequency. Before
+SCRUM-184 this was three separate numbers
+(`EXO_SYS_LAUNCH_WAD_VIEWER`/`_CLOCK`/`_DOOM`), each needing its own entry in
+the rate limit, and **that is exactly what got missed**: SCRUM-66 added
 `EXO_SYS_LAUNCH_DOOM` to `exo_syscall.h` without updating the fuzz test, and
 left unrated it turned roughly 1-in-29 of the million draws into a full
 ~200-page Doom image build, which is what blew the suite through the old
-60s ceiling (and very nearly the new 120s one too). It runs last on purpose
+60s ceiling (and very nearly the new 120s one too). Collapsing to one number
+retires that particular foot-gun — a new app is a row in `launch_apps[]`, not
+a new syscall number the rate limit has to learn about — but the limit on
+`EXO_SYS_LAUNCH` itself still has to stay. It runs last on purpose
 (see that suite's own file comment), so it has no headroom to spare: any
 suite added *before* it also eats into its share of the timeout, and adding
 an unrated expensive syscall is worse still. Re-measure the full run rather
