@@ -17,6 +17,7 @@ void suite_stdio_tests   (CU_pSuite s);
 void suite_stdlib_tests  (CU_pSuite s);
 void suite_kbd_ring_tests(CU_pSuite s);
 void suite_ps2_decode_tests(CU_pSuite s);
+void suite_ps2_mouse_tests(CU_pSuite s);
 void suite_exo_syscall_tests(CU_pSuite s);
 void suite_exo_syscall_kview_tests(CU_pSuite s);
 void suite_exo_errno_tests(CU_pSuite s);
@@ -38,6 +39,7 @@ void suite_tss_tests(CU_pSuite s);
 void suite_libos_launch_tests(CU_pSuite s);
 void suite_syscall_serial_tests(CU_pSuite s);
 void suite_syscall_kbd_tests(CU_pSuite s);
+void suite_syscall_mouse_tests(CU_pSuite s);
 void suite_pit_tests(CU_pSuite s);
 void suite_speaker_tests(CU_pSuite s);
 void suite_syscall_sound_tests(CU_pSuite s);
@@ -274,6 +276,9 @@ int run_tests(void)
     s = CU_add_suite("ps2_decode", NULL, NULL);
     suite_ps2_decode_tests(s);
 
+    s = CU_add_suite("ps2_mouse", NULL, NULL);
+    suite_ps2_mouse_tests(s);
+
     s = CU_add_suite("exo_syscall", NULL, NULL);
     suite_exo_syscall_tests(s);
 
@@ -344,6 +349,9 @@ int run_tests(void)
 
     s = CU_add_suite("syscall_kbd", NULL, NULL);
     suite_syscall_kbd_tests(s);
+
+    s = CU_add_suite("syscall_mouse", NULL, NULL);
+    suite_syscall_mouse_tests(s);
 
     s = CU_add_suite("pit", NULL, NULL);
     suite_pit_tests(s);
