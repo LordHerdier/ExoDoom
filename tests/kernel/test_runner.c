@@ -69,6 +69,7 @@ void suite_syscall_fuzz_tests(CU_pSuite s);
 void suite_syscall_bench_tests(CU_pSuite s);
 void suite_libos_snake_tests(CU_pSuite s);
 void suite_doom_keymap_tests(CU_pSuite s);
+void suite_doom_sfx_tone_tests(CU_pSuite s);
 void suite_libos_doom_tests(CU_pSuite s);
 void suite_syscall_stat_tests(CU_pSuite s);
 void suite_ata_tests(CU_pSuite s);
@@ -439,6 +440,9 @@ int run_tests(void)
      * init/cleanup (SCRUM-40). */
     s = CU_add_suite("doom_keymap", NULL, NULL);
     suite_doom_keymap_tests(s);
+
+    s = CU_add_suite("doom_sfx_tone", NULL, NULL);
+    suite_doom_sfx_tone_tests(s);
 
     s = CU_add_suite("libos_doom", libos_doom_suite_init,
                      libos_doom_suite_cleanup);
