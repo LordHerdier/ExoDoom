@@ -49,9 +49,9 @@
 /*
  * Store `name` (of `len` bytes, no NUL required) in the name area.
  *
- * Returns 0 with *blk_out/*off_out set to the reference a dirent should
- * record, -EXO_EINVAL for a zero-length name or one over EXOFS_MAX_NAME,
- * -EXO_ENOSPC if the volume is full, or a device error.
+ * Returns 0, with *blk_out and *off_out set to the reference a dirent
+ * should record; -EXO_EINVAL for a zero-length name or one over
+ * EXOFS_MAX_NAME; -EXO_ENOSPC if the volume is full; or a device error.
  *
  * May allocate a block and, the first time any name is stored on a volume,
  * rewrite the superblock to record the head of the name chain.

@@ -101,7 +101,7 @@ int exofs_bdev_read(uint32_t lba, void *buf, uint32_t count)
 
     /* count == 0 before the NULL check, deliberately and in that order: the
      * syscall itself treats a zero count as an unconditional no-op checked
-     * "before everything else" (docs/syscall_spec.md §3.2 #27), so a buffer
+     * "before everything else" (docs/syscall_spec.md §3.2 #24), so a buffer
      * that is never dereferenced is never examined either. Checking NULL
      * first would make this wrapper stricter than the call it wraps, which
      * is exactly the kind of divergence the seam exists to avoid. */

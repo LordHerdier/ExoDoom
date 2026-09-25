@@ -8,7 +8,7 @@
  * (SCRUM-189).
  *
  * Everything above this file works in blocks and LBAs; this file turns those
- * into exo_disk_read/exo_disk_write/exo_disk_acquire (#27/#28/#29,
+ * into exo_disk_read/exo_disk_write/exo_disk_acquire (#24/#25/#26,
  * docs/syscall_spec.md §3.2, src/syscall_disk.c). Keeping that in one place
  * is what makes the rest of the filesystem testable from ring 0 — see the
  * dual-compile note below — and it is also the seam a future ramdisk or
@@ -50,7 +50,7 @@
  */
 
 /*
- * Acquire the disk binding for this context (#29, SCRUM-188).
+ * Acquire the disk binding for this context (#26, SCRUM-188).
  *
  * exo_disk_read/exo_disk_write answer -EXO_EBUSY to a caller that does not
  * hold the binding, whether nobody holds it or somebody else does, so this
@@ -71,7 +71,7 @@ int exofs_bdev_acquire(void);
  *
  * Unlike the raw syscall these return 0 rather than `count`: a partial
  * transfer is not a thing either syscall can report (docs/syscall_spec.md
- * §3.2 #27 — a sector fault is -EXO_EIO with no byte count), so "how many"
+ * §3.2 #24 — a sector fault is -EXO_EIO with no byte count), so "how many"
  * carries no information a caller could act on, and collapsing it removes
  * the temptation to write a partial-transfer loop that can never run.
  *

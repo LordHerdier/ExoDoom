@@ -317,7 +317,7 @@ out:
  * bad name_off would have memcpy reading from the middle of another record,
  * or past the end of the block.
  */
-static int load_record(exofs_volume_t *v, uint32_t blk, uint16_t off,
+static int load_record(uint32_t blk, uint16_t off,
                        uint8_t *buf, uint16_t *cap_out, int *free_out)
 {
     if (off < EXOFS_NAME_HDR_SIZE)     return -EXO_EINVAL;
@@ -348,7 +348,7 @@ int exofs_name_read(exofs_volume_t *v, uint32_t blk, uint16_t off,
     if (buf == NULL) return -EXO_ENOMEM;
 
     uint16_t cap; int is_free;
-    int rc = load_record(v, blk, off, buf, &cap, &is_free);
+    int rc = load_record(blk, off, buf, &cap, &is_free);
     if (rc < 0) goto out;
 
     if (is_free || len > cap) { rc = -EXO_EINVAL; goto out; }
@@ -377,7 +377,7 @@ int exofs_name_equals(exofs_volume_t *v, uint32_t blk, uint16_t off,
     if (buf == NULL) return -EXO_ENOMEM;
 
     uint16_t cap; int is_free;
-    int rc = load_record(v, blk, off, buf, &cap, &is_free);
+    int rc = load_record(blk, off, buf, &cap, &is_free);
     if (rc < 0) goto out;
 
     if (is_free || len > cap) { rc = -EXO_EINVAL; goto out; }
@@ -397,7 +397,7 @@ int exofs_name_free(exofs_volume_t *v, uint32_t blk, uint16_t off)
     if (buf == NULL) return -EXO_ENOMEM;
 
     uint16_t cap; int is_free;
-    int rc = load_record(v, blk, off, buf, &cap, &is_free);
+    int rc = load_record(blk, off, buf, &cap, &is_free);
     if (rc < 0) goto out;
 
     /* Freeing an already-free record means two dirents referenced it, or one

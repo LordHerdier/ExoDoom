@@ -48,7 +48,7 @@
 /* Block size == sector size. Keeping these equal is what lets a block index
  * be turned into an LBA with one addition instead of a multiply-and-split,
  * and exo_disk_read/exo_disk_write only speak 512-byte sectors anyway
- * (docs/syscall_spec.md §3.2 #27). */
+ * (docs/syscall_spec.md §3.2 #24). */
 #define EXOFS_BLOCK_SIZE     512u
 
 /* 'XOFS' little-endian. Checked on mount; a volume whose first four bytes

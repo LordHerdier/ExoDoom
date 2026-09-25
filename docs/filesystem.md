@@ -5,7 +5,7 @@ run as ExoDoom **LibOS code** over `exo_disk_read`/`exo_disk_write`
 (SCRUM-189). It is a library, not a kernel subsystem: the exokernel knows
 sectors, and this code is what decides that some of those sectors are a file.
 That split is the whole point — see `docs/architecture.md` and
-`docs/syscall_spec.md` §3.2 #27, which says in as many words that the disk
+`docs/syscall_spec.md` §3.2 #24, which says in as many words that the disk
 syscalls carry "zero filesystem knowledge".
 
 This document is the format contract and the design rationale. The on-disk
@@ -127,7 +127,7 @@ directory blocks are read through on every access.
 Chain walks are the hot path, and a FAT lookup that cost a syscall would make
 each walk a series of interrupt-disabled disk transfers — `syscall`'s FMASK
 clears IF, so every disk syscall runs with interrupts off (`docs/syscall_spec.md`
-§3.2 #27). Keeping data blocks uncached means the only dirty-state invariant
+§3.2 #24). Keeping data blocks uncached means the only dirty-state invariant
 in the filesystem is the FAT's single bitmap.
 
 The bitmap is per-sector rather than one flag for the whole FAT because a
