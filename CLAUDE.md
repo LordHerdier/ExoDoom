@@ -207,6 +207,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Interrupts (IDT/PIC/ISR, TSS, page-fault diagnostics) | `src/idt.c/h`, `src/pic.c/h`, `src/isr.s`, `src/io.h`, `src/tss.c/h`, `src/fault.c/h` |
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | PC speaker (PIT channel 2, SCRUM-98) | `src/speaker.c/h` |
+| Doom SFX → speaker tone table (SCRUM-99) | `src/doom_sfx_tone.c/h` |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
 | Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h` |
