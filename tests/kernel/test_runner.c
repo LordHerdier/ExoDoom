@@ -39,6 +39,7 @@ void suite_libos_launch_tests(CU_pSuite s);
 void suite_syscall_serial_tests(CU_pSuite s);
 void suite_syscall_kbd_tests(CU_pSuite s);
 void suite_pit_tests(CU_pSuite s);
+void suite_speaker_tests(CU_pSuite s);
 void suite_syscall_pit_tests(CU_pSuite s);
 void suite_doomgeneric_timer_tests(CU_pSuite s);
 void suite_libos_main_tests(CU_pSuite s);
@@ -68,6 +69,7 @@ void suite_syscall_fuzz_tests(CU_pSuite s);
 void suite_syscall_bench_tests(CU_pSuite s);
 void suite_libos_snake_tests(CU_pSuite s);
 void suite_doom_keymap_tests(CU_pSuite s);
+void suite_doom_sfx_tone_tests(CU_pSuite s);
 void suite_libos_doom_tests(CU_pSuite s);
 void suite_syscall_stat_tests(CU_pSuite s);
 void suite_ata_tests(CU_pSuite s);
@@ -343,6 +345,9 @@ int run_tests(void)
     s = CU_add_suite("pit", NULL, NULL);
     suite_pit_tests(s);
 
+    s = CU_add_suite("speaker", NULL, NULL);
+    suite_speaker_tests(s);
+
     s = CU_add_suite("syscall_pit", NULL, NULL);
     suite_syscall_pit_tests(s);
 
@@ -435,6 +440,9 @@ int run_tests(void)
      * init/cleanup (SCRUM-40). */
     s = CU_add_suite("doom_keymap", NULL, NULL);
     suite_doom_keymap_tests(s);
+
+    s = CU_add_suite("doom_sfx_tone", NULL, NULL);
+    suite_doom_sfx_tone_tests(s);
 
     s = CU_add_suite("libos_doom", libos_doom_suite_init,
                      libos_doom_suite_cleanup);

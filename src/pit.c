@@ -1,6 +1,7 @@
 #include "pit.h"
 #include "io.h"
 #include "pic.h"
+#include "speaker.h"
 
 static volatile uint32_t ticks = 0;
 static uint32_t frequency = 1000;
@@ -35,6 +36,10 @@ void pit_irq0_reset_last_rsp(void) {
 
 void irq0_handler() {
     ticks++;
+
+    /* SCRUM-98: end a timed PC speaker tone once its duration is up. This is
+     * what makes speaker_tone() -- and so exo_sound_tone -- non-blocking. */
+    speaker_tick(kernel_get_ticks_ms());
 
 #ifdef TESTING
     /* This function's own stack frame sits wherever the CPU switched RSP to

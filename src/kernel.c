@@ -10,6 +10,7 @@
 #include "tss.h"
 #include "pic.h"
 #include "pit.h"
+#include "speaker.h"
 #include "ps2.h"
 #include "ata.h"
 #include "sleep.h"
@@ -333,6 +334,13 @@ void kernel_main(void *mb2_info_ptr) {
     pic_remap();
     idt_set_gate(32, (uintptr_t)irq0_stub);
     pit_init(1000);
+
+    // ── PC speaker (SCRUM-98) ────────────────────────────────────────────
+    // PIT channel 2 + port 0x61. Silenced here because firmware can leave
+    // the gate bits set; irq0_handler() (just wired above) is what ends a
+    // timed tone, so this sits after pit_init() and ahead of the TESTING
+    // branch like everything else a test needs.
+    speaker_init();
 
     // ── ATA PIO driver (SCRUM-102) ───────────────────────────────────────
     // Polled, ring-0 only. Ahead of the TESTING branch so the KUnit suite
