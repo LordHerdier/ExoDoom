@@ -32,8 +32,15 @@
 #undef FEATURE_MULTIPLAYER
 
 // Enables sound output
+//
+// ExoDoom (SCRUM-101): on, backed by the PC speaker. DG_sound_module and
+// DG_music_module are defined in src/doom_sound.c, outside this tree.
+// Defined here rather than with -DFEATURE_SOUND: i_sound.c's
+// `#include <SDL_mixer.h>` guard sits above its include of this header, so
+// it never sees this definition, while sound_modules[] and
+// InitMusicModule() below that include do.
 
-//#undef FEATURE_SOUND
+#define FEATURE_SOUND
 
 #endif /* #ifndef DOOM_FEATURES_H */
 

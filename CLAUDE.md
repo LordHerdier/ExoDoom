@@ -208,6 +208,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | PC speaker (PIT channel 2, SCRUM-98) | `src/speaker.c/h` |
 | Doom SFX → speaker tone table (SCRUM-99) | `src/doom_sfx_tone.c/h` |
+| Doom `sound_module_t` over the speaker (SCRUM-101) | `src/doom_sound.c/h` (+ `FEATURE_SOUND` in `src/doom/doomfeatures.h`) |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
 | Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h`, `src/syscall_sound.c/h` (SCRUM-100) |

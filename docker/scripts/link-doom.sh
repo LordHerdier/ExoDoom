@@ -72,6 +72,12 @@ SHIM_SOURCES=(
   # vendored patch small, not because it is optional. This gate is what found
   # it: merging SCRUM-83 left those three symbols undefined here.
   src/doom_panic.c
+  # SCRUM-101's sound module. With FEATURE_SOUND on (src/doom/doomfeatures.h),
+  # i_sound.c references DG_sound_module/DG_music_module and binds
+  # use_libsamplerate/libsamplerate_scale; doom_sound.c defines all four and
+  # calls doom_sfx_tone(), so both belong to the Doom link.
+  src/doom_sound.c
+  src/doom_sfx_tone.c
   src/libos_heap.c
   src/libos_page_alloc.c
   src/libos_fb.c
