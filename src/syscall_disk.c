@@ -40,7 +40,7 @@ static int ata_write_sector_adapter(uint32_t lba, uint8_t *buf)
  * bits that made it invalid.
  *
  * count == 0's "always succeeds and touches nothing" contract
- * (docs/syscall_spec.md #27/#28) runs ahead of every other rejection below
+ * (docs/syscall_spec.md #24/#25) runs ahead of every other rejection below
  * it in both handlers -- ownership included -- matching
  * exo_fb_acquire's own rule of validating the caller's arguments before
  * touching the resource (src/syscall_fb.c: "checked before anything is
@@ -110,7 +110,7 @@ static int owns_disk(void)
     return disk_binding_owner() == syscall_current_context();
 }
 
-/* #27 -- read `count` sectors starting at `lba` into `buf`. */
+/* #24 -- read `count` sectors starting at `lba` into `buf`. */
 static int64_t sys_disk_read(uint64_t lba, uint64_t buf, uint64_t count,
                              uint64_t a4, uint64_t a5, uint64_t a6)
 {
@@ -134,7 +134,7 @@ static int64_t sys_disk_read(uint64_t lba, uint64_t buf, uint64_t count,
                          ata_read_sector);
 }
 
-/* #28 -- write `count` sectors starting at `lba` from `buf`. */
+/* #25 -- write `count` sectors starting at `lba` from `buf`. */
 static int64_t sys_disk_write(uint64_t lba, uint64_t buf, uint64_t count,
                               uint64_t a4, uint64_t a5, uint64_t a6)
 {
@@ -158,7 +158,7 @@ static int64_t sys_disk_write(uint64_t lba, uint64_t buf, uint64_t count,
                          ata_write_sector_adapter);
 }
 
-/* #29 -- bind the disk to the caller. */
+/* #26 -- bind the disk to the caller. */
 static int64_t sys_disk_acquire(uint64_t a1, uint64_t a2, uint64_t a3,
                                 uint64_t a4, uint64_t a5, uint64_t a6)
 {

@@ -5,7 +5,7 @@
 /*
  * disk_binding.h — disk secure binding (SCRUM-188, epic SCRUM-151).
  *
- * exo_disk_read/exo_disk_write (#27/#28, SCRUM-103) shipped with no
+ * exo_disk_read/exo_disk_write (#24/#25, SCRUM-103) shipped with no
  * ownership concept: the raw disk was the one exokernel resource any LibOS
  * could touch regardless of who else was using it. This module makes it an
  * owned resource in the same sense as the framebuffer (src/fb_binding.c),
@@ -15,7 +15,7 @@
  * (src/fb_shadow.c), so there is no per-context multiplexing to reach for
  * here.
  *
- *   - exo_disk_acquire (#29) **establishes** the binding — one owner at a
+ *   - exo_disk_acquire (#26) **establishes** the binding — one owner at a
  *     time, -EXO_EBUSY for anyone else.
  *   - exo_disk_read/exo_disk_write **enforce** it — a caller that does not
  *     hold the binding gets -EXO_EBUSY, whether nobody holds it yet or

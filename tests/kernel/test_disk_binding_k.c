@@ -137,7 +137,7 @@ static void test_read_write_reject_unheld_disk(void)
     CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
 
     /* count == 0 stays a no-op success regardless of the binding -- it
-     * touches nothing (docs/syscall_spec.md #27/#28). */
+     * touches nothing (docs/syscall_spec.md #24/#25). */
     CU_ASSERT_EQUAL(do_disk_read(TEST_LBA, 0, 0), 0);
     CU_ASSERT_EQUAL(do_disk_write(TEST_LBA, 0, 0), 0);
 }

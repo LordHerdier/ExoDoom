@@ -16,7 +16,7 @@
  * overflow) still run unconditionally, since they reject before ever
  * reaching ata.c.
  *
- * SCRUM-188 added an ownership check to #27/#28 themselves: every real
+ * SCRUM-188 added an ownership check to #24/#25 themselves: every real
  * transfer here now needs the suite's own context to hold the disk binding
  * first, so syscall_disk_suite_init()/_cleanup() acquire/release it around
  * the whole suite. Binding *enforcement* itself (a foreign owner blocking

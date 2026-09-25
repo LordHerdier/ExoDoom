@@ -6,7 +6,7 @@
  * exo_page_map via src/libos_fb.c's libos_fb_map() for the screen,
  * exo_kbd_poll for input, exo_get_ticks for timing, exo_serial_write for
  * diagnostics), launched from the shell's "snake" command
- * (src/shell/shell_main.c) via exo_launch_snake() (#22, src/syscall_launch.c)
+ * (src/shell/shell_main.c) via exo_launch(EXO_LAUNCH_APP_SNAKE) (#21, src/syscall_launch.c)
  * rather than kernel_main hardcoding it as the boot-time LibOS.
  *
  * Simpler than the WAD viewer in two ways: there is no external resource to

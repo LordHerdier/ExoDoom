@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 /*
- * syscall_stat.c — exo_memstat (#25) / exo_pslist (#26), SCRUM-113.
+ * syscall_stat.c — exo_memstat (#22) / exo_pslist (#23), SCRUM-113.
  *
  * Neither handler is ownership-checked the way src/syscall_mem.c's are: both
  * are deliberately unscoped introspection (see exo_syscall.h's own comment
@@ -19,7 +19,7 @@
  * sys_fb_acquire).
  */
 
-/* #25 — page-usage snapshot of the whole PMM.
+/* #22 — page-usage snapshot of the whole PMM.
  *   0             *out filled
  *   -EXO_EFAULT   [out, out + sizeof(exo_memstat_t)) is not entirely inside
  *                 the LibOS window and mapped writable */
@@ -42,7 +42,7 @@ static int64_t sys_memstat(uint64_t out, uint64_t a2, uint64_t a3,
     return 0;
 }
 
-/* #26 — list every live LibOS context into `out`, an array of at least
+/* #23 — list every live LibOS context into `out`, an array of at least
  * `max` exo_ps_info_t entries.
  *   >= 0          number of entries written (0..max)
  *   -EXO_EFAULT   [out, out + max * sizeof(exo_ps_info_t)) is not entirely

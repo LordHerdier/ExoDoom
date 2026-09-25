@@ -4,7 +4,7 @@
  * Third real ring-3 LibOS app after the shell (SCRUM-110) and the WAD/flat/
  * automap viewer (SCRUM-178), and structured identically: a code+data blob
  * built and switched to by the shell's "clock" command
- * (src/shell/shell_main.c) via exo_launch_clock() (#22, src/syscall_launch.c),
+ * (src/shell/shell_main.c) via exo_launch(EXO_LAUNCH_APP_CLOCK) (#21, src/syscall_launch.c),
  * with no libc shim linked in (stays comfortably inside
  * LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES the same way the shell does).
  *
