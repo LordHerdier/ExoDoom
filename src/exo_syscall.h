@@ -549,13 +549,15 @@ static inline int64_t exo_file_rename(const char *oldpath, const char *newpath)
 }
 
 /* #17 — start a PC speaker tone.  Returns immediately; the kernel stops the
- * tone after dur_ms.  Always 0. */
+ * tone after dur_ms.  0, or -EXO_EINVAL for freq outside 19..20000 Hz or
+ * dur_ms outside 1..10000 (SCRUM-100, src/syscall_sound.c).  Last tone wins. */
 static inline int64_t exo_sound_tone(uint32_t freq, uint32_t dur_ms)
 {
     return exo_syscall2(EXO_SYS_SOUND_TONE, (uint64_t)freq, (uint64_t)dur_ms);
 }
 
-/* #18 — silence the speaker now.  Always 0. */
+/* #18 — silence the speaker now.  0 (also if nothing is sounding), or
+ * -EXO_EPERM if another context started the tone that is sounding. */
 static inline int64_t exo_sound_stop(void)
 {
     return exo_syscall0(EXO_SYS_SOUND_STOP);

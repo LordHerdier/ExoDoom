@@ -113,10 +113,15 @@ without an audio backend, so none of this needs `-audiodev`. To actually
 
 ## 7. Design decisions and gotchas
 
-**No ownership check.** The speaker has no binding table (compare
-`src/fb_binding.c`, `src/disk_binding.c`). That is a SCRUM-100 decision, not
-this driver's — this layer is ring-0 only, and ring 3 cannot reach ports
-`0x42`/`0x43`/`0x61` itself (IOPL 0, no I/O permission bitmap).
+**No ownership check here.** This layer is ring-0 only. The policy lives in
+`src/syscall_sound.c` (SCRUM-100): no binding table (acquiring the one voice
+up front would only lock every other LibOS out of sound), last tone wins, and
+only the context that started the sounding tone may `exo_sound_stop` it;
+`exo_exit` silences the exiting context's tone. Ring 3 cannot reach ports
+`0x42`/`0x43`/`0x61` itself (IOPL 0, no I/O permission bitmap) —
+`tests/kernel/test_syscall_sound_k.c` proves each of those accesses takes
+`#GP` from a real LibOS address space while `exo_sound_tone` from the same
+code works.
 
 **One voice.** The PC speaker is a single square-wave channel. Mixing
 several Doom sound effects is SCRUM-101's policy problem (last-started
