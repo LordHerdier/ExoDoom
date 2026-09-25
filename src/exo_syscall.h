@@ -108,6 +108,7 @@
 #define EXO_SYS_DISK_READ    24
 #define EXO_SYS_DISK_WRITE   25
 #define EXO_SYS_DISK_ACQUIRE 26
+#define EXO_SYS_DISK_RELEASE 27
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -117,7 +118,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        27
+#define EXO_SYS_COUNT        28
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -656,6 +657,23 @@ static inline int64_t exo_disk_write(uint32_t lba, const void *buf,
 static inline int64_t exo_disk_acquire(void)
 {
     return exo_syscall0(EXO_SYS_DISK_ACQUIRE);
+}
+
+/* #27 — give the disk binding back (SCRUM-189). The voluntary counterpart to
+ * exo_disk_acquire, and the only way a LibOS can perform phase 2 of the
+ * revocation protocol for this resource (docs/syscall_spec.md §3.6): without
+ * it, `disk_binding_release()` is reachable from ring 0 only, so the disk
+ * could change hands solely by forced reclaim.
+ *
+ * Always returns 0 — releasing a binding this caller does not hold is a
+ * no-op, not an error, for the same reason a re-acquire by the current owner
+ * is success: a LibOS unwinding after a failed acquire should not have to
+ * remember which one it was. Flush anything cached above this first; the
+ * kernel does not know the binding meant anything (ExoFS calls
+ * exofs_unmount() before exofs_bdev_release() for exactly this reason). */
+static inline int64_t exo_disk_release(void)
+{
+    return exo_syscall0(EXO_SYS_DISK_RELEASE);
 }
 
 #endif /* !EXO_KERNEL */

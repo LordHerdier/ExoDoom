@@ -625,6 +625,103 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL
   objs+=("build/doom_tables.o")
 
+  echo "[3b4/7] Compile ExoFS for the kernel-side test suite (SCRUM-189)"
+  # src/libos_fs/ is the ported FAT-like filesystem. It is LibOS-space code
+  # by design (the kernel knows sectors; this library decides what a file
+  # is), so it deliberately lives in a subdirectory, which step 3's
+  # `src/*.c` glob never descends into -- a shipped kernel links none of
+  # it. This step is the only thing that compiles it today, and it is
+  # inside the TESTING block, so that stays true.
+  #
+  # -DEXO_KERNEL, like every other compile in this script, and it is what
+  # picks the in-process exo_syscall_dispatch() form of
+  # src/libos_fs/exofs_blockdev.c's disk I/O rather than the inline
+  # `syscall` stubs (see that file's own #ifdef EXO_KERNEL comment, and
+  # src/libos_page_alloc.c's, for why a ring-0 caller must not execute a
+  # stub: `sysretq` forces CPL 3 on return). That is what lets
+  # tests/kernel/test_exofs_k.c drive the real filesystem from ring 0.
+  #
+  # The mirror-image step does not exist yet: nothing links ExoFS into a
+  # ring-3 target, because no ring-3 app uses it until the shell commands
+  # (SCRUM-202) or exo_file_* (SCRUM-44). These sources are written to
+  # build cleanly WITHOUT -DEXO_KERNEL as well, the same way src/stdlib.c
+  # and src/libos_page_alloc.c are, so that step is a
+  # build_ring3_link_target call and nothing more when it is wanted --
+  # which step [3b5/7] below exists to keep true rather than merely
+  # asserted here.
+  _compile_exofs_one() {
+    local c="$1" o="$2"
+    echo "    CC $(basename "$c") (exofs)"
+    x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  }
+  cmds=()
+  for c in src/libos_fs/*.c; do
+    o="build/exofs_$(basename "${c%.c}.o")"
+    objs+=("$o")
+    cmds+=("$(qcmd _compile_exofs_one "$c" "$o")")
+  done
+  run_parallel "${cmds[@]}" || { echo "    ERROR: exofs compile failed"; exit 1; }
+
+  echo "[3b5/7] Gate: ExoFS still builds as a ring-3 target (SCRUM-189)"
+  # The step above compiles ExoFS one way only -- WITH -DEXO_KERNEL, for
+  # tests/kernel/test_exofs_k.c. But the whole point of this library is that
+  # it is LibOS-space code, and the first ring-3 consumer (SCRUM-202 shell
+  # commands, SCRUM-44 exo_file_*) is not written yet. Without this step,
+  # nothing in the tree would notice ExoFS acquiring a kernel-only
+  # dependency, and "a build_ring3_link_target call and nothing more" would
+  # quietly stop being true months before anyone tried it.
+  #
+  # So: compile every source a second time with probe_cflags (the ring-3
+  # CFLAGS, -mcmodel=large) and WITHOUT -DEXO_KERNEL, which selects the
+  # inline `syscall` stub form of exofs_blockdev.c, then check what the
+  # objects still need from outside src/libos_fs/. The allowlist below is
+  # exactly what a ring-3 link target already provides: the libc shim
+  # (src/string.c) and the LibOS heap (src/libos_heap.c). Anything else
+  # appearing here means ExoFS has picked up a dependency that exists only
+  # inside the kernel image -- which is the failure this gate is for, and
+  # the message says so rather than just printing a symbol name.
+  #
+  # Objects go to a scratch dir and are never added to $objs: the kernel
+  # image links the -DEXO_KERNEL build, not this one.
+  exofs_r3_allowed="libos_heap_alloc libos_heap_free memcmp memcpy memset strlen"
+  rm -rf build/exofs_ring3 && mkdir -p build/exofs_ring3
+  _compile_exofs_ring3_one() {
+    local c="$1" o="$2"
+    echo "    CC $(basename "$c") (exofs, ring-3 view)"
+    x86_64-elf-gcc -c "$c" -o "$o" "${probe_cflags[@]}" -I src/
+  }
+  cmds=()
+  for c in src/libos_fs/*.c; do
+    cmds+=("$(qcmd _compile_exofs_ring3_one "$c" \
+                   "build/exofs_ring3/$(basename "${c%.c}.o")")")
+  done
+  run_parallel "${cmds[@]}" || {
+    echo "    ERROR: ExoFS no longer compiles without -DEXO_KERNEL."
+    echo "           src/libos_fs/ is LibOS-space code; see exofs_blockdev.h."
+    exit 1
+  }
+
+  # nm -u lists undefined symbols. exofs_* ones resolve within the library
+  # itself once all the objects are linked together, so drop them and judge
+  # what is left.
+  exofs_r3_undef=$(x86_64-elf-nm -u build/exofs_ring3/*.o \
+                   | awk '{ print $2 }' | sort -u | grep -v '^exofs_' || true)
+  exofs_r3_bad=""
+  for sym in ${exofs_r3_undef}; do
+    case " ${exofs_r3_allowed} " in
+      *" ${sym} "*) ;;
+      *) exofs_r3_bad="${exofs_r3_bad} ${sym}" ;;
+    esac
+  done
+  if [[ -n "${exofs_r3_bad}" ]]; then
+    echo "    ERROR: ExoFS depends on symbols a ring-3 target cannot provide:"
+    for sym in ${exofs_r3_bad}; do echo "             ${sym}"; done
+    echo "           Either it belongs in the libc shim / libos_heap, or it is"
+    echo "           kernel-only and does not belong in src/libos_fs/ at all."
+    exit 1
+  fi
+  echo "    OK: ring-3 view needs only:${exofs_r3_undef//$'\n'/ }"
+
   echo "[3c/7] Compile kernel test sources"
   # Kernel view by default -- these run in ring 0.  The one TU that needs
   # the LibOS view (test_exo_syscall_k.c, which instantiates the stubs)

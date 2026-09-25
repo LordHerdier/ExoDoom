@@ -350,7 +350,7 @@ void kernel_main(void *mb2_info_ptr) {
     }
 
     // ── Disk syscalls (SCRUM-103/SCRUM-188) ─────────────────────────────
-    // Binds exo_disk_read/exo_disk_write/exo_disk_acquire (#24/#25/#26) in
+    // Binds exo_disk_read/_write/_acquire/_release (#24/#25/#26/#27) in
     // front of the ATA driver above, passing along whether a drive actually
     // answered so the handlers can return -EXO_ENODEV without re-probing the
     // bus. Same placement rule as every other syscall *_init(): after

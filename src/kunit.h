@@ -41,7 +41,26 @@
  * the 51 suites registered in tests/kernel/test_runner.c at the time, to
  * stop this needing a bump every few sprints. */
 #define KUNIT_MAX_SUITES          256
-#define KUNIT_MAX_TESTS_PER_SUITE 64
+
+/* The per-suite ceiling has exactly the same silent-overflow mode as
+ * KUNIT_MAX_SUITES above, and bit for the same reason: CU_add_test() returns
+ * NULL past the cap, test_runner.c does not check the return (nor should it
+ * have to), and the dropped tests simply never run while ALL TESTS PASSED
+ * still prints. Raised from 64 to 128 under SCRUM-189, whose exofs suite
+ * reached 66 tests and silently lost its last two -- including the ticket's
+ * own end-to-end acceptance test, which is the single test most worth
+ * noticing the absence of.
+ *
+ * The cost is real but small: the registry is a flat static array, so this
+ * is KUNIT_MAX_SUITES * KUNIT_MAX_TESTS_PER_SUITE * sizeof(CU_Test) of .bss
+ * in a TESTING build, and doubling the per-suite cap doubles it. Do not trim
+ * either constant back toward the current count -- a ceiling whose overflow
+ * mode is silence leaves no safe margin.
+ *
+ * If a suite ever genuinely approaches 128, split it rather than raising
+ * this again: test_libos_heap_k.c's two-suite split shows the shape, and a
+ * suite that large has usually stopped being one subject. */
+#define KUNIT_MAX_TESTS_PER_SUITE 128
 #define KUNIT_NAME_LEN            64
 
 /* ---- Opaque handle types ----------------------------------------------- */

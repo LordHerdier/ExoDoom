@@ -37,6 +37,7 @@ static void test_codes_match_libc_errno(void)
     CU_ASSERT_EQUAL(EXO_ESPIPE,   ESPIPE);
     CU_ASSERT_EQUAL(EXO_EROFS,    EROFS);
     CU_ASSERT_EQUAL(EXO_ENOSYS,   ENOSYS);
+    CU_ASSERT_EQUAL(EXO_ENOTEMPTY, ENOTEMPTY);
 
     /* EXO_EFAULT has no libc errno.h counterpart -- there is no pointer
      * argument to a libc call that crosses the LibOS/kernel boundary the way
@@ -54,6 +55,7 @@ static void test_codes_are_unique(void)
         EXO_EFAULT,  EXO_EBUSY,   EXO_EEXIST,  EXO_ENODEV,  EXO_ENOTDIR,
         EXO_EISDIR,  EXO_EINVAL,  EXO_ENFILE,  EXO_EMFILE,  EXO_EFBIG,
         EXO_ENOSPC,  EXO_ESPIPE,  EXO_EROFS,   EXO_ENOSYS,
+        EXO_ENOTEMPTY,
     };
     unsigned i, j;
     const unsigned n = sizeof(codes) / sizeof(codes[0]);

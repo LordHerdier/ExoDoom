@@ -190,13 +190,25 @@ TESTS FAILED: 1 test(s) failed
 | Setting | Value |
 |---------|-------|
 | `KUNIT_MAX_SUITES` | 256 |
-| `KUNIT_MAX_TESTS_PER_SUITE` | 64 |
+| `KUNIT_MAX_TESTS_PER_SUITE` | 128 |
 | `KUNIT_NAME_LEN` | 64 bytes |
 
-These can be increased in `src/kunit.h` if needed.
+These can be increased in `src/kunit.h` if needed. The registry is a flat
+static array, so the two counts multiply into `.bss` — raising the per-suite
+cap is not free, and a suite approaching it is usually better split (see
+`tests/kernel/test_libos_heap_k.c`, which registers two).
 
 ⚠️ **Exceeding them fails silently.** `CU_add_suite` returns `NULL` at the
 ceiling, `CU_add_test(NULL, ...)` quietly does nothing, and the run still ends
 in `ALL TESTS PASSED` — with an entire suite missing from the output. If a
 suite you registered does not appear in the serial log, check the count here
 before debugging anything else.
+
+**Both ceilings bite, not just the suite one.** SCRUM-189's exofs suite
+reached 66 tests against the then-64 per-suite cap and silently lost its last
+two — including that ticket's own end-to-end acceptance test. Nothing in the
+output said so; the only symptom was the summary reporting two fewer tests
+than there were `CU_add_test` calls. **If `make docker-test`'s "Tests run"
+count is lower than the number of `CU_add_test` calls you expect, check the
+per-suite cap as well as the suite cap** — a suite that is present in the log
+can still be missing tests from its tail.

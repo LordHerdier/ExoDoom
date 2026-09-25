@@ -171,10 +171,35 @@ static int64_t sys_disk_acquire(uint64_t a1, uint64_t a2, uint64_t a3,
     }
 }
 
+/* #27 -- give the binding back (SCRUM-189).
+ *
+ * No failure mode: disk_binding_release() is already a no-op for a context
+ * that does not hold the disk, so there is nothing to report that the caller
+ * could act on. That deliberately mirrors #26 treating a re-acquire by the
+ * current owner as success -- a LibOS unwinding an error path should be able
+ * to release unconditionally without first working out whether it ever
+ * acquired.
+ *
+ * Unlike #24/#25 this does NOT check disk_binding_present() first. A caller
+ * on a headless machine cannot be holding a binding, so the release is a
+ * no-op either way, and answering -EXO_ENODEV would make the unconditional
+ * cleanup above impossible for the one caller that needs it most. Nothing
+ * here touches the ATA bus, so there is no hardware to be absent. */
+static int64_t sys_disk_release(uint64_t a1, uint64_t a2, uint64_t a3,
+                                uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+
+    disk_binding_release(syscall_current_context());
+
+    return 0;
+}
+
 void syscall_disk_init(int drive_present)
 {
     disk_binding_init(drive_present);
     exo_syscall_register(EXO_SYS_DISK_READ, sys_disk_read);
     exo_syscall_register(EXO_SYS_DISK_WRITE, sys_disk_write);
     exo_syscall_register(EXO_SYS_DISK_ACQUIRE, sys_disk_acquire);
+    exo_syscall_register(EXO_SYS_DISK_RELEASE, sys_disk_release);
 }

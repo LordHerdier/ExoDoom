@@ -1,0 +1,340 @@
+# ExoFS — the LibOS-space filesystem
+
+ExoFS (`src/libos_fs/`) is the team's `cfat` FAT-like filesystem, ported to
+run as ExoDoom **LibOS code** over `exo_disk_read`/`exo_disk_write`
+(SCRUM-189). It is a library, not a kernel subsystem: the exokernel knows
+sectors, and this code is what decides that some of those sectors are a file.
+That split is the whole point — see `docs/architecture.md` and
+`docs/syscall_spec.md` §3.2 #24, which says in as many words that the disk
+syscalls carry "zero filesystem knowledge".
+
+This document is the format contract and the design rationale. The on-disk
+structs themselves live in `src/libos_fs/exofs_layout.h`, which is
+deliberately plain-old-data with no dependency beyond `<stdint.h>` so
+SCRUM-190's host-side image builder can compile against that exact header
+rather than restating the format in a script.
+
+> **Status.** Feature-complete for SCRUM-189: the block-I/O seam, the volume
+> layer (superblock/format/mount/FAT cache), the FAT layer, the name area,
+> directory entries, path resolution, the directory operations
+> (mkdir/rmdir/opendir/readdir) and the file operations
+> (open/read/write/seek/stat/unlink). What remains on the ticket is wiring
+> and documentation, not filesystem behaviour.
+
+---
+
+## 1. Ordering invariants
+
+Two write orderings in ExoFS are load-bearing rather than incidental. Both
+are about what an **interrupted or failed operation leaves behind**, and both
+would look arbitrary to someone rearranging the code for readability. They
+are stated here as well as at their call sites because the call-site comment
+is the first thing lost in a refactor.
+
+The general rule they are both instances of: **order writes so that a
+failure partway through leaves a state the filesystem already knows how to
+handle.** There is no journal and no transaction; ordering is the only tool
+available.
+
+### 1.1 Allocation zeroes a block before claiming it
+
+`exofs_fat_alloc()` (`src/libos_fs/exofs_fat.c`) writes 512 zero bytes to the
+block **and only then** sets its FAT entry to `EXOFS_BLOCK_EOC`.
+
+| Order | If it fails or is interrupted in the middle |
+|---|---|
+| **zero, then claim** (what ExoFS does) | A zeroed block that is still marked free. That is just a free block — nothing is lost, and the next allocation finds it. |
+| claim, then zero | A block owned by a chain, still holding its previous owner's bytes. For a directory block those bytes are read as **live entries**, with stale names and stale `first_block` values pointing into chains that now belong to somebody else. |
+
+This is also why zeroing is not left to the caller as an option. A caller
+that forgets it does not get a slightly untidy block; it gets a directory
+that appears to contain another file's entries.
+
+### 1.2 Chain teardown validates before it frees
+
+`exofs_chain_free()` walks the chain **twice** — once to validate it end to
+end, once to free it — rather than freeing blocks as it walks.
+
+A single pass that frees as it goes will, on a chain containing a cycle,
+free some blocks and then discover the corruption. The result is a
+half-freed chain: strictly worse than what it started with, and no longer
+diagnosable. Validating first means `-EXO_EIO` leaves the corrupt chain
+exactly as it was, so a repair tool (or a human with a hex dump) still has
+something to look at.
+
+Two `O(n)` passes over an in-RAM array cost nothing worth optimising, and
+the alternative — a single pass recording block numbers as it goes — needs
+scratch storage proportional to the chain length, which is the one thing a
+teardown path should not need to allocate.
+
+### 1.3 Format writes the superblock last
+
+The same rule again, at volume scope: `exofs_format()` writes the FAT and the
+root block first and the superblock last. Until that final sector lands
+there is no magic on the disk, so `exofs_mount()` refuses the volume — which
+is the honest answer for one whose FAT was only half written. The opposite
+order yields a *mountable* volume with a garbage FAT.
+
+---
+
+## 2. Geometry
+
+A volume starts at a caller-supplied base LBA, not at LBA 0:
+
+```
+base_lba + 0                    superblock (exactly one sector)
+base_lba + 1                    FAT, fat_blocks sectors
+base_lba + 1 + fat_blocks       data region, total_blocks blocks of 512 B
+```
+
+The base is a parameter because the disk is shared —
+`tests/kernel/test_ata_k.c` already owns LBA 2048/2049 of the scratch image
+and `tests/kernel/test_syscall_disk_k.c` owns LBA 3072 — and because it lets
+SCRUM-190 place a volume at a partition-like offset without a format change.
+
+Block size equals sector size (512 B), which is what lets a block index
+become an LBA with one addition.
+
+`exofs_format()` takes the sector count from its caller because **there is no
+disk-capacity syscall**: `ata_init()` issues IDENTIFY, which carries the
+count, but `src/ata.c` does not surface it. Worth a small follow-up. The
+geometry derived from that count is recorded in the superblock, so
+`exofs_mount()` needs only the base.
+
+---
+
+## 3. Why there is a superblock
+
+cfat had none: geometry was compile-time constants that every reader had to
+agree on by convention, and a blank or foreign disk read as a FAT full of
+zeros. Mounting a real device means **detecting**, so the superblock carries
+magic, version, block size and the full geometry, and `exofs_mount()`
+validates each field against another rather than against itself.
+
+That cross-checking is the part that matters. A corrupted sector that happens
+to start with the right four bytes must not produce a mounted volume whose
+`data_lba` points anywhere at all, so `fat_blocks` must be exactly the size
+`total_blocks` implies, and `data_lba` must be exactly where that FAT ends.
+
+---
+
+## 4. Caching
+
+**The FAT lives in RAM; nothing else is cached.** The whole FAT is read at
+mount and written back per *sector* through a dirty bitmap. Data and
+directory blocks are read through on every access.
+
+Chain walks are the hot path, and a FAT lookup that cost a syscall would make
+each walk a series of interrupt-disabled disk transfers — `syscall`'s FMASK
+clears IF, so every disk syscall runs with interrupts off (`docs/syscall_spec.md`
+§3.2 #24). Keeping data blocks uncached means the only dirty-state invariant
+in the filesystem is the FAT's single bitmap.
+
+The bitmap is per-sector rather than one flag for the whole FAT because a
+128 MiB volume has a 1 MiB FAT: one flag would turn a single-block
+allocation into a 2048-sector writeback, with interrupts off throughout.
+
+FAT changes are **marked dirty, not flushed**. The flush belongs to the
+operation, not the block — extending a file by 100 blocks should cost one
+writeback, not 100 — so callers `exofs_sync()` at the point an operation
+completes.
+
+---
+
+## 5. What ExoFS fixes relative to cfat
+
+Beyond the superblock above, and recorded here because each one is a defect
+in the original rather than a matter of taste:
+
+| cfat | ExoFS |
+|---|---|
+| `exit(1)` from library code on a full disk or missing file | negative `EXO_E*` from every entry point; a library that terminates its caller cannot be used by a shell or by Doom |
+| Unbounded chain walks (`while (FAT[i] != USHRT_MAX)`) — a FAT with a cycle hangs forever | every walk bounded by the block count, `-EXO_EIO` on a cycle or a link into a free block. cfat only ever read a file it had written itself; ExoFS reads a real disk |
+| `findFreeBlock()` rescans from block 0 per allocation — O(n) each, O(n²) to fill | a wrapping hint resumes where the last search stopped; a freed block moves the hint back to itself |
+| Block 0 kept out of the allocator only by `FAT[0]` never reading as free | the search starts at block 1, so the root cannot be handed out even if the on-disk FAT says it is free |
+| 16-bit FAT entries, capping a volume at 32 MiB | 32-bit entries. SCRUM-190 must fit a ~28 MB IWAD once the multiboot WAD module is retired |
+| `MAXFILENAME 11` (8.3), inline in the directory entry | variable-length names through an indirection (§6) |
+| Directory iteration finds "the next entry" by `strcmp`-ing names — O(n) per step, so a full walk is O(n²), and wrong outright with duplicate names | positional `(block, index)` cursor |
+| Entry slots never reclaimed; create/delete/create grows a directory forever | `EXOFS_ENT_FREE` slots reused before the directory is extended |
+| One entry marked `isLast` terminates a directory — an invariant every insert and delete has to repair, and one that silently truncates the directory if it is ever wrong | no terminator flag at all. A directory's extent is its FAT chain; a slot is live iff its attributes are non-zero and `EXOFS_ENT_FREE` is clear. Early exit was all the flag bought, over 16 entries per block |
+| Paths tokenised with `strtok()`, whose state is a single static — and both `findEntryFromPath()` and `findParentFromPath()` use it, so a nested walk silently destroys the outer one | an iterator carrying its own cursor; two walks can interleave, which `test_path_iterator` checks directly |
+| Path copied into `char path[MAXPATH]` with `strcpy()` — an unchecked copy of caller-supplied data into a 255-byte stack buffer | the path is never copied; the iterator walks it in place and copies one component at a time into a buffer whose size it is told |
+| No cycle detection anywhere | every chain walk bounded, at the FAT layer and again at the directory iterator |
+
+---
+
+## 6. Variable-length names
+
+The ticket's headline fix. A directory entry stays **fixed at 32 bytes** — so
+16 per block, and an entry's position is arithmetic rather than a scan —
+which is precisely why the name cannot be inline. The entry instead stores
+`(name_block, name_off, name_len)` into a **name area** of ordinary
+FAT-allocated blocks.
+
+Records never straddle a block boundary, so reading a name is always one
+block read. Freed records are marked and reused rather than compacted,
+because SCRUM-104's save-file rotation renames constantly and a bump-only
+name area would grow without bound.
+
+---
+
+## 6b. Directories
+
+`.` and `..` are **real entries**, not synthesised during iteration. That is
+what lets path resolution handle them with no special case at all: it looks
+them up in the directory like any other name, so they mean whatever the
+directory says they mean. The cost is two slots and two name records per
+directory, plus the obligation that anything which ever *moves* a directory
+must fix its `..` — nothing moves directories yet, and a future rename owns
+that.
+
+The root's `..` points at the root. There is nowhere above it, and a
+self-loop makes `/..` resolve to `/` the way every other filesystem behaves,
+without the path code needing to know the root is special.
+
+This is why **`exofs_format()` mounts the volume it has just written**:
+creating an entry allocates a name record, which needs the FAT cache and the
+superblock's `name_head`, so the root's `.`/`..` cannot be laid down by the
+same code that writes raw sectors. Format writes the superblock, mounts,
+bootstraps the root, syncs and unmounts. cfat's `createfs()` called
+`createRootDirectory()` at the same point for the same reason. A consequence
+worth knowing: **a freshly formatted volume has two blocks in use**, the root
+and one name block.
+
+`exofs_readdir()` reports `.` and `..`, as POSIX does. They are ordinary
+entries here, a shell listing wants them, and filtering them would cost a
+name comparison on every iteration to hide something the caller can skip for
+free.
+
+**`rmdir` unlinks from the parent before freeing the directory's blocks** —
+§1's rule at its sharpest. This order leaks a block chain nothing references
+if interrupted; the other leaves the parent naming blocks that are back on
+the free list, so the next allocation hands them to another file while a live
+directory entry still points there. One is a wasted block, the other is two
+files sharing storage.
+
+---
+
+## 6c. Files
+
+A file is a FAT chain of blocks plus a byte count in its directory entry.
+Three properties are worth knowing before editing `exofs_file.c`:
+
+**An empty file has no chain.** `first_block` stays `EXOFS_NO_BLOCK` until the
+first byte is written, so a volume full of empty files costs no data blocks.
+Every write path has to cope with that, which is why writing goes through
+`ensure_block()` rather than `exofs_chain_nth()`.
+
+**The chain position is cached in the handle.** Finding the block holding
+offset N means walking N/512 links, and re-walking from the head on every
+call makes sequential I/O O(blocks²) — for SCRUM-190's ~28 MB IWAD that is
+~57000 steps per call by the end of the file. The handle remembers the last
+block it touched and its chain index, so a forward step costs one link and
+only a backwards seek pays for a re-walk.
+
+**Holes are free.** Seeking past the end and writing leaves a gap that reads
+as zeros, with no hole tracking anywhere — every block is zeroed when
+allocated (§1.1), so unwritten bytes inside an allocated block are already
+zero.
+
+### Durability
+
+A file's size and chain head live in its directory entry, rewritten on
+`exofs_close()` or `exofs_fflush()` — **not on every write**, which for a
+28 MB sequential write would mean one extra whole-block rewrite per call. So
+a handle must be closed for its writes to be findable again; an unmounted
+volume with an unclosed handle keeps the data blocks but not the size, so
+they read as a shorter file. That is the bargain stdio makes with `fclose()`,
+and it is worth stating because the failure is silent.
+
+The one exception is `EXOFS_O_TRUNC`, which flushes immediately. Deferring it
+would leave the entry naming a chain that is already back on the free list —
+the dangling case §1 exists to avoid, and the only place in the file layer
+where a deferred metadata write would be unsafe rather than merely lossy.
+
+`unlink` unlinks from the parent before freeing the data chain, the same
+ordering and for the same reason as `rmdir` (§6b). It refuses a directory
+with `-EXO_EISDIR`: that is `rmdir`'s job, and quietly removing a tree here
+is help nobody asked for.
+
+---
+
+## 7. Paths
+
+**Absolute only.** A path must start with `/`. There is no working directory
+in this library and there should not be one: a shell that wants a `cd` keeps
+the state itself and passes absolute paths down, which is also the only
+arrangement that still works when two callers share a mounted volume.
+
+Repeated separators (`//`) and a trailing `/` are skipped rather than
+producing empty components. A component longer than `EXOFS_MAX_NAME` is
+**reported, not truncated** — a truncated component resolves to a different
+file, which is worse than failing.
+
+`.` and `..` are not special-cased in the path code. They are resolved
+through the directory's own entries, so they mean whatever the directory says
+they mean, which is what makes `..` work once those entries exist.
+
+Descending through a non-directory is `-EXO_ENOTDIR`, distinct from
+`-EXO_ENOENT` for a component that is simply absent: "your path is wrong" and
+"it isn't there" are different answers and a caller can act on the
+difference.
+
+---
+
+## 8. Limits and scope
+
+- **One volume at a time.** The mounted volume is a single static state.
+  This is not a simplification awaiting removal: the disk binding
+  (SCRUM-188) is exclusive, so only one context can reach the disk at all,
+  and that context has one disk.
+- **Unmount before releasing the binding.** `exofs_bdev_release()`
+  (`exo_disk_release`, #27) drops the binding immediately; it cannot know a
+  filesystem was mounted on top of it. The FAT is resident and written back
+  a sector at a time as it changes (§1), so releasing with dirty FAT
+  sectors still cached loses them silently, and the next holder of the disk
+  sees an allocation table that disagrees with the directory entries. Call
+  `exofs_unmount()` (which flushes) or at least `exofs_sync()` first. This
+  matters for any caller that hands the disk to somebody else and keeps
+  running — the shell launching a child that needs the disk is the case
+  that motivated #27.
+- **No threading.** There is no preemption inside a LibOS today, and a lock
+  here would not help if there were — the FAT cache would need one too.
+- **`EXOFS_MAX_BLOCKS` = 262144** (a 128 MiB volume, 1 MiB of FAT). The cap
+  is really on LibOS heap spent on the resident FAT; 1 MiB is already a
+  noticeable share of a 256 MiB QEMU VM. Raising it is one line; paying for
+  it in resident memory is the part to think about.
+- **Timestamps are `exo_get_ticks()`** — monotonic milliseconds since boot,
+  not a wall-clock date. There is no clock to ask. They order writes within
+  one boot and nothing more, so nothing should compare them across a mount.
+
+---
+
+## 9. Source map
+
+| File | What it holds |
+|---|---|
+| `exofs_layout.h` | The on-disk format. POD only, no dependency beyond `<stdint.h>`, so SCRUM-190's image builder compiles against this exact header rather than restating it. |
+| `exofs.h` | The public API and its error contract. |
+| `exofs_internal.h` | The mounted volume's in-memory state, shared between ExoFS's own translation units. Not for the image builder. |
+| `exofs_blockdev.c/.h` | The only file that knows a syscall exists: acquire/release, chunked sector read/write, and the tick source. ExoFS's single `#ifdef EXO_KERNEL`. |
+| `exofs_volume.c` | Superblock, geometry, `format`/`mount`/`sync`/`unmount`, the FAT cache and its writeback. |
+| `exofs_fat.c/.h` | Block allocation and chain traversal. |
+| `exofs_name.c/.h` | The variable-length name area (§6). |
+| `exofs_dirent.c/.h` | Entry storage, the positional iterator, lookup/add/remove. |
+| `exofs_path.c/.h` | Path parsing and resolution (§7). |
+| `exofs_dir.c/.h` | `mkdir`/`rmdir`/`opendir`/`readdir`, and the `.`/`..` bootstrap (§6b). |
+| `exofs_file.c` | `open`/`read`/`write`/`seek`/`stat`/`unlink` (§6c). |
+| `tests/kernel/test_exofs_k.c` | The whole suite, 66 tests, ending in the ticket's end-to-end acceptance path. |
+
+### Building it
+
+`src/libos_fs/` is a **subdirectory**, which is what keeps it out of
+`docker/scripts/build.sh`'s `src/*.c` glob — the same opt-out
+`tests/kernel/libos_c_probe/` uses. It is compiled only under `TESTING=1`, by
+step `[3b4/7]`, so a shipped kernel links none of it.
+
+Nothing links ExoFS into a ring-3 target yet. SCRUM-202 (shell filesystem
+commands) or SCRUM-44 (`exo_file_*`) is what will, and the sources already
+build cleanly without `-DEXO_KERNEL`, so that step is a
+`build_ring3_link_target` call and nothing more.

@@ -56,14 +56,15 @@ static void test_numbers_match_spec(void)
     CU_ASSERT_EQUAL(EXO_SYS_DISK_READ,     24);
     CU_ASSERT_EQUAL(EXO_SYS_DISK_WRITE,    25);
     CU_ASSERT_EQUAL(EXO_SYS_DISK_ACQUIRE,  26);
+    CU_ASSERT_EQUAL(EXO_SYS_DISK_RELEASE,  27);
 }
 
 /* The dispatcher will range-check against EXO_SYS_COUNT, so it has to stay one
- * past the last number — and the spec's total is 30 syscalls (SCRUM-188). */
+ * past the last number — 28 as of exo_disk_release (SCRUM-189). */
 static void test_count_is_one_past_last(void)
 {
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_DISK_ACQUIRE + 1);
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 27);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_DISK_RELEASE + 1);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 28);
 }
 
 /* Two syscalls sharing a number would route silently to the wrong handler. */
@@ -79,6 +80,7 @@ static void test_numbers_are_unique(void)
         EXO_SYS_SOUND_STOP,   EXO_SYS_YIELD,       EXO_SYS_EXIT,
         EXO_SYS_LAUNCH,       EXO_SYS_MEMSTAT,     EXO_SYS_PSLIST,
         EXO_SYS_DISK_READ,    EXO_SYS_DISK_WRITE,  EXO_SYS_DISK_ACQUIRE,
+        EXO_SYS_DISK_RELEASE,
     };
     /* 64-bit so the mask keeps working as the table grows; the assert makes
      * the ceiling explicit rather than letting the shift go undefined. */
@@ -262,6 +264,7 @@ static void *const volatile stub_addresses[] = {
     (void *)exo_launch,            (void *)exo_memstat,
     (void *)exo_pslist,            (void *)exo_disk_read,
     (void *)exo_disk_write,        (void *)exo_disk_acquire,
+    (void *)exo_disk_release,
 };
 
 static void test_every_syscall_has_a_stub(void)
