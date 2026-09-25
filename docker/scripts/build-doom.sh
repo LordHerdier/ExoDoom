@@ -110,98 +110,69 @@ if [[ $fail -gt 0 ]]; then
   exit 1
 fi
 
-# -- Sound is a *configured* no-op, and this is the gate that keeps it one ----
+# -- Sound is ON, backed by the PC speaker, and this gate keeps it that way --
 #
-# SCRUM-82 asked for I_StartSound/I_StopSound/I_UpdateSound to be stubbed to
-# no-ops, so that the Audio epic (SCRUM-98..101) sits off the critical path to
-# a running game rather than in front of it. The vendored tree already answers
-# that without a single edit, which is why this step is a check and not a stub:
+# History: SCRUM-82 shipped with FEATURE_SOUND undefined, which made
+# I_StartSound/I_StopSound/I_UpdateSound configured no-ops (sound_modules[]
+# collapsed to { NULL }), and this gate existed to keep them no-ops. SCRUM-101
+# turns sound on: src/doom/doomfeatures.h now #defines FEATURE_SOUND, and
+# src/doom_sound.c -- outside the vendored tree, linked into the libos_doom
+# target and into docker/scripts/link-doom.sh's gate -- defines the
+# DG_sound_module/DG_music_module that i_sound.c then references.
 #
-#   src/doom/doomfeatures.h leaves FEATURE_SOUND undefined (line 36 has the
-#   #undef itself commented out), so in src/doom/i_sound.c the compiled-in
-#   module table collapses to `sound_modules[] = { NULL }`, InitSfxModule()
-#   finds nothing to initialise, InitMusicModule() has an empty body, and both
-#   `sound_module` and `music_module` stay NULL for the life of the process.
-#   Every I_* entry point in that file already null-checks those two pointers
-#   and returns a benign value -- 0 from I_StartSound and I_GetSfxLumpNum,
-#   false from I_SoundIsPlaying, nothing at all from I_StopSound and
-#   I_UpdateSound. s_sound.c's callers are fine with that: the handle it
-#   stores is never played, and I_SoundIsPlaying(0) answering false simply
-#   retires the channel.
+# The ways this can silently regress are therefore the mirror image of
+# SCRUM-82's, and each is a check on the object file (what the linker sees),
+# not the source:
 #
-# This is Option A in docs/syscall_spec.md sec6, chosen there on purpose. So
-# the ticket's acceptance ("no crashes from sound function calls; game is
-# silent but functional") holds today, and what was actually missing was
-# anything that would notice if it stopped holding.
+#   1. i_sound.o must reference DG_sound_module and DG_music_module. If it
+#      does not, FEATURE_SOUND has gone off again: everything still compiles
+#      and links, and Doom is silent with nobody told. Defining it with
+#      -DFEATURE_SOUND instead would be loud (i_sound.c's <SDL_mixer.h>
+#      guard sits above its include of doomfeatures.h and would fire), which
+#      is exactly why it is defined in the header.
+#   2. i_sound.o must not reference any Mix_*/SDL_* symbol: an SDL call
+#      reaching the link has no definition anywhere in this project.
+#   3. I_StartSound/I_StopSound/I_UpdateSound must still be *defined* here --
+#      s_sound.c calls all three unconditionally (s_sound.c:475, :165, :513).
 #
-# What would stop it holding is FEATURE_SOUND becoming defined. Note which
-# half of that this gate is actually for, because the obvious half is already
-# covered: a plain -DFEATURE_SOUND fails in the compile loop above all by
-# itself, since i_sound.c's `#include <SDL_mixer.h>` sits under the same guard
-# and there is no SDL_mixer.h in this image (verified -- "fatal error:
-# SDL_mixer.h: No such file or directory"). That path is loud and needs no
-# help from us.
-#
-# The quiet half is FEATURE_SOUND defined with that include bypassed --
-# -D__DJGPP__ alongside it, which the guard explicitly excludes, or an
-# SDL_mixer.h arriving on the include path from some future vendored shim.
-# Then i_sound.c compiles perfectly well (verified), and the two module
-# symbols it now references -- DG_sound_module/DG_music_module, declared
-# extern in i_sound.h and defined in none of the 79 files -- are left
-# undefined. A compile-only pass has nothing to say about that, so the first
-# sign would be SCRUM-66's link: the one step in the project with three epics
-# landing on it at once, and the one that least needs a fourth,
-# self-inflicted undefined-symbol hunt.
-#
-# So: assert the shape in the object file rather than in the source, since the
-# object file is what the linker will actually see.
+# Whether DG_sound_module/DG_music_module actually resolve is link-doom.sh's
+# job, which compiles src/doom_sound.c next to these objects.
 echo ""
-echo "sound configuration gate (SCRUM-82)"
+echo "sound configuration gate (SCRUM-101; was SCRUM-82)"
 
 sound_o="build/doom/i_sound.o"
 
-# 1. No sound-module symbol may be left undefined. This is the check that
-#    fires if FEATURE_SOUND comes back: the #ifdef'd references in
-#    sound_modules[] and InitMusicModule() are the only two in the tree.
-#    Mix_/SDL_ are in the same list because i_sound.c's <SDL_mixer.h> include
-#    sits under the same guard, and an SDL symbol reaching the link is the
-#    same mistake wearing a different hat.
-#
-#    Run nm on its own first, so a tooling failure is distinguishable from
-#    "no matches". This script sets `pipefail`, so with nm inside the
-#    pipeline any nm error fails the whole pipeline -- and the `|| true`
-#    that has to be there for grep (which exits 1 in the ordinary case of
-#    finding nothing) would swallow it, leaving sound_undef empty and this
-#    gate reporting OK for an object it never managed to read. The
-#    defined-symbol check below never had the problem, because it tests
-#    nm's own exit status directly. Review catch on PR #100.
+# Run nm on its own first, so a tooling failure is distinguishable from "no
+# matches" -- with nm inside a pipefail pipeline, the `|| true` grep needs
+# would swallow an nm error and leave the checks below reading nothing.
+# Review catch on PR #100.
 if ! sound_nm="$(x86_64-elf-nm -u "$sound_o")"; then
   echo "    ERROR: x86_64-elf-nm failed to read $sound_o."
   echo "           This gate cannot speak for an object it could not read."
   exit 1
 fi
 
-sound_undef="$(printf '%s\n' "$sound_nm" \
-  | grep -oE 'DG_sound_module|DG_music_module|Mix_[A-Za-z0-9_]*|SDL_[A-Za-z0-9_]*' \
-  | sort -u || true)"
+for sym in DG_sound_module DG_music_module; do
+  if ! printf '%s\n' "$sound_nm" | grep -qE " U $sym\$"; then
+    echo "    ERROR: $sound_o no longer references $sym."
+    echo ""
+    echo "    FEATURE_SOUND has gone off (src/doom/doomfeatures.h). Doom would"
+    echo "    build, link and run -- silently. SCRUM-101 turned it on; the PC"
+    echo "    speaker module is src/doom_sound.c."
+    exit 1
+  fi
+done
 
-if [[ -n "$sound_undef" ]]; then
-  echo "    ERROR: $sound_o references sound-module symbols that nothing defines:"
-  printf '             %s\n' $sound_undef
-  echo ""
-  echo "    FEATURE_SOUND is supposed to stay undefined (src/doom/doomfeatures.h),"
-  echo "    which is what makes I_StartSound/I_StopSound/I_UpdateSound no-ops and"
-  echo "    keeps the Audio epic off the critical path -- docs/syscall_spec.md sec6"
-  echo "    Option A, SCRUM-82. With it defined these symbols have no definition"
-  echo "    anywhere in src/doom/, and SCRUM-66's link is where you would find out."
+sdl_undef="$(printf '%s\n' "$sound_nm" \
+  | grep -oE 'Mix_[A-Za-z0-9_]*|SDL_[A-Za-z0-9_]*' | sort -u || true)"
+if [[ -n "$sdl_undef" ]]; then
+  echo "    ERROR: $sound_o references SDL/SDL_mixer symbols nothing defines:"
+  printf '             %s\n' $sdl_undef
+  echo "           i_sound.c's <SDL_mixer.h> include must stay unreachable;"
+  echo "           see the comment on FEATURE_SOUND in src/doom/doomfeatures.h."
   exit 1
 fi
 
-# 2. The three entry points the ticket names must still be *defined* here.
-#    Symmetric to the check above, guarding the opposite mistake: deleting them
-#    or #ifdef-ing them away would also compile silently and produce an
-#    undefined symbol at link from the other direction -- s_sound.c calls all
-#    three unconditionally (s_sound.c:475, :165, :513).
 for sym in I_StartSound I_StopSound I_UpdateSound; do
   if ! x86_64-elf-nm -g --defined-only "$sound_o" | grep -qE " T $sym\$"; then
     echo "    ERROR: $sound_o no longer defines $sym."
@@ -210,6 +181,6 @@ for sym in I_StartSound I_StopSound I_UpdateSound; do
   fi
 done
 
-echo "    OK   FEATURE_SOUND off; I_StartSound/I_StopSound/I_UpdateSound are defined no-ops"
+echo "    OK   FEATURE_SOUND on; i_sound.o uses DG_sound_module/DG_music_module, no SDL"
 
 exit 0

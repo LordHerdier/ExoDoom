@@ -1320,6 +1320,9 @@ no-ops. This means Doom will run silently with zero sound code.
 
 To add PC speaker sound, there are two options:
 
+**Status (SCRUM-101): Option B is what the port now does.** Option A below
+was the state from SCRUM-82 until then, and is kept for the history.
+
 **Option A (minimal):** Keep `FEATURE_SOUND` undefined. Doom runs silently. No
 sound syscalls needed.
 
@@ -1357,6 +1360,24 @@ bound since SCRUM-100; see §3.2 #17/#18 — the syscall is `exo_sound_tone`,
 which is what the Jira summary's `exo_sound_play` refers to). Define
 `FEATURE_SOUND` and register the module. The mapping from Doom's 8-bit PCM sound
 lumps to single-frequency tones is lossy but recognizable.
+
+> **Implemented (SCRUM-101)** as `src/doom_sound.c/h`. `FEATURE_SOUND` is
+> `#define`d in `src/doom/doomfeatures.h` — not on the command line, because
+> `i_sound.c`'s `<SDL_mixer.h>` guard precedes its include of that header and
+> would fire. `DG_sound_module` is a one-voice sequencer: `StartSound` plays
+> step 0 of the SCRUM-99 sequence via `exo_sound_tone`; `Update` (from
+> `I_UpdateSound`, once per main-loop pass) starts each later step when the
+> previous one's time is up, skipping steps a long frame has already passed;
+> nothing ever waits. Voice arbitration is Doom's own rule — lower
+> `sfxinfo_t.priority` wins, equal re-triggers, a loser's handle reports
+> not-playing so `s_sound.c` retires it. Volume/separation cannot be
+> honoured on a one-bit speaker, except that volume 0 plays nothing.
+> `DG_music_module` is all no-ops (the voice belongs to effects). The module
+> claims every `snddevice_t` because `snd_sfxdevice` defaults to
+> `SNDDEVICE_SB` and there is no config file to change it.
+> `docker/scripts/build-doom.sh`'s sound gate is inverted accordingly: it now
+> fails if `i_sound.o` stops referencing `DG_sound_module`/`DG_music_module`
+> (sound silently off) or references any `SDL_*`/`Mix_*`.
 
 > **The mapping (SCRUM-99)** is `src/doom_sfx_tone.c/h`: a hand-made table,
 > indexed by `sfxenum_t` through designated initialisers, giving every real
