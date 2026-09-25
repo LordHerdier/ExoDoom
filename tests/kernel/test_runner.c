@@ -40,6 +40,8 @@ void suite_syscall_serial_tests(CU_pSuite s);
 void suite_syscall_kbd_tests(CU_pSuite s);
 void suite_pit_tests(CU_pSuite s);
 void suite_speaker_tests(CU_pSuite s);
+void suite_syscall_sound_tests(CU_pSuite s);
+int syscall_sound_suite_cleanup(void);
 void suite_syscall_pit_tests(CU_pSuite s);
 void suite_doomgeneric_timer_tests(CU_pSuite s);
 void suite_libos_main_tests(CU_pSuite s);
@@ -347,6 +349,11 @@ int run_tests(void)
 
     s = CU_add_suite("speaker", NULL, NULL);
     suite_speaker_tests(s);
+
+    /* Right after speaker: these handlers sit directly on that driver, and
+     * if it is failing its failures explain these. */
+    s = CU_add_suite("syscall_sound", NULL, syscall_sound_suite_cleanup);
+    suite_syscall_sound_tests(s);
 
     s = CU_add_suite("syscall_pit", NULL, NULL);
     suite_syscall_pit_tests(s);

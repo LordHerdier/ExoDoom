@@ -24,6 +24,7 @@
 #include "syscall_stat.h"
 #include "syscall_kbd.h"
 #include "syscall_pit.h"
+#include "syscall_sound.h"
 #include "syscall_yield.h"
 #include "syscall_launch.h"
 #include "fb_binding.h"
@@ -372,6 +373,12 @@ void kernel_main(void *mb2_info_ptr) {
     // kernel_get_ticks_ms(), which stays at 0 without it -- and, like the
     // other syscall *_init()s, ahead of the TESTING branch.
     syscall_pit_init();
+
+    // ── Sound syscalls (SCRUM-100) ───────────────────────────────────────
+    // Binds exo_sound_tone/exo_sound_stop (#17/#18) in front of the PC
+    // speaker driver. After speaker_init() above and, like the other
+    // syscall *_init()s, ahead of the TESTING branch.
+    syscall_sound_init();
 
     // ── Yield syscall (SCRUM-109) ────────────────────────────────────────
     // Binds exo_yield (#19) to context_switch_request() via the round-robin
