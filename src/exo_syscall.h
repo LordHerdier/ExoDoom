@@ -92,22 +92,48 @@
 /* Scheduling / lifecycle */
 #define EXO_SYS_YIELD        19
 #define EXO_SYS_EXIT         20
-/* LibOS launch (SCRUM-178, SCRUM-168, SCRUM-182, SCRUM-66) */
-#define EXO_SYS_LAUNCH_WAD_VIEWER 21
-#define EXO_SYS_LAUNCH_CLOCK      22
-#define EXO_SYS_LAUNCH_SNAKE      23
-#define EXO_SYS_LAUNCH_DOOM       24
+/* LibOS launch (SCRUM-178, SCRUM-168, SCRUM-182, SCRUM-66, SCRUM-184).
+ *
+ * ONE number for every launchable app, taking an EXO_LAUNCH_APP_* id below.
+ * It replaced four -- EXO_SYS_LAUNCH_WAD_VIEWER/_CLOCK/_SNAKE/_DOOM, #21..#24
+ * -- which did not scale: each new demo LibOS cost a syscall number, a
+ * dispatcher handler, and edits to the two tests that police this table's
+ * density and size, to say nothing of the number space itself. The app id is
+ * an ordinary argument, so adding an app now touches neither. */
+#define EXO_SYS_LAUNCH       21
 /* Introspection (SCRUM-113) */
-#define EXO_SYS_MEMSTAT      25
-#define EXO_SYS_PSLIST       26
+#define EXO_SYS_MEMSTAT      22
+#define EXO_SYS_PSLIST       23
 /* Disk (SCRUM-103, binding SCRUM-188) */
-#define EXO_SYS_DISK_READ    27
-#define EXO_SYS_DISK_WRITE   28
-#define EXO_SYS_DISK_ACQUIRE 29
+#define EXO_SYS_DISK_READ    24
+#define EXO_SYS_DISK_WRITE   25
+#define EXO_SYS_DISK_ACQUIRE 26
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
- * with -EXO_ENOSYS; keep it last and keep the numbers above dense. */
-#define EXO_SYS_COUNT        30
+ * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
+ *
+ * Collapsing the four launch numbers into one (SCRUM-184) left #22..#24
+ * unclaimed, so MEMSTAT/PSLIST/DISK_* moved down three to close the gap
+ * rather than leaving holes the density test would reject. Nothing outside
+ * this kernel image depends on these values -- there is no stable userspace
+ * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
+#define EXO_SYS_COUNT        27
+
+/* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
+/*
+ * These cross the syscall boundary, so the order is ABI: append, never
+ * reorder, and keep EXO_LAUNCH_APP_COUNT one past the last. The kernel's
+ * launch_apps[] table (src/syscall_launch.c) is indexed by exactly these
+ * values and rejects anything >= COUNT with -EXO_EINVAL.
+ *
+ * Numbered from 0 rather than carrying over the old #21..#24 so the id is
+ * an index rather than a syscall number wearing a disguise.
+ */
+#define EXO_LAUNCH_APP_WAD_VIEWER 0
+#define EXO_LAUNCH_APP_CLOCK      1
+#define EXO_LAUNCH_APP_SNAKE      2
+#define EXO_LAUNCH_APP_DOOM       3
+#define EXO_LAUNCH_APP_COUNT      4
 
 /* ---- Error codes -------------------------------------------------------- */
 /*
@@ -231,7 +257,7 @@ typedef struct {
     uint8_t reserved;
 } exo_mouse_state_t;
 
-/* exo_memstat(stat_out) — #25.  Page-usage snapshot of the whole PMM, not
+/* exo_memstat(stat_out) — #22.  Page-usage snapshot of the whole PMM, not
  * just the caller's own pages — introspection is deliberately unscoped, the
  * same way exo_pslist() below reports every live context rather than just
  * the caller's. */
@@ -244,7 +270,7 @@ typedef struct {
     uint32_t reserved;      /* zeroed by the kernel                         */
 } exo_memstat_t;
 
-/* exo_pslist(out, max) — #26.  One entry per live LibOS context (the shell
+/* exo_pslist(out, max) — #23.  One entry per live LibOS context (the shell
  * included — it is context_create()'d like any other, SCRUM-178).
  * `state` mirrors context_state_t (src/context.h): 1=READY, 2=RUNNING,
  * 3=BLOCKED.  0 (CONTEXT_STATE_UNUSED) never appears — unused slots are
@@ -549,57 +575,38 @@ static inline void exo_exit(int32_t code)
     for (;;) { }
 }
 
-/* #21 — launch the WAD/flat/automap viewer as a second LibOS context and
- * switch to it immediately (src/syscall_launch.c). Like exo_yield(), this
- * call does not return control here until something switches back to the
- * caller — in this case, the viewer's own exo_yield() call
- * (context_next_ready()'s round robin). Returns a negative EXO_E* right
- * away if the launch failed before the switch was armed, in which case the
- * caller (the shell) keeps running uninterrupted; returns 0 once rescheduled
- * after the viewer has yielded back. */
-static inline int64_t exo_launch_wad_viewer(void)
-{
-    return exo_syscall0(EXO_SYS_LAUNCH_WAD_VIEWER);
-}
-
-/* #22 — launch the clock demo LibOS (SCRUM-168) as a second/third LibOS
- * context and switch to it immediately (src/syscall_launch.c). Same calling
- * convention as exo_launch_wad_viewer(): does not return control here until
- * something switches back to the caller (Ctrl+Tab, SCRUM-111, since the
- * clock itself never yields). Returns a negative EXO_E* right away if the
- * launch failed before the switch was armed; returns 0 once rescheduled
- * after the caller is switched back to. */
-static inline int64_t exo_launch_clock(void)
-{
-    return exo_syscall0(EXO_SYS_LAUNCH_CLOCK);
-}
-
-/* #23 — launch the Snake LibOS as a second LibOS context and switch to it
- * immediately (src/syscall_launch.c, SCRUM-182). Same calling convention as
- * exo_launch_wad_viewer(): does not return control here until something
- * switches back to the caller (Snake's own exo_yield() call after exiting
- * via EXO_SYS_EXIT), returns a negative EXO_E* right away only if the launch
- * failed before the switch was armed. */
-static inline int64_t exo_launch_snake(void)
-{
-    return exo_syscall0(EXO_SYS_LAUNCH_SNAKE);
-}
-
 /*
- * Launch the Doom LibOS (SCRUM-66).
+ * #21 — launch the ring-3 LibOS app named by `app_id` (an EXO_LAUNCH_APP_*
+ * value) as its own context and switch to it immediately
+ * (src/syscall_launch.c, SCRUM-184).
  *
- * Like the WAD viewer's #21 and unlike snake's #23, the kernel side stages a
- * resource before entering ring 3: sys_launch_doom() maps the multiboot WAD
- * module into the new address space and patches its address and length into
- * the image's params page, where DG_Init (src/doomgeneric_exo.c) reads them.
- * Nothing about that is visible here -- the call still takes no arguments.
+ * Replaces exo_launch_wad_viewer()/_clock()/_snake()/_doom(), which were four
+ * no-argument wrappers over four syscall numbers. One wrapper over one
+ * number, because the thing that varied was never the call -- it was which
+ * blob the kernel picked.
+ *
+ * Calling convention, unchanged from those four: this does not return control
+ * to the caller when it succeeds. The launch arms a context switch and the
+ * syscall epilogue takes it, so the next thing that runs is the new app. The
+ * call appears to return 0 only later, once something switches back to the
+ * caller -- the app's own exo_yield() after exiting via EXO_SYS_EXIT, or
+ * Ctrl+Tab (SCRUM-111) for an app that never yields, such as the clock.
+ *
+ * A negative EXO_E* comes back immediately, with the caller still running
+ * uninterrupted, if the launch failed before the switch was armed:
+ *
+ *   -EXO_EINVAL  app_id is not a valid EXO_LAUNCH_APP_* (new to SCRUM-184 --
+ *                with a number per app, an unknown app was an unknown
+ *                syscall and the dispatcher answered -EXO_ENOSYS)
+ *   -EXO_ENODEV  the app needs the WAD module and there is none
+ *   -EXO_ENOMEM  no room for the image or no free context row
  */
-static inline int64_t exo_launch_doom(void)
+static inline int64_t exo_launch(uint64_t app_id)
 {
-    return exo_syscall0(EXO_SYS_LAUNCH_DOOM);
+    return exo_syscall1(EXO_SYS_LAUNCH, app_id);
 }
 
-/* #25 — page-usage snapshot of the whole PMM (docs/syscall_spec.md §3.2).
+/* #22 — page-usage snapshot of the whole PMM (docs/syscall_spec.md §3.2).
  * Returns 0 with *stat_out filled, or -EXO_EFAULT if
  * [stat_out, stat_out + sizeof(exo_memstat_t)) is not entirely inside the
  * LibOS window and mapped writable. */
@@ -608,7 +615,7 @@ static inline int64_t exo_memstat(exo_memstat_t *stat_out)
     return exo_syscall1(EXO_SYS_MEMSTAT, (uint64_t)(uintptr_t)stat_out);
 }
 
-/* #26 — list every live LibOS context (the caller included) into `out`,
+/* #23 — list every live LibOS context (the caller included) into `out`,
  * an array of at least `max` exo_ps_info_t entries; `max` must not exceed
  * EXO_PSLIST_MAX. Returns the number of entries written (0..max), or
  * -EXO_EFAULT for a bad `out` range, -EXO_EINVAL if max > EXO_PSLIST_MAX. */
@@ -618,7 +625,7 @@ static inline int64_t exo_pslist(exo_ps_info_t *out, uint32_t max)
                         (uint64_t)max);
 }
 
-/* #27 — read `count` consecutive 512-byte sectors starting at 28-bit LBA
+/* #24 — read `count` consecutive 512-byte sectors starting at 28-bit LBA
  * `lba` into `buf` (at least `count * 512` bytes). Returns `count` on
  * success, or -EXO_ENODEV (no drive), -EXO_EINVAL (count == 0 is NOT an
  * error and returns 0; count over EXO_DISK_MAX_SECTORS or lba+count
@@ -632,7 +639,7 @@ static inline int64_t exo_disk_read(uint32_t lba, void *buf, uint32_t count)
                         (uint64_t)(uintptr_t)buf, (uint64_t)count);
 }
 
-/* #28 — write `count` consecutive 512-byte sectors starting at 28-bit LBA
+/* #25 — write `count` consecutive 512-byte sectors starting at 28-bit LBA
  * `lba` from `buf`. Same return/error contract as exo_disk_read, with `buf`
  * checked readable rather than writable. */
 static inline int64_t exo_disk_write(uint32_t lba, const void *buf,
@@ -642,7 +649,7 @@ static inline int64_t exo_disk_write(uint32_t lba, const void *buf,
                         (uint64_t)(uintptr_t)buf, (uint64_t)count);
 }
 
-/* #29 — bind the disk to the caller (SCRUM-188). Must succeed before
+/* #26 — bind the disk to the caller (SCRUM-188). Must succeed before
  * exo_disk_read/exo_disk_write will do anything for this caller. Returns 0
  * (including a re-acquire by the current owner), -EXO_EBUSY if another
  * context holds it, or -EXO_ENODEV if this machine has no drive. */

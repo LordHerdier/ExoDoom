@@ -15,12 +15,12 @@
  * syscall_disk.h -- exo_disk_read/exo_disk_write/exo_disk_acquire handlers
  * (SCRUM-103, binding SCRUM-188).
  *
- * Binds #27/#28/#29 to the dispatcher in src/syscall.c, the same split
+ * Binds #24/#25/#26 to the dispatcher in src/syscall.c, the same split
  * syscall_serial.c already has against src/serial.c: src/ata.c knows how to
  * drive the ATA bus, src/disk_binding.c knows who is allowed to touch it
  * right now, and this file knows what a LibOS is allowed to ask for and how
- * to answer in -EXO_E* terms. #27/#28 reject a caller that does not hold
- * the binding with -EXO_EBUSY; #29 (exo_disk_acquire) is how a caller gets
+ * to answer in -EXO_E* terms. #24/#25 reject a caller that does not hold
+ * the binding with -EXO_EBUSY; #26 (exo_disk_acquire) is how a caller gets
  * it.
  *
  * Call from kernel_main after syscall_init() and ata_init() (the latter so
