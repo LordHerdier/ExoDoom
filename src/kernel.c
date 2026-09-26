@@ -12,6 +12,7 @@
 #include "pit.h"
 #include "speaker.h"
 #include "ps2.h"
+#include "ps2_mouse.h"
 #include "ata.h"
 #include "sleep.h"
 #include "fb.h"
@@ -23,6 +24,7 @@
 #include "syscall_disk.h"
 #include "syscall_stat.h"
 #include "syscall_kbd.h"
+#include "syscall_mouse.h"
 #include "syscall_pit.h"
 #include "syscall_sound.h"
 #include "syscall_yield.h"
@@ -38,6 +40,7 @@
 
 extern void irq0_stub();
 extern void irq1_stub();
+extern void irq12_stub();
 extern void kbd_init();
 
 /* Embedded shell LibOS code/data blobs -- produced at build time by
@@ -317,6 +320,16 @@ void kernel_main(void *mb2_info_ptr) {
     // calls this handler during a TESTING build.
     syscall_kbd_init();
 
+    // ── Mouse syscall (SCRUM-52) ─────────────────────────────────────────
+    // Binds exo_mouse_poll (#7) to the kernel's PS/2 mouse accumulator
+    // (src/ps2_mouse.c/h) -- same placement rule as syscall_kbd_init() just
+    // above: after syscall_init, ahead of the TESTING branch, so the
+    // dispatch-boundary tests can exercise it. Harmless before
+    // ps2_mouse_init() runs (below, in the normal-boot tail): the
+    // accumulator just reports all-zero state until then, and nothing calls
+    // this handler during a TESTING build.
+    syscall_mouse_init();
+
     // ── PIC / PIT (SCRUM-172) ────────────────────────────────────────────
     // Moved ahead of the TESTING branch, same reasoning as tss_init() for
     // SCRUM-46: exo_get_ticks (#5) needs a live, advancing tick count to
@@ -486,6 +499,28 @@ void kernel_main(void *mb2_info_ptr) {
     // keyboard interrupt landing right after this has somewhere real to go.
     pic_unmask_irq(1);
     klog(&con, 0, "PS/2 keyboard initialized (IRQ1 -> vector 0x21)");
+
+    // ── PS/2 mouse (SCRUM-52) ────────────────────────────────────────────
+    // Same placement rule as the keyboard block just above: nothing under
+    // TESTING touches the mouse, so its IRQ wiring stays in the normal-boot
+    // tail rather than moving ahead of the TESTING branch the way the
+    // syscall handler binding above did. idt_set_gate(44) wires vector 0x2C
+    // (IRQ12, the slave PIC's line 4) to irq12_stub; ps2_mouse_init() then
+    // runs the controller handshake (enable aux port, enable IRQ12, tell the
+    // mouse to start streaming) before pic_unmask_irq(12) lets the first
+    // packet actually reach the handler -- mirrors kbd_init() then
+    // pic_unmask_irq(1) exactly.
+    idt_set_gate(44, (uintptr_t)irq12_stub);
+    ps2_mouse_init();
+    // IRQ12 is a slave-PIC line, and pic_remap()'s initial mask (src/pic.c)
+    // left the master's IRQ2 -- the slave's cascade line into the master --
+    // masked along with everything but IRQ0. No slave IRQ can ever reach the
+    // CPU until that cascade line is unmasked too: this is the first PS/2
+    // mouse (in fact the first slave-PIC) device the kernel wires up, so
+    // nothing had to unmask it before now.
+    pic_unmask_irq(2);
+    pic_unmask_irq(12);
+    klog(&con, 0, "PS/2 mouse initialized (IRQ12 -> vector 0x2C)");
 
     __asm__ volatile ("sti");
     klog(&con, 0, "Interrupts enabled (STI)");
