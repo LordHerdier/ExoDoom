@@ -18,7 +18,7 @@ docker-run: docker-build
 docker-run-kernel: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm -it -v "$(PWD):/work" exodoom-qemu \
-	  'qemu-system-x86_64 -kernel build/exodoom -m 256M -device intel-hda -no-reboot -display curses -serial mon:stdio'
+	  'qemu-system-x86_64 -kernel build/exodoom -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -display curses -serial mon:stdio'
 
 docker-test:
 	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
@@ -32,6 +32,8 @@ docker-test:
 	  -cdrom build/exodoom.iso \
 	  -drive file=/work/build/ata_scratch.img,format=raw,if=ide \
 	  -device intel-hda \
+	  -device hda-output,audiodev=snd0 \
+	  -audiodev none,id=snd0 \
 	  -m 256M \
 	  -no-reboot \
 	  -display none \
@@ -54,6 +56,8 @@ docker-ci:
 	  -cdrom build/exodoom.iso \
 	  -drive file=/work/build/ata_scratch.img,format=raw,if=ide \
 	  -device intel-hda \
+	  -device hda-output,audiodev=snd0 \
+	  -audiodev none,id=snd0 \
 	  -m 256M \
 	  -no-reboot \
 	  -display none \
@@ -82,10 +86,16 @@ docker-link-doom:
 docker-run-debug: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm -it -p 1234:1234 -v "$(PWD):/work" exodoom-qemu \
-	'qemu-system-x86_64 -cdrom build/exodoom.iso -m 256M -device intel-hda -no-reboot -serial mon:stdio -s -S'
+	'qemu-system-x86_64 -cdrom build/exodoom.iso -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -serial mon:stdio -s -S'
 
+# Boots on the HOST's qemu rather than in the container, which is the only
+# place a speaker exists -- swap `-audiodev none,id=snd0` below for
+# `-audiodev pa,id=snd0` (or alsa/sdl/coreaudio) to actually hear SCRUM-210's
+# test tone. Everything under docker-* keeps the null backend: it still runs
+# the full BDL DMA and completion-interrupt path, which is what the KUnit
+# suite asserts on, and headless Docker has no audio backend to hand.
 run: docker-build
-	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -device intel-hda -no-reboot -serial stdio
+	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -serial stdio
 
 clean:
 	rm -rf build

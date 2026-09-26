@@ -79,11 +79,16 @@ void suite_ata_tests(CU_pSuite s);
 void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
 void suite_pci_tests(CU_pSuite s);
+void suite_hda_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
  * into a later suite if an assertion fails mid-test (SCRUM-113). */
 int syscall_stat_suite_cleanup(void);
+
+/* Stops the HDA output stream at suite end, so a tone left running cannot
+ * keep raising the controller's INTx line into a later suite (SCRUM-210). */
+int suite_hda_cleanup(void);
 
 /* Acquires the disk binding for the suite's own context before the round-
  * trip/hardware tests run and releases it afterward (SCRUM-188). */
@@ -478,6 +483,13 @@ int run_tests(void)
      * hardware rather than to a model of it (SCRUM-209). */
     s = CU_add_suite("pci", NULL, NULL);
     suite_pci_tests(s);
+
+    /* After "pci", which it depends on: hda_init() finds the controller
+     * through pci_find_class() and maps its BAR (SCRUM-210). The cleanup
+     * stops the stream -- these are the only tests that leave a DMA engine
+     * and an unmasked IRQ line running while they measure. */
+    s = CU_add_suite("hda", NULL, suite_hda_cleanup);
+    suite_hda_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not

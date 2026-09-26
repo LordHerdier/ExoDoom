@@ -117,6 +117,27 @@ irq1_stub:
     iretq
 
 /*
+ * ── Intel HDA — PCI INTx (vector 32 + Interrupt Line) ─────────────────
+ * (SCRUM-210) Unlike IRQ0/IRQ1 this stub's vector is not fixed: the
+ * controller's 8259 line comes from its PCI Interrupt Line register, so
+ * hda_init() reads it and calls idt_set_gate(32 + line, irq_hda_stub). It
+ * needs its own stub rather than sharing one because PUSH_REGS/
+ * ALIGN_CALL_STACK have to wrap one specific C function, and
+ * hda_irq_handler() sends its own EOI (the line may be 8-15, i.e. on the
+ * slave PIC -- pic_send_EOI() handles that).
+ */
+.global irq_hda_stub
+.extern hda_irq_handler
+
+irq_hda_stub:
+    PUSH_REGS
+    ALIGN_CALL_STACK
+    call hda_irq_handler
+    RESTORE_CALL_STACK
+    POP_REGS
+    iretq
+
+/*
  * ── error_stub — absorbs the 10 error-code exception vectors ───────────
  * (SCRUM-135) Installed on vectors 8, 10, 11, 12, 13, 14, 17, 21, 29, 30.
  * Those vectors push an 8-byte error code below the normal interrupt frame

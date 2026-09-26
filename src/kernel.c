@@ -14,6 +14,7 @@
 #include "ps2.h"
 #include "ata.h"
 #include "pci.h"
+#include "hda.h"
 #include "sleep.h"
 #include "fb.h"
 #include "fb_console.h"
@@ -355,6 +356,29 @@ void kernel_main(void *mb2_info_ptr) {
     pci_init();
     pci_dump();
 
+    // ── Intel HDA audio controller (SCRUM-210) ───────────────────────────
+    // Depends on pci_init() above (it finds the controller by class 0x0403
+    // and maps its BAR) and on page_alloc_init() (the CORB/RIRB/BDL/sample
+    // buffers are contiguous PMM pages, not kmalloc -- see src/hda.c). Ahead
+    // of the TESTING branch like every other driver a KUnit suite drives.
+    //
+    // hda_init() wires the controller's INTx line to an IDT vector itself,
+    // rather than kernel_main doing it the way IRQ0/IRQ1 are done, because
+    // the vector is not a constant: it comes from the function's PCI
+    // Interrupt Line register and is only known once the bus has been walked.
+    //
+    // Soft-fail, same as ata_init() below: a machine with no audio controller
+    // (or a QEMU invocation without -device intel-hda) reports a code and
+    // boots on.
+    int hda_rc = hda_init();
+    if (hda_rc != HDA_OK) {
+        serial_print("hda: init failed (rc=");
+        serial_print_hex64((uint64_t)(int64_t)hda_rc);
+        serial_print(")\n");
+    } else {
+        hda_dump();
+    }
+
     // ── ATA PIO driver (SCRUM-102) ───────────────────────────────────────
     // Polled, ring-0 only. Ahead of the TESTING branch so the KUnit suite
     // can exercise a live drive attached via docker-test/docker-ci's scratch
@@ -501,6 +525,34 @@ void kernel_main(void *mb2_info_ptr) {
 
     __asm__ volatile ("sti");
     klog(&con, 0, "Interrupts enabled (STI)");
+
+    // ── HDA boot test tone (SCRUM-210) ───────────────────────────────────
+    // The audible half of this ticket's acceptance: a synthesized tone
+    // played by the controller's own DMA, out of a buffer in system memory,
+    // through a real codec. The KUnit suite asserts the register/DMA/IRQ
+    // state that makes it work; this is the part a person can hear, and
+    // without it a normal boot programs the stream and then plays nothing.
+    //
+    // Deliberately here, in the normal-boot tail *after* `sti`, and not next
+    // to hda_init() above: the duration is enforced by hda_tick() from
+    // irq0_handler, so a tone started with interrupts still masked would
+    // keep sounding until whenever they were enabled. It also keeps the tone
+    // out of TESTING builds entirely, which exit through run_tests() and
+    // drive hda_play_tone() themselves.
+    //
+    // Needs a real QEMU audio backend to be audible -- `-audiodev none` (what
+    // every docker-* target passes, since headless Docker has none) runs the
+    // whole DMA path and discards the samples. See the `run` target's comment
+    // in the Makefile.
+    if (hda_present()) {
+        if (hda_play_tone(HDA_BOOT_TONE_HZ, HDA_BOOT_TONE_MS) == HDA_OK) {
+            klog(&con, kernel_get_ticks_ms(),
+                 "HDA: boot test tone playing (DMA + codec)");
+        } else {
+            klog(&con, kernel_get_ticks_ms(),
+                 "HDA: boot test tone refused");
+        }
+    }
 
     // ── Shell LibOS launch (SCRUM-110, refactored by SCRUM-178) ─────────
     // The first real LibOS this kernel launches on a normal boot, replacing
