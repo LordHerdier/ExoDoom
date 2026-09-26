@@ -212,6 +212,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Doom SFX → speaker tone table (SCRUM-99) | `src/doom_sfx_tone.c/h` |
 | Doom `sound_module_t` over the speaker (SCRUM-101) | `src/doom_sound.c/h` (+ `FEATURE_SOUND` in `src/doom/doomfeatures.h`) |
 | WAD DMX sound lump decoder (`DS*` → 8-bit PCM, SCRUM-211) | `src/doom_dmx.c/h` |
+| Software PCM mixer (8 voices, resample + sum + clip, SCRUM-212) | `src/pcm_mixer.c/h` (+ `hda_pcm_*` in `src/hda.c/h`) |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
 | Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h`, `src/syscall_sound.c/h` (SCRUM-100) |
@@ -656,7 +657,8 @@ convention and calls it from `kernel_main` instead of a test harness.
     with a real `-audiodev` — headless Docker has no audio backend, so CI
     asserts state up to the point samples leave RAM.
   There is no `exo_sound_pcm` and no HDA ownership binding: HDA is ring-0
-  only, like `src/ata.c` was before SCRUM-188.
+  only, like `src/ata.c` was before SCRUM-188. The BDL is two entries *for a
+  tone*; streaming redices it to 16 — see the mixer bullet below.
 - **Doom's real sound samples are now readable, and they are not all one
   sample rate (SCRUM-211).** `src/doom_dmx.c/h` decodes a `DS*` DMX lump out
   of the mounted WAD: 8-byte header (format tag, rate, sample count) then
@@ -676,8 +678,8 @@ convention and calls it from `kernel_main` instead of a test harness.
     `tests/kernel/test_doom_dmx_k.c` asserts that histogram exactly so the
     mixer cannot inherit the wrong assumption. HDA output is pinned at
     `HDA_SAMPLE_RATE_HZ` = 48000/16-bit/stereo, so **resampling is the
-    mixer's job and does not exist yet** — hardcoding one input rate would
-    play two thirds of Doom's effects at half speed.
+    mixer's job** (SCRUM-212 does it per voice) — hardcoding one input rate
+    would play two thirds of Doom's effects at half speed.
   The sfx lookup is **name-based** (`doom_dmx_find_sfx(wad, "pistol", …)`),
   not `sfxenum_t`-based, because the enum→name mapping lives only in
   `src/doom/sounds.c`'s `S_sfx[]` and this file is globbed into *shipped*
@@ -688,7 +690,57 @@ convention and calls it from `kernel_main` instead of a test harness.
   links. Nothing calls the decoder yet: `src/doom_sound.c` still serves
   SCRUM-99's speaker tone table, and rewiring it (plus adding this file to
   the `libos_doom` ring-3 target's source list, which it is written to
-  support — no syscall, no kernel-only dependency) belongs to the mixer.
+  support — no syscall, no kernel-only dependency) belongs to `exo_sound_pcm`,
+  not to the mixer, which SCRUM-212 has since built.
+- **The mixer joins those two ends, and it is two files for a reason
+  (SCRUM-212).** `src/pcm_mixer.c/h` holds `PCM_MIXER_VOICES` = 8 voices
+  (matching `src/doom/s_sound.c`'s `snd_channels`), each reading a decoded DMX
+  lump *in place* and resampled by its own 16.16 phase accumulator with linear
+  interpolation; they are summed in `int32_t` and **saturated**, not wrapped,
+  to `int16_t`. `hda_pcm_start()` in `src/hda.c` then streams that into the
+  controller, refilling BDL slices from the completion IRQ. Full write-up:
+  `docs/drivers/hda.md` §12. What matters before editing either side:
+  - **`src/pcm_mixer.c` includes no device header, and that is the design.**
+    It is the same split `src/doom_sfx_tone.c` has from `src/speaker.c`, and
+    it is what lets `tests/kernel/test_pcm_mixer_k.c` assert the exact samples
+    with no controller present. A mixer written inside the IRQ handler could
+    only ever be checked by "`SDnLPIB` moved and nothing crashed" — which is
+    precisely the assertion that misses a phase step computed the wrong way
+    round. The cost is that `PCM_MIXER_RATE_HZ`/`_CHANNELS` restate
+    `HDA_SAMPLE_RATE_HZ`/`HDA_CHANNELS`; `test_hda_pcm_k.c` sees both headers
+    and asserts they agree.
+  - **The BDL entry size *is* the latency, so streaming redices it.**
+    `HDA_BDL_ENTRIES` = 2 (a tone, written once, looping) would make a slice
+    ~171 ms — a gunshot a sixth of a second late. `HDA_BDL_ENTRIES_PCM` = 16
+    over the same 64 KiB buffer gives ~21 ms for ~47 IRQs/sec. **Each mode
+    programs its own layout on entry** (`bdl_program()`), so a tone after a
+    stream or the reverse is correct with no sequencing by the caller — do not
+    "fix" this by having one mode restore the other's.
+  - **The refill trails the DMA read head and catches up in a loop.** It
+    renders every entry from its cursor up to the one `SDnLPIB` says is being
+    read, which are exactly the consumed ones, leaving almost a full buffer of
+    headroom. The loop (rather than "one entry per interrupt") is what makes a
+    coalesced or missed completion cost one longer render instead of a
+    permanent hole. It runs *after* the `SDnSTS` clear, so INTx is already
+    deasserted for the duration of the mixing.
+  - **The stream never stops while streaming mode is on**, emitting the
+    silence `pcm_mixer_render()` writes for an empty mixer. Stopping per effect
+    would reset `SDnLPIB` and give back the latency the 16-entry split just
+    bought. That render writes *every* frame it is given, which is what stops a
+    finished effect looping in the cyclic buffer.
+  - **The real-time budget is asserted, not claimed.** `hda_pcm_underruns()`
+    counts `FIFOE` — the only failure a too-slow render can cause — and must
+    stay 0 with all 8 voices. And "frame timing is unaffected" is checked as a
+    **ratio between two independent clocks** (PIT ticks vs. the audio DMA's
+    refill rate): a test that timed its own wait with `kernel_get_ticks_ms()`
+    would spin longer in wall time and still report the interval it asked for,
+    proving nothing.
+  - **A voice must not outlive its mount.** Voices hold the zero-copy pointer
+    into the IWAD module, so anything calling `doom_wad_unmount()` calls
+    `pcm_mixer_reset()` first — which is what the `hda_pcm` suite's cleanup
+    does, in that order.
+  Still ring 0 only: no `exo_sound_pcm`, no HDA ownership binding, and Doom's
+  sound module remains SCRUM-101's one-voice speaker sequencer.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - **The context table (SCRUM-107, `src/context.c/h`) tracks live LibOS

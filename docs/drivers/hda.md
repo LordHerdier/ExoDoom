@@ -18,6 +18,7 @@
 9. [Testing](#9-testing)
 10. [Design decisions and gotchas](#10-design-decisions-and-gotchas)
 11. [Where the samples come from](#11-where-the-samples-come-from)
+12. [Streaming mode: the software mixer](#12-streaming-mode-the-software-mixer)
 
 ---
 
@@ -426,13 +427,13 @@ Two ways to go further, both worth knowing:
 
 ## 11. Where the samples come from
 
-This driver plays whatever is in its cyclic buffer, and what `kernel_main`
-puts there today is a synthesized 440 Hz tone. Doom's real sound effects are
-decoded by a separate module, `src/doom_dmx.c/h` (SCRUM-211), and the two are
-not yet connected — the software PCM mixer that would connect them does not
-exist.
+This driver plays whatever is in its cyclic buffer. `kernel_main` puts a
+synthesized 440 Hz tone there at boot (SCRUM-210); Doom's real sound effects
+are decoded by a separate module, `src/doom_dmx.c/h` (SCRUM-211). The two are
+joined by `src/pcm_mixer.c/h` and the streaming mode described in §12
+(SCRUM-212).
 
-Anyone writing that mixer should know the shape of the gap before starting:
+The gap that mixer has to close, which is the reason it exists at all:
 
 | | DMX lump (`doom_dmx_t`) | HDA stream |
 |---|---|---|
@@ -440,8 +441,10 @@ Anyone writing that mixer should know the shape of the gap before starting:
 | Channels | mono | 2 (`HDA_BYTES_PER_FRAME` = 4) |
 | Sample rate | **five different rates**, see below | `HDA_SAMPLE_RATE_HZ` = 48000, fixed |
 
-`doom_dmx_to_s16()` closes the first row and nothing else. The second is a
-duplication. The third is the one that needs actual work, and it is worse
+`doom_dmx_to_s16()` closes the first row and nothing else — and the mixer does
+not call it, because it needs the conversion fused with the gain and the
+interpolation rather than as a separate pass over a copy. The second row is a
+duplication. The third is the one that needed actual work, and it is worse
 than the folklore suggests: DMX lumps are commonly described as "always
 11025 Hz", and freedoom2 v0.13.0's 109 `DS*` lumps are 67 at 22050 Hz, 38 at
 11025, 2 at 17990, 1 at 16000 and 1 at 44100. `tests/kernel/test_doom_dmx_k.c`
@@ -450,6 +453,99 @@ input rate will be caught by that test's neighbours rather than by two thirds
 of Doom's effects quietly playing an octave low.
 
 `doom_dmx_t.samples` points into the identity-mapped IWAD module and is
-read-only for the life of the mount, so a mixer reads through it directly
+read-only for the life of the mount, so the mixer reads through it directly
 rather than copying — see `src/doom_dmx.h` for the rest of the contract,
-including the 16 padding samples stripped at each end.
+including the 16 padding samples stripped at each end. The corollary is a
+lifetime rule: **a voice must not outlive its mount**, so anything calling
+`doom_wad_unmount()` calls `pcm_mixer_reset()` first.
+
+---
+
+## 12. Streaming mode: the software mixer
+
+`src/pcm_mixer.c/h` (SCRUM-212) holds up to `PCM_MIXER_VOICES` = 8 voices —
+matching `src/doom/s_sound.c`'s `snd_channels` — each reading a decoded DMX
+lump at its own rate, summed and clipped into the interleaved stereo frames
+this driver DMAs. It is the *second* of two mutually exclusive modes on the
+same stream descriptor and the same 64 KiB buffer; `hda_play_tone()` is the
+first.
+
+### 12.1 Why the BDL is diced differently
+
+A tone is written once and loops forever, so `HDA_BDL_ENTRIES` = 2 is plenty.
+For a stream that is rewritten continuously, **the entry size is the latency**:
+nothing started can be heard until the DMA engine reaches an entry written
+after the request. At two entries that is 8192 frames, ~171 ms — a gunshot a
+sixth of a second after the trigger, an order of magnitude worse than Doom's
+frame period.
+
+So streaming programs `HDA_BDL_ENTRIES_PCM` = 16 entries over the *same*
+buffer: `HDA_PCM_ENTRY_FRAMES` = 1024 frames, ~21 ms each, ~47 completion
+interrupts a second. Nothing about the buffer or its physical pages changes —
+only how finely it is diced, and therefore how often the handler refills a
+slice. `bdl_program(entries)` rewrites the list in place and records the count;
+`stream_program()` derives `LVI` from that count. **Each mode programs its own
+layout on entry**, so neither has to undo the other's on exit, and a tone
+started after a stream (or the reverse) is correct without a caller sequencing
+them.
+
+### 12.2 The refill, and why it trails the read head
+
+`pcm_refill()` runs inside `hda_irq_handler()`, after the `SDnSTS` clear —
+deliberately after, because that write is what deasserts the level-triggered
+INTx line and the mixing is by far the longest thing the handler does.
+
+It reads `SDnLPIB` to find the entry the controller is inside now, and renders
+every entry from its own cursor up to (not including) that one. Those entries
+have been consumed, so overwriting them puts the fill almost a full buffer
+ahead of the read head — which is what makes a 21 ms slice safe rather than
+marginal. Catching up in a **loop**, rather than assuming exactly one entry per
+interrupt, is what makes a coalesced or missed completion cost one longer
+render instead of a permanent hole in the output; the loop is bounded by the
+entry count.
+
+Because the handler runs with IF clear, `pcm_mixer_render()` sees a stable
+voice table without a lock of its own. The mixer's *mutators* — called from
+ordinary kernel context — do their own `cli`/`sti` pair for the few
+instructions in which a voice is half-written, the same primitive and the same
+reason as this file's `irq_save()`/`irq_restore()`.
+
+### 12.3 The stream never stops
+
+`hda_pcm_start()` leaves the stream running with no voices sounding, emitting
+the silence `pcm_mixer_render()` writes for an empty mixer. Stopping per effect
+would reset `SDnLPIB` and reintroduce exactly the start-up latency the 16-entry
+split exists to remove, and a restart mid-DMA is audible as a click. Idle cost
+is one interrupt every ~21 ms writing zeros.
+
+That `pcm_mixer_render()` writes *every* frame it is given — silence included,
+rather than leaving frames it does not reach — is what guarantees no leftover
+of a previous tone or a finished effect can loop in the cyclic buffer.
+
+### 12.4 The real-time budget, and how it is asserted
+
+The refill mixes up to 8 voices over 1024 frames, ~47 times a second, with
+interrupts off. That is a budget, and the honest way to check it is not to
+assert in a comment that integer multiply-adds are cheap:
+
+- `hda_pcm_underruns()` counts `FIFOE` — the controller reaching a slice the
+  mixer had not finished writing. Under streaming that is the *only* failure a
+  too-slow render can produce, so `tests/kernel/test_hda_pcm_k.c` requires it
+  to stay 0 with every voice sounding.
+- The "frame timing is unaffected" half of SCRUM-212's acceptance is checked as
+  a **ratio between two independent clocks**, because measuring one against
+  itself proves nothing: a test that timed its own wait with
+  `kernel_get_ticks_ms()` would spin longer in wall time and still report the
+  interval it asked for. Instead the PIT's millisecond count gates the wait and
+  the stream's own DMA rate is the reference — refills are driven by the
+  controller finishing frames at 48 kHz, which owes nothing to IRQ0, so a
+  handler holding interrupts off long enough to lose timer ticks would inflate
+  the refill count over a fixed number of PIT milliseconds.
+
+### 12.5 What this is not
+
+Ring 0 only, with no ownership binding — the `src/disk_binding.c` equivalent
+for HDA does not exist, and neither does `exo_sound_pcm`. Both are separate,
+explicitly-blocked tickets. Nothing in ring 3 can reach the mixer, and Doom's
+own sound module is still SCRUM-101's one-voice PC speaker sequencer
+(`src/doom_sound.c`); rewiring that to real PCM waits on the syscall.
