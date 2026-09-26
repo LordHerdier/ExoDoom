@@ -40,6 +40,7 @@
 #define TEST_OWNER_SYSCALL_BENCH ((page_owner_t)(PAGE_OWNER_LIBOS + 13))
 #define TEST_OWNER_VMM_QUOTA     ((page_owner_t)(PAGE_OWNER_LIBOS + 14))
 #define TEST_OWNER_SOUND         ((page_owner_t)(PAGE_OWNER_LIBOS + 15))
+#define TEST_OWNER_SOUND_PCM     ((page_owner_t)(PAGE_OWNER_LIBOS + 16))
 
 /*
  * test_libc_shim_probe_k.c (SCRUM-51) deliberately does NOT get its own
@@ -138,7 +139,20 @@ _Static_assert(TEST_OWNER_VMM_REGISTRY     != TEST_OWNER_VMM_ADDRSPACE &&
               TEST_OWNER_SSE              != TEST_OWNER_SOUND &&
               TEST_OWNER_REVOKE_ADDRSPACE != TEST_OWNER_SOUND &&
               TEST_OWNER_SYSCALL_BENCH    != TEST_OWNER_SOUND &&
-              TEST_OWNER_VMM_QUOTA        != TEST_OWNER_SOUND,
+              TEST_OWNER_VMM_QUOTA        != TEST_OWNER_SOUND &&
+              TEST_OWNER_VMM_REGISTRY     != TEST_OWNER_SOUND_PCM &&
+              TEST_OWNER_VMM_ADDRSPACE    != TEST_OWNER_SOUND_PCM &&
+              TEST_OWNER_LIBOS_LAUNCH     != TEST_OWNER_SOUND_PCM &&
+              TEST_OWNER_LIBOS_MAIN       != TEST_OWNER_SOUND_PCM &&
+              TEST_OWNER_LIBOS_C_PROBE    != TEST_OWNER_SOUND_PCM &&
+              TEST_OWNER_PORT_IO_FAULT    != TEST_OWNER_SOUND_PCM &&
+              TEST_OWNER_KERNEL_MEM_FAULT != TEST_OWNER_SOUND_PCM &&
+              TEST_OWNER_IRQ_ENTRY        != TEST_OWNER_SOUND_PCM &&
+              TEST_OWNER_SSE              != TEST_OWNER_SOUND_PCM &&
+              TEST_OWNER_REVOKE_ADDRSPACE != TEST_OWNER_SOUND_PCM &&
+              TEST_OWNER_SYSCALL_BENCH    != TEST_OWNER_SOUND_PCM &&
+              TEST_OWNER_VMM_QUOTA        != TEST_OWNER_SOUND_PCM &&
+              TEST_OWNER_SOUND            != TEST_OWNER_SOUND_PCM,
               "address-space-binding test owner ids must be pairwise distinct");
 
 /*

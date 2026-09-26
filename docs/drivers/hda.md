@@ -431,7 +431,9 @@ This driver plays whatever is in its cyclic buffer. `kernel_main` puts a
 synthesized 440 Hz tone there at boot (SCRUM-210); Doom's real sound effects
 are decoded by a separate module, `src/doom_dmx.c/h` (SCRUM-211). The two are
 joined by `src/pcm_mixer.c/h` and the streaming mode described in §12
-(SCRUM-212).
+(SCRUM-212), and reached from ring 3 through `exo_sound_pcm` (§12.5,
+SCRUM-213) — which is now the only thing on a normal boot that starts a
+stream, the boot tone aside.
 
 The gap that mixer has to close, which is the reason it exists at all:
 
@@ -542,10 +544,29 @@ assert in a comment that integer multiply-adds are cheap:
   handler holding interrupts off long enough to lose timer ticks would inflate
   the refill count over a fixed number of PIT milliseconds.
 
-### 12.5 What this is not
+### 12.5 Reaching it from ring 3 (SCRUM-213)
 
-Ring 0 only, with no ownership binding — the `src/disk_binding.c` equivalent
-for HDA does not exist, and neither does `exo_sound_pcm`. Both are separate,
-explicitly-blocked tickets. Nothing in ring 3 can reach the mixer, and Doom's
-own sound module is still SCRUM-101's one-voice PC speaker sequencer
-(`src/doom_sound.c`); rewiring that to real PCM waits on the syscall.
+`exo_sound_pcm` (#27) and `exo_sound_pcm_stop` (#28), in
+`src/syscall_sound.c`, are the LibOS-facing end of everything above. A caller
+hands over 8-bit unsigned mono samples and the rate they were recorded at, and
+gets back a voice handle.
+
+Three things are worth knowing here rather than only in
+`docs/syscall_spec.md` §3.5b, because they are properties of *this* driver:
+
+- **There is no acquire, and no binding table.** The eight voices already are
+  the admission policy, so an exclusive owner would answer a question the
+  mixer answers better. Ownership is recorded per voice instead.
+- **The samples are copied into kernel pages.** `pcm_mixer_render()` runs
+  inside `hda_irq_handler()`, under whatever CR3 is loaded when the completion
+  interrupt lands, and the caller may unmap or free its buffer as soon as the
+  syscall returns — so a voice cannot hold a ring-3 pointer. The copy is what
+  makes the voice's lifetime the kernel's.
+- **The stream is started lazily**, by the first successful #27, not by
+  `syscall_sound_init()`. §12.3's idle stream costs ~47 interrupts a second
+  forever, and on most boots nothing ever asks for a sound.
+
+Still open on this line: Doom's own sound module is SCRUM-101's one-voice PC
+speaker sequencer (`src/doom_sound.c`); rewiring it onto #27/#28 is its own
+ticket. Revocation (`src/revoke.c`) has no sound leg either — an exiting LibOS
+loses its voices via `syscall_sound_release()`, a revoked one does not.
