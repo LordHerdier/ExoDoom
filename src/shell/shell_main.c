@@ -270,7 +270,16 @@ static void shell_run_command(fb_console_t *con, const char *line) {
          * so in practice this does not come back; Ctrl+Tab (SCRUM-111) is
          * how you reach the shell again. A failure here is the launch
          * itself: no WAD module (-EXO_ENODEV), or no room for the image
-         * (-EXO_ENOMEM), which is much the largest of the four. */
+         * (-EXO_ENOMEM), which is much the largest of the four.
+         *
+         * Running "doom" again from a different foreground context launches
+         * a second, independent instance rather than replacing this one
+         * (SCRUM-196) -- sys_launch() (src/syscall_launch.c) only reclaims
+         * context rows that have actually exited, not ones merely switched
+         * away from. Both stay live until each exits on its own (or the
+         * machine reboots); `pslist` lists every live context id. There is
+         * no split-screen compositor yet (SCRUM-197), so only the current
+         * foreground instance is ever visible at once. */
         int64_t rc = exo_launch(EXO_LAUNCH_APP_DOOM);
         if (rc == 0) {
             fbcon_clear(con);

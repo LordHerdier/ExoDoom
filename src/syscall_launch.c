@@ -101,35 +101,6 @@ typedef struct {
     const uint8_t *data_end;
     size_t         bss_len;
     unsigned       flags;
-
-    /*
-     * The most recently launched instance's context id, or PAGE_OWNER_FREE
-     * if none is live. Per-app and mutable, which is why launch_apps[] is
-     * not const.
-     *
-     * Each app exits via exo_exit() (#20, src/syscall_exit.c,
-     * SCRUM-155/178), which reclaims its pages and framebuffer binding
-     * immediately and hands off to the shell -- but it cannot
-     * context_destroy() its own context_t row, because
-     * context_switch_request() inside exo_exit() still needs that row live,
-     * as the outgoing side, to capture into. The row is therefore left
-     * behind READY but resourceless, and without reclaiming it here a second
-     * launch of the same app would context_create() yet another context
-     * alongside the shell and the leftover row, eventually exhausting
-     * CONTEXT_MAX.
-     *
-     * revoke_all() is a harmless no-op by the time the reclaim runs
-     * (exo_exit() already freed everything); context_destroy() is the part
-     * that still matters, to free the table slot itself. Kept as a pair
-     * regardless, in case an app ever exits some other way -- a crash, or a
-     * future teardown path exo_exit() does not cover -- that leaves real
-     * resources behind after all.
-     *
-     * Per-app rather than one shared "the current app": under framebuffer
-     * multiplexing (SCRUM-112) these are independent live contexts, not
-     * mutually exclusive the way "the current viewer" was before it.
-     */
-    page_owner_t   last_id;
 } launch_app_t;
 
 /*
@@ -145,7 +116,6 @@ static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
         _binary_libos_wad_viewer_data_bin_end,
         LIBOS_WAD_VIEWER_BSS_LEN,
         LAUNCH_NEEDS_WAD | LAUNCH_RELEASES_FB,
-        PAGE_OWNER_FREE,
     },
     [EXO_LAUNCH_APP_CLOCK] = {
         _binary_libos_clock_code_bin_start,
@@ -154,7 +124,6 @@ static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
         _binary_libos_clock_data_bin_end,
         LIBOS_CLOCK_BSS_LEN,
         0u,
-        PAGE_OWNER_FREE,
     },
     [EXO_LAUNCH_APP_SNAKE] = {
         _binary_libos_snake_code_bin_start,
@@ -163,7 +132,6 @@ static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
         _binary_libos_snake_data_bin_end,
         LIBOS_SNAKE_BSS_LEN,
         LAUNCH_RELEASES_FB,
-        PAGE_OWNER_FREE,
     },
     [EXO_LAUNCH_APP_DOOM] = {
         _binary_libos_doom_code_bin_start,
@@ -172,7 +140,6 @@ static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
         _binary_libos_doom_data_bin_end,
         LIBOS_DOOM_BSS_LEN,
         LAUNCH_NEEDS_WAD | LAUNCH_RELEASES_FB,
-        PAGE_OWNER_FREE,
     },
 };
 
@@ -203,15 +170,35 @@ static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
 
     launch_app_t *app = &launch_apps[app_id];
 
-    /* Reclaim the previous instance of THIS app before creating another --
-     * see last_id's own comment. context_lookup() guards against a stale id
-     * from an instance some other path already tore down. */
-    if (app->last_id != PAGE_OWNER_FREE &&
-        context_lookup(app->last_id) != NULL) {
-        revoke_all(app->last_id);
-        context_destroy(app->last_id);
+    /*
+     * Reclaim any exited-but-not-yet-destroyed context row before creating
+     * another one. exo_exit() (src/syscall_exit.c, SCRUM-155/178) already
+     * frees a terminating context's pages/bindings via reclaim_pages_owned(),
+     * but cannot context_destroy() its own row -- context_switch_request()
+     * inside exo_exit() still needs that row live, as the outgoing side, to
+     * capture into -- so it leaves the row behind, downgraded to
+     * CONTEXT_STATE_BLOCKED (SCRUM-111) precisely so context_next_ready()'s
+     * round-robin skips it. Nothing else destroys it. Before this ticket that
+     * fell out of sys_launch()'s own last_id-keyed "tear down my previous
+     * instance" step; now that concurrent instances of the same app are
+     * allowed (SCRUM-196/SCRUM-195), that step is gone, so the sweep has to
+     * be table-wide and app-agnostic instead of per-app, or a BLOCKED row
+     * from any app would simply never get reclaimed and CONTEXT_MAX (14)
+     * would eventually exhaust. revoke_all() is a harmless no-op by the time
+     * this runs (exo_exit() already freed everything); context_destroy() is
+     * the part that still matters, to free the table slot itself. Kept as a
+     * pair regardless, in case an app ever exits some other way -- a crash,
+     * or a future teardown path exo_exit() does not cover -- that leaves
+     * real resources behind after all.
+     */
+    context_info_t live[CONTEXT_MAX];
+    uint32_t live_count = context_list(live, CONTEXT_MAX);
+    for (uint32_t i = 0; i < live_count; i++) {
+        if (live[i].state == CONTEXT_STATE_BLOCKED) {
+            revoke_all(live[i].id);
+            context_destroy(live[i].id);
+        }
     }
-    app->last_id = PAGE_OWNER_FREE;
 
     /* Looked up before context_create() so a missing module fails without
      * having allocated anything -- the ordering the old WAD-viewer handler
@@ -292,10 +279,10 @@ static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
     if (app->flags & LAUNCH_RELEASES_FB) {
         /* Whoever currently holds the framebuffer binding -- the shell, from
          * its own libos_fb_map() call at startup (src/shell/shell_main.c),
-         * on a first launch; nobody, on a later one, since the reclaim at
-         * the top of this function already released it from the previous
-         * instance -- must give it up before this one can exo_fb_acquire()
-         * it (exclusive, src/fb_binding.c, SCRUM-154). fb_binding_owner()
+         * on a first launch; some other still-live app, once more than one
+         * instance can be running at once (SCRUM-196) -- must give it up
+         * before this one can exo_fb_acquire() it (exclusive,
+         * src/fb_binding.c, SCRUM-154). fb_binding_owner()
          * rather than assuming the caller: the caller is always the shell,
          * but the *holder* is not, once a second launch runs. Only the
          * binding is released, not the holder's own already-established page
@@ -316,11 +303,6 @@ static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
         context_destroy(id);
         return -EXO_EINVAL;
     }
-
-    /* Only now, on the success path -- everything above that fails instead
-     * destroys `id` itself and returns with app->last_id still
-     * PAGE_OWNER_FREE from the top of this function. */
-    app->last_id = id;
 
     return 0;
 }
