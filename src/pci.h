@@ -50,6 +50,18 @@
 #define PCI_OFF_BAR0        0x10
 #define PCI_OFF_SECONDARY_BUS 0x19   /* header type 0x1 only */
 
+/* Interrupt routing, header type 0x0. `Interrupt Pin` is read-only and names
+ * which of INTA#-INTD# the function drives (0 = none); `Interrupt Line` is a
+ * read/write byte the firmware fills in with the 8259 IRQ that pin was routed
+ * to. Nothing in hardware enforces that the two agree -- the Line register is
+ * purely a place for firmware to leave a note for the OS -- but on QEMU (as on
+ * any BIOS machine) it is filled in correctly before GRUB runs, and it is the
+ * only way to learn the IRQ without an I/O APIC or ACPI tables. src/hda.c
+ * reads both: the pin to confirm the function drives an interrupt at all, the
+ * line to pick the IDT vector. */
+#define PCI_OFF_INTERRUPT_LINE 0x3C
+#define PCI_OFF_INTERRUPT_PIN  0x3D
+
 /* Command register bits (see the PCI spec's command register layout). */
 #define PCI_CMD_IO_SPACE     (1u << 0)
 #define PCI_CMD_MEM_SPACE    (1u << 1)
