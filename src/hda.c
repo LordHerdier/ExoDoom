@@ -7,6 +7,7 @@
 #include "serial.h"
 #include "page_alloc.h"
 #include "vmm.h"
+#include "pcm_mixer.h"
 
 #include <stddef.h>
 
@@ -63,6 +64,23 @@ static volatile uint8_t  g_playing;
 static volatile uint8_t  g_timed;
 static volatile uint32_t g_deadline_ms;
 static uint32_t          g_tone_hz;
+
+/*
+ * Streaming (PCM) mode, SCRUM-212. g_bdl_entries is how finely the buffer is
+ * currently diced -- HDA_BDL_ENTRIES for a tone, HDA_BDL_ENTRIES_PCM for a
+ * mixed stream -- and is what stream_program() programs LVI from, so each
+ * mode's own start path sets it and neither has to undo the other's.
+ *
+ * g_pcm_write is the refill cursor: the next entry hda_irq_handler() will
+ * render into. It trails the DMA engine's position and catches up rather than
+ * assuming one interrupt per entry, so a coalesced or missed completion
+ * costs a longer render on the next one instead of a permanent gap.
+ */
+static uint32_t          g_bdl_entries = HDA_BDL_ENTRIES;
+static volatile uint8_t  g_streaming;
+static volatile uint32_t g_pcm_write;
+static volatile uint32_t g_pcm_refills;
+static volatile uint32_t g_pcm_underruns;
 
 /* ── MMIO access ───────────────────────────────────────────────────────── */
 
@@ -491,6 +509,31 @@ static uint32_t fill_tone(uint32_t freq_hz)
     return (uint32_t)(((uint64_t)periods * HDA_SAMPLE_RATE_HZ) / HDA_BUF_FRAMES);
 }
 
+/*
+ * Dice the sample buffer into `entries` equal BDL entries, each asking for a
+ * completion interrupt.
+ *
+ * Never one entry: the spec requires LVI >= 1, so a single-entry list is
+ * illegal. Two is what a tone wants -- it also halves the latency between
+ * "DMA is running" and the first observable interrupt. Streaming wants
+ * HDA_BDL_ENTRIES_PCM, for the latency reason that constant's own comment
+ * gives. The buffer and its physical pages are identical either way; only the
+ * dicing differs, so this rewrites the list in place and records the count
+ * for stream_program() to derive LVI from.
+ */
+static void bdl_program(uint32_t entries)
+{
+    uint64_t buf_phys = (uint64_t)(uintptr_t)g_buf;
+    uint32_t len = HDA_BUF_BYTES / entries;
+
+    for (uint32_t i = 0; i < entries; i++) {
+        g_bdl[i].addr  = buf_phys + (uint64_t)i * len;
+        g_bdl[i].len   = len;
+        g_bdl[i].flags = HDA_BDL_IOC;
+    }
+    g_bdl_entries = entries;
+}
+
 static int buffers_init(void)
 {
     if (g_bdl == NULL) {
@@ -508,16 +551,7 @@ static int buffers_init(void)
         g_buf = (int16_t *)p;
     }
 
-    /* Two entries, each half the buffer, both asking for a completion
-     * interrupt. Two rather than one because the spec requires LVI >= 1 --
-     * a single-entry list is illegal -- and because it halves the latency
-     * between "DMA is running" and the first observable interrupt. */
-    uint64_t buf_phys = (uint64_t)(uintptr_t)g_buf;
-    for (uint32_t i = 0; i < HDA_BDL_ENTRIES; i++) {
-        g_bdl[i].addr  = buf_phys + i * (HDA_BUF_BYTES / HDA_BDL_ENTRIES);
-        g_bdl[i].len   = HDA_BUF_BYTES / HDA_BDL_ENTRIES;
-        g_bdl[i].flags = HDA_BDL_IOC;
-    }
+    bdl_program(HDA_BDL_ENTRIES);
     return HDA_OK;
 }
 
@@ -552,7 +586,7 @@ static int stream_program(void)
             HDA_SDSTS_BCIS | HDA_SDSTS_FIFOE | HDA_SDSTS_DESE);
 
     mmio_w32(sd(HDA_SD_CBL), HDA_BUF_BYTES);
-    mmio_w16(sd(HDA_SD_LVI), (uint16_t)(HDA_BDL_ENTRIES - 1));
+    mmio_w16(sd(HDA_SD_LVI), (uint16_t)(g_bdl_entries - 1));
     mmio_w16(sd(HDA_SD_FMT), HDA_FMT_48K_16BIT_STEREO);
 
     uint64_t bdl_phys = (uint64_t)(uintptr_t)g_bdl;
@@ -609,6 +643,43 @@ static int irq_init(void)
     return HDA_OK;
 }
 
+/*
+ * Render into every BDL entry the DMA engine has finished with, up to but not
+ * including the one it is reading now.
+ *
+ * SDnLPIB is the stream's byte position inside the cyclic buffer, so
+ * LPIB / HDA_PCM_ENTRY_BYTES is the entry currently being read. Everything
+ * from g_pcm_write up to there has been consumed and is free to overwrite;
+ * the entry being read is not, and neither is anything ahead of it. Writing
+ * the just-consumed entries puts the fill as far from the read head as the
+ * buffer allows -- almost a full loop of headroom -- which is what makes a
+ * 21 ms slice safe rather than marginal.
+ *
+ * Catching up in a loop, rather than assuming exactly one entry per
+ * interrupt, is what makes a coalesced or missed completion cost one longer
+ * render instead of a permanent hole in the output. The loop is bounded by
+ * the entry count, so the worst case is the whole buffer once.
+ *
+ * Runs inside hda_irq_handler() with IF clear, so pcm_mixer_render() sees a
+ * stable voice table without taking a lock of its own.
+ */
+static void pcm_refill(void)
+{
+    uint32_t lpib    = mmio_r32(sd(HDA_SD_LPIB));
+    uint32_t playing = (lpib / HDA_PCM_ENTRY_BYTES) % HDA_BDL_ENTRIES_PCM;
+
+    for (uint32_t guard = 0; guard < HDA_BDL_ENTRIES_PCM; guard++) {
+        if (g_pcm_write == playing) {
+            break;
+        }
+        int16_t *slice = g_buf + (size_t)g_pcm_write
+                                 * (HDA_PCM_ENTRY_BYTES / sizeof(int16_t));
+        pcm_mixer_render(slice, HDA_PCM_ENTRY_FRAMES);
+        g_pcm_write = (g_pcm_write + 1) % HDA_BDL_ENTRIES_PCM;
+        g_pcm_refills++;
+    }
+}
+
 void hda_irq_handler(void)
 {
     if (g_bar != NULL) {
@@ -626,6 +697,25 @@ void hda_irq_handler(void)
                     (uint8_t)(sts & (HDA_SDSTS_BCIS | HDA_SDSTS_FIFOE
                                      | HDA_SDSTS_DESE)));
             g_irq_count++;
+
+            /*
+             * Streaming mode's refill (SCRUM-212). Deliberately *after* the
+             * status clear: that write is what deasserts the level-triggered
+             * INTx line, and the mixing below is by far the longest thing
+             * this handler does. Clearing first keeps the line down for the
+             * whole render rather than holding it asserted throughout.
+             */
+            if (g_streaming) {
+                if (sts & HDA_SDSTS_FIFOE) {
+                    /* The controller reached a slice the mixer had not
+                     * written in time. Counted rather than ignored: it is the
+                     * only failure a too-slow render can produce, and
+                     * hda_pcm_underruns() is what asserts it does not happen.
+                     */
+                    g_pcm_underruns++;
+                }
+                pcm_refill();
+            }
         }
         /* A call with our bit clear is somebody else's shared interrupt.
          * Nothing to do -- but the EOI below still has to happen, because
@@ -727,6 +817,11 @@ int hda_play_tone(uint32_t freq_hz, uint32_t dur_ms)
 
     g_playing = 0;
     g_stream_err = 0;
+    /* Take the stream back from streaming mode, if it had it, and restore the
+     * tone's own BDL split. Each mode programs its own layout on entry, so
+     * neither has to undo the other's on exit (SCRUM-212). */
+    g_streaming = 0;
+    bdl_program(HDA_BDL_ENTRIES);
     int rc = stream_program();
     if (rc != HDA_OK) {
         irq_restore(flags);
@@ -755,6 +850,7 @@ void hda_stop(void)
     mmio_w32(sd(HDA_SD_CTL), 0);
     g_playing = 0;
     g_timed = 0;
+    g_streaming = 0;
     irq_restore(flags);
 }
 
@@ -766,6 +862,92 @@ int hda_is_playing(void)
 uint32_t hda_tone_hz(void)
 {
     return g_tone_hz;
+}
+
+/* ── Streaming (PCM) mode ──────────────────────────────────────────────── */
+
+int hda_pcm_start(void)
+{
+    if (!g_present || g_buf == NULL) {
+        return HDA_ENODEV;
+    }
+
+    /*
+     * Prefill the whole buffer before the DMA engine is pointed at it. The
+     * stream is stopped by stream_program()'s reset, so there is no window in
+     * which the controller reads a half-written slice -- and because
+     * pcm_mixer_render() writes every frame it is given, this also guarantees
+     * the buffer holds no leftovers from a previous tone. With no voices
+     * started yet that fill is silence, which is exactly what should be
+     * playing until something starts.
+     */
+    pcm_mixer_render(g_buf, HDA_BUF_FRAMES);
+
+    uint64_t flags = irq_save();
+
+    g_playing       = 0;
+    g_streaming     = 0;   /* not yet: pcm_refill() must not run mid-setup */
+    g_stream_err    = 0;
+    g_pcm_refills   = 0;
+    g_pcm_underruns = 0;
+
+    bdl_program(HDA_BDL_ENTRIES_PCM);
+    int rc = stream_program();
+    if (rc != HDA_OK) {
+        irq_restore(flags);
+        return rc;
+    }
+
+    /*
+     * The refill cursor starts at entry 0 while the DMA engine starts there
+     * too, so the first completion interrupt finds them one apart and renders
+     * exactly the entry just consumed. Every entry already holds valid
+     * samples from the prefill above, so nothing is played before it is
+     * written even on the first loop.
+     */
+    g_pcm_write = 0;
+
+    mmio_w32(sd(HDA_SD_CTL),
+             ((uint32_t)HDA_STREAM_TAG << HDA_SDCTL_TAG_SHIFT)
+             | HDA_SDCTL_IOCE | HDA_SDCTL_RUN);
+
+    /* No deadline: a mixed stream ends when its voices do, not on a timer, so
+     * hda_tick() has nothing to do here (it only acts on g_timed). */
+    g_timed     = 0;
+    g_tone_hz   = 0;
+    g_playing   = 1;
+    g_streaming = 1;
+
+    irq_restore(flags);
+    return HDA_OK;
+}
+
+void hda_pcm_stop(void)
+{
+    if (!g_present) {
+        return;
+    }
+    uint64_t flags = irq_save();
+    mmio_w32(sd(HDA_SD_CTL), 0);
+    g_streaming = 0;
+    g_playing   = 0;
+    g_timed     = 0;
+    irq_restore(flags);
+}
+
+int hda_pcm_is_streaming(void)
+{
+    return g_streaming;
+}
+
+uint32_t hda_pcm_refills(void)
+{
+    return g_pcm_refills;
+}
+
+uint32_t hda_pcm_underruns(void)
+{
+    return g_pcm_underruns;
 }
 
 void hda_tick(uint32_t now_ms)

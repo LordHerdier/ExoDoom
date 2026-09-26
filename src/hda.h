@@ -207,6 +207,27 @@
  * per loop rather than once. */
 #define HDA_BDL_ENTRIES     2u
 
+/*
+ * ── Streaming (PCM) mode's own BDL split (SCRUM-212) ───────────────────
+ *
+ * A tone is written once and loops forever, so two entries are plenty. A
+ * mixed stream is rewritten continuously, and there the entry size *is* the
+ * latency: nothing started can be heard until the DMA engine reaches an entry
+ * written after the request. At HDA_BDL_ENTRIES = 2 that is half of
+ * HDA_BUF_BYTES -- 8192 frames, ~171 ms -- a gunshot a sixth of a second
+ * after the trigger, an order of magnitude worse than Doom's frame period.
+ *
+ * Sixteen entries over the same 64 KiB buffer gives 1024 frames each, ~21 ms,
+ * for ~47 completion interrupts a second. The buffer is unchanged between the
+ * two modes; only how finely it is diced, and therefore how often
+ * hda_irq_handler() refills a slice of it. The BDL page holds 16-byte entries
+ * so 256 would fit -- 16 is a latency/interrupt-rate choice, not a space
+ * limit.
+ */
+#define HDA_BDL_ENTRIES_PCM  16u
+#define HDA_PCM_ENTRY_BYTES  (HDA_BUF_BYTES / HDA_BDL_ENTRIES_PCM)
+#define HDA_PCM_ENTRY_FRAMES (HDA_PCM_ENTRY_BYTES / HDA_BYTES_PER_FRAME)
+
 /* Peak amplitude of the square wave, out of 32767. A quarter scale is loud
  * enough to hear and quiet enough not to hurt on headphones. */
 #define HDA_TONE_AMPLITUDE  8192
@@ -279,6 +300,57 @@ int hda_is_playing(void);
 
 /* The frequency hda_play_tone() actually programmed, after snapping. */
 uint32_t hda_tone_hz(void);
+
+/* ── Streaming (PCM) mode: the software mixer's output (SCRUM-212) ─────── */
+
+/*
+ * Start playing whatever src/pcm_mixer.c is mixing.
+ *
+ * This is the second of two mutually exclusive modes on the same stream and
+ * the same buffer. hda_play_tone() writes the buffer once and lets it loop;
+ * streaming mode reprograms the BDL into HDA_BDL_ENTRIES_PCM slices and
+ * refills each one from hda_irq_handler() as the DMA engine finishes it, by
+ * calling pcm_mixer_render(). Starting either mode takes the stream over from
+ * the other cleanly, so the two never have to be sequenced by a caller.
+ *
+ * **The stream keeps running with no voices sounding**, emitting the silence
+ * pcm_mixer_render() writes for an empty mixer, rather than stopping and
+ * restarting per effect. Stopping would reset SDnLPIB and reintroduce exactly
+ * the start-up latency the 16-entry split exists to remove, and a restart mid
+ * DMA is audible as a click. Idle cost is one interrupt every
+ * HDA_PCM_ENTRY_FRAMES frames (~21 ms) writing zeros.
+ *
+ * Returns HDA_OK, or HDA_ENODEV if hda_init() did not complete, or whatever
+ * stream_program() failed with. Safe with IF set or clear. Does not itself
+ * start any voice -- that is pcm_mixer_start().
+ */
+int hda_pcm_start(void);
+
+/* Stop streaming and halt the stream. Voices are left alone: this silences
+ * the output without forgetting what was playing, so hda_pcm_start() resumes
+ * mid-effect. Call pcm_mixer_reset() as well to forget the voices. */
+void hda_pcm_stop(void);
+
+/* 1 while streaming mode is on (as opposed to a tone, or nothing). */
+int hda_pcm_is_streaming(void);
+
+/* How many BDL entries have been refilled since hda_pcm_start(). The
+ * refill cadence made observable: this advancing at roughly
+ * HDA_SAMPLE_RATE_HZ / HDA_PCM_ENTRY_FRAMES per second is what proves the
+ * completion interrupt is really driving the mixer. */
+uint32_t hda_pcm_refills(void);
+
+/*
+ * How many FIFO errors the stream has reported since hda_pcm_start().
+ *
+ * Under streaming this is the one failure the refill can actually cause: a
+ * FIFOE means the controller reached a slice the mixer had not written in
+ * time, i.e. the render did not keep up with the DMA. It is therefore the
+ * real-time budget's own assertion, and tests/kernel/test_hda_pcm_k.c
+ * requires it to stay 0 with every voice sounding rather than asserting in a
+ * comment that the mixing is cheap enough.
+ */
+uint32_t hda_pcm_underruns(void);
 
 /* Called from irq0_handler() with kernel_get_ticks_ms(): ends a timed tone
  * once its deadline passes. Wrap-safe, exactly like speaker_tick(). */

@@ -15,6 +15,9 @@
 #include "ata.h"
 #include "pci.h"
 #include "hda.h"
+#include "pcm_mixer.h"
+#include "doom_dmx.h"
+#include "wad.h"
 #include "sleep.h"
 #include "fb.h"
 #include "fb_console.h"
@@ -551,6 +554,75 @@ void kernel_main(void *mb2_info_ptr) {
         } else {
             klog(&con, kernel_get_ticks_ms(),
                  "HDA: boot test tone refused");
+        }
+    }
+
+    // ── HDA PCM mixer demo (SCRUM-212) ───────────────────────────────────
+    // The audible half of *this* ticket's acceptance: two of Doom's own sound
+    // effects, decoded from the mounted IWAD and played *at the same time*
+    // through the software mixer, rather than one synthesized tone.
+    //
+    // Two lumps at different sample rates on purpose.  DSPISTOL and DSSHOTGN
+    // are not both 11025 Hz -- of freedoom2's 109 DS* lumps, 67 are 22050 --
+    // so if the mixer ignored each voice's rate one of these two would play
+    // at the wrong speed, which is obvious by ear and is the failure the
+    // ticket's own "no resampling required" premise would have shipped.  They
+    // are started ~80 ms apart so they genuinely overlap rather than merely
+    // queueing.
+    //
+    // Sequenced after the boot tone rather than beside it: the two modes share
+    // one stream descriptor, so starting this immediately would cut the tone
+    // off mid-note.  kernel_sleep_ms() is safe here -- interrupts are enabled
+    // (the `sti` above) and this is the boot tail, with nothing waiting on it.
+    //
+    // The WAD is found here rather than through doom_wad_mounted(): on a
+    // normal boot that registry is filled by DG_Init from *ring 3* (SCRUM-73),
+    // which has not run yet.  The module is identity-mapped, so a local wad_t
+    // over it is enough, and the decoded doom_dmx_t points straight into those
+    // pages -- nothing is copied (src/doom_dmx.h's zero-copy contract).  The
+    // wad_t itself may be a local: the voices hold only the sample pointer.
+    //
+    // Needs a real QEMU audio backend to be audible, exactly like the tone
+    // above: `-audiodev none` runs the whole DMA path and discards the samples.
+    if (hda_present()) {
+        uint64_t mod_start = 0, mod_end = 0;
+        wad_t wad;
+        doom_dmx_t pistol, shotgun;
+
+        if (mmap_find_module(&mod_start, &mod_end) == 0 && mod_end > mod_start
+            && wad_init(&wad, (const uint8_t *)(uintptr_t)mod_start,
+                        (uint32_t)(mod_end - mod_start)) == 0
+            && doom_dmx_find_sfx(&wad, "pistol", &pistol) == DOOM_DMX_OK
+            && doom_dmx_find_sfx(&wad, "shotgn", &shotgun) == DOOM_DMX_OK) {
+
+            // Let the boot tone finish before taking the stream from it.
+            kernel_sleep_ms(HDA_BOOT_TONE_MS);
+
+            pcm_mixer_reset();
+            if (hda_pcm_start() == HDA_OK) {
+                pcm_mixer_start(&pistol, PCM_MIXER_VOL_MAX,
+                                PCM_MIXER_SEP_CENTRE / 2, 64);
+                kernel_sleep_ms(80);
+                pcm_mixer_start(&shotgun, PCM_MIXER_VOL_MAX,
+                                PCM_MIXER_SEP_CENTRE + PCM_MIXER_SEP_CENTRE / 2,
+                                64);
+                klog(&con, kernel_get_ticks_ms(),
+                     "HDA: mixing DSPISTOL + DSSHOTGN (2 voices, resampled)");
+                // Also on serial, unlike the boot tone above: klog() writes
+                // only to the framebuffer console, and this is the one boot
+                // line worth being able to see from a headless capture --
+                // which is how the mix gets verified at all
+                // (-audiodev wav + peak amplitude, per docs/drivers/hda.md
+                // §10's note that "the registers are right" and "you can hear
+                // it" are different claims).
+                serial_print("hda: mixing DSPISTOL + DSSHOTGN (2 voices)\n");
+            } else {
+                klog(&con, kernel_get_ticks_ms(),
+                     "HDA: PCM stream refused");
+            }
+        } else {
+            klog(&con, kernel_get_ticks_ms(),
+                 "HDA: no IWAD sound lumps to mix");
         }
     }
 

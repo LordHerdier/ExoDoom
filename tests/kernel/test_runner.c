@@ -81,6 +81,8 @@ void suite_disk_binding_tests(CU_pSuite s);
 void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
 void suite_doom_dmx_tests(CU_pSuite s);
+void suite_pcm_mixer_tests(CU_pSuite s);
+void suite_hda_pcm_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -96,6 +98,17 @@ int suite_hda_cleanup(void);
  * process-global state shared with the dg_init suite (SCRUM-211). */
 int suite_doom_dmx_init(void);
 int suite_doom_dmx_cleanup(void);
+
+/* Voices are process-global state; a voice left sounding by one test would
+ * mix into the next one's assertions (SCRUM-212). */
+int suite_pcm_mixer_init(void);
+int suite_pcm_mixer_cleanup(void);
+
+/* Mounts the freedoom2 module for its real-sample tests and stops the stream
+ * afterwards -- a voice left sounding would point into a WAD the cleanup has
+ * unmounted (SCRUM-212). */
+int suite_hda_pcm_init(void);
+int suite_hda_pcm_cleanup(void);
 
 /* Acquires the disk binding for the suite's own context before the round-
  * trip/hardware tests run and releases it afterward (SCRUM-188). */
@@ -503,6 +516,20 @@ int run_tests(void)
      * for its reference data, hence the mount/unmount pair (SCRUM-211). */
     s = CU_add_suite("doom_dmx", suite_doom_dmx_init, suite_doom_dmx_cleanup);
     suite_doom_dmx_tests(s);
+
+    /* What joins those two ends: N voices resampled, summed and clipped into
+     * one stereo stream.  Hardware-free by construction -- src/pcm_mixer.c
+     * includes no device header -- so this suite asserts the exact samples,
+     * and test_hda_pcm below asserts the controller actually plays them
+     * (SCRUM-212). */
+    s = CU_add_suite("pcm_mixer", suite_pcm_mixer_init, suite_pcm_mixer_cleanup);
+    suite_pcm_mixer_tests(s);
+
+    /* The two joined: the mixer rendering into the HDA stream's BDL slices
+     * from the completion interrupt.  Needs the real controller, so it sits
+     * with the hda suite rather than with the arithmetic above (SCRUM-212). */
+    s = CU_add_suite("hda_pcm", suite_hda_pcm_init, suite_hda_pcm_cleanup);
+    suite_hda_pcm_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not
