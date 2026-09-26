@@ -211,6 +211,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | PC speaker (PIT channel 2, SCRUM-98) | `src/speaker.c/h` |
 | Doom SFX → speaker tone table (SCRUM-99) | `src/doom_sfx_tone.c/h` |
 | Doom `sound_module_t` over the speaker (SCRUM-101) | `src/doom_sound.c/h` (+ `FEATURE_SOUND` in `src/doom/doomfeatures.h`) |
+| WAD DMX sound lump decoder (`DS*` → 8-bit PCM, SCRUM-211) | `src/doom_dmx.c/h` |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
 | Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h`, `src/syscall_sound.c/h` (SCRUM-100) |
@@ -569,9 +570,10 @@ convention and calls it from `kernel_main` instead of a test harness.
   true), while Doom's shipped table was generated in single-precision `float`
   with a truncating cast and is off by up to 1.01 LSB — which is also why
   `finesine`'s peak is 65535 and ours is 65536. To make that comparison
-  possible, `build.sh` compiles **`src/doom/tables.c`** — the one file under
-  `src/doom/` the kernel image links, and only under `TESTING=1`; it is pure
-  const integer arrays with zero undefined references.
+  possible, `build.sh` compiles **`src/doom/tables.c`** — one of only two
+  files under `src/doom/` the kernel image links (the other is `sounds.c`,
+  SCRUM-211), and only under `TESTING=1`; it is pure const integer arrays
+  with zero undefined references.
 - **`I_Error`/`I_Quit` report on serial and stop (SCRUM-83).** Doom's fatal
   path used to write to `stderr`, open a zenity dialog through `system()`,
   and `exit(-1)` — none of which exists here. `src/doom/i_system.c` now calls
@@ -655,6 +657,38 @@ convention and calls it from `kernel_main` instead of a test harness.
     asserts state up to the point samples leave RAM.
   There is no `exo_sound_pcm` and no HDA ownership binding: HDA is ring-0
   only, like `src/ata.c` was before SCRUM-188.
+- **Doom's real sound samples are now readable, and they are not all one
+  sample rate (SCRUM-211).** `src/doom_dmx.c/h` decodes a `DS*` DMX lump out
+  of the mounted WAD: 8-byte header (format tag, rate, sample count) then
+  8-bit *unsigned* mono PCM. Three things about it are load-bearing:
+  - **It is zero-copy, and deliberately so.** `doom_dmx_t.samples` points
+    into the identity-mapped GRUB module — the same "there is nowhere to copy
+    28 MiB to" reasoning `src/doom_wad.h` gives for the mount itself. Nothing
+    is allocated and nothing is freed; `doom_dmx_to_s16()` is the one call
+    that writes, and only into a buffer the caller supplies.
+  - **The 16 padding samples at each end must be dropped**, which is why
+    `num_samples` is the header count minus 32. They are not silence
+    (DSPISTOL's raw body starts 145, 144, 141; its first audible sample is
+    156), so keeping them clicks at both ends of every effect.
+  - **The rate is reported, never assumed.** "DMX lumps are always
+    11025 Hz" is false: across freedoom2 v0.13.0's 109 `DS*` lumps it is 67
+    at 22050, 38 at 11025, 2 at 17990, 1 at 16000, 1 at 44100, and
+    `tests/kernel/test_doom_dmx_k.c` asserts that histogram exactly so the
+    mixer cannot inherit the wrong assumption. HDA output is pinned at
+    `HDA_SAMPLE_RATE_HZ` = 48000/16-bit/stereo, so **resampling is the
+    mixer's job and does not exist yet** — hardcoding one input rate would
+    play two thirds of Doom's effects at half speed.
+  The sfx lookup is **name-based** (`doom_dmx_find_sfx(wad, "pistol", …)`),
+  not `sfxenum_t`-based, because the enum→name mapping lives only in
+  `src/doom/sounds.c`'s `S_sfx[]` and this file is globbed into *shipped*
+  kernels where nothing from `src/doom/` links. To still prove the enum leg,
+  `build.sh`'s step 3b now compiles `src/doom/sounds.c` under `TESTING` —
+  the second instance of the narrow exception `src/doom/tables.c` already
+  is, and the only two files from the vendored tree the kernel image ever
+  links. Nothing calls the decoder yet: `src/doom_sound.c` still serves
+  SCRUM-99's speaker tone table, and rewiring it (plus adding this file to
+  the `libos_doom` ring-3 target's source list, which it is written to
+  support — no syscall, no kernel-only dependency) belongs to the mixer.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - **The context table (SCRUM-107, `src/context.c/h`) tracks live LibOS

@@ -600,9 +600,9 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     src/errno.c src/fpconv.c \
     src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c
 
-  echo "[3b3/7] Compile Doom's reference trig tables (SCRUM-41)"
-  # The ONE file under src/doom/ that the kernel image links, and only in a
-  # TESTING build.  tests/kernel/test_fixed_math_k.c is SCRUM-41's acceptance
+  echo "[3b3/7] Compile Doom's reference data tables (SCRUM-41, SCRUM-211)"
+  # The only two files under src/doom/ that the kernel image links, and only in
+  # a TESTING build.  tests/kernel/test_fixed_math_k.c is SCRUM-41's acceptance
   # test: it regenerates finesine/finecosine/finetangent/tantoangle through
   # src/fixed_math.c and compares all 24,577 entries against the vendored
   # chocolate-doom data, which is what the ticket means by "verified against
@@ -625,6 +625,25 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   x86_64-elf-gcc -c src/doom/tables.c -o build/doom_tables.o \
     "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL
   objs+=("build/doom_tables.o")
+
+  # sounds.c is the second application of that same exception, for the same
+  # kind of reason (SCRUM-211).  tests/kernel/test_doom_dmx_k.c has to prove
+  # the DMX decoder resolves a real sfxenum_t -- not a string a test made up --
+  # to its DS* lump, and the enum-to-lump-name mapping lives nowhere but
+  # S_sfx[] in this file.  src/doom_dmx.c deliberately does NOT reference
+  # S_sfx[] (it takes the sfx name, so it stays linkable in a shipped kernel
+  # where nothing from src/doom/ exists -- see src/doom_dmx.h), which leaves
+  # the test as the only place the enum leg can be exercised at all.
+  #
+  # It qualifies on the same terms as tables.c: S_sfx[]/S_music[] are const-ish
+  # data with no engine dependency and no floats, its only includes are
+  # <stdlib.h>, doomtype.h and sounds.h (all reachable through the shim with
+  # the same -I flags), and it defines no function, so it cannot drag in an
+  # undefined reference.
+  echo "    CC sounds.c (doom sfx name table)"
+  x86_64-elf-gcc -c src/doom/sounds.c -o build/doom_sounds.o \
+    "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL
+  objs+=("build/doom_sounds.o")
 
   echo "[3c/7] Compile kernel test sources"
   # Kernel view by default -- these run in ring 0.  The one TU that needs
