@@ -13,6 +13,7 @@
 #include "speaker.h"
 #include "ps2.h"
 #include "ata.h"
+#include "pci.h"
 #include "sleep.h"
 #include "fb.h"
 #include "fb_console.h"
@@ -342,6 +343,17 @@ void kernel_main(void *mb2_info_ptr) {
     // timed tone, so this sits after pit_init() and ahead of the TESTING
     // branch like everything else a test needs.
     speaker_init();
+
+    // ── PCI enumeration (SCRUM-209) ─────────────────────────────────────
+    // Config-space access is pure port I/O (0xCF8/0xCFC), so this needs no
+    // subsystem below it and could sit anywhere after serial_init(). It goes
+    // ahead of the TESTING branch like every other driver a KUnit suite
+    // drives, and after vmm_init() because pci_bar_map() -- which the suite
+    // exercises against the HDA controller's BAR -- edits the kernel map
+    // vmm_init() installs. Enumeration cannot fail: a machine with no PCI
+    // simply reports zero functions.
+    pci_init();
+    pci_dump();
 
     // ── ATA PIO driver (SCRUM-102) ───────────────────────────────────────
     // Polled, ring-0 only. Ahead of the TESTING branch so the KUnit suite
