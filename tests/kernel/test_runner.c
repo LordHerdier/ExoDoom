@@ -78,6 +78,7 @@ void suite_syscall_stat_tests(CU_pSuite s);
 void suite_ata_tests(CU_pSuite s);
 void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
+void suite_pci_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -472,6 +473,11 @@ int run_tests(void)
     s = CU_add_suite("disk_binding", disk_binding_suite_init,
                      disk_binding_suite_cleanup);
     suite_disk_binding_tests(s);
+
+    /* Next to "ata" above: the other driver that talks to real emulated
+     * hardware rather than to a model of it (SCRUM-209). */
+    s = CU_add_suite("pci", NULL, NULL);
+    suite_pci_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not
