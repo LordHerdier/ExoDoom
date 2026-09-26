@@ -17,6 +17,7 @@
 8. [API reference](#8-api-reference)
 9. [Testing](#9-testing)
 10. [Design decisions and gotchas](#10-design-decisions-and-gotchas)
+11. [Where the samples come from](#11-where-the-samples-come-from)
 
 ---
 
@@ -420,3 +421,35 @@ Two ways to go further, both worth knowing:
   exist.
 - **No ownership or binding layer.** Ring 0 only, like `src/ata.c` before
   SCRUM-188. `exo_sound_pcm` and an HDA binding table are separate tickets.
+
+---
+
+## 11. Where the samples come from
+
+This driver plays whatever is in its cyclic buffer, and what `kernel_main`
+puts there today is a synthesized 440 Hz tone. Doom's real sound effects are
+decoded by a separate module, `src/doom_dmx.c/h` (SCRUM-211), and the two are
+not yet connected — the software PCM mixer that would connect them does not
+exist.
+
+Anyone writing that mixer should know the shape of the gap before starting:
+
+| | DMX lump (`doom_dmx_t`) | HDA stream |
+|---|---|---|
+| Sample format | 8-bit **unsigned** | 16-bit signed |
+| Channels | mono | 2 (`HDA_BYTES_PER_FRAME` = 4) |
+| Sample rate | **five different rates**, see below | `HDA_SAMPLE_RATE_HZ` = 48000, fixed |
+
+`doom_dmx_to_s16()` closes the first row and nothing else. The second is a
+duplication. The third is the one that needs actual work, and it is worse
+than the folklore suggests: DMX lumps are commonly described as "always
+11025 Hz", and freedoom2 v0.13.0's 109 `DS*` lumps are 67 at 22050 Hz, 38 at
+11025, 2 at 17990, 1 at 16000 and 1 at 44100. `tests/kernel/test_doom_dmx_k.c`
+asserts that histogram exactly, so a mixer written against a single assumed
+input rate will be caught by that test's neighbours rather than by two thirds
+of Doom's effects quietly playing an octave low.
+
+`doom_dmx_t.samples` points into the identity-mapped IWAD module and is
+read-only for the life of the mount, so a mixer reads through it directly
+rather than copying — see `src/doom_dmx.h` for the rest of the contract,
+including the 16 padding samples stripped at each end.
