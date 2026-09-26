@@ -215,7 +215,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Software PCM mixer (8 voices, resample + sum + clip, SCRUM-212) | `src/pcm_mixer.c/h` (+ `hda_pcm_*` in `src/hda.c/h`) |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
-| Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h`, `src/syscall_sound.c/h` (SCRUM-100) |
+| Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h`, `src/syscall_sound.c/h` (speaker SCRUM-100, PCM SCRUM-213) |
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer), `src/disk_binding.c/h` (disk, SCRUM-188) |
 | Resource revocation (repossession) | `src/revoke.c/h` (protocol), the `page_revoke_*`/`fb_binding_revoke_*`/`disk_binding_revoke_*` primitives |
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
@@ -739,8 +739,24 @@ convention and calls it from `kernel_main` instead of a test harness.
     into the IWAD module, so anything calling `doom_wad_unmount()` calls
     `pcm_mixer_reset()` first — which is what the `hda_pcm` suite's cleanup
     does, in that order.
-  Still ring 0 only: no `exo_sound_pcm`, no HDA ownership binding, and Doom's
-  sound module remains SCRUM-101's one-voice speaker sequencer.
+  - **Ring 3 reaches it through `exo_sound_pcm` (#27) / `exo_sound_pcm_stop`
+    (#28), and sound is deliberately *shared* (SCRUM-213).** There is no
+    `exo_sound_acquire` and no `src/sound_binding.c`: `pcm_mixer_start()`'s
+    eight voices, priority rule and non-disturbing refusal already are the
+    admission policy, so an exclusive binding would answer the same question
+    with less information. What is owned is a **voice** — each row in
+    `src/syscall_sound.c` records the `page_owner_t` that started it, which is
+    what makes #28 answer `-EXO_EPERM` for someone else's voice and what
+    `syscall_sound_release()` (from `exo_exit`) uses. **The samples are copied
+    into kernel pages** rather than played in place, because the mixer renders
+    from `hda_irq_handler()` under whatever CR3 is loaded and the caller may
+    free its buffer the moment the syscall returns — the opposite of the
+    zero-copy rule that holds in ring 0. Those pages are swept back at the
+    start of each sound syscall, never from the IRQ (`free_page_owned()` there
+    would race the PMM bitmap). `docs/syscall_spec.md` §3.5b.
+  Still open: Doom's sound module remains SCRUM-101's one-voice speaker
+  sequencer, and `src/revoke.c` has no sound leg — an exiting LibOS loses its
+  voices, a revoked one keeps them.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - **The context table (SCRUM-107, `src/context.c/h`) tracks live LibOS

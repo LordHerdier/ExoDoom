@@ -108,6 +108,17 @@
 #define EXO_SYS_DISK_READ    24
 #define EXO_SYS_DISK_WRITE   25
 #define EXO_SYS_DISK_ACQUIRE 26
+/* PCM sound (SCRUM-213).
+ *
+ * Appended rather than grouped next to #17/#18: the numbers above are ABI
+ * for as long as this kernel image is the only thing that speaks it, and
+ * renumbering the whole table to keep one family contiguous buys nothing
+ * (SCRUM-184 renumbered only because collapsing four launch numbers left a
+ * hole the density test rejects). There is no exo_sound_acquire to go with
+ * these -- the mixer is shared, deliberately; see docs/syscall_spec.md
+ * §3.8. */
+#define EXO_SYS_SOUND_PCM      27
+#define EXO_SYS_SOUND_PCM_STOP 28
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -117,7 +128,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        27
+#define EXO_SYS_COUNT        29
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -658,6 +669,48 @@ static inline int64_t exo_disk_write(uint32_t lba, const void *buf,
 static inline int64_t exo_disk_acquire(void)
 {
     return exo_syscall0(EXO_SYS_DISK_ACQUIRE);
+}
+
+/* #27 — queue `num_samples` bytes of 8-bit *unsigned* mono PCM at `buf`,
+ * recorded at `rate_hz`, on one of the mixer's voices (SCRUM-213). Returns at
+ * once: the samples are copied into kernel memory and played by DMA, so `buf`
+ * is the caller's again the moment this returns.
+ *
+ * `rate_hz` is the rate the samples were recorded at, NOT the hardware's --
+ * the mixer resamples each voice to the stream's own rate, which is why a DMX
+ * lump can be handed over exactly as doom_dmx_parse() reports it. `vol` is
+ * 0..127, `sep` 0..255 with 128 centred, and `priority` follows Doom's
+ * sfxinfo_t convention where a LOWER number is MORE important.
+ *
+ * Returns a non-negative voice handle for exo_sound_pcm_stop, or:
+ *   -EXO_EINVAL   num_samples 0 or over SOUND_PCM_MAX_SAMPLES, or an
+ *                 unplayable rate_hz
+ *   -EXO_ENODEV   this machine has no audio controller, or the output stream
+ *                 refused to start
+ *   -EXO_EFAULT   [buf, buf+num_samples) is not entirely inside the LibOS
+ *                 window and mapped
+ *   -EXO_EBUSY    every voice is busy with sound at least as important as
+ *                 this one; nothing already playing was disturbed
+ *   -EXO_ENOMEM   no contiguous kernel pages to copy the samples into
+ * docs/syscall_spec.md §3.2 #27 and §3.8. */
+static inline int64_t exo_sound_pcm(const void *buf, uint32_t num_samples,
+                                    uint32_t rate_hz, int vol, int sep,
+                                    int priority)
+{
+    return exo_syscall6(EXO_SYS_SOUND_PCM, (uint64_t)(uintptr_t)buf,
+                        (uint64_t)num_samples, (uint64_t)rate_hz,
+                        (uint64_t)(int64_t)vol, (uint64_t)(int64_t)sep,
+                        (uint64_t)(int64_t)priority);
+}
+
+/* #28 — stop the voice `handle` names. 0 on success, and also for a handle
+ * whose sound has already finished or been taken over by a more important one
+ * (there is nothing left to stop, which is not an error). -EXO_EPERM if the
+ * voice is playing another context's sound, -EXO_EINVAL for a negative
+ * handle, which was never issued by anyone. */
+static inline int64_t exo_sound_pcm_stop(int handle)
+{
+    return exo_syscall1(EXO_SYS_SOUND_PCM_STOP, (uint64_t)(int64_t)handle);
 }
 
 #endif /* !EXO_KERNEL */

@@ -42,6 +42,9 @@ void suite_pit_tests(CU_pSuite s);
 void suite_speaker_tests(CU_pSuite s);
 void suite_syscall_sound_tests(CU_pSuite s);
 int syscall_sound_suite_cleanup(void);
+void suite_syscall_sound_pcm_tests(CU_pSuite s);
+int syscall_sound_pcm_suite_init(void);
+int syscall_sound_pcm_suite_cleanup(void);
 void suite_syscall_pit_tests(CU_pSuite s);
 void suite_doomgeneric_timer_tests(CU_pSuite s);
 void suite_libos_main_tests(CU_pSuite s);
@@ -530,6 +533,14 @@ int run_tests(void)
      * with the hda suite rather than with the arithmetic above (SCRUM-212). */
     s = CU_add_suite("hda_pcm", suite_hda_pcm_init, suite_hda_pcm_cleanup);
     suite_hda_pcm_tests(s);
+
+    /* And the whole of that behind the syscall gate: #27/#28, argument
+     * validation, per-voice ownership, and a ring-3 LibOS queueing its own
+     * samples.  After hda_pcm because it shares the same controller and
+     * mixer, and leaves both quiesced (SCRUM-213). */
+    s = CU_add_suite("syscall_sound_pcm", syscall_sound_pcm_suite_init,
+                     syscall_sound_pcm_suite_cleanup);
+    suite_syscall_sound_pcm_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not

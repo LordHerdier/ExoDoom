@@ -373,13 +373,17 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 24 | `exo_disk_read(lba, buf, count)`    | Storage     | ✅     | Read `count` consecutive 512-byte sectors starting at 28-bit LBA `lba` into `buf` (at least `count * 512` bytes), one `ata_read_sector()` call per sector. Returns `count` on success (`count == 0` always succeeds and touches nothing, checked before everything else below), `-EINVAL` if `count` exceeds `EXO_DISK_MAX_SECTORS` (128, `src/syscall_disk.h`) or `lba + count - 1` overflows 28-bit LBA space, `-ENODEV` if no drive was detected at boot, `-EBUSY` if the caller does not hold the disk binding (§3.5a — a headless machine answers `-ENODEV` rather than `-EBUSY`, same precedence `exo_disk_acquire` uses), `-EFAULT` if `[buf, buf + count*512)` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` and mapped writable (same `exo_range_in_user_window`/`exo_user_range_mapped` pair #8 uses — checked last, so a caller with no claim on the disk learns nothing about whether its buffer pointer happens to be valid), or `-EIO` if a sector faults partway through the transfer (no partial-success byte count — ATA gives no way to tell "this sector failed" from "this sector was never attempted" once a fault stops the loop). Sector-addressed only, zero filesystem knowledge — the ported FAT-like fs (SCRUM-189) is LibOS-side, on top of this. Implemented in SCRUM-103 (`src/syscall_disk.c`, on top of the ATA PIO driver, SCRUM-102, `src/ata.c`); ownership enforcement SCRUM-188 (`src/disk_binding.c`). |
 | 25 | `exo_disk_write(lba, buf, count)`   | Storage     | ✅     | Same shape as #24, writing `count` sectors from `buf` via `ata_write_sector()`. `buf` is checked readable rather than writable. Same error codes, same binding check. Implemented in SCRUM-103 (`src/syscall_disk.c`); ownership enforcement SCRUM-188. |
 | 26 | `exo_disk_acquire()`                | Storage     | ✅     | Bind the disk to the caller — one exclusive owner at a time, the same pre-SCRUM-112 shape `exo_fb_acquire` (#4) originally had (§3.5a). Must succeed before #24/#25 will do anything for the caller. Returns `0` (including a re-acquire by the current owner), `-EBUSY` if another context holds it, or `-ENODEV` if this machine has no drive. Implemented in SCRUM-188 (`src/syscall_disk.c`, `src/disk_binding.c`). |
+| 27 | `exo_sound_pcm(buf, num_samples, rate_hz, vol, sep, priority)` | Sound | ✅ | Queue `num_samples` bytes of 8-bit *unsigned* mono PCM at `buf`, recorded at `rate_hz`, on one of the software mixer's `PCM_MIXER_VOICES` (8) voices, and return at once — the samples are **copied** into kernel pages, so `buf` is the caller's again immediately (§3.5b on why a ring-3 pointer cannot be played in place). `rate_hz` is the rate the samples were recorded at, not the hardware's: the mixer resamples per voice (`src/pcm_mixer.c`, SCRUM-212), which is what lets a DMX lump be handed over exactly as `doom_dmx_parse()` reports it. `vol` 0–127, `sep` 0–255 (128 centred), `priority` in Doom's `sfxinfo_t` sense where **lower is more important**. Returns a non-negative voice handle for #28, or `-EXO_EINVAL` (`num_samples` 0 or over `SOUND_PCM_MAX_SAMPLES` = 196608, `src/syscall_sound.h`; or `rate_hz` outside 1–65535, above which the mixer's 16.16 phase step overflows), `-EXO_ENODEV` (no HDA controller, or the output stream refused to start), `-EXO_EFAULT` (`[buf, buf+num_samples)` not entirely inside the LibOS window **and mapped** — the same `exo_range_in_user_window`/`exo_user_range_mapped` pair #8 and #24 use), `-EXO_EBUSY` (every voice busy with sound at least as important; nothing already playing is disturbed, which is the mixer's own non-starvation rule surfaced at the ABI), or `-EXO_ENOMEM` (no contiguous run of kernel pages that size). Validation order is shape → device → buffer, the precedence §3.5a settled on. The stream is started lazily by the first successful call. Implemented in SCRUM-213 (`src/syscall_sound.c`, on top of `src/pcm_mixer.c` and `src/hda.c`). |
+| 28 | `exo_sound_pcm_stop(handle)` | Sound | ✅ | Stop the voice `handle` names. Returns `0`, including for a handle whose sound has already finished or been taken over by a more important one — there is then nothing left to stop and no error to report — `-EXO_EPERM` if that voice is playing another context's sound, or `-EXO_EINVAL` for a negative handle, which #27 never issues. Also frees that voice's staging pages. `exo_exit` stops the exiting context's voices the same way (`syscall_sound_release()`). Implemented in SCRUM-213. |
 
-**Total: 27 syscalls.** This is the complete interface needed to run Doom with
+**Total: 29 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking, plus the single
 argument-based LibOS-launch syscall (#21) that backs the shell's interactive
 demo commands, the two introspection syscalls (#22/#23) that back its
-`memstat`/`pslist` commands, and the three storage syscalls (#24/#25/#26) the
-future FAT-like filesystem (SCRUM-189) will build on.
+`memstat`/`pslist` commands, the three storage syscalls (#24/#25/#26) the
+future FAT-like filesystem (SCRUM-189) will build on, and the PCM sound pair
+(#27/#28) that puts the software mixer in reach of a LibOS — everything sound
+needs beyond the speaker's #17/#18.
 
 ### 3.2a Error codes (SCRUM-57)
 
@@ -906,6 +910,67 @@ by `IA32_FMASK` (§3.4) and the entry path is single-threaded, so the
 read-modify-write in `disk_binding_acquire()` cannot be interleaved.
 Preemptive multi-LibOS scheduling (SCRUM-147) invalidates that assumption
 the same way it does for the framebuffer.
+
+### 3.5b Sound: shared, not bound (SCRUM-213)
+
+§3.5 and §3.5a both answer "who may use this device?" with an exclusive
+binding: one owner, `-EXO_EBUSY` to everyone else. The PCM sound path answers
+it differently, and the difference is the design decision SCRUM-213 existed to
+make. **There is no `exo_sound_acquire` and no `src/sound_binding.c`.**
+
+The reason is that the resource is not the device. `src/pcm_mixer.c`
+(SCRUM-212) presents eight voices, and `pcm_mixer_start()` already carries a
+complete admission policy over them: Doom's priority convention (a *lower*
+number is more important), take-over of the least important voice when every
+one is busy, and an explicit refusal — nothing already playing is disturbed —
+when the newcomer is the least important thing in the room. A binding table
+placed in front of that would be a second policy answering the same question
+with strictly less information, and the one outcome it can express, "this
+LibOS has the sound device and you do not", is exactly the outcome eight
+voices exist to avoid. `src/syscall_sound.c` made the same call for the PC
+speaker's one voice on pragmatic grounds (#17/#18, SCRUM-100: acquiring a
+single-voice device up front just locks everyone else out of making any sound
+at all); with a mixer the argument becomes structural.
+
+What is owned is therefore a **voice**, not the device. Each occupied voice
+records the `page_owner_t` that started it, exactly as `tone_holder` records
+who started the tone now sounding. That per-voice owner is what:
+
+- lets `exo_sound_pcm_stop` (#28) refuse another context's voice with
+  `-EXO_EPERM` while leaving it playing, and
+- lets `syscall_sound_release()` — called from `exo_exit` (`src/syscall_exit.c`)
+  — stop an exiting LibOS's voices and return their pages, without touching
+  anybody else's.
+
+**The samples are copied, and that is not an implementation detail.**
+`pcm_mixer_start()` keeps the pointer it is handed for the whole life of the
+voice and reads through it from inside `hda_irq_handler()`. A ring-3 pointer
+cannot survive that in either direction: the completion interrupt fires under
+whatever CR3 happens to be loaded at the time, and the caller is free to
+`exo_page_unmap` or `exo_page_free` the buffer the instant #27 returns. The
+optimistic outcome is a fatal supervisor-mode page fault (the SCRUM-186 class
+of bug `exo_user_range_mapped()` exists to prevent); the quiet one is a page
+that has since been handed to a different context being played out loud. So
+the handler validates the range and copies it into a contiguous run of
+`PAGE_OWNER_KERNEL` pages (`alloc_pages_contig_owned()`), and the voice's
+lifetime becomes the kernel's to guarantee. This is the same reasoning
+`src/doom_dmx.h` gives for *not* copying in ring 0 — the IWAD is
+kernel-mapped and read-only for the life of the mount — applied where neither
+of those holds.
+
+Those staging pages are freed when the voice they belong to is no longer
+playing, swept at the start of each sound syscall and in
+`syscall_sound_release()`. Deliberately **not** freed where the voice actually
+retires: that happens inside `hda_irq_handler()`, and calling
+`free_page_owned()` there would race the PMM bitmap against ring-0 code that
+an interrupt can preempt — a syscall body cannot be, having IF clear, but
+`kernel_main` and its callees can. The cost of sweeping late is that a
+finished effect holds its pages until the next sound syscall, bounded by
+`PCM_MIXER_VOICES` buffers.
+
+**Not covered here:** revocation (§3.6) has no sound leg, matching the
+speaker. An *exiting* LibOS is handled by `syscall_sound_release()`; a
+*revoked* one keeps its voices, since `revoke_all()` has nothing to call.
 
 ### 3.6 Revocation & repossession (SCRUM-156)
 
