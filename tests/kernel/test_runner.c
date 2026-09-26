@@ -80,6 +80,7 @@ void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
 void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
+void suite_doom_dmx_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -89,6 +90,12 @@ int syscall_stat_suite_cleanup(void);
 /* Stops the HDA output stream at suite end, so a tone left running cannot
  * keep raising the controller's INTx line into a later suite (SCRUM-210). */
 int suite_hda_cleanup(void);
+
+/* Mounts the real freedoom2 GRUB module into the doom_wad registry for the
+ * suite's reference-data tests, and unmounts it afterwards -- that registry is
+ * process-global state shared with the dg_init suite (SCRUM-211). */
+int suite_doom_dmx_init(void);
+int suite_doom_dmx_cleanup(void);
 
 /* Acquires the disk binding for the suite's own context before the round-
  * trip/hardware tests run and releases it afterward (SCRUM-188). */
@@ -490,6 +497,12 @@ int run_tests(void)
      * and an unmasked IRQ line running while they measure. */
     s = CU_add_suite("hda", NULL, suite_hda_cleanup);
     suite_hda_tests(s);
+
+    /* The other end of the same audio path: where HDA plays samples, this
+     * decodes the ones Doom actually ships.  Reads the real freedoom2 module
+     * for its reference data, hence the mount/unmount pair (SCRUM-211). */
+    s = CU_add_suite("doom_dmx", suite_doom_dmx_init, suite_doom_dmx_cleanup);
+    suite_doom_dmx_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not
