@@ -231,11 +231,20 @@ which always has a host bridge, an ISA bridge and an IDE controller.
   access is pure port I/O and would work anywhere after `serial_init()`, but
   `pci_bar_map()` edits the kernel map `vmm_init()` installs. Like every
   other driver a KUnit suite drives, it sits ahead of the `TESTING` branch.
-- **No IRQ handling.** The `Interrupt Line` field is read/write and purely
-  informational; wiring a PCI device's interrupt properly means either the
-  I/O APIC (which needs MP or ACPI table parsing) or MSI. Neither is needed
-  to find a device and size its BARs, which is where this ticket stops.
+- **No IRQ handling *here*.** The `Interrupt Line` field (offset `0x3C`) is
+  read/write and purely informational as far as this file is concerned: it is
+  a place firmware leaves a note saying which 8259 line it routed the
+  function's INTx pin to. Enumeration neither reads nor needs it, which is
+  where SCRUM-209 stopped. `PCI_OFF_INTERRUPT_LINE`/`_PIN` were added to
+  `src/pci.h` by SCRUM-210, and `src/hda.c` is the first driver to use them:
+  it reads the line, installs its own stub on vector `32 + line`, and unmasks
+  it at the PIC (plus the cascade for a line on the slave). That is legacy
+  INTx only — the I/O APIC (which needs MP or ACPI table parsing) and MSI are
+  both still unbuilt, and see `docs/drivers/hda.md` §7 for why one vector per
+  driver means a device routed onto IRQ 0/1/2 is refused rather than wired.
 - **No capability-list walk.** MSI/MSI-X live in the capabilities linked
   list at offset `0x34`; a driver that wants them can walk it through
-  `pci_config_read8()` without this file growing an opinion.
+  `pci_config_read8()` without this file growing an opinion. Nothing does yet
+  — SCRUM-210's HDA driver takes its interrupt through INTx precisely because
+  the PIC and IDT already exist and MSI would have to be built first.
 - **256 bytes per function, not 4096.** Mechanism #1's hard limit — see §2.

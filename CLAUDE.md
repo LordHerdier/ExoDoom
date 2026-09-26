@@ -207,6 +207,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Interrupts (IDT/PIC/ISR, TSS, page-fault diagnostics) | `src/idt.c/h`, `src/pic.c/h`, `src/isr.s`, `src/io.h`, `src/tss.c/h`, `src/fault.c/h` |
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | PCI bus (config space, enumeration, BARs, SCRUM-209) | `src/pci.c/h` |
+| Intel HDA audio (CORB/RIRB, BDL stream DMA, INTx, SCRUM-210) | `src/hda.c/h` |
 | PC speaker (PIT channel 2, SCRUM-98) | `src/speaker.c/h` |
 | Doom SFX → speaker tone table (SCRUM-99) | `src/doom_sfx_tone.c/h` |
 | Doom `sound_module_t` over the speaker (SCRUM-101) | `src/doom_sound.c/h` (+ `FEATURE_SOUND` in `src/doom/doomfeatures.h`) |
@@ -615,6 +616,45 @@ convention and calls it from `kernel_main` instead of a test harness.
   twice over: it keeps the struct out of `.bss` (where there'd be no bytes to
   patch), and it's what lets `DG_Init` report "nobody patched this" instead
   of dereferencing address 0.
+- **PCM audio exists, but only in ring 0 (SCRUM-209/SCRUM-210).**
+  `src/pci.c` walks the bus over config mechanism #1 and `src/hda.c` drives
+  the Intel HDA controller it finds: controller reset, a CORB/RIRB command
+  ring in two PMM pages, a codec widget walk that unmutes a DAC and an output
+  pin, and a 64 KiB cyclic sample buffer played by the controller's own DMA
+  off a two-entry BDL, with buffer completion arriving as a legacy PCI INTx
+  through the existing PIC/IDT. `make docker-test`'s `hda` suite asserts the
+  whole chain including `SDnLPIB` advancing and the completion IRQ firing, and
+  `kernel_main` plays a 440 Hz boot tone (after `sti`, so `hda_tick()` can end
+  it) as the audible half.
+  **Four things will bite whoever edits this next**, all expanded in
+  `docs/drivers/hda.md` §10:
+  - **`SDnSTS` can only be cleared by a byte write to descriptor offset
+    `0x03`.** It shares a 32-bit location with `SDnCTL`, so a dword read at
+    `0x00` shows it in bits 31:24 and a dword write carrying it is silently
+    dropped. `SDnSTS.BCIS` is what holds the level-triggered INTx line
+    asserted, so a clear that misses re-enters the handler forever — a wedged
+    boot with no fault and no output.
+  - **`RINTCNT` is CORB flow control, not just an interrupt divisor.** The
+    controller stops fetching commands once that many responses are unread, so
+    the obvious `RINTCNT = 1` makes the command ring work exactly once unless
+    `RIRBSTS` is cleared around every verb. The driver does both.
+  - **The first *output* stream descriptor index is `GCAP.ISS`,** read at
+    runtime — input descriptors come first in the register block, and
+    hardcoding 0 programs a capture stream.
+  - **`OUT_AMP_CAP`'s gain step *count* is bits 14:8, not bits 22:16 (the
+    step *size*).** Getting this wrong yields a driver where every register
+    reads correct, DMA runs, the IRQ fires, every test passes — and the tone
+    plays ~28 dB down, i.e. inaudible. For an audio path "the registers are
+    right" and "you can hear it" are different claims; settle the second with
+    `-audiodev wav,id=snd0,path=out.wav` and look at the peak amplitude.
+  - **`-device intel-hda` alone has no codec.** Every QEMU invocation in the
+    `Makefile` and `docker/Dockerfile.qemu` now also passes
+    `-device hda-output,audiodev=snd0 -audiodev none,id=snd0`; SCRUM-209 only
+    needed the PCI function to exist. Audibility is `make run`'s job on a host
+    with a real `-audiodev` — headless Docker has no audio backend, so CI
+    asserts state up to the point samples leave RAM.
+  There is no `exo_sound_pcm` and no HDA ownership binding: HDA is ring-0
+  only, like `src/ata.c` was before SCRUM-188.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - **The context table (SCRUM-107, `src/context.c/h`) tracks live LibOS
