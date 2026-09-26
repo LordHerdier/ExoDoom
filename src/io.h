@@ -40,6 +40,16 @@ static inline void outl(uint16_t port, uint32_t val) {
 }
 
 /*
+ * inl — 32-bit port read (PCI configuration mechanism #1 reads its data
+ *       register at 0xCFC as a whole dword; see src/pci.c).
+ */
+static inline uint32_t inl(uint16_t port) {
+    uint32_t ret;
+    __asm__ volatile ("inl %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+/*
  * io_wait — Short delay for hardware that needs time between
  *           consecutive I/O operations (notably the 8259 PIC).
  *
