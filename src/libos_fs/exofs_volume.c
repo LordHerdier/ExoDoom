@@ -349,6 +349,13 @@ int exofs_mount(uint32_t base_lba)
     g_vol.root_block   = sb->root_block;
     g_vol.name_head    = sb->name_head;
 
+    /* 0 is a real block number (the root), so the open-handle table's empty
+     * marker has to be set explicitly rather than relying on the memset
+     * above. */
+    for (uint32_t i = 0; i < EXOFS_MAX_OPEN_HANDLES; i++) {
+        g_vol.open_ent_block[i] = EXOFS_NO_BLOCK;
+    }
+
     /* Sized to whole sectors, not to the entry count: the FAT is read with
      * one sector-granular transfer and the last sector is usually only
      * partly used. See exofs_internal.h's note on this field. */
@@ -419,6 +426,49 @@ int exofs_super_update(exofs_volume_t *v)
     sb->name_head    = v->name_head;
 
     return exofs_bdev_write(v->base_lba, sb, 1);
+}
+
+/* ---- Open-handle tracking ------------------------------------------------- */
+
+int exofs_handle_is_open(exofs_volume_t *v, uint32_t block, uint16_t index)
+{
+    if (v == NULL) return 0;
+
+    for (uint32_t i = 0; i < EXOFS_MAX_OPEN_HANDLES; i++) {
+        if (v->open_ent_block[i] == block && v->open_ent_index[i] == index) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int exofs_handle_register(exofs_volume_t *v, uint32_t block, uint16_t index)
+{
+    if (v == NULL) return -EXO_EINVAL;
+
+    for (uint32_t i = 0; i < EXOFS_MAX_OPEN_HANDLES; i++) {
+        if (v->open_ent_block[i] == EXOFS_NO_BLOCK) {
+            v->open_ent_block[i] = block;
+            v->open_ent_index[i] = index;
+            return 0;
+        }
+    }
+    return -EXO_ENFILE;
+}
+
+void exofs_handle_unregister(exofs_volume_t *v, uint32_t block, uint16_t index)
+{
+    if (v == NULL) return;
+
+    /* Clears exactly one matching slot, so opening the same entry twice and
+     * closing one handle leaves the other still registered. */
+    for (uint32_t i = 0; i < EXOFS_MAX_OPEN_HANDLES; i++) {
+        if (v->open_ent_block[i] == block && v->open_ent_index[i] == index) {
+            v->open_ent_block[i] = EXOFS_NO_BLOCK;
+            v->open_ent_index[i] = 0;
+            return;
+        }
+    }
 }
 
 int exofs_geometry(exofs_geometry_t *out)

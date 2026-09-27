@@ -121,7 +121,9 @@ int exofs_mkdir(const char *path);
  *
  * Returns 0, -EXO_ENOENT, -EXO_ENOTDIR if `path` is not a directory,
  * -EXO_ENOTEMPTY if it holds anything besides "." and "..", -EXO_EBUSY for
- * the root (which has no parent to be removed from), or a device error.
+ * the root (which has no parent to be removed from), -EXO_EINVAL if the
+ * path's last component resolves to "." or ".." (there is no correct target
+ * to remove — see exofs_dir.c), or a device error.
  */
 int exofs_rmdir(const char *path);
 
@@ -238,7 +240,11 @@ typedef struct exofs_stat {
  * Returns 0, -EXO_ENOENT (absent, without EXOFS_O_CREATE), -EXO_EEXIST is
  * not used here, -EXO_EISDIR if `path` is a directory, -EXO_ENOTDIR for a
  * non-directory parent component, -EXO_EINVAL for a malformed path or flags,
- * -EXO_ENOSPC, or a device error.
+ * -EXO_EBUSY if EXOFS_O_TRUNC is set and another handle already has this
+ * entry open (truncating out from under a live handle is exactly the stale
+ * cur_block/first_block corruption exofs_volume_t::open_ent_block exists to
+ * prevent), -EXO_ENFILE if the open-handle table is full, -EXO_ENOSPC, or a
+ * device error.
  */
 int exofs_open(const char *path, uint32_t flags, exofs_file_t *out);
 
@@ -272,7 +278,9 @@ int64_t exofs_write(exofs_file_t *f, const void *buf, uint32_t n);
  */
 int64_t exofs_seek(exofs_file_t *f, int64_t off, uint32_t whence);
 
-/* Report on `path` without opening it. */
+/* Report on `path` without opening it. Returns -EXO_EINVAL if the path's
+ * last component resolves to "." or ".." — see exofs_stat()'s own comment
+ * for why there is no correct record to report there. */
 int exofs_stat(const char *path, exofs_stat_t *out);
 
 /*
@@ -280,7 +288,8 @@ int exofs_stat(const char *path, exofs_stat_t *out);
  *
  * Returns -EXO_EISDIR for a directory — that is exofs_rmdir()'s job, and
  * silently removing a directory tree here would be the kind of help nobody
- * asked for.
+ * asked for. Returns -EXO_EBUSY if another handle already has this entry
+ * open, for the same reason EXOFS_O_TRUNC refuses one in exofs_open().
  */
 int exofs_unlink(const char *path);
 

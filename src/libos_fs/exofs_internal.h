@@ -27,6 +27,9 @@
  * keeps a typical allocation to a single 512-byte write.
  */
 
+/* See exofs_volume_t::open_ent_block below. */
+#define EXOFS_MAX_OPEN_HANDLES 8u
+
 typedef struct exofs_volume {
     int      mounted;
 
@@ -78,6 +81,21 @@ typedef struct exofs_volume {
      * never trusted, since a stale hint only costs a longer scan.
      */
     uint32_t next_free_hint;
+
+    /*
+     * Directory-entry refs of every exofs_file_t currently open (SCRUM-189
+     * review fix). There is no descriptor table here (exofs.h says so), but
+     * exofs_open()'s O_TRUNC path and exofs_unlink() both free a file's block
+     * chain, and a second handle already open on that same entry caches
+     * first_block/cur_block from before the free — the next read or write
+     * through it then walks into whatever the allocator has since handed to
+     * an unrelated file. Small and fixed, like every other concurrency-shaped
+     * limit in this codebase (CONTEXT_MAX, LIBOS_LAUNCH_MAX_*_PAGES).
+     * EXOFS_NO_BLOCK marks an empty slot; entries are unordered and may
+     * repeat a (block, index) pair once per handle open on it.
+     */
+    uint32_t open_ent_block[EXOFS_MAX_OPEN_HANDLES];
+    uint16_t open_ent_index[EXOFS_MAX_OPEN_HANDLES];
 } exofs_volume_t;
 
 /* The one mounted volume, or NULL when nothing is mounted. */
@@ -104,5 +122,18 @@ void exofs_fat_mark_dirty(exofs_volume_t *v, uint32_t idx);
 /* Rewrite the superblock from `v`. See the definition in exofs_volume.c for
  * why this is a rare, immediate write rather than something batched. */
 int exofs_super_update(exofs_volume_t *v);
+
+/* ---- Open-handle tracking -------------------------------------------------
+ *
+ * See exofs_volume_t::open_ent_block for why this exists. Registering never
+ * fails except when the small fixed table is full (-EXO_ENFILE); a caller
+ * that gets that back has not opened its handle and must not proceed as if
+ * it had. `exofs_handle_is_open()` deliberately does not distinguish "one
+ * other handle" from "several" — the callers that consult it only ever need
+ * "any at all".
+ */
+int  exofs_handle_is_open(exofs_volume_t *v, uint32_t block, uint16_t index);
+int  exofs_handle_register(exofs_volume_t *v, uint32_t block, uint16_t index);
+void exofs_handle_unregister(exofs_volume_t *v, uint32_t block, uint16_t index);
 
 #endif /* EXOFS_INTERNAL_H */

@@ -69,7 +69,11 @@ int exofs_fat_alloc(exofs_volume_t *v, uint32_t *out);
 
 /* Free a single block. Freeing an already-free block is -EXO_EINVAL rather
  * than a silent no-op: it means a chain was walked twice or a block was
- * double-owned, and both are worth hearing about. */
+ * double-owned, and both are worth hearing about. Freeing block 0 (the root
+ * — point 4 above) is also -EXO_EINVAL, symmetric with exofs_fat_alloc()
+ * never handing it out: whatever reached this call with blk == 0, be it a
+ * corrupted on-disk chain or a caller bug, must not be allowed to put the
+ * root back on the free list. */
 int exofs_fat_free(exofs_volume_t *v, uint32_t blk);
 
 /*

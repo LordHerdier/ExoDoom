@@ -29,6 +29,7 @@
 #include "exofs.h"
 #include "exofs_internal.h"
 #include "exofs_layout.h"
+#include "exofs_dir.h"
 #include "exofs_dirent.h"
 #include "exofs_path.h"
 #include "exofs_name.h"
@@ -159,6 +160,10 @@ int exofs_close(exofs_file_t *f)
 
     int rc = exofs_fflush(f);
     f->open = 0;
+
+    exofs_volume_t *v = exofs_vol();
+    if (v != NULL) exofs_handle_unregister(v, f->ent_block, f->ent_index);
+
     return rc;
 }
 
@@ -201,6 +206,18 @@ int exofs_open(const char *path, uint32_t flags, exofs_file_t *out)
      * is asserted rather than assumed. */
     if (ref.block == EXOFS_NO_BLOCK) return -EXO_EISDIR;
 
+    /*
+     * Refuse to truncate an entry another handle already has open. Without
+     * this, O_TRUNC frees the chain out from under that other handle, which
+     * keeps caching the now-freed first_block/cur_block and walks into
+     * whatever the allocator hands out next — see
+     * exofs_volume_t::open_ent_block.
+     */
+    if ((flags & EXOFS_O_TRUNC) && e.first_block != EXOFS_NO_BLOCK &&
+        exofs_handle_is_open(v, ref.block, ref.index)) {
+        return -EXO_EBUSY;
+    }
+
     memset(out, 0, sizeof(*out));
     out->open        = 1;
     out->flags       = flags;
@@ -213,9 +230,12 @@ int exofs_open(const char *path, uint32_t flags, exofs_file_t *out)
     out->cur_block   = EXOFS_NO_BLOCK;
     out->cur_index   = 0;
 
+    rc = exofs_handle_register(v, out->ent_block, out->ent_index);
+    if (rc < 0) { out->open = 0; return rc; }
+
     if ((flags & EXOFS_O_TRUNC) && out->first_block != EXOFS_NO_BLOCK) {
         rc = exofs_chain_free(v, out->first_block);
-        if (rc < 0) return rc;
+        if (rc < 0) goto fail_registered;
 
         out->first_block = EXOFS_NO_BLOCK;
         out->size        = 0;
@@ -228,15 +248,23 @@ int exofs_open(const char *path, uint32_t flags, exofs_file_t *out)
          * place in the file layer where a deferred metadata write would be
          * unsafe rather than merely lossy. */
         rc = flush_metadata(v, out);
-        if (rc < 0) return rc;
+        if (rc < 0) goto fail_registered;
 
         rc = exofs_sync();
-        if (rc < 0) return rc;
+        if (rc < 0) goto fail_registered;
     }
 
     if (flags & EXOFS_O_APPEND) out->pos = out->size;
 
     return 0;
+
+fail_registered:
+    /* A truncate step failed after the handle was already registered — undo
+     * that registration so a failed open does not leave a phantom entry in
+     * the table, blocking a later truncate/unlink for no reason. */
+    exofs_handle_unregister(v, out->ent_block, out->ent_index);
+    out->open = 0;
+    return rc;
 }
 
 /* ---- Read / write ------------------------------------------------------- */
@@ -384,6 +412,17 @@ int exofs_stat(const char *path, exofs_stat_t *out)
     int rc = exofs_path_resolve(v, path, NULL, &e);
     if (rc < 0) return rc;
 
+    /*
+     * "." and ".." are real, independently-created dirents (exofs_dir.h),
+     * not aliases resolved to their target's own entry — so their own
+     * ctime/attributes/size are a second, separately-timestamped copy of
+     * (approximately) the target's, not the target's real record. Reporting
+     * them here would be silently wrong the moment the two ever drift, so
+     * this is the same call exofs_rmdir() makes on the identical case rather
+     * than a best-effort guess at which copy is "right".
+     */
+    if (exofs_dir_is_dot(v, &e)) return -EXO_EINVAL;
+
     memset(out, 0, sizeof(*out));
     out->size       = e.size;
     out->attributes = e.attributes;
@@ -407,6 +446,11 @@ int exofs_unlink(const char *path)
      * removing a tree here is help nobody asked for. */
     if (e.attributes & EXOFS_ATTR_DIRECTORY) return -EXO_EISDIR;
     if (ref.block == EXOFS_NO_BLOCK)          return -EXO_EISDIR;
+
+    /* Refuse rather than free a chain a still-open handle caches — see
+     * exofs_volume_t::open_ent_block and the same guard in exofs_open()'s
+     * O_TRUNC path. */
+    if (exofs_handle_is_open(v, ref.block, ref.index)) return -EXO_EBUSY;
 
     /*
      * Unlink from the parent first, then free the data chain — the same

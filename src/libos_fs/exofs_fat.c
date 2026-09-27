@@ -107,6 +107,13 @@ int exofs_fat_free(exofs_volume_t *v, uint32_t blk)
     if (v == NULL)              return -EXO_EINVAL;
     if (blk >= v->total_blocks) return -EXO_EINVAL;
 
+    /* Symmetric with exofs_fat_alloc()'s FIRST_ALLOCATABLE_BLOCK guard
+     * (exofs_fat.h point 4): block 0 is the root directory and must never be
+     * handed back to the free list, whatever called with it — a corrupted
+     * on-disk chain (first_block == 0) or a caller bug reaching this point
+     * would otherwise free the root out from under the volume. */
+    if (blk < FIRST_ALLOCATABLE_BLOCK) return -EXO_EINVAL;
+
     /* Refusing a double free rather than ignoring it: see exofs_fat.h. */
     if (v->fat[blk] == EXOFS_BLOCK_FREE) return -EXO_EINVAL;
 

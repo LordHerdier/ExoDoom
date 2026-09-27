@@ -189,6 +189,23 @@ int exofs_rmdir(const char *path)
      * (exofs_path.c), so there is nothing to remove it from. */
     if (ref.block == EXOFS_NO_BLOCK) return -EXO_EBUSY;
 
+    /*
+     * Reject a path whose last component resolved to "." or "..". Both are
+     * real dirents (exofs_dir.h), so exofs_path_resolve() happily hands one
+     * back like any other entry — but "." names the directory's own chain
+     * (e.first_block == the directory being removed) while `ref` points at
+     * the "." SLOT INSIDE that same directory, not at the real entry naming
+     * it in its parent. Removing `ref` deletes the wrong slot, and
+     * exofs_dir_destroy(e.first_block) then frees the directory's live block
+     * chain out from under its real parent entry — for "/." on a fresh
+     * volume, e.first_block is the root itself, so this would free block 0.
+     * ".." has the matching problem the other way: `ref` lives inside the
+     * child, not inside the grandparent that actually names the parent.
+     * Every real filesystem refuses this (rmdir(".") -> EINVAL); there is no
+     * resolvable target here to fall back to.
+     */
+    if (exofs_dir_is_dot(v, &e)) return -EXO_EINVAL;
+
     int empty = 0;
     rc = exofs_dir_is_empty(v, e.first_block, &empty);
     if (rc < 0) return rc;

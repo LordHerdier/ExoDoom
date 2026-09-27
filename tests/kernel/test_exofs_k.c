@@ -47,6 +47,7 @@
 #include "syscall_disk.h"
 #include "ata.h"
 #include "libos_heap.h"
+#include "string.h"
 
 #include "libos_fs/exofs_layout.h"
 #include "libos_fs/exofs_blockdev.h"
@@ -614,6 +615,26 @@ static void test_alloc_and_free_one_block(void)
     /* Freeing it twice is an error, not a no-op: it means a chain was
      * walked twice or a block was double-owned. */
     CU_ASSERT_EQUAL(exofs_fat_free(v, blk), -EXO_EINVAL);
+
+    exofs_unmount();
+}
+
+static void test_fat_free_rejects_root_block(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    /* Symmetric with exofs_fat_alloc() never handing out block 0: freeing
+     * it must be refused too, whatever the caller's reason (a corrupted
+     * on-disk chain naming block 0, or a caller bug) — see exofs_fat.h
+     * point 4. Without this, the FAT would mark the root free and the next
+     * allocation could hand it to an unrelated file. */
+    CU_ASSERT_EQUAL(exofs_fat_free(v, 0u), -EXO_EINVAL);
+
+    uint32_t ent = 0;
+    CU_ASSERT_EQUAL(exofs_fat_get(v, 0u, &ent), 0);
+    CU_ASSERT_EQUAL(ent, EXOFS_BLOCK_EOC);   /* still owned by the root */
 
     exofs_unmount();
 }
@@ -1904,6 +1925,42 @@ static void test_rmdir(void)
     exofs_unmount();
 }
 
+static void test_rmdir_rejects_dot_and_dotdot(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_volume_t *v = exofs_vol();
+
+    /*
+     * "." and ".." are real dirents (exofs_dir.h), so exofs_path_resolve()
+     * resolves a path ending in one of them like any other name — but
+     * there is no correct slot to unlink and no correct chain to free for
+     * either: rmdir("/foo/.") would delete "." out of foo's own directory
+     * while destroying foo's real (live) chain, leaving foo's real parent
+     * entry dangling over freed blocks; rmdir("/.") on the root would free
+     * block 0. Both must be refused outright.
+     */
+    CU_ASSERT_EQUAL(exofs_mkdir("/foo"), 0);
+    CU_ASSERT_EQUAL(exofs_rmdir("/foo/."), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rmdir("/foo/.."), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rmdir("/."), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rmdir("/.."), -EXO_EINVAL);
+
+    /* foo itself, and the root, must still be exactly as they were. */
+    exofs_dirent_t e;
+    CU_ASSERT_EQUAL(exofs_path_resolve(v, "/foo", NULL, &e), 0);
+    CU_ASSERT_TRUE(e.attributes & EXOFS_ATTR_DIRECTORY);
+
+    uint32_t root_ent = EXOFS_BLOCK_FREE;
+    CU_ASSERT_EQUAL(exofs_fat_get(v, v->root_block, &root_ent), 0);
+    CU_ASSERT_EQUAL(root_ent, EXOFS_BLOCK_EOC);
+
+    CU_ASSERT_EQUAL(exofs_rmdir("/foo"), 0);
+
+    exofs_unmount();
+}
+
 /*
  * mkdir/rmdir in a loop must return everything it took, every time. The
  * cycle that would expose a leaked name record, a leaked block or an
@@ -2335,6 +2392,47 @@ static void test_open_errors(void)
     exofs_unmount();
 }
 
+static void test_truncate_and_unlink_refuse_while_open(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_file_t a, b;
+
+    /* Give the file a real chain, so a wrongly-allowed truncate/unlink has
+     * something to free out from under `a`. */
+    CU_ASSERT_EQUAL(exofs_open("/f", EXOFS_O_WRITE | EXOFS_O_CREATE, &a), 0);
+    CU_ASSERT_EQUAL(exofs_write(&a, "hello", 5u), 5);
+    CU_ASSERT_EQUAL(exofs_close(&a), 0);
+
+    CU_ASSERT_EQUAL(exofs_open("/f", EXOFS_O_READ, &a), 0);
+
+    /*
+     * `a` is still open on "/f". A second open with O_TRUNC, or an unlink,
+     * would free "/f"'s chain while `a` keeps caching its now-stale
+     * first_block/cur_block — the next exofs_read(&a, ...) would then walk
+     * into whatever block the allocator hands out next. Both must be
+     * refused instead (exofs_volume_t::open_ent_block).
+     */
+    CU_ASSERT_EQUAL(exofs_open("/f", EXOFS_O_WRITE | EXOFS_O_TRUNC, &b),
+                    -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exofs_unlink("/f"), -EXO_EBUSY);
+
+    /* `a` still reads its real contents — nothing was freed. */
+    char buf[5];
+    CU_ASSERT_EQUAL(exofs_read(&a, buf, 5u), 5);
+    CU_ASSERT_EQUAL(memcmp(buf, "hello", 5u), 0);
+
+    CU_ASSERT_EQUAL(exofs_close(&a), 0);
+
+    /* Once closed, both are allowed again. */
+    CU_ASSERT_EQUAL(exofs_open("/f", EXOFS_O_WRITE | EXOFS_O_TRUNC, &b), 0);
+    CU_ASSERT_EQUAL(exofs_close(&b), 0);
+    CU_ASSERT_EQUAL(exofs_unlink("/f"), 0);
+
+    exofs_unmount();
+}
+
 static void test_unlink(void)
 {
     if (!drive_present()) return;
@@ -2377,6 +2475,32 @@ static void test_unlink(void)
     CU_ASSERT_EQUAL(exofs_unlink("/nothing"), -EXO_ENOENT);
 
     libos_heap_free(w);
+    exofs_unmount();
+}
+
+static void test_stat_rejects_dot_and_dotdot(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_EQUAL(exofs_mkdir("/foo"), 0);
+
+    exofs_stat_t st;
+
+    /* "." and ".." are their own, separately-created dirents (exofs_dir.h)
+     * — reporting their own ctime/attributes/size would be a second,
+     * independently timestamped copy of the target's record, not the real
+     * one. There is nothing correct to hand back, so this is refused the
+     * same way exofs_rmdir() refuses the identical path shape. */
+    CU_ASSERT_EQUAL(exofs_stat("/foo/.", &st), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_stat("/foo/..", &st), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_stat("/.", &st), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_stat("/..", &st), -EXO_EINVAL);
+
+    /* The directory itself still reports fine. */
+    CU_ASSERT_EQUAL(exofs_stat("/foo", &st), 0);
+    CU_ASSERT_TRUE(st.attributes & EXOFS_ATTR_DIRECTORY);
+
     exofs_unmount();
 }
 
@@ -2535,6 +2659,8 @@ void suite_exofs_tests(CU_pSuite s)
 
     CU_add_test(s, "allocate and free one block",
                 test_alloc_and_free_one_block);
+    CU_add_test(s, "freeing the root block is refused",
+                test_fat_free_rejects_root_block);
     CU_add_test(s, "allocation zeroes the block",
                 test_alloc_zeroes_the_block);
     CU_add_test(s, "chain extend, walk and free",
@@ -2594,6 +2720,8 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "mkdir error cases", test_mkdir_errors);
     CU_add_test(s, ".. navigates upward", test_dotdot_navigates_upward);
     CU_add_test(s, "rmdir", test_rmdir);
+    CU_add_test(s, "rmdir rejects \".\" and \"..\"",
+                test_rmdir_rejects_dot_and_dotdot);
     CU_add_test(s, "mkdir/rmdir cycles leak nothing",
                 test_mkdir_rmdir_cycle_leaks_nothing);
     CU_add_test(s, "directories survive a remount",
@@ -2613,7 +2741,11 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "a hole reads as zeros", test_hole_reads_as_zeros);
     CU_add_test(s, "append and truncate", test_append_and_truncate);
     CU_add_test(s, "open error cases", test_open_errors);
+    CU_add_test(s, "truncate/unlink refuse a still-open entry",
+                test_truncate_and_unlink_refuse_while_open);
     CU_add_test(s, "unlink", test_unlink);
+    CU_add_test(s, "stat rejects \".\" and \"..\"",
+                test_stat_rejects_dot_and_dotdot);
     CU_add_test(s, "file cycles leak nothing",
                 test_file_cycle_leaks_nothing);
     CU_add_test(s, "ACCEPTANCE: format, write, remount, list, read back",
