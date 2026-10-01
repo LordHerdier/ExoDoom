@@ -353,7 +353,7 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 4  | `exo_fb_acquire(info_out)`          | Framebuffer | ✅     | Write framebuffer info (`phys_addr`, `width`, `height`, `pitch`, `bpp`) to `info_out` struct, backed by a **private, RAM-backed virtual framebuffer sized to the real framebuffer's geometry — not the real hardware framebuffer itself** (multiplexing, SCRUM-112, §3.3, §3.5). Every context gets its own on request; there is no exclusivity and no `-EBUSY` anymore. LibOS then calls `exo_page_map` to map it — an ordinary owned-page mapping, not a binding check. Freed (the pages) when the terminating context's pages are reclaimed, and (the directory entry) explicitly on `exo_exit` / forced revocation. Used by `DG_Init`. Returns `0` (including a re-acquire by the current owner, which re-fills the struct with the *same* buffer), `-EFAULT` if `[info_out, info_out + sizeof(exo_fb_info_t))` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` (SCRUM-54, same `exo_range_in_user_window` check #8 uses), `-ENOMEM` if no contiguous run of pages that size is free, or `-ENODEV` on a machine the bootloader gave no framebuffer. Implemented in SCRUM-154 (`src/syscall_fb.c`, `src/fb_binding.c`) and replaced by SCRUM-112 (`src/fb_shadow.c`); what actually reaches the screen is decided independently by `src/fb_compositor.c`, which composites whichever context is `context_current()` onto the real hardware framebuffer on a throttled PIT tick (`src/pit.c`). |
 | 5  | `exo_get_ticks()`                   | Timer       | ✅     | Return `uint32_t` milliseconds since boot. Zero arguments. Never fails. Used by `DG_GetTicksMs` and `DG_SleepMs`. Kernel-side PIT + `kernel_get_ticks_ms()` done (SCRUM-9, -10); bound to the dispatcher in SCRUM-172 (`src/syscall_pit.c`) — `pic_remap()`/IRQ0/`pit_init()` moved ahead of the `TESTING` branch in `kernel_main` so ticks advance during a test boot too. |
 | 6  | `exo_kbd_poll(event_out)`           | Input       | ✅     | Dequeue next keyboard event into `event_out` struct `{uint8_t pressed; uint8_t key; uint8_t modifiers; uint8_t reserved}`. `key` is a decoded `ps2_key_t` index (`KEY_A`, `KEY_ESC`, …), not a raw PS/2 scancode — the kernel's scancode decoder runs before the event is queued. `modifiers` is the `EXO_MOD_*` shift/ctrl/alt mask sampled when the event was queued, so a chord decodes correctly even if the modifier is released before the LibOS polls — Doom binds shift (run), ctrl (fire) and alt (strafe). Returns `1` if event available, `0` if empty, `-EXO_EFAULT` if `event_out` isn't entirely inside the LibOS window. No ownership to check — the keyboard isn't acquired/released like the framebuffer. Bound in `src/syscall_kbd.c` (SCRUM-39) on top of the IRQ1 handler + scancode table (SCRUM-13/-14) and ring buffer (SCRUM-18), all now done. |
-| 7  | `exo_mouse_poll(state_out)`         | Input       | ⬜     | Write accumulated mouse state `{int16_t dx; int16_t dy; uint8_t buttons; uint8_t reserved}` to `state_out`, then reset accumulators. `reserved` is zeroed by the kernel and keeps the struct a fixed 6 bytes. Returns `0`. Prerequisite: PS/2 mouse init (SCRUM-19, Sprint 2).                                                                                            |
+| 7  | `exo_mouse_poll(state_out)`         | Input       | ✅     | Write accumulated mouse state `{int16_t dx; int16_t dy; uint8_t buttons; uint8_t reserved}` to `state_out`, then reset the dx/dy accumulators (`buttons` is a level and is left as-is). `reserved` is zeroed by the kernel and keeps the struct a fixed 6 bytes. Returns `0`, or `-EXO_EFAULT` if `state_out` isn't entirely inside the LibOS window (same `exo_range_in_user_window` + `exo_user_range_mapped` pair #6 uses). No ownership to check, same reasoning as #6. Bound in `src/syscall_mouse.c` on top of the IRQ12 handler + 3-byte packet decoder + delta accumulator, all in `src/ps2_mouse.c` (SCRUM-52) — the controller init (`0xA8`/config byte/`0xF4`), IRQ12 wiring and packet decode did not actually exist before this ticket despite SCRUM-19/28/29 being marked done; see that ticket's own note. Dx is right-positive, dy is **up-positive** (raw PS/2 sign convention, not screen-down) — whoever wires this into Doom's `ev_mouse` (SCRUM-80) negates dy the way the dead SDL code in `src/doom/i_input.c` already shows. |
 | 8  | `exo_serial_write(buf, len)`        | Debug       | ✅     | Write `len` bytes from `buf` to COM1. Returns `len` on success (COM1 is a busy-wait UART; there is no partial write), `-EFAULT` if `[buf, buf+len)` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)`, `-EINVAL` if `len` exceeds 4096 (`SERIAL_WRITE_MAX_LEN`) — the whole call runs with interrupts off (`syscall`'s FMASK clears IF), so an uncapped write would stall the machine for as long as COM1 takes to drain it. `len == 0` always succeeds regardless of `buf`. No ownership to check — COM1 is not acquired/released the way the framebuffer is, just a channel every LibOS may write to. Implemented in SCRUM-50 (`src/syscall_serial.c`). `printf` now routes through it for the ring-3 LibOS build (SCRUM-51, `src/stdio.c`, gated on `#ifdef EXO_KERNEL`); `fprintf` is still unimplemented (§2.3).                                    |
 | 9  | `exo_file_open(path, mode)`         | File I/O    | ⬜     | Open a file on the ramdisk/ATA filesystem. `mode`: `0`=read, `1`=write, `2`=read+write. Returns file descriptor (≥ 0) or negative error. Used by `fopen` shim.                                                                                                                 |
 | 10 | `exo_file_close(fd)`                | File I/O    | ⬜     | Close file descriptor. Returns `0` or `-EBADF`. Used by `fclose` shim.                                                                                                                                                                                                         |
@@ -363,8 +363,8 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 14 | `exo_file_stat(path, size_out)`     | File I/O    | ⬜     | Write file size to `*size_out`. Returns `0` or `-ENOENT`. Used by `M_FileExists` (`fopen` check) and `M_FileLength`.                                                                                                                                                           |
 | 15 | `exo_file_remove(path)`             | File I/O    | ⬜     | Delete a file. Returns `0` or `-ENOENT`. Used by `remove()` for old save games.                                                                                                                                                                                                |
 | 16 | `exo_file_rename(old, new)`         | File I/O    | ⬜     | Rename a file. Returns `0` or negative error. Used by `rename()` for save game rotation.                                                                                                                                                                                       |
-| 17 | `exo_sound_tone(freq, dur_ms)`      | Sound       | ⬜     | Play a tone on the PC speaker at `freq` Hz for `dur_ms` milliseconds. Non-blocking (kernel manages PIT ch2). Returns `0`. Used by `I_StartSound` shim.                                                                                                                         |
-| 18 | `exo_sound_stop()`                  | Sound       | ⬜     | Silence the PC speaker immediately. Returns `0`. Used by `I_StopSound` shim.                                                                                                                                                                                                   |
+| 17 | `exo_sound_tone(freq, dur_ms)`      | Sound       | ✅     | Play a tone on the PC speaker at `freq` Hz for `dur_ms` milliseconds and return at once; IRQ0 ends it (SCRUM-98/100, `src/syscall_sound.c`). `0`, or `-EXO_EINVAL` for `freq` outside 19–20000 or `dur_ms` outside 1–`SOUND_TONE_MAX_MS` (10000) — `dur_ms = 0` is refused so every tone ring 3 starts ends on its own. Last tone wins. Used by the Doom sound module (SCRUM-101). |
+| 18 | `exo_sound_stop()`                  | Sound       | ✅     | Silence the PC speaker now. `0` (also when nothing is sounding), or `-EXO_EPERM` if the tone sounding was started by another context. `exo_exit` silences the exiting context's tone the same way. Used by the Doom sound module (SCRUM-101). |
 | 19 | `exo_yield()`                       | Scheduling  | ✅     | Cooperatively yield CPU to next runnable LibOS context. Returns when rescheduled. Called once per idle-loop iteration by the real shell LibOS (SCRUM-110, `src/shell/shell_main.c`) and optionally by `DG_SleepMs`. Still a no-op in practice today: nothing yet registers a second context via `context_create()` on a normal boot (Doom is not linked in), so the call always finds nothing else `READY`. Bound in SCRUM-109 (`src/syscall_yield.c`) to `context_switch_request()` (SCRUM-108) via a round-robin scan of the context table, `context_next_ready()` (`src/context.c`) — the minimum policy the acceptance criterion needs, not a real scheduler (priority/fairness/wake-on-event is SCRUM-147's job). No error return: if nothing else is `READY`, including a caller with no row in the table (the boot-time default LibOS), it is a no-op that returns `0`.                                                                                                                                          |
 | 20 | `exo_exit(code)`                    | Lifecycle   | ✅     | Terminate calling LibOS. Frees its pages and framebuffer binding (`revoke_all`) and hands off to whatever's next-ready via `context_switch_request()` — leaves the now-resourceless `context_t` row behind rather than destroying it (the outgoing side of that switch still needs it live to capture into); the caller that launched this LibOS is what eventually `context_destroy()`s it, on its own next relaunch (see #21/#22). Does not return. Implemented in SCRUM-155, extended in SCRUM-178 (`src/syscall_exit.c`). |
 | 21 | `exo_launch(app_id)`                | Lifecycle   | ✅     | Build the ring-3 LibOS app named by `app_id` (an `EXO_LAUNCH_APP_*` value: `WAD_VIEWER`, `CLOCK`, `SNAKE`, `DOOM`) as its own context and `context_switch_request()` to it immediately; reclaims (`revoke_all` + `context_destroy`) whatever the previous launch of *that app* left behind first. Apps whose table row sets `LAUNCH_NEEDS_WAD` (the viewer and Doom) also get the WAD module mapped read-only at `LIBOS_WAD_VADDR` and its address/length patched in via `libos_launch_patch_params()`, where `DG_Init` reads them. Like `exo_yield()`, does not return control to the caller until something switches back — the app's own `exo_exit()`/`exo_yield()` round trip, or Ctrl+Tab (SCRUM-111) for an app that never yields, such as the clock. Returns `-EXO_EINVAL` for an unknown `app_id`, `-EXO_ENODEV` if a WAD-needing app has no module, `-EXO_ENOMEM` if the image or a context row will not fit — all of those only if the launch failed before the switch was armed. Invoked by the shell's `wadview`/`clock`/`snake`/`doom` commands. Replaced the four per-app syscalls #21–#24 in SCRUM-184 (`src/syscall_launch.c`). |
@@ -1362,6 +1362,9 @@ no-ops. This means Doom will run silently with zero sound code.
 
 To add PC speaker sound, there are two options:
 
+**Status (SCRUM-101): Option B is what the port now does.** Option A below
+was the state from SCRUM-82 until then, and is kept for the history.
+
 **Option A (minimal):** Keep `FEATURE_SOUND` undefined. Doom runs silently. No
 sound syscalls needed.
 
@@ -1394,9 +1397,40 @@ sound syscalls needed.
 
 **Option B (PC speaker):** Implement a `sound_module_t` with
 `Init`/`StartSound`/`StopSound`/`Update` that maps Doom SFX lump data to PC
-speaker tone frequencies and calls `exo_sound_tone`/`exo_sound_stop`. Define
+speaker tone frequencies and calls `exo_sound_tone`/`exo_sound_stop` (both
+bound since SCRUM-100; see §3.2 #17/#18 — the syscall is `exo_sound_tone`,
+which is what the Jira summary's `exo_sound_play` refers to). Define
 `FEATURE_SOUND` and register the module. The mapping from Doom's 8-bit PCM sound
 lumps to single-frequency tones is lossy but recognizable.
+
+> **Implemented (SCRUM-101)** as `src/doom_sound.c/h`. `FEATURE_SOUND` is
+> `#define`d in `src/doom/doomfeatures.h` — not on the command line, because
+> `i_sound.c`'s `<SDL_mixer.h>` guard precedes its include of that header and
+> would fire. `DG_sound_module` is a one-voice sequencer: `StartSound` plays
+> step 0 of the SCRUM-99 sequence via `exo_sound_tone`; `Update` (from
+> `I_UpdateSound`, once per main-loop pass) starts each later step when the
+> previous one's time is up, skipping steps a long frame has already passed;
+> nothing ever waits. Voice arbitration is Doom's own rule — lower
+> `sfxinfo_t.priority` wins, equal re-triggers, a loser's handle reports
+> not-playing so `s_sound.c` retires it. Volume/separation cannot be
+> honoured on a one-bit speaker, except that volume 0 plays nothing.
+> `DG_music_module` is all no-ops (the voice belongs to effects). The module
+> claims every `snddevice_t` because `snd_sfxdevice` defaults to
+> `SNDDEVICE_SB` and there is no config file to change it.
+> `docker/scripts/build-doom.sh`'s sound gate is inverted accordingly: it now
+> fails if `i_sound.o` stops referencing `DG_sound_module`/`DG_music_module`
+> (sound silently off) or references any `SDL_*`/`Mix_*`.
+
+> **The mapping (SCRUM-99)** is `src/doom_sfx_tone.c/h`: a hand-made table,
+> indexed by `sfxenum_t` through designated initialisers, giving every real
+> SFX a sequence of 1–4 `(freq_hz, dur_ms)` steps (e.g. shotgun falls
+> 900→300→150 Hz, door open sweeps 250→550 Hz, imp sight growls
+> 200→320→180 Hz). It does not read the PCM lumps at all — a single square
+> wave cannot follow them, so recognisability comes from pitch direction and
+> shape instead. `tests/kernel/test_doom_sfx_tone_k.c` checks that all 108
+> ids are mapped, every step is inside the speaker's 19–20000 Hz range with a
+> non-zero duration, no sequence exceeds 600 ms, and that shotgun / door open
+> / imp alert are distinct from their first step.
 
 ---
 

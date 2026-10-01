@@ -116,6 +116,18 @@ irq1_stub:
     POP_REGS
     iretq
 
+/* ── IRQ12 — PS/2 mouse (vector 0x2C) ─────────────────────────────────── */
+.global irq12_stub
+.extern irq12_handler
+
+irq12_stub:
+    PUSH_REGS
+    ALIGN_CALL_STACK
+    call irq12_handler
+    RESTORE_CALL_STACK
+    POP_REGS
+    iretq
+
 /*
  * ── error_stub — absorbs the 10 error-code exception vectors ───────────
  * (SCRUM-135) Installed on vectors 8, 10, 11, 12, 13, 14, 17, 21, 29, 30.

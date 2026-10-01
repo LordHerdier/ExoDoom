@@ -8,6 +8,7 @@
 #include "fb_shadow.h"
 #include "page_alloc.h"
 #include "syscall.h"
+#include "syscall_sound.h"
 
 /*
  * SCRUM-155 — resource reclamation on LibOS exit.
@@ -94,6 +95,10 @@ static int64_t sys_exit(uint64_t code, uint64_t a2, uint64_t a3,
      */
     fb_binding_release(owner);
     fb_shadow_release(owner);
+    /* SCRUM-100: an exiting LibOS's last effect must not keep playing into
+     * whoever runs next. Tones are bounded (SOUND_TONE_MAX_MS) regardless,
+     * but that bound is seconds, not "now". */
+    syscall_sound_release(owner);
     (void)reclaim_pages_owned(owner);
 
     /* SCRUM-178: hand off to whatever else is ready, exactly like

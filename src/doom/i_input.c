@@ -41,6 +41,8 @@
 
 #include "doomgeneric.h"
 
+#include "exo_syscall.h"
+
 int vanilla_keyboard_mapping = 1;
 
 // Is the shift key currently down?
@@ -324,15 +326,16 @@ void I_GetEvent(void)
     }
 
 
-                /*
-            case SDL_MOUSEMOTION:
-                event.type = ev_mouse;
-                event.data1 = mouse_button_state;
-                event.data2 = AccelerateMouse(sdlevent.motion.xrel);
-                event.data3 = -AccelerateMouse(sdlevent.motion.yrel);
-                D_PostEvent(&event);
-                break;
-                */
+    exo_mouse_state_t mstate;
+
+    if (exo_mouse_poll(&mstate) == 0)
+    {
+        event.type = ev_mouse;
+        event.data1 = mstate.buttons;
+        event.data2 = mstate.dx;
+        event.data3 = -mstate.dy;
+        D_PostEvent(&event);
+    }
 }
 
 void I_InitInput(void)

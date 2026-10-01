@@ -17,6 +17,7 @@ void suite_stdio_tests   (CU_pSuite s);
 void suite_stdlib_tests  (CU_pSuite s);
 void suite_kbd_ring_tests(CU_pSuite s);
 void suite_ps2_decode_tests(CU_pSuite s);
+void suite_ps2_mouse_tests(CU_pSuite s);
 void suite_exo_syscall_tests(CU_pSuite s);
 void suite_exo_syscall_kview_tests(CU_pSuite s);
 void suite_exo_errno_tests(CU_pSuite s);
@@ -38,7 +39,11 @@ void suite_tss_tests(CU_pSuite s);
 void suite_libos_launch_tests(CU_pSuite s);
 void suite_syscall_serial_tests(CU_pSuite s);
 void suite_syscall_kbd_tests(CU_pSuite s);
+void suite_syscall_mouse_tests(CU_pSuite s);
 void suite_pit_tests(CU_pSuite s);
+void suite_speaker_tests(CU_pSuite s);
+void suite_syscall_sound_tests(CU_pSuite s);
+int syscall_sound_suite_cleanup(void);
 void suite_syscall_pit_tests(CU_pSuite s);
 void suite_doomgeneric_timer_tests(CU_pSuite s);
 void suite_libos_main_tests(CU_pSuite s);
@@ -68,12 +73,15 @@ void suite_syscall_fuzz_tests(CU_pSuite s);
 void suite_syscall_bench_tests(CU_pSuite s);
 void suite_libos_snake_tests(CU_pSuite s);
 void suite_doom_keymap_tests(CU_pSuite s);
+void suite_doom_sfx_tone_tests(CU_pSuite s);
+void suite_doom_sound_tests(CU_pSuite s);
 void suite_libos_doom_tests(CU_pSuite s);
 void suite_syscall_stat_tests(CU_pSuite s);
 void suite_ata_tests(CU_pSuite s);
 void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
 void suite_exofs_tests(CU_pSuite s);
+void suite_launch_multi_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -93,6 +101,12 @@ int disk_binding_suite_cleanup(void);
  * (SCRUM-189). */
 int exofs_suite_init(void);
 int exofs_suite_cleanup(void);
+
+/* Same idea as context_launch_rebind_suite_cleanup (SCRUM-196): each test
+ * here launches real contexts (with real code/data/stack pages) via the
+ * live EXO_SYS_LAUNCH handler and must not leak one into a later suite if an
+ * assertion fails mid-test. */
+int launch_multi_suite_cleanup(void);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -276,6 +290,9 @@ int run_tests(void)
     s = CU_add_suite("ps2_decode", NULL, NULL);
     suite_ps2_decode_tests(s);
 
+    s = CU_add_suite("ps2_mouse", NULL, NULL);
+    suite_ps2_mouse_tests(s);
+
     s = CU_add_suite("exo_syscall", NULL, NULL);
     suite_exo_syscall_tests(s);
 
@@ -347,8 +364,19 @@ int run_tests(void)
     s = CU_add_suite("syscall_kbd", NULL, NULL);
     suite_syscall_kbd_tests(s);
 
+    s = CU_add_suite("syscall_mouse", NULL, NULL);
+    suite_syscall_mouse_tests(s);
+
     s = CU_add_suite("pit", NULL, NULL);
     suite_pit_tests(s);
+
+    s = CU_add_suite("speaker", NULL, NULL);
+    suite_speaker_tests(s);
+
+    /* Right after speaker: these handlers sit directly on that driver, and
+     * if it is failing its failures explain these. */
+    s = CU_add_suite("syscall_sound", NULL, syscall_sound_suite_cleanup);
+    suite_syscall_sound_tests(s);
 
     s = CU_add_suite("syscall_pit", NULL, NULL);
     suite_syscall_pit_tests(s);
@@ -443,6 +471,12 @@ int run_tests(void)
     s = CU_add_suite("doom_keymap", NULL, NULL);
     suite_doom_keymap_tests(s);
 
+    s = CU_add_suite("doom_sfx_tone", NULL, NULL);
+    suite_doom_sfx_tone_tests(s);
+
+    s = CU_add_suite("doom_sound", NULL, NULL);
+    suite_doom_sound_tests(s);
+
     s = CU_add_suite("libos_doom", libos_doom_suite_init,
                      libos_doom_suite_cleanup);
     suite_libos_doom_tests(s);
@@ -466,6 +500,9 @@ int run_tests(void)
      * surfacing here as a pile of -EXO_EBUSY (SCRUM-189). */
     s = CU_add_suite("exofs", exofs_suite_init, exofs_suite_cleanup);
     suite_exofs_tests(s);
+
+    s = CU_add_suite("launch_multi", NULL, launch_multi_suite_cleanup);
+    suite_launch_multi_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not

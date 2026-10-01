@@ -206,9 +206,12 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Process/context table (id, page dir, saved registers, state) | `src/context.c/h` |
 | Interrupts (IDT/PIC/ISR, TSS, page-fault diagnostics) | `src/idt.c/h`, `src/pic.c/h`, `src/isr.s`, `src/io.h`, `src/tss.c/h`, `src/fault.c/h` |
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
+| PC speaker (PIT channel 2, SCRUM-98) | `src/speaker.c/h` |
+| Doom SFX → speaker tone table (SCRUM-99) | `src/doom_sfx_tone.c/h` |
+| Doom `sound_module_t` over the speaker (SCRUM-101) | `src/doom_sound.c/h` (+ `FEATURE_SOUND` in `src/doom/doomfeatures.h`) |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
-| Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h` |
+| Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h`, `src/syscall_sound.c/h` (SCRUM-100) |
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer), `src/disk_binding.c/h` (disk, SCRUM-188) |
 | LibOS-space filesystem (ExoFS, over the disk syscalls) | `src/libos_fs/` (SCRUM-189) — **not part of the kernel**; see `docs/filesystem.md` |
 | Resource revocation (repossession) | `src/revoke.c/h` (protocol), the `page_revoke_*`/`fb_binding_revoke_*`/`disk_binding_revoke_*` primitives |
