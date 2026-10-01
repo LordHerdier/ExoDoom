@@ -6,6 +6,7 @@
 #include "vmm.h"
 #include "mmap.h"
 #include "serial.h"
+#include "context.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -107,19 +108,14 @@ static int64_t sys_page_free(uint64_t paddr, uint64_t a2, uint64_t a3,
 /*
  * May `who` install a mapping of physical page `paddr`?
  *
- * The framebuffer is asked first and its answer is final when it has one: FB
- * pages sit outside the RAM the PMM manages, so page_owner() reports
- * PAGE_OWNER_FREE for every one of them and the generic check below would
- * wave through exactly the memory the binding exists to protect.  §3.5 spells
- * out why the verdict is three-valued rather than a bool.
+ * Real framebuffer MMIO is kernel-only under SCRUM-166.  A framebuffer
+ * address is therefore denied before consulting the PMM; addresses outside
+ * the framebuffer fall through to ordinary per-page ownership.
  */
 static int may_map_phys(uint64_t paddr, page_owner_t who)
 {
-    switch (fb_binding_check_map(paddr, who)) {
-    case FB_MAP_ALLOW:  return 1;
-    case FB_MAP_DENY:   return 0;
-    default:            break;      /* FB_MAP_NOT_FB — ordinary RAM */
-    }
+    if (fb_binding_check_map(paddr, who) == FB_MAP_DENY)
+        return 0;
 
     return page_owner((void *)(uintptr_t)paddr) == who;
 }
@@ -157,11 +153,13 @@ static int may_unmap_phys(uint64_t paddr, page_owner_t who)
     return owner == who || owner == PAGE_OWNER_FREE;
 }
 
-/* Is `vaddr` inside the window a LibOS is allowed to map into?  See
- * EXO_USER_VA_BASE in src/exo_syscall.h for why the window exists. */
+/* Is the page at `vaddr` inside the calling LibOS context's VA policy?
+ * Each context owns its policy; the EXO_USER_VA_* constants are only the
+ * default aperture assigned when the context is created. */
 static int in_user_window(uint64_t vaddr)
 {
-    return vaddr >= EXO_USER_VA_BASE && vaddr < EXO_USER_VA_END;
+    return context_range_in_va_policy(syscall_current_context(),
+                                      vaddr, VMM_PAGE_SIZE);
 }
 
 /* vmm.c's status codes in the ABI's terms (src/vmm.h).  Two of them are

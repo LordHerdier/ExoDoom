@@ -479,9 +479,9 @@ static void test_revoke_all_refuses_reserved_ids(void)
 
 /* ── The framebuffer ──────────────────────────────────────────────────────── */
 
-/* The mark is an ask here too: a marked owner still holds the screen and may
- * still map its pages, which is what lets it finish the frame it is drawing
- * before handing the display over. */
+/* The mark is an ask here too: a marked owner still holds the legacy binding
+ * until reclaim. SCRUM-166 makes that state reclamation-only, though; it no
+ * longer grants direct access to the real framebuffer's MMIO pages. */
 static void test_fb_request_marks_without_taking(void)
 {
     install_test_fb();
@@ -494,9 +494,9 @@ static void test_fb_request_marks_without_taking(void)
     CU_ASSERT_TRUE(revoke_pending(fb));
 
     CU_ASSERT_EQUAL(fb_binding_owner(), OTHER_LIBOS);
+            /* The legacy holder and every other LibOS are both denied hardware MMIO. */
     CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, OTHER_LIBOS),
-                    FB_MAP_ALLOW);
-    /* And it is still refused to everyone else. */
+                    FB_MAP_DENY);
     CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, PAGE_OWNER_LIBOS),
                     FB_MAP_DENY);
 }

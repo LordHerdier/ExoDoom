@@ -1058,11 +1058,18 @@ space, and it is the one the kernel is running in: until each LibOS gets its
 own PML4 (SCRUM-48), `exo_page_map` edits the kernel's page tables. Two rules
 make that safe:
 
-- **The LibOS window.** `vaddr` must lie in
-  `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[64 TiB, 128 TiB)`, and anything
-  else is `-EPERM`. Ownership answers *which physical page*; the window answers
-  *where*, and both questions have to be asked — a LibOS must not be able to
-  install a page it legitimately owns over kernel text.
+- **Per-context LibOS VA policy (SCRUM-166).** Every real `context_t` owns a
+  VA policy describing the range in which that context may install mappings.
+  `context_create()` initializes the policy to
+  `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[64 TiB, 128 TiB)`, preserving the
+  existing ABI aperture as the default rather than using it as one global
+  authorization rule. `exo_page_map`, `exo_page_unmap`, and pointer-taking
+  syscalls authorize addresses against the policy belonging to
+  `syscall_current_context()`. The boot-time compatibility owner
+  `PAGE_OWNER_LIBOS`, which can exist without a `context_t` row, uses the same
+  default aperture until execution moves to a real context. Ownership answers
+  *which physical page* a context may map; its VA policy answers *where* it may
+  map it, and both checks are required.
 
   **Why the base is 64 TiB and not 4 GiB.** The kernel map is an *identity* map
   (`vmm_init`, SCRUM-15): every byte of usable RAM is mapped at a virtual

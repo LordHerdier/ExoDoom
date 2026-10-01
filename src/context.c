@@ -1,5 +1,6 @@
 #include "context.h"
 #include "libos_launch.h"  /* LIBOS_LAUNCH_RFLAGS */
+#include "exo_syscall.h"
 
 #include <string.h>
 
@@ -100,6 +101,8 @@ int context_create(uint64_t pml4_phys, page_owner_t *id_out) {
     memset(slot, 0, sizeof(*slot));
     slot->id = id;
     slot->state = CONTEXT_STATE_READY;
+    slot->va_policy.base = EXO_USER_VA_BASE;
+    slot->va_policy.end = EXO_USER_VA_END;
 
     *id_out = id;
     return CONTEXT_OK;
@@ -126,6 +129,41 @@ int context_destroy(page_owner_t id) {
 
 context_t *context_lookup(page_owner_t id) {
     return find_slot(id);
+}
+
+const context_va_policy_t *context_va_policy(page_owner_t id) {
+    context_t *slot = find_slot(id);
+    return slot != NULL ? &slot->va_policy : NULL;
+}
+
+int context_range_in_va_policy(page_owner_t id, uint64_t base, uint64_t len)
+{
+    const context_va_policy_t *policy = context_va_policy(id);
+
+    /*
+     * PAGE_OWNER_LIBOS is the boot-time compatibility owner.  It can be
+     * VMM-bound without occupying a contexts[] slot, so preserve the
+     * original default aperture until execution moves to a real context.
+     */
+    context_va_policy_t legacy_policy;
+
+    if (policy == NULL) {
+        if (id != PAGE_OWNER_LIBOS)
+            return 0;
+
+        legacy_policy.base = EXO_USER_VA_BASE;
+        legacy_policy.end = EXO_USER_VA_END;
+        policy = &legacy_policy;
+    }
+
+    if (len == 0)
+        return 1;
+
+    if (base < policy->base || base >= policy->end)
+        return 0;
+
+    uint64_t end = base + len;
+    return end >= base && end <= policy->end;
 }
 
 uint32_t context_count(void) {

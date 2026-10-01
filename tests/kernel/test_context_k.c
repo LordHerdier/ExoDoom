@@ -19,7 +19,7 @@
 #include "context.h"
 #include "vmm.h"
 #include "page_alloc.h"
-
+#include "exo_syscall.h"
 #include <stdint.h>
 
 /* Sweep every context still live at suite end and tear it down, so a failed
@@ -87,6 +87,72 @@ static void test_create_rejects_zero_pml4(void)
     page_owner_t id = PAGE_OWNER_FREE;
     CU_ASSERT_EQUAL(context_create(0, &id), CONTEXT_EINVAL);
     CU_ASSERT_EQUAL(context_count(), 0);
+}
+
+static void test_create_initializes_va_policy(void)
+{
+    uint64_t phys = new_address_space();
+    page_owner_t id = PAGE_OWNER_FREE;
+
+    CU_ASSERT_EQUAL(context_create(phys, &id), CONTEXT_OK);
+
+    const context_va_policy_t *policy = context_va_policy(id);
+    CU_ASSERT_PTR_NOT_NULL(policy);
+
+    if (policy != NULL) {
+        CU_ASSERT_EQUAL(policy->base, EXO_USER_VA_BASE);
+        CU_ASSERT_EQUAL(policy->end, EXO_USER_VA_END);
+    }
+
+    CU_ASSERT_EQUAL(context_destroy(id), CONTEXT_OK);
+    CU_ASSERT_PTR_NULL(context_va_policy(id));
+}
+
+static void test_va_policy_is_per_context(void)
+{
+    uint64_t phys_a = new_address_space();
+    uint64_t phys_b = new_address_space();
+    page_owner_t id_a = PAGE_OWNER_FREE;
+    page_owner_t id_b = PAGE_OWNER_FREE;
+
+    CU_ASSERT_EQUAL(context_create(phys_a, &id_a), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_create(phys_b, &id_b), CONTEXT_OK);
+
+    context_t *ctx_a = context_lookup(id_a);
+    context_t *ctx_b = context_lookup(id_b);
+
+    CU_ASSERT_PTR_NOT_NULL(ctx_a);
+    CU_ASSERT_PTR_NOT_NULL(ctx_b);
+
+    if (ctx_a != NULL && ctx_b != NULL) {
+        ctx_a->va_policy.base = EXO_USER_VA_BASE;
+        ctx_a->va_policy.end = EXO_USER_VA_BASE + 0x2000;
+
+        CU_ASSERT_TRUE(context_range_in_va_policy(
+            id_a, EXO_USER_VA_BASE, 0x1000));
+        CU_ASSERT_FALSE(context_range_in_va_policy(
+            id_a, EXO_USER_VA_BASE + 0x2000, 0x1000));
+
+        CU_ASSERT_TRUE(context_range_in_va_policy(
+            id_b, EXO_USER_VA_BASE + 0x2000, 0x1000));
+    }
+
+    CU_ASSERT_EQUAL(context_destroy(id_a), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_destroy(id_b), CONTEXT_OK);
+}
+
+static void test_legacy_owner_uses_default_va_policy(void)
+{
+    CU_ASSERT_PTR_NULL(context_va_policy(PAGE_OWNER_LIBOS));
+
+    CU_ASSERT_TRUE(context_range_in_va_policy(
+        PAGE_OWNER_LIBOS, EXO_USER_VA_BASE, 0x1000));
+
+    CU_ASSERT_FALSE(context_range_in_va_policy(
+        PAGE_OWNER_LIBOS, EXO_USER_VA_BASE - 0x1000, 0x1000));
+
+    CU_ASSERT_FALSE(context_range_in_va_policy(
+        PAGE_OWNER_LIBOS, EXO_USER_VA_END, 0x1000));
 }
 
 /* Two contexts, each with its own address space, tracked at once -- the
@@ -243,13 +309,22 @@ static void test_table_full_is_enomem(void)
 void suite_context_tests(CU_pSuite s)
 {
     CU_add_test(s, "create never steals the LibOS binding",
-               test_create_never_steals_libos_binding);
-    CU_add_test(s, "create rejects zero pml4", test_create_rejects_zero_pml4);
+                test_create_never_steals_libos_binding);
+    CU_add_test(s, "create rejects zero pml4",
+                test_create_rejects_zero_pml4);
+    CU_add_test(s, "create initializes VA policy",
+                test_create_initializes_va_policy);
+    CU_add_test(s, "VA policy is per context",
+                test_va_policy_is_per_context);
+    CU_add_test(s, "legacy owner uses default VA policy",
+            test_legacy_owner_uses_default_va_policy);
     CU_add_test(s, "two contexts tracked simultaneously",
-               test_two_contexts_simultaneously);
-    CU_add_test(s, "new context has zeroed regs", test_new_context_regs_are_zeroed);
+                test_two_contexts_simultaneously);
+    CU_add_test(s, "new context has zeroed regs",
+                test_new_context_regs_are_zeroed);
     CU_add_test(s, "state transitions", test_state_transitions);
     CU_add_test(s, "unknown id is ENOENT", test_unknown_id_is_enoent);
-    CU_add_test(s, "destroyed id is reusable", test_destroyed_id_is_reusable);
+    CU_add_test(s, "destroyed id is reusable",
+                test_destroyed_id_is_reusable);
     CU_add_test(s, "table full is ENOMEM", test_table_full_is_enomem);
 }
