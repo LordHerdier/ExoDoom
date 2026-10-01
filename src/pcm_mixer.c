@@ -266,6 +266,27 @@ void pcm_mixer_stop(int handle)
     irq_restore(flags);
 }
 
+int pcm_mixer_set_params(int handle, int vol, int sep)
+{
+    /* Computed before the lock: gain_for() is pure arithmetic on the
+     * arguments, and the critical section only has to cover the two stores
+     * pcm_mixer_render() reads. */
+    int32_t gain_l, gain_r;
+    gain_for(vol, sep, &gain_l, &gain_r);
+
+    uint64_t flags = irq_save();
+    voice_t *v = handle_voice(handle);
+    if (v == NULL) {
+        irq_restore(flags);
+        return PCM_MIXER_ENOVOICE;
+    }
+
+    v->gain_l = gain_l;
+    v->gain_r = gain_r;
+    irq_restore(flags);
+    return PCM_MIXER_OK;
+}
+
 int pcm_mixer_is_playing(int handle)
 {
     uint64_t flags = irq_save();

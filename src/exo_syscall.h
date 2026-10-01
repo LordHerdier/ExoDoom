@@ -119,6 +119,11 @@
  * §3.8. */
 #define EXO_SYS_SOUND_PCM      27
 #define EXO_SYS_SOUND_PCM_STOP 28
+/* #29 (SCRUM-214) re-places a voice already sounding. It exists because Doom
+ * retunes live sounds -- I_UpdateSoundParams runs once a tic for every active
+ * channel -- so a sound fired to the player's left has to follow them as they
+ * turn. Same per-voice ownership as #28. */
+#define EXO_SYS_SOUND_PCM_PARAMS 29
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -128,7 +133,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        29
+#define EXO_SYS_COUNT        30
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -711,6 +716,23 @@ static inline int64_t exo_sound_pcm(const void *buf, uint32_t num_samples,
 static inline int64_t exo_sound_pcm_stop(int handle)
 {
     return exo_syscall1(EXO_SYS_SOUND_PCM_STOP, (uint64_t)(int64_t)handle);
+}
+
+/* #29 — re-place the voice `handle` names: `vol` 0..127 and `sep` 0..255 with
+ * 128 centred, the same ranges #27 takes, applied through the same panning law.
+ * Changes how the voice is heard and nothing else -- not its priority, not how
+ * far through its sample it is.
+ *
+ * 0 on success, and also for a handle whose sound has already finished or been
+ * taken over: Doom retunes every channel it believes is active, a tic or so
+ * before it notices one has ended, so that is the ordinary case rather than an
+ * error. -EXO_EPERM if the voice is playing another context's sound (left
+ * untouched), -EXO_EINVAL for a negative handle. docs/syscall_spec.md §3.2 #29
+ * and §3.5b. */
+static inline int64_t exo_sound_pcm_params(int handle, int vol, int sep)
+{
+    return exo_syscall3(EXO_SYS_SOUND_PCM_PARAMS, (uint64_t)(int64_t)handle,
+                        (uint64_t)(int64_t)vol, (uint64_t)(int64_t)sep);
 }
 
 #endif /* !EXO_KERNEL */

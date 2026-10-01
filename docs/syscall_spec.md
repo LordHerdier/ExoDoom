@@ -375,15 +375,17 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 26 | `exo_disk_acquire()`                | Storage     | ✅     | Bind the disk to the caller — one exclusive owner at a time, the same pre-SCRUM-112 shape `exo_fb_acquire` (#4) originally had (§3.5a). Must succeed before #24/#25 will do anything for the caller. Returns `0` (including a re-acquire by the current owner), `-EBUSY` if another context holds it, or `-ENODEV` if this machine has no drive. Implemented in SCRUM-188 (`src/syscall_disk.c`, `src/disk_binding.c`). |
 | 27 | `exo_sound_pcm(buf, num_samples, rate_hz, vol, sep, priority)` | Sound | ✅ | Queue `num_samples` bytes of 8-bit *unsigned* mono PCM at `buf`, recorded at `rate_hz`, on one of the software mixer's `PCM_MIXER_VOICES` (8) voices, and return at once — the samples are **copied** into kernel pages, so `buf` is the caller's again immediately (§3.5b on why a ring-3 pointer cannot be played in place). `rate_hz` is the rate the samples were recorded at, not the hardware's: the mixer resamples per voice (`src/pcm_mixer.c`, SCRUM-212), which is what lets a DMX lump be handed over exactly as `doom_dmx_parse()` reports it. `vol` 0–127, `sep` 0–255 (128 centred), `priority` in Doom's `sfxinfo_t` sense where **lower is more important**. Returns a non-negative voice handle for #28, or `-EXO_EINVAL` (`num_samples` 0 or over `SOUND_PCM_MAX_SAMPLES` = 196608, `src/syscall_sound.h`; or `rate_hz` outside 1–65535, above which the mixer's 16.16 phase step overflows), `-EXO_ENODEV` (no HDA controller, or the output stream refused to start), `-EXO_EFAULT` (`[buf, buf+num_samples)` not entirely inside the LibOS window **and mapped** — the same `exo_range_in_user_window`/`exo_user_range_mapped` pair #8 and #24 use), `-EXO_EBUSY` (every voice busy with sound at least as important; nothing already playing is disturbed, which is the mixer's own non-starvation rule surfaced at the ABI), or `-EXO_ENOMEM` (no contiguous run of kernel pages that size). Validation order is shape → device → buffer, the precedence §3.5a settled on. The stream is started lazily by the first successful call. Implemented in SCRUM-213 (`src/syscall_sound.c`, on top of `src/pcm_mixer.c` and `src/hda.c`). |
 | 28 | `exo_sound_pcm_stop(handle)` | Sound | ✅ | Stop the voice `handle` names. Returns `0`, including for a handle whose sound has already finished or been taken over by a more important one — there is then nothing left to stop and no error to report — `-EXO_EPERM` if that voice is playing another context's sound, or `-EXO_EINVAL` for a negative handle, which #27 never issues. Also frees that voice's staging pages. `exo_exit` stops the exiting context's voices the same way (`syscall_sound_release()`). Implemented in SCRUM-213. |
+| 29 | `exo_sound_pcm_params(handle, vol, sep)` | Sound | ✅ | Re-place the voice `handle` names: recompute its gains from `vol` (0–127) and `sep` (0–255, 128 centred) through the same panning law #27 applies, and change nothing else — not its priority, not how far through its sample it is. It exists because Doom retunes *live* sounds: `I_UpdateSoundParams` runs once a tic for every active channel (`s_sound.c`'s `S_UpdateSounds`), so a sound fired to the player's left has to follow them as they turn, and a mixer that could only place a voice at the moment it started would freeze every effect at the geometry it was fired in. Returns `0`, **including for a handle whose sound has already finished or been taken over** — Doom retunes channels a tic before it notices one has ended, so that is the ordinary case rather than a caller error, and it is the same reason #28 answers `0` there — `-EXO_EPERM` if that voice is playing another context's sound (left untouched, §3.5b), or `-EXO_EINVAL` for a negative handle, which #27 never issues. `vol`/`sep` are deliberately **not** range-checked: `pcm_mixer_set_params()` clamps both to Doom's ranges exactly as `pcm_mixer_start()` does, so a retune cannot answer `-EXO_EINVAL` for numbers #27 accepted. Implemented in SCRUM-214 (`src/syscall_sound.c`, `pcm_mixer_set_params()` in `src/pcm_mixer.c`). |
 
-**Total: 29 syscalls.** This is the complete interface needed to run Doom with
+**Total: 30 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking, plus the single
 argument-based LibOS-launch syscall (#21) that backs the shell's interactive
 demo commands, the two introspection syscalls (#22/#23) that back its
 `memstat`/`pslist` commands, the three storage syscalls (#24/#25/#26) the
-future FAT-like filesystem (SCRUM-189) will build on, and the PCM sound pair
-(#27/#28) that puts the software mixer in reach of a LibOS — everything sound
-needs beyond the speaker's #17/#18.
+future FAT-like filesystem (SCRUM-189) will build on, and the PCM sound trio
+(#27/#28/#29) that puts the software mixer in reach of a LibOS — everything
+sound needs beyond the speaker's #17/#18, and what Doom's own sound module now
+plays through (§6 Option C, SCRUM-214).
 
 ### 3.2a Error codes (SCRUM-57)
 
@@ -937,7 +939,12 @@ records the `page_owner_t` that started it, exactly as `tone_holder` records
 who started the tone now sounding. That per-voice owner is what:
 
 - lets `exo_sound_pcm_stop` (#28) refuse another context's voice with
-  `-EXO_EPERM` while leaving it playing, and
+  `-EXO_EPERM` while leaving it playing,
+- does the same for `exo_sound_pcm_params` (#29, SCRUM-214), which carries no
+  buffer of its own and so is *only* that check plus the mixer call — and where
+  the refusal has to leave the voice not merely playing but placed exactly where
+  its owner put it, since a partially-applied re-pan would move somebody else's
+  sound across the stereo field, and
 - lets `syscall_sound_release()` — called from `exo_exit` (`src/syscall_exit.c`)
   — stop an exiting LibOS's voices and return their pages, without touching
   anybody else's.
@@ -967,6 +974,14 @@ an interrupt can preempt — a syscall body cannot be, having IF clear, but
 `kernel_main` and its callees can. The cost of sweeping late is that a
 finished effect holds its pages until the next sound syscall, bounded by
 `PCM_MIXER_VOICES` buffers.
+
+One thing #29 deliberately is *not*: a re-admission. It leaves `priority`,
+the phase and the sample pointer alone, so it changes how a voice is heard and
+never who holds it or where it has got to. Both halves of that matter — a
+re-place that reset the phase would restart the effect every tic Doom retunes
+it, which is every tic, so the sound would never end; one that took a new
+priority would let an incidental noise promote itself past the arbitration that
+admitted it.
 
 **Not covered here:** revocation (§3.6) has no sound leg, matching the
 speaker. An *exiting* LibOS is handled by `syscall_sound_release()`; a
@@ -1385,8 +1400,10 @@ no-ops. This means Doom will run silently with zero sound code.
 
 To add PC speaker sound, there are two options:
 
-**Status (SCRUM-101): Option B is what the port now does.** Option A below
-was the state from SCRUM-82 until then, and is kept for the history.
+**Status (SCRUM-214): Option C is what the port now does, with Option B as its
+runtime fallback.** Options A and B below were the state from SCRUM-82 and
+SCRUM-101 respectively, and are kept for the history — B is not dead code, it
+is what plays on a machine with no audio controller.
 
 **Option A (minimal):** Keep `FEATURE_SOUND` undefined. Doom runs silently. No
 sound syscalls needed.
@@ -1454,6 +1471,84 @@ lumps to single-frequency tones is lossy but recognizable.
 > ids are mapped, every step is inside the speaker's 19–20000 Hz range with a
 > non-zero duration, no sequence exceeds 600 ms, and that shotgun / door open
 > / imp alert are distinct from their first step.
+
+**Option C (real PCM):** Play the WAD's actual `DS*` samples through the
+software mixer and the HDA controller, via `exo_sound_pcm` (#27) /
+`exo_sound_pcm_stop` (#28) / `exo_sound_pcm_params` (#29).
+
+> **Implemented (SCRUM-214)** as `src/doom_sound_pcm.c/h`, reached from the same
+> `DG_sound_module` in `src/doom_sound.c`. Firing the shotgun in-game now plays
+> `DSSHOTGN` itself, which is the epic's (SCRUM-208) definition of done.
+>
+> **The choice between C and B is a runtime one, per effect, not a build-time
+> `#ifdef`** — which the ticket asked for explicitly, since only one wiring can
+> own `I_StartSound`. `StartSound` tries PCM first and falls back to the tone
+> sequencer when PCM answers "not started":
+>
+> - no WAD mounted, or no `DS*` lump for this effect → that one effect plays as
+>   a tone. A WAD without a given effect is a real possibility (PWADs, and
+>   `S_sfx[]` carries entries no IWAD defines), and it should cost one effect
+>   rather than all sound.
+> - `-EXO_ENODEV` from #27 → this machine has no audio controller at all, so the
+>   PCM path is **latched off** for the rest of the run and the port degrades to
+>   the speaker in one step instead of paying a failed syscall per effect
+>   forever.
+> - `-EXO_EBUSY` from #27 → the mixer refused a sound less important than
+>   everything already playing, disturbing nothing. That counts as *handled*,
+>   not failed: the effect was deliberately declined, and a tone would be a
+>   second and louder answer to a request already refused. The channel reports
+>   not-playing and `s_sound.c` retires it, the same convention SCRUM-101 uses
+>   for a tone that lost the speaker.
+>
+> Which back end owns a channel is therefore per-channel state
+> (`chan_path[]` in `src/doom_sound.c`), and `StopSound`/`SoundIsPlaying`/
+> `UpdateSoundParams` route on it. It is recorded at start rather than read back
+> from `doom_sound_pcm_owns()`, because the `-EXO_EBUSY` case owns the channel
+> while holding no voice — asking "do you hold a voice?" would hand that channel
+> to the speaker and play a tone the mixer had just declined.
+>
+> **The lump name is the *link's* where there is one.** `s_sound.c` does not
+> follow `sfxinfo_t::link` before calling the module — it reads the link only to
+> adjust the volume and passes the aliasing entry straight through — so
+> resolving it is the back end's job, exactly as chocolate-doom's
+> `I_GetSfxLumpNum` does it. There is one such sound and it matters: `chgun` is
+> `SOUND_LINK`'d to `sfx_pistol` (`src/doom/sounds.c`) and no IWAD, freedoom2
+> included, contains a `DSCHGUN`. Skip the link and the chaingun alone drops to
+> a square-wave tone in the middle of an otherwise sampled soundtrack — which is
+> why `tests/kernel/test_doom_sound_pcm_k.c` asserts both halves (the lookup
+> really misses on `chgun`, and the link points at a name that hits) even though
+> the resolution itself lives in ring-3-only glue.
+>
+> **The samples are never copied on the LibOS side.** `doom_dmx_find_sfx()`
+> returns a pointer into the WAD the kernel mapped at `LIBOS_WAD_VADDR`, which
+> is inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)`, and #27 checks its buffer
+> *readable* rather than writable — so a DMX lump is already a valid argument
+> exactly as decoded, rate included, since the mixer resamples per voice. The
+> copy into kernel pages is the syscall's own, for the reasons §3.5b gives.
+>
+> **`SoundIsPlaying` is answered from the clock, not a syscall.** A sound's
+> length is `num_samples / rate_hz`, known when it starts, so
+> `DG_GetTicksMs()` answers it without a ring transition per channel per tic —
+> and no #30 "is this voice playing" was needed. The cost is that a voice the
+> mixer stole early still reads as playing until its nominal end, retiring the
+> channel slightly late; Doom's own SDL back end errs in the same direction.
+>
+> **Two bounds worth knowing.** The HDA stream refills in ~21 ms slices
+> (`docs/drivers/hda.md` §12), so an effect can start up to one slice late —
+> under Doom's 28.5 ms tic. And staging pages are swept at the top of each sound
+> syscall (§3.5b), so a burst of effects followed by silence holds up to
+> `PCM_MIXER_VOICES` buffers until the next sound; Doom is the first workload
+> that really uses all eight voices.
+>
+> **Music is still silent.** `DG_music_module` is MUS/MIDI, not PCM; nothing
+> here changes it.
+>
+> `tests/kernel/test_doom_sound_pcm_k.c` is the acceptance test and it asserts
+> the *sample*, not a started voice: rendered hard left at full volume the
+> mixer's gain is exactly unity, and `DSSHOTGN`'s first sample is 140 in DMX's
+> unsigned encoding, so frame 0's left channel must be exactly `(140 - 128) << 8`
+> = 3072. It then checks those bytes are leaving RAM, as the controller's own
+> DMA read position moving.
 
 ---
 

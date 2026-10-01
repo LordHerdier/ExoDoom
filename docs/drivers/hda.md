@@ -549,7 +549,11 @@ assert in a comment that integer multiply-adds are cheap:
 `exo_sound_pcm` (#27) and `exo_sound_pcm_stop` (#28), in
 `src/syscall_sound.c`, are the LibOS-facing end of everything above. A caller
 hands over 8-bit unsigned mono samples and the rate they were recorded at, and
-gets back a voice handle.
+gets back a voice handle. `exo_sound_pcm_params` (#29, SCRUM-214) re-places a
+voice already sounding, over `pcm_mixer_set_params()` — recomputing that voice's
+gains through the same panning law `pcm_mixer_start()` uses and touching nothing
+else, so a live sound can follow the player as they turn without being
+restarted or re-admitted.
 
 Three things are worth knowing here rather than only in
 `docs/syscall_spec.md` §3.5b, because they are properties of *this* driver:
@@ -566,7 +570,17 @@ Three things are worth knowing here rather than only in
   `syscall_sound_init()`. §12.3's idle stream costs ~47 interrupts a second
   forever, and on most boots nothing ever asks for a sound.
 
-Still open on this line: Doom's own sound module is SCRUM-101's one-voice PC
-speaker sequencer (`src/doom_sound.c`); rewiring it onto #27/#28 is its own
-ticket. Revocation (`src/revoke.c`) has no sound leg either — an exiting LibOS
-loses its voices via `syscall_sound_release()`, a revoked one does not.
+### 12.6 What Doom plays through it (SCRUM-214)
+
+`DG_sound_module` now reaches this driver for real: `src/doom_sound_pcm.c`
+decodes the effect's `DS*` lump out of the mounted WAD and queues it on #27,
+with SCRUM-101's speaker sequencer kept as a per-effect runtime fallback (no
+WAD, no such lump, or no controller at all — `docs/syscall_spec.md` §6 Option
+C has the selection rule). The acceptance test asserts the shotgun's own first
+sample on the voice and then watches `SDnLPIB` move, so what is checked is this
+driver playing that lump rather than a voice having been started.
+
+Still open on this line: revocation (`src/revoke.c`) has no sound leg — an
+exiting LibOS loses its voices via `syscall_sound_release()`, a revoked one does
+not — and Doom's music is still silent, since `DG_music_module` is MUS/MIDI
+rather than PCM.

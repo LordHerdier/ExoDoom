@@ -12,6 +12,12 @@
  *     exo_syscall_dispatch() -- a `syscall` instruction from ring 0 would
  *     not come back -- so the test exercises the real handlers and the real
  *     speaker, not a mock.
+ *
+ * Since SCRUM-214 the sound_module_t at the bottom is no longer only this
+ * file's tone sequencer: it tries the real PCM samples first
+ * (src/doom_sound_pcm.c) and falls back to the tones here. Everything above
+ * that block -- the sequencer, its voice arbitration, its tests -- is
+ * unchanged, and is what a machine with no audio controller still plays.
  */
 
 #include "doom_sound.h"
@@ -163,8 +169,51 @@ int doom_sound_current_step(void)
 
 #include "doom/i_sound.h"
 #include "doom/sounds.h"
+#include "doom_sound_pcm.h"
 
 uint32_t DG_GetTicksMs(void);
+
+/*
+ * ── Which path owns a channel (SCRUM-214) ─────────────────────────────
+ *
+ * Two sound back ends now sit behind this one module: the real PCM samples
+ * (src/doom_sound_pcm.c, over exo_sound_pcm) and the speaker tone sequencer
+ * above in this file (SCRUM-101). They are not alternatives chosen at build
+ * time -- StartSound tries PCM and falls back, per effect, for the reasons
+ * src/doom_sound_pcm.h lays out -- so which one is playing is a property of
+ * the *channel*, and Stop/IsPlaying/UpdateSoundParams have to ask before
+ * acting. Getting that wrong would not be quiet: routing a stop to the wrong
+ * back end leaves the real sound running and cuts an unrelated one.
+ *
+ * Recorded here rather than read back from doom_sound_pcm_owns(), because a
+ * sound the mixer *refused* (the least important thing in the room) is owned
+ * by the PCM path -- as a sound deliberately dropped -- while holding no
+ * voice. Asking "do you hold a voice for this channel?" would answer no and
+ * hand that channel to the speaker, playing a tone for an effect the mixer
+ * had just declined on purpose.
+ */
+#define CHAN_PATH_NONE  0
+#define CHAN_PATH_PCM   1
+#define CHAN_PATH_TONE  2
+
+/* Indexed by Doom's channel number; sized as src/doom_sound_pcm.c sizes its
+ * own rows, and out-of-range channels fall through to the tone path, which
+ * has always taken the channel number as an opaque handle. */
+static uint8_t chan_path[16];
+
+static int path_of(int channel)
+{
+    if (channel < 0 || channel >= (int)(sizeof(chan_path) / sizeof(chan_path[0])))
+        return CHAN_PATH_TONE;
+    return chan_path[channel];
+}
+
+static void set_path(int channel, int path)
+{
+    if (channel >= 0
+        && channel < (int)(sizeof(chan_path) / sizeof(chan_path[0])))
+        chan_path[channel] = (uint8_t)path;
+}
 
 /* Referenced by i_sound.c's I_BindSoundVariables() once FEATURE_SOUND is
  * on (they belong to chocolate-doom's SDL mixer, which is not vendored).
@@ -175,7 +224,9 @@ float libsamplerate_scale = 0.65f;
 /* Every device Doom's config can name. snd_sfxdevice defaults to
  * SNDDEVICE_SB (i_sound.c) and there is no config file to change it, so a
  * list of just SNDDEVICE_PCSPEAKER would never be selected. Whatever the
- * setting says, the PC speaker is the one output this machine has. */
+ * setting says, this module is the one output this machine has -- which since
+ * SCRUM-214 is an HDA controller when there is one and the speaker when there
+ * is not, so the list is if anything more honest than it was. */
 static snddevice_t exo_sound_devices[] = {
     SNDDEVICE_PCSPEAKER, SNDDEVICE_ADLIB, SNDDEVICE_SB, SNDDEVICE_PAS,
     SNDDEVICE_GUS, SNDDEVICE_WAVEBLASTER, SNDDEVICE_SOUNDCANVAS,
@@ -186,23 +237,33 @@ static boolean exo_snd_init(boolean use_sfx_prefix)
 {
     (void)use_sfx_prefix;
     doom_sound_reset();
+    doom_sound_pcm_reset();
+    for (unsigned i = 0; i < sizeof(chan_path) / sizeof(chan_path[0]); i++)
+        chan_path[i] = CHAN_PATH_NONE;
     return true;
 }
 
 static void exo_snd_shutdown(void)
 {
     doom_sound_reset();
+    doom_sound_pcm_reset();
 }
 
-/* No PCM is ever read, so there is no lump to find. Any non-negative value
- * stops s_sound.c asking again; W_GetNumForName would I_Error on a WAD
- * without the DS lump. */
+/* Still no lump number. The PCM path finds its samples by *name*
+ * (doom_dmx_find_sfx over sfxinfo_t::name, src/doom_dmx.h on why the lookup is
+ * name-based), so Doom's lumpnum is as unused now as it was for the tone path.
+ * Any non-negative value stops s_sound.c asking again; W_GetNumForName would
+ * I_Error on a WAD missing the DS lump, and a missing lump has to cost one
+ * effect rather than the run. */
 static int exo_snd_get_lump(sfxinfo_t *sfx)
 {
     (void)sfx;
     return 0;
 }
 
+/* The tone sequencer needs a pump -- it starts each step of its sequence when
+ * the last one's time is up. The PCM path needs nothing here: its voices
+ * advance inside the kernel's HDA completion interrupt. */
 static void exo_snd_update(void)
 {
     doom_sound_update(DG_GetTicksMs());
@@ -210,24 +271,64 @@ static void exo_snd_update(void)
 
 static void exo_snd_update_params(int channel, int vol, int sep)
 {
-    (void)channel; (void)vol; (void)sep;   /* one mono voice, no volume */
+    if (path_of(channel) == CHAN_PATH_PCM) {
+        doom_sound_pcm_params(channel, vol, sep);
+        return;
+    }
+    /* One mono square wave: no volume, no panning. Unchanged from SCRUM-101. */
+    (void)vol; (void)sep;
 }
 
 static int exo_snd_start(sfxinfo_t *sfx, int channel, int vol, int sep)
 {
-    (void)sep;
+    uint32_t now = DG_GetTicksMs();
+
+    /*
+     * PCM first; the tone table is the fallback, not the default.
+     *
+     * The name is the *link's* where there is one, which is not a detail:
+     * s_sound.c does NOT follow sfx->link before calling here -- it reads the
+     * link only to adjust the volume (S_StartSound, S_UpdateSounds) and passes
+     * the aliasing sfxinfo_t straight through. Doom's own back end resolves it
+     * in I_GetSfxLumpNum (chocolate-doom's i_sdlsound.c does exactly this
+     * `if (sfx->link) sfx = sfx->link` step), and a back end that skipped it
+     * would look for a lump the IWAD does not contain. freedoom2 has one such
+     * sound and vanilla Doom has the same one: `chgun` is SOUND_LINK'd to
+     * sfx_pistol (src/doom/sounds.c) and there is no DSCHGUN in the WAD, so
+     * without this the chaingun -- and only the chaingun -- would drop to a
+     * square-wave tone in the middle of an otherwise sampled soundtrack.
+     */
+    const sfxinfo_t *lump_sfx = (sfx->link != NULL) ? sfx->link : sfx;
+
+    if (doom_sound_pcm_start(lump_sfx->name, channel, sfx->priority, vol, sep,
+                             now)) {
+        set_path(channel, CHAN_PATH_PCM);
+        return channel;
+    }
+
+    set_path(channel, CHAN_PATH_TONE);
     return doom_sound_start((int)(sfx - S_sfx), channel, sfx->priority, vol,
-                            DG_GetTicksMs());
+                            now);
 }
 
 static void exo_snd_stop(int channel)
 {
-    doom_sound_stop(channel);
+    if (path_of(channel) == CHAN_PATH_PCM)
+        doom_sound_pcm_stop(channel);
+    else
+        doom_sound_stop(channel);
+
+    set_path(channel, CHAN_PATH_NONE);
 }
 
 static boolean exo_snd_is_playing(int channel)
 {
-    return doom_sound_is_playing(channel, DG_GetTicksMs()) ? true : false;
+    uint32_t now = DG_GetTicksMs();
+
+    if (path_of(channel) == CHAN_PATH_PCM)
+        return doom_sound_pcm_is_playing(channel, now) ? true : false;
+
+    return doom_sound_is_playing(channel, now) ? true : false;
 }
 
 sound_module_t DG_sound_module = {

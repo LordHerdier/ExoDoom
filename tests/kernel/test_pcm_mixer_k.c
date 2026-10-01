@@ -526,6 +526,141 @@ static void test_stop_all_and_reset(void)
     CU_ASSERT_FALSE(pcm_mixer_is_playing(0x7FFFFFFF));
 }
 
+/* ── Re-placing a live voice (SCRUM-214) ───────────────────────────────── */
+
+/*
+ * The claim is that set_params reaches the *same* place start does: a voice
+ * started hard left and then moved hard right must render exactly what a voice
+ * started hard right renders.  Asserted against the reference conversion
+ * rather than against "louder on the right", so a panning law that drifted
+ * between the two entry points would fail here even if the direction was
+ * right -- the whole point of routing both through gain_for().
+ */
+static void test_set_params_repans_a_live_voice(void)
+{
+    pcm_mixer_reset();
+    doom_dmx_t d = dmx_of(g_ramp, 9, PCM_MIXER_RATE_HZ);
+
+    int16_t reference[9];
+    CU_ASSERT_EQUAL(doom_dmx_to_s16(&d, reference, 9), 9u);
+
+    int h = pcm_mixer_start(&d, PCM_MIXER_VOL_MAX, 0 /* hard left */, 0);
+    CU_ASSERT_TRUE(h >= 0);
+
+    CU_ASSERT_EQUAL(pcm_mixer_set_params(h, PCM_MIXER_VOL_MAX,
+                                         PCM_MIXER_SEP_MAX /* hard right */),
+                    PCM_MIXER_OK);
+
+    clear_out();
+    pcm_mixer_render(g_out, 9);
+
+    for (uint32_t i = 0; i < 9; i++) {
+        CU_ASSERT_EQUAL(g_out[i * PCM_MIXER_CHANNELS + 1], reference[i]);
+        CU_ASSERT_EQUAL(g_out[i * PCM_MIXER_CHANNELS], 0);
+    }
+}
+
+/* Volume alone, and the clamping the syscall layer relies on instead of
+ * range-checking its own arguments. */
+static void test_set_params_changes_volume_and_clamps(void)
+{
+    pcm_mixer_reset();
+    doom_dmx_t d = dmx_of(g_max, 64, PCM_MIXER_RATE_HZ);
+
+    int h = pcm_mixer_start(&d, PCM_MIXER_VOL_MAX, 0, 0);
+    CU_ASSERT_TRUE(h >= 0);
+
+    CU_ASSERT_EQUAL(pcm_mixer_set_params(h, 0, 0), PCM_MIXER_OK);
+    clear_out();
+    pcm_mixer_render(g_out, 4);
+    for (uint32_t i = 0; i < 4 * PCM_MIXER_CHANNELS; i++) {
+        CU_ASSERT_EQUAL(g_out[i], 0);
+    }
+
+    /* Out of range in both directions: clamped, exactly as start's are, so a
+     * caller cannot drive a gain past full scale through this door. */
+    CU_ASSERT_EQUAL(pcm_mixer_set_params(h, 1000, -50), PCM_MIXER_OK);
+    clear_out();
+    pcm_mixer_render(g_out, 4);
+    CU_ASSERT_EQUAL(g_out[0], 32512);   /* vol 127, hard left */
+    CU_ASSERT_EQUAL(g_out[1], 0);
+}
+
+/*
+ * What it must NOT change.  A re-place that reset the phase would restart the
+ * effect every tic Doom retunes it -- which is every tic -- so the sound would
+ * never end; one that touched priority would let a quiet incidental noise
+ * promote itself past the arbitration that admitted it.
+ */
+static void test_set_params_leaves_phase_and_priority_alone(void)
+{
+    pcm_mixer_reset();
+    static const uint8_t two[2] = { 255, 255 };
+    doom_dmx_t d = dmx_of(two, 2, PCM_MIXER_RATE_HZ);
+
+    /* Priority 8: refusable by nothing more important than 8. */
+    int h = pcm_mixer_start(&d, PCM_MIXER_VOL_MAX, 0, 8);
+    CU_ASSERT_TRUE(h >= 0);
+
+    pcm_mixer_render(g_out, 1);                    /* one of its two samples */
+    CU_ASSERT_EQUAL(pcm_mixer_set_params(h, PCM_MIXER_VOL_MAX, 0),
+                    PCM_MIXER_OK);
+
+    /* Phase kept: one more frame finishes it. A reset phase would need two. */
+    pcm_mixer_render(g_out, 1);
+    CU_ASSERT_TRUE(pcm_mixer_is_playing(h));
+    pcm_mixer_render(g_out, 1);
+    CU_ASSERT_FALSE(pcm_mixer_is_playing(h));
+
+    /* Priority kept: fill the mixer with priority-8 voices, retune them all,
+     * and a priority-9 newcomer is still refused. */
+    pcm_mixer_reset();
+    doom_dmx_t big = dmx_of(g_max, 64, PCM_MIXER_RATE_HZ);
+    int handles[PCM_MIXER_VOICES];
+    for (uint32_t i = 0; i < PCM_MIXER_VOICES; i++) {
+        handles[i] = pcm_mixer_start(&big, PCM_MIXER_VOL_MAX, 0, 8);
+        CU_ASSERT_TRUE(handles[i] >= 0);
+    }
+    for (uint32_t i = 0; i < PCM_MIXER_VOICES; i++) {
+        CU_ASSERT_EQUAL(pcm_mixer_set_params(handles[i], 64,
+                                             PCM_MIXER_SEP_CENTRE),
+                        PCM_MIXER_OK);
+    }
+    CU_ASSERT_EQUAL(pcm_mixer_start(&big, PCM_MIXER_VOL_MAX, 0, 9),
+                    PCM_MIXER_ENOVOICE);
+    CU_ASSERT_EQUAL(pcm_mixer_active_voices(), PCM_MIXER_VOICES);
+}
+
+/* A handle whose voice has gone is ENOVOICE and touches nothing -- the case
+ * Doom hits every time it retunes a channel a tic after the sound ended. */
+static void test_set_params_on_a_gone_voice(void)
+{
+    pcm_mixer_reset();
+    doom_dmx_t d = dmx_of(g_max, 64, PCM_MIXER_RATE_HZ);
+
+    int old = pcm_mixer_start(&d, PCM_MIXER_VOL_MAX, 0, 0);
+    CU_ASSERT_TRUE(old >= 0);
+    pcm_mixer_stop(old);
+    CU_ASSERT_EQUAL(pcm_mixer_set_params(old, PCM_MIXER_VOL_MAX, 0),
+                    PCM_MIXER_ENOVOICE);
+
+    /* A stale handle must not reach the voice that took its slot. */
+    int fresh = pcm_mixer_start(&d, PCM_MIXER_VOL_MAX, 0 /* hard left */, 0);
+    CU_ASSERT_TRUE(fresh >= 0);
+    CU_ASSERT_EQUAL(pcm_mixer_set_params(old, PCM_MIXER_VOL_MAX,
+                                         PCM_MIXER_SEP_MAX),
+                    PCM_MIXER_ENOVOICE);
+    clear_out();
+    pcm_mixer_render(g_out, 4);
+    CU_ASSERT_TRUE(g_out[0] > 0);      /* still hard left */
+    CU_ASSERT_EQUAL(g_out[1], 0);
+
+    CU_ASSERT_EQUAL(pcm_mixer_set_params(-1, PCM_MIXER_VOL_MAX, 0),
+                    PCM_MIXER_ENOVOICE);
+    CU_ASSERT_EQUAL(pcm_mixer_set_params(0x7FFFFFFF, PCM_MIXER_VOL_MAX, 0),
+                    PCM_MIXER_ENOVOICE);
+}
+
 /* ── Rejections ────────────────────────────────────────────────────────── */
 
 static void test_start_rejects_bad_input(void)
@@ -604,6 +739,14 @@ void suite_pcm_mixer_tests(CU_pSuite s)
     CU_add_test(s, "retired handle reports not playing",
                 test_retired_handle_reports_not_playing);
     CU_add_test(s, "stop_all and bad handles", test_stop_all_and_reset);
+    CU_add_test(s, "set_params re-pans a live voice",
+                test_set_params_repans_a_live_voice);
+    CU_add_test(s, "set_params changes volume and clamps",
+                test_set_params_changes_volume_and_clamps);
+    CU_add_test(s, "set_params leaves phase and priority alone",
+                test_set_params_leaves_phase_and_priority_alone);
+    CU_add_test(s, "set_params on a finished or stale handle",
+                test_set_params_on_a_gone_voice);
     CU_add_test(s, "start rejects bad input", test_start_rejects_bad_input);
     CU_add_test(s, "out-of-range gain is clamped",
                 test_out_of_range_gain_is_clamped);

@@ -86,6 +86,7 @@ void suite_hda_tests(CU_pSuite s);
 void suite_doom_dmx_tests(CU_pSuite s);
 void suite_pcm_mixer_tests(CU_pSuite s);
 void suite_hda_pcm_tests(CU_pSuite s);
+void suite_doom_sound_pcm_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -112,6 +113,12 @@ int suite_pcm_mixer_cleanup(void);
  * unmounted (SCRUM-212). */
 int suite_hda_pcm_init(void);
 int suite_hda_pcm_cleanup(void);
+
+/* Mounts the freedoom2 module -- the DS* lump it decodes is the whole point of
+ * the suite -- and leaves the mixer, the stream and the module's own channel
+ * table as it found them (SCRUM-214). */
+int suite_doom_sound_pcm_init(void);
+int suite_doom_sound_pcm_cleanup(void);
 
 /* Acquires the disk binding for the suite's own context before the round-
  * trip/hardware tests run and releases it afterward (SCRUM-188). */
@@ -541,6 +548,15 @@ int run_tests(void)
     s = CU_add_suite("syscall_sound_pcm", syscall_sound_pcm_suite_init,
                      syscall_sound_pcm_suite_cleanup);
     suite_syscall_sound_pcm_tests(s);
+
+    /* And what Doom itself plays through all of that: the sound module's PCM
+     * leg, decoding DSSHOTGN out of the mounted WAD and checking the samples
+     * on the voice are the lump's own bytes. After syscall_sound_pcm because
+     * it shares the controller and mixer with it, and mounts the same module
+     * the doom_dmx suite does (SCRUM-214). */
+    s = CU_add_suite("doom_sound_pcm", suite_doom_sound_pcm_init,
+                     suite_doom_sound_pcm_cleanup);
+    suite_doom_sound_pcm_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not
