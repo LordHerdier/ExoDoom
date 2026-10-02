@@ -1229,7 +1229,8 @@ static void store_integer(void *dest, length_mod_t lmod, uint64_t val, int neg)
     }
 }
 
-int vsscanf(const char *str, const char *fmt, va_list ap)
+static int vsscanf_core(const char *str, const char *fmt, va_list ap,
+                        const char **endp)
 {
     const char *s = str;
     const char *f = fmt;
@@ -1291,7 +1292,7 @@ int vsscanf(const char *str, const char *fmt, va_list ap)
             f++;
 
             /* Every conversion except %c and %[ skips leading whitespace. */
-            if (spec != 'c' && spec != '%') {
+            if (spec != 'c' && spec != '%' && spec != '[') {
                 while (scan_isspace((unsigned char)*s))
                     s++;
             }
@@ -1420,6 +1421,68 @@ int vsscanf(const char *str, const char *fmt, va_list ap)
                     assigned++;
                 break;
             }
+            case '[': {
+                /*
+                 * Scanset -- "%[...]" matches a maximal run of characters
+                 * drawn from (or, with a leading '^', excluded from) the
+                 * set inside the brackets.  m_config.c:1792's "%99[^\n]" is
+                 * the one call site: it reads a config value up to the end
+                 * of the line, which %s cannot do because %s stops at any
+                 * whitespace and a value can contain spaces.
+                 *
+                 * A ']' right after '[' or '[^' is a literal member of the
+                 * set, not the closing delimiter -- otherwise there would
+                 * be no way to put ']' in a scanset at all.
+                 */
+                unsigned char set[32] = { 0 };
+                int           negate = 0;
+                char         *dest = suppress ? NULL : va_arg(args, char *);
+                int           n = 0;
+
+                if (*f == '^') { negate = 1; f++; }
+
+                if (*f == ']') {
+                    set[(unsigned char)']' >> 3] |= (unsigned char)(1u << (']' & 7));
+                    f++;
+                }
+
+                while (*f != '\0' && *f != ']') {
+                    set[(unsigned char)*f >> 3] |=
+                        (unsigned char)(1u << ((unsigned char)*f & 7));
+                    f++;
+                }
+
+                if (*f == ']')
+                    f++;
+
+                if (negate) {
+                    int i;
+                    for (i = 0; i < 32; i++)
+                        set[i] = (unsigned char)~set[i];
+                }
+
+                if (*s == '\0')
+                    goto done;
+
+                while (*s != '\0' &&
+                       (set[(unsigned char)*s >> 3] &
+                        (1u << ((unsigned char)*s & 7))) != 0 &&
+                       (width == 0 || n < width)) {
+                    if (dest != NULL)
+                        dest[n] = *s;
+                    s++;
+                    n++;
+                }
+
+                if (n == 0)
+                    goto done;   /* %[ requires at least one matched char */
+
+                if (dest != NULL) {
+                    dest[n] = '\0';
+                    assigned++;
+                }
+                break;
+            }
             case '%':
                 if (*s != '%')
                     goto done;
@@ -1436,6 +1499,8 @@ int vsscanf(const char *str, const char *fmt, va_list ap)
 
 done:
     va_end(args);
+    if (endp != NULL)
+        *endp = s;
 
     /* EOF, not 0, when input ran out before the first conversion -- callers
      * distinguish "nothing matched" from "nothing was there". m_config.c's
@@ -1444,6 +1509,11 @@ done:
         return EOF;
 
     return assigned;
+}
+
+int vsscanf(const char *str, const char *fmt, va_list ap)
+{
+    return vsscanf_core(str, fmt, ap, NULL);
 }
 
 int sscanf(const char *str, const char *fmt, ...)
@@ -1462,22 +1532,52 @@ int sscanf(const char *str, const char *fmt, ...)
 }
 
 /*
- * fscanf: returns EOF, and that is the correct answer rather than a stub.
+ * fscanf -- staged through a bounded line buffer, same idea as %f's
+ * SCAN_FLOAT_FIELD_MAX staging above: a FILE's blob storage isn't
+ * necessarily NUL-terminated, so vsscanf_core can't run directly against
+ * `stream->data + stream->pos` without risking a read past the blob's real
+ * end. 256 bytes comfortably covers one m_config.c line (%79s + a literal
+ * space + %99[^\n] + slack).
  *
- * Its one call site is m_config.c:1792, reading the config file -- and
- * fopen cannot produce a config file to read: there is no writable
- * filesystem, so M_SaveDefaults never wrote one, so M_LoadDefaults' fopen
- * returns NULL and this is never reached. On a console stream there is
- * genuinely no input either.
- *
- * EOF is what C99 specifies for "input failure before any conversion", and
- * it is what M_LoadDefaults' loop already treats as end-of-file. When a real
- * readable stream exists this needs implementing for real -- including the
- * "%99[^\n]" scanset, which vsscanf above deliberately does not handle.
+ * vsscanf_core's new endp out-param is what makes this possible: it reports
+ * exactly how much of the staged line the format consumed, so the stream
+ * position advances to the right place for the *next* fscanf call --
+ * LoadDefaultCollection's "while (!feof(f))" loop depends on that to move
+ * line to line instead of re-reading the first one forever.
  */
+#define FSCANF_LINE_MAX 256
+
 int fscanf(FILE *stream, const char *fmt, ...)
 {
-    (void)stream;
-    (void)fmt;
-    return EOF;
+    char        buf[FSCANF_LINE_MAX];
+    size_t      avail;
+    size_t      n;
+    const char *end;
+    va_list     ap;
+    int         r;
+
+    if (stream == NULL || fmt == NULL)
+        return EOF;
+    if ((stream->flags & FFLAG_READ) == 0)
+        return EOF;   /* console stream: no input to read */
+
+    if (stream->pos >= stream->size) {
+        stream->flags |= FFLAG_EOF;
+        return EOF;
+    }
+
+    avail = stream->size - stream->pos;
+    n = avail < sizeof buf - 1 ? avail : sizeof buf - 1;
+    memcpy(buf, stream->data + stream->pos, n);
+    buf[n] = '\0';
+
+    va_start(ap, fmt);
+    r = vsscanf_core(buf, fmt, ap, &end);
+    va_end(ap);
+
+    stream->pos += (size_t)(end - buf);
+    if (stream->pos >= stream->size)
+        stream->flags |= FFLAG_EOF;
+
+    return r;
 }
