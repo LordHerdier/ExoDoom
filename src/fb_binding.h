@@ -54,13 +54,12 @@ typedef struct {
 #define FB_REVOKE_OK      0   /* marked / cleared / reclaimed                */
 #define FB_REVOKE_ENOENT (-1) /* `who` does not hold the framebuffer         */
 
-/* Verdicts from fb_binding_check_map().  Deliberately three-valued: a caller
- * must not be able to read "not framebuffer memory" as "permitted". */
-#define FB_MAP_NOT_FB    0    /* paddr is not framebuffer memory — the caller
-                               * falls through to generic page ownership     */
-#define FB_MAP_ALLOW     1    /* framebuffer memory and `who` holds it       */
-#define FB_MAP_DENY      2    /* framebuffer memory, held by someone else or
-                               * by nobody — the caller must return -EPERM   */
+/* Verdicts from fb_binding_check_map().  SCRUM-166 makes the real hardware
+ * framebuffer kernel-only: LibOS mappings of its MMIO pages are always denied.
+ * FB_MAP_NOT_FB tells syscall_mem.c to fall through to ordinary page ownership
+ * for physical addresses outside the framebuffer. */
+#define FB_MAP_NOT_FB    0    /* not framebuffer memory; use normal policy   */
+#define FB_MAP_DENY      1    /* real framebuffer MMIO; return -EPERM        */
 
 /*
  * Publish the framebuffer the kernel owns and drop any existing binding.
@@ -112,11 +111,11 @@ page_owner_t fb_binding_owner(void);
  * them; this module only knows how to mark the binding and how to take it back.
  */
 
-/* Phase 1 — record that the kernel wants the framebuffer back from `who`.  The
- * binding is untouched: a marked owner still owns the screen and
- * fb_binding_check_map() still answers FB_MAP_ALLOW for it, because the mark is
- * an ask, not a seizure.  Idempotent.  FB_REVOKE_ENOENT if `who` does not hold
- * it. */
+/* Phase 1 — record that the kernel wants the legacy framebuffer binding back
+ * from `who`.  The binding itself is untouched until release/reclaim, but
+ * SCRUM-166 makes binding ownership reclamation state only: even a marked
+ * holder cannot map the real framebuffer's MMIO pages.  Idempotent.
+ * FB_REVOKE_ENOENT if `who` does not hold it. */
 int fb_binding_revoke_mark(page_owner_t who);
 
 /* Withdraw a mark set by fb_binding_revoke_mark().  FB_REVOKE_ENOENT if `who`
@@ -142,19 +141,14 @@ int fb_binding_reclaim(page_owner_t who);
 int fb_binding_contains(uint64_t paddr);
 
 /*
- * The exo_page_map / exo_page_unmap permission check for one physical page
- * (SCRUM-154 AC2).  SCRUM-153's handler asks this *first* and only consults
- * generic page ownership when it answers FB_MAP_NOT_FB:
+ * The exo_page_map permission check for one physical page.  SCRUM-166 makes
+ * the real framebuffer kernel-only: framebuffer MMIO always returns
+ * FB_MAP_DENY, regardless of legacy binding state.  Non-framebuffer addresses
+ * return FB_MAP_NOT_FB so syscall_mem.c can apply ordinary page ownership.
  *
- *     switch (fb_binding_check_map(paddr, syscall_current_context())) {
- *     case FB_MAP_ALLOW:  break;                     // FB owner, proceed
- *     case FB_MAP_DENY:   return -EXO_EPERM;
- *     case FB_MAP_NOT_FB: // fall through to page_owner(paddr) == caller
- *     }
- *
- * There is no kernel bypass: PAGE_OWNER_KERNEL is denied like anyone else
- * unless it actually holds the binding.  The kernel reaches the framebuffer
- * through the identity map (src/fb.c), never through exo_page_map, so a bypass
- * would only be a hole for a LibOS that learns to spoof a context id.
+ * `who` remains in the interface while the legacy acquire/revocation API is
+ * retained, but it does not affect the mapping verdict.  The kernel reaches
+ * the hardware framebuffer through its identity mapping and the compositor,
+ * never through exo_page_map.
  */
 int fb_binding_check_map(uint64_t paddr, page_owner_t who);

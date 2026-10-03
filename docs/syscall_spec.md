@@ -710,24 +710,20 @@ re-acquire by the current owner succeeds and re-fills the struct: §3.2 makes
 `-EBUSY` the answer to "another LibOS holds it", and a LibOS re-running
 `DG_Init` is not that.
 
-**Enforce.** `fb_binding_check_map(paddr, who)` is the per-page permission gate
-`exo_page_map` / `exo_page_unmap` consult (SCRUM-153). It is deliberately
-three-valued so a caller cannot read "not framebuffer memory" as "permitted":
+**Enforce.** `fb_binding_check_map(paddr, who)` protects the real hardware
+framebuffer's physical range from LibOS mappings. Under SCRUM-166 the result is
+two-valued for mapping policy: an address inside the framebuffer returns
+`FB_MAP_DENY`, while an address outside it returns `FB_MAP_NOT_FB`.
 
 ```c
-switch (fb_binding_check_map(paddr, syscall_current_context())) {
-case FB_MAP_ALLOW:  break;              /* FB owner — proceed              */
-case FB_MAP_DENY:   return -EXO_EPERM;  /* FB memory, someone else's       */
-case FB_MAP_NOT_FB: /* fall through to page_owner(paddr) == caller        */
-}
-```
+There is no allow case. Holding the legacy framebuffer binding does
+not grant permission to map the hardware framebuffer. The extent remains
+page-granular because mapping permission is decided per 4 KiB page and the
+physical framebuffer base need not be page-aligned. The kernel reaches the
+hardware framebuffer directly; LibOS contexts render through their private
+shadow framebuffers and never receive the hardware MMIO mapping through
+`exo_page_map`.
 
-The extent is page-granular: the framebuffer's physical range is widened to
-whole 4 KiB pages, because mapping permission is decided per page and the base
-need not be page-aligned. An *unheld* framebuffer denies too — it is not public
-property, the LibOS has to bind it first — and there is no kernel bypass: the
-kernel reaches the framebuffer through the identity map (`src/fb.c`), never
-through `exo_page_map`.
 
 **Reclaim.** `fb_binding_release(who)` drops the binding if `who` holds it and
 is a no-op otherwise, so reclamation can call it unconditionally for a context
@@ -946,9 +942,11 @@ rests on, and both mechanisms enforce it:
 - A marked page keeps its owner. `page_owner()` still names the context,
   `free_page_owned()` still lets that context (and only that context) free it,
   and SCRUM-153's `exo_page_map` will still map it.
-- A marked framebuffer binding is still held. `fb_binding_check_map()` still
-  answers `FB_MAP_ALLOW` for its owner, so a LibOS asked for the screen can
-  finish the frame it is drawing before handing it over.
+- A marked legacy framebuffer binding is still recorded as held until it is
+  released or reclaimed, but that state no longer grants hardware mapping
+  permission. Under SCRUM-166, `fb_binding_check_map()` returns `FB_MAP_DENY`
+  for framebuffer MMIO regardless of owner or revocation state. Active LibOS
+  framebuffer access is through the context's private shadow framebuffer.
 
 If the mark revoked permission the moment it landed, phase 2 would be
 unimplementable — there would be nothing left for the LibOS to return.
@@ -1058,11 +1056,18 @@ space, and it is the one the kernel is running in: until each LibOS gets its
 own PML4 (SCRUM-48), `exo_page_map` edits the kernel's page tables. Two rules
 make that safe:
 
-- **The LibOS window.** `vaddr` must lie in
-  `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[64 TiB, 128 TiB)`, and anything
-  else is `-EPERM`. Ownership answers *which physical page*; the window answers
-  *where*, and both questions have to be asked — a LibOS must not be able to
-  install a page it legitimately owns over kernel text.
+- **Per-context LibOS VA policy (SCRUM-166).** Every real `context_t` owns a
+  VA policy describing the range in which that context may install mappings.
+  `context_create()` initializes the policy to
+  `[EXO_USER_VA_BASE, EXO_USER_VA_END)` = `[64 TiB, 128 TiB)`, preserving the
+  existing ABI aperture as the default rather than using it as one global
+  authorization rule. `exo_page_map`, `exo_page_unmap`, and pointer-taking
+  syscalls authorize addresses against the policy belonging to
+  `syscall_current_context()`. The boot-time compatibility owner
+  `PAGE_OWNER_LIBOS`, which can exist without a `context_t` row, uses the same
+  default aperture until execution moves to a real context. Ownership answers
+  *which physical page* a context may map; its VA policy answers *where* it may
+  map it, and both checks are required.
 
   **Why the base is 64 TiB and not 4 GiB.** The kernel map is an *identity* map
   (`vmm_init`, SCRUM-15): every byte of usable RAM is mapped at a virtual

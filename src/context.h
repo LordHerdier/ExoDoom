@@ -152,9 +152,15 @@ _Static_assert(sizeof(context_regs_t) == 128,
                 "context_switch.s hardcodes sizeof(context_regs_t)");
 
 typedef struct {
-    page_owner_t     id;
-    context_regs_t   regs;
-    context_state_t  state;
+    uint64_t base;
+    uint64_t end;
+} context_va_policy_t;
+
+typedef struct {
+    page_owner_t        id;
+    context_regs_t      regs;
+    context_state_t     state;
+    context_va_policy_t va_policy;
 } context_t;
 
 /* Table capacity is VMM_MAX_ADDRESS_SPACES minus one: every context here is
@@ -224,6 +230,20 @@ int context_destroy(page_owner_t id);
  * context_destroy() call -- the table has no stable storage guarantee
  * beyond that, the same way vmm's own registry doesn't. */
 context_t *context_lookup(page_owner_t id);
+
+/*
+ * Return `id`'s virtual-address policy, or NULL when `id` is not represented
+ * by a live context-table entry. PAGE_OWNER_LIBOS is the boot-time
+ * compatibility owner and therefore has no table-backed policy object.
+ */
+const context_va_policy_t *context_va_policy(page_owner_t id);
+
+/*
+ * Whether [base, base+len) is permitted by `id`'s VA policy. The complete
+ * range must fit without wrapping. PAGE_OWNER_LIBOS uses the default
+ * EXO_USER_VA_* aperture for compatibility until a real context is running.
+ */
+int context_range_in_va_policy(page_owner_t id, uint64_t base, uint64_t len);
 
 /* Number of contexts currently in a non-UNUSED state. */
 uint32_t context_count(void);

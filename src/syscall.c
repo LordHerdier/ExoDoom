@@ -67,6 +67,11 @@ page_owner_t syscall_current_context(void)
     return context_current();
 }
 
+int exo_range_in_user_window(uint64_t base, uint64_t len)
+{
+    return context_range_in_va_policy(syscall_current_context(), base, len);
+}
+
 int exo_user_range_mapped(uint64_t base, uint64_t len, int writable)
 {
     /* Mirrors exo_range_in_user_window's len==0 rule: an empty range can't

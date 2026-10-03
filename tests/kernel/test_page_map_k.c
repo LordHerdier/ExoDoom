@@ -281,12 +281,11 @@ static void test_bad_arguments_rejected(void)
 }
 
 /*
- * The framebuffer is the case generic page ownership cannot decide: its pages
- * are MMIO, outside the PMM's pool, so page_owner() calls them FREE.  Mapping
- * them follows the binding instead (§3.5) — which is how DG_Init gets pixels
- * on screen and how nobody else does.
+ * The real framebuffer is MMIO outside the PMM's pool, so generic page
+ * ownership cannot protect it.  SCRUM-166 makes that hardware mapping
+ * kernel-only: legacy binding state must never authorize exo_page_map.
  */
-static void test_framebuffer_follows_the_binding(void)
+static void test_framebuffer_mapping_is_always_denied(void)
 {
     const fb_geometry_t *geom = fb_binding_geometry();
     CU_ASSERT_PTR_NOT_NULL(geom);
@@ -296,36 +295,31 @@ static void test_framebuffer_follows_the_binding(void)
     page_owner_t me = syscall_current_context();
     uint64_t fb_page = geom->phys_addr & ~(uint64_t)(VMM_PAGE_SIZE - 1);
 
-    /* Unheld: not public property. */
+    /* Unheld: denied. */
     fb_binding_release(fb_binding_owner());
     CU_ASSERT_EQUAL(do_map(SCRATCH, fb_page, MAP_RW), -EXO_EPERM);
 
-    /* Held by someone else: still refused. */
-    fb_binding_acquire(OTHER_LIBOS);
+    /* A different legacy holder does not change the mapping policy. */
+    CU_ASSERT_EQUAL(fb_binding_acquire(OTHER_LIBOS), FB_BIND_OK);
     CU_ASSERT_EQUAL(do_map(SCRATCH, fb_page, MAP_RW), -EXO_EPERM);
 
-    /* Held by the caller: allowed, and unmappable again by the caller. */
+    /* Even the caller holding the legacy binding cannot map hardware MMIO. */
     fb_binding_release(OTHER_LIBOS);
     CU_ASSERT_EQUAL(fb_binding_acquire(me), FB_BIND_OK);
-    CU_ASSERT_EQUAL(do_map(SCRATCH, fb_page, MAP_RW), 0);
+    CU_ASSERT_EQUAL(do_map(SCRATCH, fb_page, MAP_RW), -EXO_EPERM);
 
     uint64_t resolved = 0;
     CU_ASSERT_EQUAL(vmm_translate_in(current_root(), SCRATCH, &resolved, NULL),
-                    VMM_OK);
-    CU_ASSERT_EQUAL(resolved, fb_page);
+                    VMM_ENOENT);
 
-    CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
     fb_binding_release(me);
 }
 
 /*
- * Losing the framebuffer must not leave the LibOS holding an address it can
- * never clean up.  The kernel repossessing the screen (§3.6) does not walk the
- * page tables, so the mapping outlives the binding; if unmapping it then
- * required the binding, that virtual address would be dead space for the rest
- * of the context's life.
+ * Reclaiming a legacy framebuffer binding must not change the hardware MMIO
+ * policy. Neither the former holder nor a newly acquired holder may map it.
  */
-static void test_fb_mapping_removable_after_reclaim(void)
+static void test_fb_reclaim_does_not_grant_mapping(void)
 {
     const fb_geometry_t *geom = fb_binding_geometry();
     CU_ASSERT_PTR_NOT_NULL(geom);
@@ -336,21 +330,22 @@ static void test_fb_mapping_removable_after_reclaim(void)
     uint64_t fb_page = geom->phys_addr & ~(uint64_t)(VMM_PAGE_SIZE - 1);
 
     CU_ASSERT_EQUAL(fb_binding_acquire(me), FB_BIND_OK);
-    CU_ASSERT_EQUAL(do_map(SCRATCH_2, fb_page, MAP_RW), 0);
-
-    /* The kernel takes the screen back; the mapping is untouched by that. */
-    CU_ASSERT_EQUAL(fb_binding_reclaim(me), FB_REVOKE_OK);
-    CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
-
-    /* Mapping it again is refused — the binding is gone... */
     CU_ASSERT_EQUAL(do_map(SCRATCH_2, fb_page, MAP_RW), -EXO_EPERM);
 
-    /* ...but letting go of it is not. */
-    CU_ASSERT_EQUAL(do_unmap(SCRATCH_2), 0);
+    /* Reclaim the legacy binding. Hardware MMIO remains inaccessible. */
+    CU_ASSERT_EQUAL(fb_binding_reclaim(me), FB_REVOKE_OK);
+    CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
+    CU_ASSERT_EQUAL(do_map(SCRATCH_2, fb_page, MAP_RW), -EXO_EPERM);
+
+    /* A different context acquiring the legacy binding changes nothing. */
+    CU_ASSERT_EQUAL(fb_binding_acquire(OTHER_LIBOS), FB_BIND_OK);
+    CU_ASSERT_EQUAL(do_map(SCRATCH_2, fb_page, MAP_RW), -EXO_EPERM);
 
     uint64_t resolved = 0;
     CU_ASSERT_EQUAL(vmm_translate_in(current_root(), SCRATCH_2, &resolved, NULL),
                     VMM_ENOENT);
+
+    fb_binding_release(OTHER_LIBOS);
 }
 
 /* The suite borrows the framebuffer binding and allocates under a second
@@ -402,9 +397,10 @@ void suite_page_map_tests(CU_pSuite s)
     CU_add_test(s, "remap over foreign rejected", test_remap_over_foreign_mapping_rejected);
     CU_add_test(s, "vaddr outside window",       test_vaddr_outside_window_rejected);
     CU_add_test(s, "bad arguments rejected",     test_bad_arguments_rejected);
-    CU_add_test(s, "framebuffer follows binding", test_framebuffer_follows_the_binding);
-    CU_add_test(s, "fb mapping removable after reclaim",
-                test_fb_mapping_removable_after_reclaim);
+    CU_add_test(s, "framebuffer hardware mapping is always denied",
+            test_framebuffer_mapping_is_always_denied);
+    CU_add_test(s, "fb reclaim does not grant hardware mapping",
+            test_fb_reclaim_does_not_grant_mapping);
     CU_add_test(s, "map charges caller's table quota",
                 test_map_charges_callers_table_quota);
 }

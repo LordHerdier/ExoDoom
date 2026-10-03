@@ -165,14 +165,15 @@ int fb_binding_contains(uint64_t paddr)
 
 int fb_binding_check_map(uint64_t paddr, page_owner_t who)
 {
+    (void)who;
+
     if (!fb_binding_contains(paddr))
         return FB_MAP_NOT_FB;
 
-    if (who != PAGE_OWNER_FREE && fb_owner == who)
-        return FB_MAP_ALLOW;
-
-    /* Framebuffer memory that the caller has not acquired — including the case
-     * where nobody has.  An unheld framebuffer is not public property: the
-     * LibOS has to bind it first. */
+    /*
+     * SCRUM-112/SCRUM-166: LibOS contexts render through their private shadow
+     * framebuffers. The real hardware framebuffer belongs to the kernel and
+     * is reached only by the compositor, never through exo_page_map.
+     */
     return FB_MAP_DENY;
 }

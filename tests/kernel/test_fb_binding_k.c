@@ -6,17 +6,14 @@
  * every caller now gets its own private virtual framebuffer
  * (src/fb_shadow.c, test_fb_shadow_k.c) instead of exclusive access to the
  * real one, so the real binding is permanently unheld in normal operation.
- * fb_binding.c's establish/enforce/reclaim API is otherwise unchanged and
- * still exactly what fb_binding_check_map() (SCRUM-153's exo_page_map gate)
- * relies on to keep the real framebuffer unmappable by any LibOS — these
- * tests exercise that API directly (fb_binding_acquire/_release/_check_map)
- * rather than through the syscall, which is the only thing that changed:
- * they are defense-in-depth coverage of the module itself now, not of what
- * exo_fb_acquire does with it. The handful of tests that *did* exercise
- * establish/reclaim through the real exo_fb_acquire dispatch were rewritten
- * for the new contract (no more -EXO_EBUSY, no more binding taken) rather
- * than removed outright.
+  * SCRUM-166 further separates that legacy binding state from mapping policy:
+ * fb_binding_acquire() still supports the existing reclamation protocol, but
+ * ownership no longer grants permission to map the real framebuffer.
+ * fb_binding_check_map() denies framebuffer MMIO to every LibOS context.
  *
+ * These tests therefore exercise acquire/release/reclaim as legacy lifecycle
+ * state and independently verify that the physical framebuffer remains
+ * unmappable regardless of who holds that state.
  * Most tests install a synthetic geometry rather than using the machine's real
  * framebuffer, so the address arithmetic is exact and the assertions do not
  * depend on the video mode GRUB happened to pick.  The suite's init/cleanup
@@ -362,26 +359,18 @@ static void test_degenerate_geometry_refused(void)
 
 /* ── Enforce: the exo_page_map gate (SCRUM-153) ──────────────────────────── */
 
-/* The whole point of the binding: framebuffer pages are mappable only by the
- * LibOS that acquired them. */
+/* SCRUM-166: real framebuffer MMIO is kernel-only.  Acquiring the legacy
+ * binding does not grant a LibOS permission to map it; contexts render
+ * through their private shadow framebuffers instead. */
 static void test_map_of_fb_pages_needs_the_binding(void)
 {
     install_test_fb();
 
-    /* Unheld is not public property — the LibOS must acquire first. */
     CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, PAGE_OWNER_LIBOS),
                     FB_MAP_DENY);
-
-    CU_ASSERT_EQUAL(fb_binding_acquire(PAGE_OWNER_LIBOS), FB_BIND_OK);
-
-    CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, PAGE_OWNER_LIBOS),
-                    FB_MAP_ALLOW);
     CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE + TEST_FB_SIZE - 1,
                                          PAGE_OWNER_LIBOS),
-                    FB_MAP_ALLOW);
-
-    /* Another LibOS gets nothing, and neither does the kernel: there is no
-     * bypass, only the binding. */
+                    FB_MAP_DENY);
     CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, OTHER_LIBOS),
                     FB_MAP_DENY);
     CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, PAGE_OWNER_KERNEL),
@@ -389,9 +378,6 @@ static void test_map_of_fb_pages_needs_the_binding(void)
     CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, PAGE_OWNER_FREE),
                     FB_MAP_DENY);
 }
-
-/* Addresses outside the framebuffer are not this table's business: the caller
- * falls through to generic page ownership for them. */
 static void test_non_fb_addresses_fall_through(void)
 {
     install_test_fb();
@@ -455,8 +441,11 @@ static void test_release_lets_another_context_acquire(void)
     CU_ASSERT_EQUAL(fb_binding_acquire(me), FB_BIND_OK);
     CU_ASSERT_EQUAL(fb_binding_owner(), me);
 
-    /* And the new owner can map it, which the previous one no longer can. */
-    CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, me), FB_MAP_ALLOW);
+    /*
+     * Binding ownership is legacy reclamation state only; it no longer grants
+     * either context permission to map the real framebuffer.
+     */
+    CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, me), FB_MAP_DENY);
     CU_ASSERT_EQUAL(fb_binding_check_map(TEST_FB_BASE, OTHER_LIBOS),
                     FB_MAP_DENY);
 
