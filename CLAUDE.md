@@ -217,7 +217,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Keyboard (PS/2 + event ring) | `src/ps2.c/h`, `src/kbd_ring.c/h` |
 | Freestanding libc bits | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`, `src/fpconv.c/h` (float↔decimal); header-only: `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/types.h`, `src/sys/stat.h` |
 | Fixed-point trigonometry (sin/cos/tan/atan, integer floor/ceil) | `src/fixed_math.c/h` |
-| Doom globals from non-vendored netcode | `src/doom_net_stub.c` |
+| Doom net layer, stubbed to single player (SCRUM-97) | `src/doom_net_stub.c` (the two globals standing in for the non-vendored netcode); `src/doom/d_loop.c` + `d_net.c` are the vendored loop above it, driven from ring 0 by `tests/kernel/test_doom_net_k.c` |
 | Vendored Doom engine (linked as the `libos_doom` ring-3 target, SCRUM-66) | `src/doom/`, `src/libos_doom/` |
 | doomgeneric platform layer | `src/doomgeneric_exo.c/h` (timer half: `DG_GetTicksMs`/`DG_SleepMs`, SCRUM-74) |
 | Doom fatal-error path (`I_Error`/`I_Quit` back end) | `src/doom_panic.c/h` |
@@ -567,9 +567,55 @@ convention and calls it from `kernel_main` instead of a test harness.
   true), while Doom's shipped table was generated in single-precision `float`
   with a truncating cast and is off by up to 1.01 LSB — which is also why
   `finesine`'s peak is 65535 and ours is 65536. To make that comparison
-  possible, `build.sh` compiles **`src/doom/tables.c`** — the one file under
-  `src/doom/` the kernel image links, and only under `TESTING=1`; it is pure
+  possible, `build.sh` compiles **`src/doom/tables.c`** — one of only three
+  files under `src/doom/` the kernel image links (the others are `d_loop.c`
+  and `d_net.c`, SCRUM-97, below), and only under `TESTING=1`; it is pure
   const integer arrays with zero undefined references.
+- **Doom's network layer is two booleans, and single player runs through it
+  anyway (SCRUM-97).** Doom has no separate single-player loop: every tic
+  goes through `src/doom/d_loop.c` (build a ticcmd, file it in a 128-slot
+  ring, decide from the clock how many tics are due) and `d_net.c` (hand each
+  one to `G_Ticker`). The networking *beneath* those two was never vendored,
+  and `src/doom_net_stub.c`'s `net_client_connected = false` /
+  `drone = false` are the whole of what replaces it — they are what keep the
+  loop on its local-only side. `drone` is the one with teeth: no ticcmd is
+  ever built for a drone and `PlayersInGame()` counts nobody, so flipping it
+  freezes the game silently rather than failing. `FEATURE_MULTIPLAYER` is
+  `#undef` in `src/doom/doomfeatures.h` and must stay that way: defining it
+  makes `d_loop.c` call a dozen `NET_*` functions that do not exist.
+  Three things the audit turned up that are worth knowing before touching
+  any of it:
+  - **`ticdup` is a zero-initialised global that `d_loop.c` divides by in ten
+    places.** It becomes 1 only inside `D_StartNetGame()`, which
+    `D_CheckNetGame()` calls late in `D_DoomMain`. Nothing between `Z_Init`
+    and that call reaches `NetUpdate`/`TryRunTics`, so the order is safe
+    today — but anything that calls into the tic loop earlier (an early
+    `D_Display`, a progress callback during `R_Init`) is a ring-3 `#DE`, not
+    a wrong answer.
+  - **`D_ConnectNetGame()` read an uninitialised stack field on every boot.**
+    Upstream leaves `net_connect_data_t connect_data` unzeroed and its
+    initialiser never writes `player_class` (Hexen's) or `deh_sha1sum`
+    (its writer is `#if ORIGCODE`), yet `D_InitNetGame()` reads
+    `player_class` unconditionally. Harmless in practice — no Doom code
+    consumes a player class — but undefined, and the first thing a re-enabled
+    network layer would put on the wire. Fixed with a one-line `= {0}` in
+    `src/doom/d_net.c`, marked `ExoDoom (SCRUM-97)` like the tree's other
+    patches.
+  - **The non-`ORIGCODE` `D_StartNetGame()` assigns none of `localplayer`,
+    `local_playeringame[]`, `recvtic` or `offsetms`** — the upstream branch
+    that did is compiled out — so the loop depends on `.bss` being zero.
+    `libos_build_image()` zeroes it on every launch (and SCRUM-196 made a
+    second launch reachable), so this holds; a loader that reused data pages
+    without clearing them would start a second Doom mid-ring.
+  `tests/kernel/test_doom_net_k.c` links the **real** `d_loop.c`/`d_net.c`
+  into the test kernel (`build.sh` step 3d) and runs them in the order
+  `D_DoomMain`/`D_DoomLoop` do, against a faked engine and a hand-moved
+  clock. Its cases are **one continuous session, order-dependent on
+  purpose** — `d_loop.c` keeps its state in file statics with no reset. That
+  TU also *defines* the 22 engine globals and 16 functions the two objects
+  import (`players`, `netgame`, `G_Ticker`, `I_GetTime`, …); nothing else in
+  the kernel image may define those names, so a second test wanting the same
+  fakes must share that file's, not add its own.
 - **`I_Error`/`I_Quit` report on serial and stop (SCRUM-83).** Doom's fatal
   path used to write to `stderr`, open a zenity dialog through `system()`,
   and `exit(-1)` — none of which exists here. `src/doom/i_system.c` now calls

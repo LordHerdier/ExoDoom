@@ -76,6 +76,7 @@ void suite_doom_keymap_tests(CU_pSuite s);
 void suite_doom_sfx_tone_tests(CU_pSuite s);
 void suite_doom_sound_tests(CU_pSuite s);
 void suite_libos_doom_tests(CU_pSuite s);
+void suite_doom_net_tests(CU_pSuite s);
 void suite_syscall_stat_tests(CU_pSuite s);
 void suite_ata_tests(CU_pSuite s);
 void suite_syscall_disk_tests(CU_pSuite s);
@@ -473,6 +474,13 @@ int run_tests(void)
     s = CU_add_suite("libos_doom", libos_doom_suite_init,
                      libos_doom_suite_cleanup);
     suite_libos_doom_tests(s);
+
+    /* Drives the real src/doom/d_loop.c + d_net.c against a faked engine and
+     * a hand-moved clock: no hardware, no kernel state touched, so no suite
+     * init/cleanup. Its cases are one continuous session and must stay in
+     * the order they are registered -- see the file comment (SCRUM-97). */
+    s = CU_add_suite("doom_net", NULL, NULL);
+    suite_doom_net_tests(s);
 
     s = CU_add_suite("syscall_stat", NULL, syscall_stat_suite_cleanup);
     suite_syscall_stat_tests(s);

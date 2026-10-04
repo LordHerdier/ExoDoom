@@ -45,6 +45,23 @@
  *
  * If real networking ever arrives, deleting this file is the whole
  * migration: net_client.c would define both.
+ *
+ * ── What depends on these staying false (SCRUM-97) ─────────────────────
+ *
+ * Doom has no separate single-player loop -- every tic runs through
+ * d_loop.c's netgame machinery -- and these two values keep it on its
+ * local-only side.
+ *
+ * `drone` is the one with teeth.  BuildNewTic() builds no ticcmd for a
+ * drone and PlayersInGame() counts nobody, so with it true TryRunTics()
+ * never runs a tic: the game sits frozen, with no error to name the cause.
+ * `net_client_connected` is what keeps TryRunTics() on SinglePlayerClear()
+ * and off OldNetSync(), which paces the loop against `recvtic` -- a counter
+ * only D_ReceiveTic() advances, and nothing calls that without a network.
+ *
+ * tests/kernel/test_doom_net_k.c links the real d_loop.c and d_net.c
+ * against this file and drives a whole single-player session through them;
+ * its first and last cases assert both are still false.
  */
 
 #include "doom/doomtype.h"
