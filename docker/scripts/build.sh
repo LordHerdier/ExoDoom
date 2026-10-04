@@ -789,6 +789,7 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     cmds+=("$(qcmd _assemble_test_s_one "$s" "$pp" "$o")")
   done
   run_parallel "${cmds[@]}" || { echo "    ERROR: kernel test assembly failed"; exit 1; }
+
   echo "[3d/7] Compile Doom's tic loop and net glue (SCRUM-97)"
   # Another narrow exception to "nothing in src/doom/ links into
   # build/exodoom", on the same terms as tables.c in step 3b3 above: d_loop.c

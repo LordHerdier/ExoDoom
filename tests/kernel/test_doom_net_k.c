@@ -23,7 +23,7 @@
  * a divisor that is zero until somebody sets it.
  *
  * This suite links the REAL d_loop.c and d_net.c into the test kernel
- * (docker/scripts/build.sh step 3b4, the same narrow exception SCRUM-41 made
+ * (docker/scripts/build.sh step 3d, the same narrow exception SCRUM-41 made
  * for tables.c) and runs them the way D_DoomMain and D_DoomLoop do, with
  * only the game engine below them faked: D_ConnectNetGame, D_CheckNetGame,
  * the one TryRunTics D_DoomLoop makes before the loop clock starts,
