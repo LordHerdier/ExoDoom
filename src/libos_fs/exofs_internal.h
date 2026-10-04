@@ -30,6 +30,11 @@
 /* See exofs_volume_t::open_ent_block below. */
 #define EXOFS_MAX_OPEN_HANDLES 8u
 
+/* See exofs_volume_t::name_room below. A real entry is at most
+ * EXOFS_BLOCK_SIZE - EXOFS_NAME_HDR_SIZE, so this cannot be mistaken for
+ * one. */
+#define EXOFS_NAME_ROOM_UNKNOWN 0xFFFFu
+
 typedef struct exofs_volume {
     int      mounted;
 
@@ -81,6 +86,45 @@ typedef struct exofs_volume {
      * never trusted, since a stale hint only costs a longer scan.
      */
     uint32_t next_free_hint;
+
+    /*
+     * What each block of the name chain can still take (SCRUM-223).
+     *
+     * name_room[i] is the longest name the i-th block of the chain has room
+     * for, or EXOFS_NAME_ROOM_UNKNOWN when that block has not been looked at
+     * since mount. It is the name area's counterpart to next_free_hint
+     * above, and it is a table rather than one number because names are not
+     * one size: a block with no room for a 200-byte name may still have room
+     * for a 5-byte one, so "the first block with room" is a different block
+     * for every length asked for. One hint either strands the space it has
+     * moved past or has to rescan it, which is the cost this exists to
+     * remove. exofs_name.c has the allocation loop that consults it.
+     *
+     * NOT A CACHE OF ANYTHING ON DISK. It holds no block contents, is never
+     * written back and has no dirty state, so the top of this file is still
+     * right that the FAT's bitmap is the only dirty-state invariant. All it
+     * ever answers is "is this block worth reading?", and it can only be
+     * unhelpful in the harmless direction: UNKNOWN -- or an index past
+     * name_room_cap, when the heap could not supply a bigger table -- means
+     * "read it and see", which is what every allocation did for every block
+     * before this existed.
+     *
+     * From libos_heap_alloc(), freed at unmount. NULL until the first name
+     * is stored after a mount; 2 bytes per name block after that.
+     */
+    uint16_t *name_room;
+    uint32_t  name_room_cap;
+
+    /*
+     * Data-block transfers since mount, counted in exofs_read_block() and
+     * exofs_write_block(). Nothing in the filesystem reads these. They exist
+     * so that "this operation re-reads the whole chain" can be a failing
+     * assertion in tests/kernel/test_exofs_k.c instead of a remark in a code
+     * review: SCRUM-223, -224 and -225 were all found by reading, and each
+     * is one refactor away from coming back unnoticed.
+     */
+    uint32_t stat_block_reads;
+    uint32_t stat_block_writes;
 
     /*
      * Directory-entry refs of every exofs_file_t currently open (SCRUM-189

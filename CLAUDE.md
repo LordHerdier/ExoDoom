@@ -429,7 +429,7 @@ convention and calls it from `kernel_main` instead of a test harness.
   of those sectors are a file. **`docs/syscall_spec.md` §4's old
   "recommended approach" of an in-kernel ramdisk is superseded** by the
   2026-09-19 storage decision; that section now carries a note saying so.
-  Five things to know before touching it:
+  Six things to know before touching it:
   - **It is compiled only under `TESTING=1`**, by `build.sh` step `[3b4/7]`,
     and a shipped kernel links none of it. That works because `src/libos_fs/`
     is a *subdirectory*, which step 3's `src/*.c` glob never descends into —
@@ -476,6 +476,21 @@ convention and calls it from `kernel_main` instead of a test harness.
     last; `rmdir`/`unlink` unlink from the parent before freeing blocks.
     Reversing any of them turns a harmless leak into two files sharing
     storage. Do not "tidy" these into a more natural-looking order.
+  - **What an operation costs is asserted, not assumed (SCRUM-223).**
+    `exofs_volume_t` counts its own data-block transfers
+    (`stat_block_reads`/`_writes`, bumped in `exofs_read_block()`/
+    `exofs_write_block()`), and the suite states costs as numbers — "storing
+    a name reads one block" — because every disk read is a syscall with
+    interrupts off and a chain re-walk is invisible to a test that only
+    checks results. The name allocator is what that first caught: it re-read
+    every full block on every call, O(M²) to create M files. It now keeps
+    `name_room[]`, the longest name each block of the name chain can still
+    take, and steps over blocks that cannot fit without reading them. **The
+    table must never change where a name lands** — placement is still first
+    fit in chain order — and a test runs one workload with the table and
+    with it wiped before every call and compares every record, so a
+    placement difference is a bug in the table, not a tuning choice.
+    `docs/filesystem.md` §6.
 - **`format()` mounts the volume it just wrote**, which surprises people
   reading `exofs_volume.c`. Creating a directory entry allocates a name
   record, which needs the FAT cache and the superblock's `name_head`, so the

@@ -44,6 +44,16 @@
  * that points into the block, which requires an index this filesystem does
  * not have. Reuse matters concretely for SCRUM-104: Doom's save-file
  * rotation renames constantly, and a bump-only name area grows forever.
+ *
+ * WHAT AN ALLOCATION COSTS (SCRUM-223). First fit in chain order means
+ * finding the first block with room, and finding that out used to mean
+ * reading every block before it, on every call -- O(M^2) block reads to
+ * store M names. exofs_volume_t::name_room now remembers what each block of
+ * the chain can still take, so a block that cannot hold the name is stepped
+ * over without being read and the usual cost is one read: the block the
+ * name goes into. Placement is unchanged; exofs_name.c's "Room table"
+ * comment says why that is safe to rely on, and docs/filesystem.md section 6
+ * has the numbers.
  */
 
 /*

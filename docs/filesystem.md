@@ -120,9 +120,9 @@ to start with the right four bytes must not produce a mounted volume whose
 
 ## 4. Caching
 
-**The FAT lives in RAM; nothing else is cached.** The whole FAT is read at
-mount and written back per *sector* through a dirty bitmap. Data and
-directory blocks are read through on every access.
+**The FAT lives in RAM; no other block's contents are cached.** The whole
+FAT is read at mount and written back per *sector* through a dirty bitmap.
+Data and directory blocks are read through on every access.
 
 Chain walks are the hot path, and a FAT lookup that cost a syscall would make
 each walk a series of interrupt-disabled disk transfers — `syscall`'s FMASK
@@ -138,6 +138,22 @@ FAT changes are **marked dirty, not flushed**. The flush belongs to the
 operation, not the block — extending a file by 100 blocks should cost one
 writeback, not 100 — so callers `exofs_sync()` at the point an operation
 completes.
+
+### What is remembered that is not a cache
+
+Two pieces of per-mount state exist purely to avoid work, and neither holds
+anything that is on the disk or has to be written back to it — so the FAT's
+bitmap is still the only dirty-state invariant there is:
+
+- `next_free_hint` — where the next free-block search starts (§5).
+- `name_room[]` — for each block of the name chain, the longest name it can
+  still take (§6, SCRUM-223).
+
+Both follow the same rule: **they may only ever be unhelpful, never wrong in
+a way that changes an answer.** A stale `next_free_hint` costs a longer scan.
+A `name_room` entry is either exact or "unknown", and unknown means "read the
+block and see", which is what happened for every block before the table
+existed.
 
 ---
 
@@ -201,6 +217,59 @@ Records never straddle a block boundary, so reading a name is always one
 block read. Freed records are marked and reused rather than compacted,
 because SCRUM-104's save-file rotation renames constantly and a bump-only
 name area would grow without bound.
+
+### What storing a name costs
+
+Placement is **first fit in chain order**: a name goes into the first block
+of the name chain that has room for it, and the chain grows only when no
+existing block does. That rule has not changed since SCRUM-189. What changed
+in SCRUM-223 is what it costs to apply.
+
+The original `exofs_name_alloc()` restarted at the head of the chain on every
+call and *read each block from disk* on the way to one with room. The Mth
+name stored therefore read every full block before it — O(M²) block reads to
+create M files, each read a syscall with interrupts off (§4).
+
+A single "resume here" hint, like the FAT's, does not fix this without
+changing the rule, because names are not one size: a block with no room for
+a 40-byte name may still have room for a 7-byte one, so "the first block with
+room" is a different block for every length. A hint either strands the space
+it has moved past or has to go back and rescan it.
+
+So the volume keeps `name_room[]` instead — 2 bytes per name block — and the
+allocation loop steps over any block whose entry says the name cannot fit,
+without reading it. The walk itself is over the in-RAM FAT. In the steady
+state **storing a name reads exactly one block: the one it goes into.**
+
+| | block reads to store 480 mixed-length names (a 21-block chain) |
+|---|---|
+| before | 5,022 — and the worst single call read all 21 blocks |
+| after | 480 |
+
+Three properties make the table safe to consult, and each has a test:
+
+- **It never changes where a name goes.** An entry is written only from a
+  block that has just been scanned end to end, by the two functions that are
+  the only writers of name blocks, so it is exact. The suite runs one
+  scripted workload twice — normally, and with the table wiped before every
+  call, which is the old algorithm exactly — and requires every placement to
+  match (`the name-room table never changes placement`).
+- **A free reaches it.** `exofs_name_free()` updates the entry after its
+  write succeeds. Without that, a freed record in a block marked "full" would
+  never be looked at again — a leak under save-file rotation
+  (`freeing a name reopens a full block`).
+- **Corruption is not remembered as "full".** A scan that stops on a bad
+  header records nothing, so the block is read and reported `-EXO_EIO` again
+  next time (`a corrupt name block is not remembered as full`).
+
+It is per-mount and rebuilt lazily: after a remount the first allocation
+reads its way down the chain once, and the second is back to one read. If
+the heap cannot supply the table, or a bigger one, allocation carries on
+without it — slower, otherwise identical.
+
+One behaviour does differ: a block already known to be too small is no
+longer re-read, so damage that appears in it later goes unnoticed until
+something needs that block.
 
 ---
 

@@ -1421,6 +1421,336 @@ static void test_bad_name_references_rejected(void)
     exofs_unmount();
 }
 
+/* ---- Name area: what an allocation costs (SCRUM-223) ---------------------
+ *
+ * exofs_name_alloc() used to restart at the head of the name chain on every
+ * call and read each block on the way to one with room, so the Mth name
+ * stored cost a read of every full block before it -- O(M^2) block reads to
+ * create M files, each one a syscall with interrupts off. It now consults
+ * exofs_volume_t::name_room and reads only a block that can take the name.
+ *
+ * "It got faster" is not something a test can assert, so these count. The
+ * volume counts its own data-block transfers (stat_block_reads), and every
+ * case below states its cost as a number.
+ */
+
+/* Lengths the way a real directory tree has them -- nothing uniform. That
+ * matters: with one length, "the first block with room" is one block and a
+ * single hint would do. With several it is a different block per length,
+ * which is the case the table exists for. */
+static const uint32_t mixed_lens[8] = { 9u, 23u, 14u, 31u, 7u, 18u, 12u, 40u };
+
+/*
+ * The ticket's scenario: create a lot of names in a row.
+ *
+ * Exactly one block read each -- the block the name goes into -- however
+ * long the chain has become. 480 names is ~20 blocks, past the table's
+ * initial 16 entries on purpose, so the run crosses a table growth as well.
+ */
+static void test_name_alloc_reads_one_block_per_name(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    enum { N = 480 };
+    char name[EXOFS_MAX_NAME + 1];
+
+    uint32_t reads_at_start = v->stat_block_reads;
+    uint32_t worst = 0;
+    uint32_t failed = 0;
+
+    for (uint32_t i = 0; i < N; i++) {
+        uint32_t len = mixed_lens[i % 8u];
+        make_name(name, len, i);
+
+        uint32_t before = v->stat_block_reads;
+        uint32_t blk = 0; uint16_t off = 0;
+        if (exofs_name_alloc(v, name, len, &blk, &off) != 0) failed++;
+
+        uint32_t cost = v->stat_block_reads - before;
+        if (cost > worst) worst = cost;
+    }
+
+    CU_ASSERT_EQUAL(failed, 0u);
+
+    uint32_t chain = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain), 0);
+    CU_ASSERT_TRUE(chain > 16u);
+
+    CU_ASSERT_EQUAL(worst, 1u);
+    CU_ASSERT_EQUAL(v->stat_block_reads - reads_at_start, (uint32_t)N);
+
+    exofs_unmount();
+}
+
+/*
+ * The table must never change WHERE a name goes -- only how many blocks are
+ * read to find out.
+ *
+ * So the same scripted workload is run twice on a fresh volume and every
+ * placement recorded: once normally, once with the table wiped to UNKNOWN
+ * before every single call. Wiped, the allocator has no choice but to read
+ * each block in chain order, which is exactly the algorithm this ticket
+ * replaced -- so the second run is the old behaviour, reproduced rather
+ * than remembered, and the two runs have to agree record for record.
+ *
+ * The script is built to make a wrong table entry show: mixed lengths, then
+ * every third name freed (holes of every size in every block, some of which
+ * coalesce), then sixty more in a different length order so some fit the
+ * holes and some do not. An entry that is too low sends a name past a block
+ * it should have gone into; one that is too high costs a read the count
+ * below would notice.
+ */
+enum { SCRIPT_FILL = 100, SCRIPT_TOTAL = 160 };
+
+typedef struct {
+    uint32_t blk[SCRIPT_TOTAL];
+    uint16_t off[SCRIPT_TOTAL];
+    uint32_t chain;
+    uint32_t reads;
+    uint32_t frees;
+    int      ok;
+} name_script_result_t;
+
+static void forget_name_room(exofs_volume_t *v)
+{
+    for (uint32_t i = 0; i < v->name_room_cap; i++) {
+        v->name_room[i] = EXOFS_NAME_ROOM_UNKNOWN;
+    }
+}
+
+static void run_name_script(int forget, name_script_result_t *res)
+{
+    res->ok = 0;
+    res->frees = 0;
+
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    char name[EXOFS_MAX_NAME + 1];
+    uint32_t reads_at_start = v->stat_block_reads;
+
+    for (uint32_t i = 0; i < SCRIPT_FILL; i++) {
+        uint32_t len = mixed_lens[i % 8u];
+        make_name(name, len, i);
+        if (forget) forget_name_room(v);
+        if (exofs_name_alloc(v, name, len, &res->blk[i], &res->off[i]) != 0) {
+            goto out;
+        }
+    }
+
+    for (uint32_t i = 0; i < SCRIPT_FILL; i += 3u) {
+        if (forget) forget_name_room(v);
+        if (exofs_name_free(v, res->blk[i], res->off[i]) != 0) goto out;
+        res->frees++;
+    }
+
+    for (uint32_t i = SCRIPT_FILL; i < SCRIPT_TOTAL; i++) {
+        uint32_t len = mixed_lens[(i * 5u + 3u) % 8u];
+        make_name(name, len, i);
+        if (forget) forget_name_room(v);
+        if (exofs_name_alloc(v, name, len, &res->blk[i], &res->off[i]) != 0) {
+            goto out;
+        }
+    }
+
+    if (exofs_name_chain_len(v, &res->chain) != 0) goto out;
+    res->reads = v->stat_block_reads - reads_at_start;
+    res->ok = 1;
+
+out:
+    exofs_unmount();
+}
+
+static void test_name_room_table_never_changes_placement(void)
+{
+    if (!drive_present()) return;
+
+    /* static: two of these are ~2 KiB, on a 16 KiB kernel stack. */
+    static name_script_result_t with_table, without;
+
+    run_name_script(0, &with_table);
+    run_name_script(1, &without);
+
+    CU_ASSERT_TRUE(with_table.ok);
+    CU_ASSERT_TRUE(without.ok);
+    if (!with_table.ok || !without.ok) return;
+
+    uint32_t moved = 0;
+    for (uint32_t i = 0; i < SCRIPT_TOTAL; i++) {
+        if (with_table.blk[i] != without.blk[i] ||
+            with_table.off[i] != without.off[i]) {
+            moved++;
+        }
+    }
+    CU_ASSERT_EQUAL(moved, 0u);
+    CU_ASSERT_EQUAL(with_table.chain, without.chain);
+    CU_ASSERT_TRUE(with_table.chain > 2u);
+
+    /* With the table: one read per call, alloc or free, and nothing else.
+     * Without: every allocation walks in from the head. */
+    CU_ASSERT_EQUAL(with_table.reads, SCRIPT_TOTAL + with_table.frees);
+    CU_ASSERT_TRUE(without.reads > 2u * with_table.reads);
+}
+
+/*
+ * A free has to reach the table too.
+ *
+ * Fill a dozen blocks, free one name in an early one, and store a name of
+ * the same length: it must land in exactly the record just vacated, for one
+ * read. If exofs_name_free() left the block marked as having no room, the
+ * allocator would skip it and put the name at the far end -- the space
+ * would still be free on disk and nothing would ever look at it again,
+ * which under save-file rotation (SCRUM-104) is a leak.
+ *
+ * And the next name of that length must NOT go there: the block is full
+ * again, and the table has to have learned that as well.
+ */
+static void test_name_free_reopens_a_full_block(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    enum { N = 60 };
+    uint32_t blks[N]; uint16_t offs[N];
+    char name[EXOFS_MAX_NAME + 1];
+
+    for (uint32_t i = 0; i < N; i++) {
+        make_name(name, 100u, i);
+        CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 100u, &blks[i], &offs[i]), 0);
+    }
+
+    uint32_t chain = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain), 0);
+    CU_ASSERT_TRUE(chain >= 12u);
+
+    /* The seventh name: second block, with ten more full blocks after it. */
+    const uint32_t victim = 6u;
+    CU_ASSERT_NOT_EQUAL(blks[victim], blks[0]);
+    CU_ASSERT_NOT_EQUAL(blks[victim], blks[N - 1]);
+
+    CU_ASSERT_EQUAL(exofs_name_free(v, blks[victim], offs[victim]), 0);
+
+    uint32_t before = v->stat_block_reads;
+    uint32_t blk = 0; uint16_t off = 0;
+    make_name(name, 100u, 1000u);
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 100u, &blk, &off), 0);
+    CU_ASSERT_EQUAL(v->stat_block_reads - before, 1u);
+    CU_ASSERT_EQUAL(blk, blks[victim]);
+    CU_ASSERT_EQUAL(off, offs[victim]);
+
+    before = v->stat_block_reads;
+    uint32_t blk2 = 0; uint16_t off2 = 0;
+    make_name(name, 100u, 1001u);
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 100u, &blk2, &off2), 0);
+    CU_ASSERT_EQUAL(v->stat_block_reads - before, 1u);
+    CU_ASSERT_NOT_EQUAL(blk2, blks[victim]);
+
+    /* Both read back, and the name that was reused is the new one. */
+    char back[EXOFS_MAX_NAME + 1];
+    make_name(name, 100u, 1000u);
+    CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, 100u, back), 0);
+    CU_ASSERT_STRING_EQUAL(back, name);
+
+    exofs_unmount();
+}
+
+/*
+ * The table is per-mount: nothing about it is on disk, so a remount starts
+ * with every block unknown. The first allocation afterwards therefore pays
+ * to rediscover the chain -- once -- and the one after it is back to a
+ * single read. Pinned because "rebuild lazily" and "never rebuild" look the
+ * same from a test that only ever runs on a fresh volume.
+ */
+static void test_name_room_table_is_rebuilt_after_remount(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    char name[EXOFS_MAX_NAME + 1];
+    uint32_t blk = 0; uint16_t off = 0;
+
+    for (uint32_t i = 0; i < 30u; i++) {
+        make_name(name, 100u, i);
+        CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 100u, &blk, &off), 0);
+    }
+
+    uint32_t chain = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain), 0);
+    CU_ASSERT_TRUE(chain >= 6u);
+
+    CU_ASSERT_EQUAL(exofs_sync(), 0);
+    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+
+    v = exofs_vol();
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v == NULL) return;
+
+    /* No 100-byte name fits anywhere but the last block (or a new one), so
+     * finding that out means reading every block before it. */
+    uint32_t before = v->stat_block_reads;
+    make_name(name, 100u, 500u);
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 100u, &blk, &off), 0);
+    uint32_t first = v->stat_block_reads - before;
+    CU_ASSERT_TRUE(first >= chain);
+    CU_ASSERT_TRUE(first <= chain + 1u);
+
+    before = v->stat_block_reads;
+    make_name(name, 100u, 501u);
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 100u, &blk, &off), 0);
+    CU_ASSERT_EQUAL(v->stat_block_reads - before, 1u);
+
+    char back[EXOFS_MAX_NAME + 1];
+    CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, 100u, back), 0);
+    CU_ASSERT_STRING_EQUAL(back, name);
+
+    exofs_unmount();
+}
+
+/*
+ * A corrupt name block must keep being reported, not get remembered as
+ * "full" and quietly skipped from then on.
+ *
+ * The table records what a block can take only after a scan that reached
+ * the end of the block cleanly. A scan that stops on a bad header learns
+ * nothing it can trust, records nothing, and so the next allocation reads
+ * the block again and says -EXO_EIO again -- which is what a caller needs
+ * in order to notice at all.
+ */
+static void test_corrupt_name_block_is_not_remembered_as_full(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
+    CU_ASSERT_PTR_NOT_NULL(buf);
+    if (buf == NULL) { exofs_unmount(); return; }
+
+    /* The root's "." record is the first thing in the name block. Turn its
+     * header into "free, capacity 0", which is no record at all. */
+    CU_ASSERT_EQUAL(exofs_read_block(v->name_head, buf), 0);
+    buf[0] = 0x00u;
+    buf[1] = 0x80u;
+    CU_ASSERT_EQUAL(exofs_write_block(v->name_head, buf), 0);
+
+    uint32_t blk = 0; uint16_t off = 0;
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, "anything", 8u, &blk, &off), -EXO_EIO);
+    CU_ASSERT_EQUAL(exofs_name_alloc(v, "anything", 8u, &blk, &off), -EXO_EIO);
+
+    /* Not grown around, either. */
+    uint32_t chain = 0;
+    CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain), 0);
+    CU_ASSERT_EQUAL(chain, 1u);
+
+    libos_heap_free(buf);
+    exofs_unmount();
+}
+
 /* ---- Directory entries --------------------------------------------------
  *
  * These drive exofs_dir_add/lookup/remove against the ROOT block directly.
@@ -2849,6 +3179,16 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "names survive a remount", test_names_survive_remount);
     CU_add_test(s, "bad name references rejected",
                 test_bad_name_references_rejected);
+    CU_add_test(s, "a name allocation reads one block",
+                test_name_alloc_reads_one_block_per_name);
+    CU_add_test(s, "the name-room table never changes placement",
+                test_name_room_table_never_changes_placement);
+    CU_add_test(s, "freeing a name reopens a full block",
+                test_name_free_reopens_a_full_block);
+    CU_add_test(s, "the name-room table is rebuilt after a remount",
+                test_name_room_table_is_rebuilt_after_remount);
+    CU_add_test(s, "a corrupt name block is not remembered as full",
+                test_corrupt_name_block_is_not_remembered_as_full);
 
     CU_add_test(s, "entry add, lookup and remove",
                 test_dirent_add_lookup_remove);
