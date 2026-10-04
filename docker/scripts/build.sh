@@ -602,7 +602,7 @@ if [[ "${TESTING:-0}" == "1" ]]; then
 
   echo "[3b3/7] Compile Doom's reference trig tables (SCRUM-41)"
   # One of three files under src/doom/ that the kernel image links (d_loop.c
-  # and d_net.c, step 3b4 below, are the others), and only in a TESTING
+  # and d_net.c, step 3d below, are the others), and only in a TESTING
   # build.  tests/kernel/test_fixed_math_k.c is SCRUM-41's acceptance
   # test: it regenerates finesine/finecosine/finetangent/tantoangle through
   # src/fixed_math.c and compares all 24,577 entries against the vendored
@@ -626,31 +626,6 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   x86_64-elf-gcc -c src/doom/tables.c -o build/doom_tables.o \
     "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL
   objs+=("build/doom_tables.o")
-
-  echo "[3b4/7] Compile Doom's tic loop and net glue (SCRUM-97)"
-  # The second exception to "nothing in src/doom/ links into build/exodoom",
-  # and as narrow as the first: d_loop.c and d_net.c, TESTING builds only.
-  #
-  # tests/kernel/test_doom_net_k.c is SCRUM-97's acceptance test -- "no
-  # crashes from uninitialized net state" -- and the state in question lives
-  # in these two files' statics and stack frames. Testing a copy of the loop
-  # would prove the copy; so the real objects are linked and driven from ring
-  # 0, with that test TU supplying the engine below them (the 22 globals and
-  # 16 functions `nm -u` lists for the pair -- G_Ticker, I_GetTime, players[]
-  # and so on). Nothing else in the kernel image defines any of those names,
-  # which is what makes it safe to do in one TU; if a later test wants the
-  # same fakes, they belong in a shared file, not a second definition.
-  #
-  # Both compile clean under the kernel's own -mno-sse CFLAGS -- neither
-  # touches a float -- so this needs no per-file flag surgery. -w for the
-  # same reason the libos_doom target passes it: vendored source, and its
-  # sign-compare warnings are upstream's to fix.
-  for f in d_loop d_net; do
-    echo "    CC $f.c (doom net layer, under test)"
-    x86_64-elf-gcc -c "src/doom/$f.c" -o "build/doom_$f.o" \
-      "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL -w
-    objs+=("build/doom_$f.o")
-  done
 
   echo "[3c/7] Compile kernel test sources"
   # Kernel view by default -- these run in ring 0.  The one TU that needs
@@ -697,6 +672,32 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     cmds+=("$(qcmd _assemble_test_s_one "$s" "$pp" "$o")")
   done
   run_parallel "${cmds[@]}" || { echo "    ERROR: kernel test assembly failed"; exit 1; }
+
+  echo "[3d/7] Compile Doom's tic loop and net glue (SCRUM-97)"
+  # Another narrow exception to "nothing in src/doom/ links into
+  # build/exodoom", on the same terms as tables.c in step 3b3 above: d_loop.c
+  # and d_net.c, TESTING builds only.
+  #
+  # tests/kernel/test_doom_net_k.c is SCRUM-97's acceptance test -- "no
+  # crashes from uninitialized net state" -- and the state in question lives
+  # in these two files' statics and stack frames. Testing a copy of the loop
+  # would prove the copy; so the real objects are linked and driven from ring
+  # 0, with that test TU supplying the engine below them (the 22 globals and
+  # 16 functions `nm -u` lists for the pair -- G_Ticker, I_GetTime, players[]
+  # and so on). Nothing else in the kernel image defines any of those names,
+  # which is what makes it safe to do in one TU; if a later test wants the
+  # same fakes, they belong in a shared file, not a second definition.
+  #
+  # Both compile clean under the kernel's own -mno-sse CFLAGS -- neither
+  # touches a float -- so this needs no per-file flag surgery. -w for the
+  # same reason the libos_doom target passes it: vendored source, and its
+  # sign-compare warnings are upstream's to fix.
+  for f in d_loop d_net; do
+    echo "    CC $f.c (doom net layer, under test)"
+    x86_64-elf-gcc -c "src/doom/$f.c" -o "build/doom_$f.o" \
+      "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL -w
+    objs+=("build/doom_$f.o")
+  done
 fi
 
 echo "[4/7] Link kernel -> build/exodoom"

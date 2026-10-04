@@ -608,7 +608,7 @@ convention and calls it from `kernel_main` instead of a test harness.
     second launch reachable), so this holds; a loader that reused data pages
     without clearing them would start a second Doom mid-ring.
   `tests/kernel/test_doom_net_k.c` links the **real** `d_loop.c`/`d_net.c`
-  into the test kernel (`build.sh` step 3b4) and runs them in the order
+  into the test kernel (`build.sh` step 3d) and runs them in the order
   `D_DoomMain`/`D_DoomLoop` do, against a faked engine and a hand-moved
   clock. Its cases are **one continuous session, order-dependent on
   purpose** — `d_loop.c` keeps its state in file statics with no reset. That
