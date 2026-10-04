@@ -89,6 +89,7 @@ void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
 void suite_doom_dmx_tests(CU_pSuite s);
 void suite_pcm_mixer_tests(CU_pSuite s);
+void suite_pcm_mixer_music_tests(CU_pSuite s);
 void suite_hda_pcm_tests(CU_pSuite s);
 void suite_doom_sound_pcm_tests(CU_pSuite s);
 
@@ -111,6 +112,12 @@ int suite_doom_dmx_cleanup(void);
  * mix into the next one's assertions (SCRUM-212). */
 int suite_pcm_mixer_init(void);
 int suite_pcm_mixer_cleanup(void);
+
+/* The music voice is the same process-global mixer state, and it holds a
+ * pointer into this suite's own static ring: cleanup detaches it so no later
+ * render reads storage the suite has finished with (SCRUM-218). */
+int suite_pcm_mixer_music_init(void);
+int suite_pcm_mixer_music_cleanup(void);
 
 /* Mounts the freedoom2 module for its real-sample tests and stops the stream
  * afterwards -- a voice left sounding would point into a WAD the cleanup has
@@ -565,6 +572,15 @@ int run_tests(void)
      * (SCRUM-212). */
     s = CU_add_suite("pcm_mixer", suite_pcm_mixer_init, suite_pcm_mixer_cleanup);
     suite_pcm_mixer_tests(s);
+
+    /* The mixer's other kind of voice: one ring of 16-bit stereo that a
+     * producer fills and render drains, for music.  Same file, same
+     * hardware-free arrangement, its own suite because what can go wrong in
+     * a ring -- a frame lost, repeated or replayed at the wrap -- is nothing
+     * like what can go wrong in a resampler (SCRUM-218). */
+    s = CU_add_suite("pcm_mixer_music", suite_pcm_mixer_music_init,
+                     suite_pcm_mixer_music_cleanup);
+    suite_pcm_mixer_music_tests(s);
 
     /* The two joined: the mixer rendering into the HDA stream's BDL slices
      * from the completion interrupt.  Needs the real controller, so it sits

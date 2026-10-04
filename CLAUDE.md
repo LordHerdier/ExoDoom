@@ -212,7 +212,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Doom SFX → speaker tone table (SCRUM-99) | `src/doom_sfx_tone.c/h` |
 | Doom `sound_module_t` (PCM first, speaker fallback) | `src/doom_sound.c/h` (speaker sequencer, SCRUM-101), `src/doom_sound_pcm.c/h` (real `DS*` samples, SCRUM-214) (+ `FEATURE_SOUND` in `src/doom/doomfeatures.h`) |
 | WAD DMX sound lump decoder (`DS*` → 8-bit PCM, SCRUM-211) | `src/doom_dmx.c/h` |
-| Software PCM mixer (8 voices, resample + sum + clip, SCRUM-212) | `src/pcm_mixer.c/h` (+ `hda_pcm_*` in `src/hda.c/h`) |
+| Software PCM mixer (8 sfx voices, resample + sum + clip, SCRUM-212; one streaming music voice, SCRUM-218) | `src/pcm_mixer.c/h` (+ `hda_pcm_*` in `src/hda.c/h`) |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
 | Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h`, `src/syscall_sound.c/h` (speaker SCRUM-100, PCM SCRUM-213, PCM re-place #30 SCRUM-214) |
@@ -865,9 +865,31 @@ convention and calls it from `kernel_main` instead of a test harness.
     voice at the moment it started. #30 is not a re-admission — priority,
     phase and sample pointer are untouched, since a reset phase would restart
     the effect every tic it is retuned. `docs/syscall_spec.md` §6 Option C.
+  - **Music is a second *kind* of voice, not a ninth sfx voice (SCRUM-218).**
+    `pcm_mixer_music_*` is one ring of interleaved 16-bit stereo at 48 kHz
+    that a producer fills and `pcm_mixer_render()` drains, summed into the
+    same accumulators as the sfx voices — so the clip still happens once, on
+    the total — with its own 0..127 level. It sits outside the voice table on
+    purpose: no slot, no priority, so `pcm_mixer_start()` cannot steal it and
+    `pcm_mixer_stop_all()` does not stop it. Four things to hold on to:
+    - **The mixer does not own the ring.** `pcm_mixer_music_open()` is given
+      the storage; the mixer still allocates nothing. Close before freeing.
+    - **An empty ring is silence and a counted underrun, never a wait** —
+      render runs in `hda_irq_handler()` with interrupts off, and the
+      producer cannot run until it returns. An *idle* voice (never written
+      to, or flushed) is not counted, or the counter would be useless for
+      what it is for: judging `PCM_MIXER_MUSIC_PAGES` (12 pages, 256 ms).
+    - **`pcm_mixer_music_write()` takes what fits and says how much**; it
+      never blocks and never overwrites unplayed audio.
+    - **The write position is derived, `(rd + count) mod cap`, not stored.**
+      A ring off by one at the wrap is a tick once per lap forever, and one
+      less field is one less thing for the wrap to keep consistent.
+      `test_pcm_mixer_music_k.c` feeds a *counter* rather than a tone, so a
+      lost, repeated or stale frame is a wrong number, not something to hear.
   Still open: `src/revoke.c` has no sound leg — an exiting LibOS loses its
   voices, a revoked one keeps them — and Doom's music is still silent
-  (`DG_music_module` is MUS/MIDI, not PCM).
+  (`DG_music_module` is MUS/MIDI, not PCM): the mixer end exists, nothing
+  feeds it yet.
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - **The context table (SCRUM-107, `src/context.c/h`) tracks live LibOS
