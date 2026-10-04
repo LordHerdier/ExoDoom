@@ -95,12 +95,102 @@ int exofs_root_dirent(exofs_volume_t *v, exofs_dirent_t *out)
     return 0;
 }
 
+/* ---- The directory walker (SCRUM-224) -----------------------------------
+ *
+ * dir_cursor_next() is the ONE loop that follows a directory's chain, and so
+ * the only place a directory walk's cycle bound and corrupt-link checks
+ * live. It yields every slot in chain order, live or not; what a caller
+ * wants from a directory is then a filter over that, not a loop of its own:
+ *
+ *   exofs_dir_iter_next()   the live slots
+ *   find_free_slot()        the first slot that is not live
+ *
+ * Those two used to be separate hand-written walks. They agreed about what a
+ * directory was, but only because someone had been careful: one checked its
+ * bound before reading a block (`steps > total_blocks`), the other wrapped
+ * the whole per-block body in it (`steps <= total_blocks`), and each had its
+ * own copy of "a link into a free block is corruption". A fix to how a
+ * damaged directory is detected would have had two places to be applied and
+ * nothing to notice if it reached only one -- which is the same hazard
+ * SCRUM-226 removed from exofs_fat.c, one layer up.
+ *
+ * ONE READ PER BLOCK, for as long as the caller keeps `buf`. The cursor
+ * records whether `buf` already holds its block, so a scan that owns the
+ * buffer across calls -- find_free_slot() does -- reads each directory block
+ * exactly once however many slots it yields.
+ *
+ * THE BOUND. A directory cannot span more blocks than the volume has, so a
+ * walk that has followed that many links is in a cycle: -EXO_EIO, the same
+ * rule and the same code as every walk in exofs_fat.c.
+ */
+typedef struct dir_cursor {
+    uint32_t block;    /* block the cursor is in                   */
+    uint16_t index;    /* next slot to yield from that block       */
+    uint32_t steps;    /* links followed so far, for the bound     */
+    int      loaded;   /* whether the caller's buf holds `block`   */
+} dir_cursor_t;
+
+static void dir_cursor_init(dir_cursor_t *c, uint32_t dir_head)
+{
+    c->block  = dir_head;
+    c->index  = 0;
+    c->steps  = 0;
+    c->loaded = 0;
+}
+
+/*
+ * Yield the next slot. Returns 1 with *ref and *e filled, 0 at the end of
+ * the chain, or a negative error. `buf` is a block-sized staging buffer in
+ * the LibOS window; it must be the same one on every call that passes a
+ * cursor with `loaded` set.
+ */
+static int dir_cursor_next(exofs_volume_t *v, dir_cursor_t *c, uint8_t *buf,
+                           exofs_entry_ref_t *ref, exofs_dirent_t *e)
+{
+    for (;;) {
+        if (c->index < EXOFS_ENTS_PER_BLOCK) {
+            if (!c->loaded) {
+                int rc = exofs_read_block(c->block, buf);
+                if (rc < 0) return rc;
+                c->loaded = 1;
+            }
+
+            memcpy(e, buf + (size_t)c->index * sizeof(exofs_dirent_t),
+                   sizeof(*e));
+            ref->block = c->block;
+            ref->index = c->index;
+            c->index++;
+            return 1;
+        }
+
+        /* Block exhausted: move to the next one in the chain. */
+        uint32_t next;
+        int rc = exofs_fat_get(v, c->block, &next);
+        if (rc < 0) return rc;
+
+        if (next == EXOFS_BLOCK_EOC)  return 0;
+        if (next == EXOFS_BLOCK_FREE) return -EXO_EIO;
+
+        if (c->steps >= v->total_blocks) return -EXO_EIO;   /* a cycle */
+
+        c->block  = next;
+        c->index  = 0;
+        c->steps++;
+        c->loaded = 0;
+    }
+}
+
 /* ---- Iteration ----------------------------------------------------------
  *
- * One block is read per 16 slots rather than per slot: the iterator holds
- * the block it is working through in a local buffer for the duration of that
- * block. Reading per slot would be 16x the transfers for a full scan, and a
- * full scan is what lookup does.
+ * The public iterator: the walker above, filtered to live slots.
+ *
+ * It re-reads its current block on every call. exofs_dir_iter_t is a plain
+ * struct a caller keeps on its own stack, with nowhere to hold 512 bytes
+ * between calls -- and nowhere it legally could, since a disk buffer has to
+ * come from the LibOS window (exofs_blockdev.h). So a caller stepping
+ * through a directory one entry at a time pays one read per entry, not one
+ * per 16. Scans that live entirely inside this file do not go through here
+ * for exactly that reason; they hold the walker and its buffer themselves.
  */
 
 void exofs_dir_iter_init(exofs_dir_iter_t *it, uint32_t dir_head)
@@ -121,47 +211,33 @@ int exofs_dir_iter_next(exofs_volume_t *v, exofs_dir_iter_t *it,
     uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     if (buf == NULL) return -EXO_ENOMEM;
 
-    int rc = 0;
+    /* Pick up where the previous call stopped. */
+    dir_cursor_t c;
+    c.block  = it->block;
+    c.index  = it->index;
+    c.steps  = it->steps;
+    c.loaded = 0;
 
+    int rc;
     for (;;) {
-        /* Same bound as every walk in exofs_fat.c: a directory cannot span
-         * more blocks than the volume has, so exceeding that is a cycle. */
-        if (it->steps > v->total_blocks) { rc = -EXO_EIO; goto out; }
+        exofs_entry_ref_t r;
+        exofs_dirent_t e;
 
-        rc = exofs_read_block(it->block, buf);
-        if (rc < 0) goto out;
+        rc = dir_cursor_next(v, &c, buf, &r, &e);
+        if (rc <= 0) break;
 
-        while (it->index < EXOFS_ENTS_PER_BLOCK) {
-            exofs_dirent_t e;
-            memcpy(&e, buf + (size_t)it->index * sizeof(exofs_dirent_t),
-                   sizeof(e));
+        if (!exofs_dirent_is_live(&e)) continue;
 
-            uint16_t slot = it->index;
-            it->index++;
-
-            if (!exofs_dirent_is_live(&e)) continue;
-
-            if (ref != NULL) { ref->block = it->block; ref->index = slot; }
-            if (out != NULL) *out = e;
-
-            rc = 1;
-            goto out;
-        }
-
-        /* Block exhausted: move to the next one in the chain. */
-        uint32_t next;
-        rc = exofs_fat_get(v, it->block, &next);
-        if (rc < 0) goto out;
-
-        if (next == EXOFS_BLOCK_EOC) { it->done = 1; rc = 0; goto out; }
-        if (next == EXOFS_BLOCK_FREE) { rc = -EXO_EIO; goto out; }
-
-        it->block = next;
-        it->index = 0;
-        it->steps++;
+        if (ref != NULL) *ref = r;
+        if (out != NULL) *out = e;
+        break;
     }
 
-out:
+    it->block = c.block;
+    it->index = c.index;
+    it->steps = c.steps;
+    if (rc == 0) it->done = 1;
+
     libos_heap_free(buf);
     return rc;
 }
@@ -212,6 +288,19 @@ int exofs_dir_lookup(exofs_volume_t *v, uint32_t dir_head, const char *name,
  * "Unused" (a zeroed slot) and "free" (an EXOFS_ENT_FREE tombstone) are both
  * acceptable and are not distinguished — the difference matters to iteration,
  * which skips both, and not to allocation, which overwrites either.
+ *
+ * The same walk as iteration, with the opposite filter (SCRUM-224): the
+ * walker yields every slot and this takes the first one that is not live.
+ * It owns the buffer for the whole search, so each block is read once.
+ *
+ * NO CACHED TAIL. A "resume here" hint was considered -- it is what the FAT
+ * allocator and the name area both have -- and left out, because it could
+ * not make a create cheaper. exofs_dir_add() has to check the new name
+ * against every entry already in the directory before it gets here, which
+ * means reading every block of the chain whatever this function does. The
+ * second pass is the avoidable part, and the fix for that is not to make it
+ * shorter but to not make it: the duplicate check can note the first free
+ * slot it passes (SCRUM-225).
  */
 static int find_free_slot(exofs_volume_t *v, uint32_t dir_head,
                           exofs_entry_ref_t *out)
@@ -219,48 +308,35 @@ static int find_free_slot(exofs_volume_t *v, uint32_t dir_head,
     uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     if (buf == NULL) return -EXO_ENOMEM;
 
-    int rc = 0;
-    uint32_t blk = dir_head;
+    dir_cursor_t c;
+    dir_cursor_init(&c, dir_head);
 
-    for (uint32_t steps = 0; steps <= v->total_blocks; steps++) {
-        rc = exofs_read_block(blk, buf);
+    int rc;
+    for (;;) {
+        exofs_entry_ref_t r;
+        exofs_dirent_t e;
+
+        rc = dir_cursor_next(v, &c, buf, &r, &e);
         if (rc < 0) goto out;
+        if (rc == 0) break;                 /* every slot is taken */
 
-        for (uint16_t i = 0; i < EXOFS_ENTS_PER_BLOCK; i++) {
-            exofs_dirent_t e;
-            memcpy(&e, buf + (size_t)i * sizeof(exofs_dirent_t), sizeof(e));
-
-            if (!exofs_dirent_is_live(&e)) {
-                out->block = blk;
-                out->index = i;
-                rc = 0;
-                goto out;
-            }
-        }
-
-        uint32_t next;
-        rc = exofs_fat_get(v, blk, &next);
-        if (rc < 0) goto out;
-
-        if (next == EXOFS_BLOCK_EOC) {
-            /* Full: grow the directory. The new block is zeroed by
-             * exofs_fat_alloc(), so every slot in it reads as unused with
-             * no further initialisation. */
-            uint32_t fresh;
-            rc = exofs_chain_extend(v, dir_head, &fresh);
-            if (rc < 0) goto out;
-
-            out->block = fresh;
-            out->index = 0;
+        if (!exofs_dirent_is_live(&e)) {
+            *out = r;
             rc = 0;
             goto out;
         }
-        if (next == EXOFS_BLOCK_FREE) { rc = -EXO_EIO; goto out; }
-
-        blk = next;
     }
 
-    rc = -EXO_EIO;   /* cycle in the directory chain */
+    /* Full: grow the directory. The new block is zeroed by
+     * exofs_fat_alloc(), so every slot in it reads as unused with no
+     * further initialisation. */
+    uint32_t fresh;
+    rc = exofs_chain_extend(v, dir_head, &fresh);
+    if (rc < 0) goto out;
+
+    out->block = fresh;
+    out->index = 0;
+    rc = 0;
 
 out:
     libos_heap_free(buf);
