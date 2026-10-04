@@ -161,6 +161,32 @@ in the original rather than a matter of taste:
 | Path copied into `char path[MAXPATH]` with `strcpy()` — an unchecked copy of caller-supplied data into a 255-byte stack buffer | the path is never copied; the iterator walks it in place and copies one component at a time into a buffer whose size it is told |
 | No cycle detection anywhere | every chain walk bounded, at the FAT layer and again at the directory iterator |
 
+### One walker per layer
+
+A bound and a corruption check are only as good as the weakest copy of them.
+The FAT layer therefore has exactly **one** loop that follows a chain to its
+end: `chain_walk()` in `exofs_fat.c`, which reports the last block and the
+block count from a single pass. `exofs_chain_last()` and `exofs_chain_len()`
+are thin front ends over it (SCRUM-226) — they used to be two hand-copied
+loops whose three checks (the `total_blocks` bound, a link into a free block,
+a link off the end of the volume) had to be kept identical by care alone.
+
+The contract that walker holds, and that
+`test_chain_last_and_len_agree_on_every_shape` /
+`test_chain_through_every_block_is_the_longest_legal_one` pin:
+
+- a chain through **every** block of the volume is the longest walk that may
+  succeed, and it must succeed — a file or directory that genuinely fills the
+  volume has to stay readable;
+- anything longer has no end to find, and is `-EXO_EIO`;
+- a link into a free block is `-EXO_EIO`; a link off the volume is
+  `exofs_fat_get()`'s `-EXO_EINVAL`, passed through;
+- on any failure neither output is written.
+
+`exofs_chain_nth()` stays separate on purpose: running out of chain is an
+*error* there (`-EXO_EINVAL`, an offset past EOF) rather than the success
+condition, so it is a different walk, not a third copy of this one.
+
 ---
 
 ## 6. Variable-length names
