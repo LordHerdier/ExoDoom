@@ -19,10 +19,11 @@
  * near the sample points people reach for by hand.
  *
  * docker/scripts/build.sh compiles src/doom/tables.c into the TESTING build
- * specifically for this suite -- it is the one file of the 79 under src/doom/
- * that the kernel image links, and it can be, because it is nothing but const
- * integer arrays (no libc, no engine dependency, and it compiles clean under
- * the kernel's own -mno-sse CFLAGS).
+ * specifically for this suite -- it is one of only three files of the 79 under
+ * src/doom/ that the kernel image links (SCRUM-97's suite brought in d_loop.c
+ * and d_net.c), and it can be, because it is nothing but const integer arrays
+ * (no libc, no engine dependency, and it compiles clean under the kernel's
+ * own -mno-sse CFLAGS).
  *
  * ── On the tolerances below ────────────────────────────────────────────
  *
