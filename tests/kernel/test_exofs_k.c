@@ -2402,6 +2402,223 @@ static void test_free_slots_are_taken_in_chain_order(void)
     exofs_unmount();
 }
 
+/* ---- Directory entries: what a create and a lookup cost (SCRUM-225) ------
+ *
+ * exofs_dir_add() used to walk the directory twice -- once to check the name
+ * was not already there, once more to find a slot -- and the first of those
+ * went through the public iterator, which re-reads its block on every entry
+ * it returns. A create in a 48-entry directory cost about 55 block reads.
+ *
+ * It is one pass now, holding its buffer, so it reads each directory block
+ * once. These state that as a number, the same way the name-area cost tests
+ * above do, and for the same reason: nothing about a correct result reveals
+ * how many times the chain was walked to get it.
+ *
+ * A name comparison costs a read of the name block, and only an entry whose
+ * name_len matches gets as far as one. So the counts below are made exact
+ * by choosing lengths: every filler entry is 8 bytes, and the names being
+ * added or looked up are lengths nothing else in the directory has.
+ */
+
+/* The one 15-byte name in the directory built below. */
+#define DIR_COST_TARGET "dup-target-name"
+
+/*
+ * Fill the root to exactly three full blocks: its own "." and "..", 45
+ * eight-byte names, and DIR_COST_TARGET as the 20th entry added -- which puts
+ * it in the second block, so finding it means reading two blocks, not one
+ * and not three.
+ */
+static int build_three_block_directory(exofs_volume_t *v,
+                                       exofs_entry_ref_t *target_ref)
+{
+    const uint32_t root = v->root_block;
+    char name[32];
+
+    for (uint32_t i = 0; i < 3u * EXOFS_ENTS_PER_BLOCK - 2u; i++) {
+        int rc;
+        if (i == 19u) {
+            rc = exofs_dir_add(v, root, DIR_COST_TARGET, EXOFS_ATTR_FILE,
+                               EXOFS_NO_BLOCK, 0, target_ref);
+        } else {
+            make_name(name, 8u, i);
+            rc = exofs_dir_add(v, root, name, EXOFS_ATTR_FILE,
+                               EXOFS_NO_BLOCK, 0, NULL);
+        }
+        if (rc != 0) return rc;
+    }
+    return 0;
+}
+
+static void test_dir_add_scans_the_directory_once(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+    exofs_entry_ref_t target;
+    CU_ASSERT_EQUAL(build_three_block_directory(v, &target), 0);
+
+    uint32_t blocks = 0;
+    CU_ASSERT_EQUAL(exofs_chain_len(v, root, &blocks), 0);
+    CU_ASSERT_EQUAL(blocks, 3u);
+    CU_ASSERT_NOT_EQUAL(target.block, root);
+
+    /*
+     * A full directory. The create reads each of its three blocks once for
+     * the duplicate check, finds no slot on the way, and grows the chain.
+     * The other two reads are not the scan's: one for the name block the
+     * name goes into (SCRUM-223), one for the read-modify-write of the
+     * directory block the entry goes into.
+     */
+    uint32_t before = v->stat_block_reads;
+    exofs_entry_ref_t grown;
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, "thirteen-long", EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 0, &grown), 0);
+    CU_ASSERT_EQUAL(v->stat_block_reads - before, blocks + 2u);
+
+    CU_ASSERT_EQUAL(exofs_chain_len(v, root, &blocks), 0);
+    CU_ASSERT_EQUAL(blocks, 4u);
+    CU_ASSERT_EQUAL(grown.index, 0u);
+
+    /*
+     * A hole in the FIRST block. The scan passes it almost at once and still
+     * has to read on to the end -- the name could be in any block -- but it
+     * must not then start again from the top to find the hole it already
+     * saw. Four blocks now, so four reads, plus the same two.
+     */
+    char name[32];
+    make_name(name, 8u, 0u);
+    exofs_entry_ref_t hole;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, root, name, &hole, NULL), 0);
+    CU_ASSERT_EQUAL(hole.block, root);
+    CU_ASSERT_EQUAL(exofs_dir_remove(v, &hole), 0);
+
+    before = v->stat_block_reads;
+    exofs_entry_ref_t filled;
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, "fourteen-chars", EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 0, &filled), 0);
+    CU_ASSERT_EQUAL(v->stat_block_reads - before, blocks + 2u);
+    CU_ASSERT_EQUAL(filled.block, hole.block);
+    CU_ASSERT_EQUAL(filled.index, hole.index);
+
+    /*
+     * A duplicate. Two directory blocks to reach it and one name-block read
+     * to confirm it -- and then it stops: no third or fourth block, no slot
+     * search, nothing allocated.
+     */
+    uint32_t free_before = exofs_fat_free_count(v);
+    uint32_t live_before = 0;
+    CU_ASSERT_EQUAL(count_entries(v, root, &live_before), 0);
+
+    before = v->stat_block_reads;
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, DIR_COST_TARGET, EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 0, NULL), -EXO_EEXIST);
+    CU_ASSERT_EQUAL(v->stat_block_reads - before, 3u);
+
+    uint32_t live_after = 0;
+    CU_ASSERT_EQUAL(count_entries(v, root, &live_after), 0);
+    CU_ASSERT_EQUAL(live_after, live_before);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
+
+    exofs_unmount();
+}
+
+/*
+ * exofs_dir_lookup() is the same scan with nothing to add, and path
+ * resolution runs it once per component -- the hot path. One read per
+ * directory block, whether the name is there or not.
+ */
+static void test_dir_lookup_reads_each_block_once(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+    exofs_entry_ref_t target;
+    CU_ASSERT_EQUAL(build_three_block_directory(v, &target), 0);
+
+    /* Not there, and no entry is 18 bytes long: three directory blocks and
+     * not one name block. */
+    uint32_t before = v->stat_block_reads;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, root, "no-such-entry-here", NULL, NULL),
+                    -EXO_ENOENT);
+    CU_ASSERT_EQUAL(v->stat_block_reads - before, 3u);
+
+    /* There, in the second block: two directory blocks and the one name
+     * block that confirms it. */
+    exofs_entry_ref_t found;
+    exofs_dirent_t e;
+    before = v->stat_block_reads;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, root, DIR_COST_TARGET, &found, &e), 0);
+    CU_ASSERT_EQUAL(v->stat_block_reads - before, 3u);
+    CU_ASSERT_EQUAL(found.block, target.block);
+    CU_ASSERT_EQUAL(found.index, target.index);
+    CU_ASSERT_EQUAL(e.name_len, 15u);
+
+    exofs_unmount();
+}
+
+/*
+ * The one way merging the two scans could go wrong: stopping at the first
+ * free slot.
+ *
+ * The old code could not make this mistake -- it finished looking for the
+ * name before it began looking for a slot. A single pass meets the slot
+ * FIRST whenever a hole comes before the duplicate in chain order, and has
+ * to carry on past it. If it took the hole instead, the directory would
+ * hold the same name twice, and which one a lookup returned would depend on
+ * which came first in the chain.
+ *
+ * So: a hole in the first block, the name already present in the second.
+ * The create must be refused, the hole must still be there afterwards, and
+ * the next genuinely new name must be what takes it.
+ */
+static void test_dir_add_looks_past_a_hole_for_a_duplicate(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+    exofs_entry_ref_t target;
+    CU_ASSERT_EQUAL(build_three_block_directory(v, &target), 0);
+    CU_ASSERT_NOT_EQUAL(target.block, root);
+
+    char name[32];
+    make_name(name, 8u, 3u);
+    exofs_entry_ref_t hole;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, root, name, &hole, NULL), 0);
+    CU_ASSERT_EQUAL(hole.block, root);
+    CU_ASSERT_EQUAL(exofs_dir_remove(v, &hole), 0);
+
+    uint32_t live_before = 0;
+    CU_ASSERT_EQUAL(count_entries(v, root, &live_before), 0);
+
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, DIR_COST_TARGET, EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 0, NULL), -EXO_EEXIST);
+
+    uint32_t live_after = 0;
+    CU_ASSERT_EQUAL(count_entries(v, root, &live_after), 0);
+    CU_ASSERT_EQUAL(live_after, live_before);
+
+    /* Still exactly one of it, and still the original. */
+    exofs_entry_ref_t found;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, root, DIR_COST_TARGET, &found, NULL), 0);
+    CU_ASSERT_EQUAL(found.block, target.block);
+    CU_ASSERT_EQUAL(found.index, target.index);
+
+    exofs_entry_ref_t filled;
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, "a-new-name", EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 0, &filled), 0);
+    CU_ASSERT_EQUAL(filled.block, hole.block);
+    CU_ASSERT_EQUAL(filled.index, hole.index);
+
+    exofs_unmount();
+}
+
 /* ---- Directory operations ----------------------------------------------- */
 
 /* Whether `name` appears in the directory `path`, via the public readdir. */
@@ -3390,6 +3607,12 @@ void suite_exofs_tests(CU_pSuite s)
                 test_directory_walk_is_bounded_by_the_volume);
     CU_add_test(s, "free slots are taken in chain order",
                 test_free_slots_are_taken_in_chain_order);
+    CU_add_test(s, "a create scans the directory once",
+                test_dir_add_scans_the_directory_once);
+    CU_add_test(s, "a lookup reads each directory block once",
+                test_dir_lookup_reads_each_block_once);
+    CU_add_test(s, "a create looks past a hole for a duplicate",
+                test_dir_add_looks_past_a_hole_for_a_duplicate);
 
     CU_add_test(s, "a fresh root has . and ..",
                 test_fresh_root_has_dot_entries);
