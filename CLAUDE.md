@@ -206,6 +206,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Process/context table (id, page dir, saved registers, state) | `src/context.c/h` |
 | Interrupts (IDT/PIC/ISR, TSS, page-fault diagnostics) | `src/idt.c/h`, `src/pic.c/h`, `src/isr.s`, `src/io.h`, `src/tss.c/h`, `src/fault.c/h` |
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
+| PCI bus (config space, enumeration, BARs, SCRUM-209) | `src/pci.c/h` |
 | PC speaker (PIT channel 2, SCRUM-98) | `src/speaker.c/h` |
 | Doom SFX → speaker tone table (SCRUM-99) | `src/doom_sfx_tone.c/h` |
 | Doom `sound_module_t` over the speaker (SCRUM-101) | `src/doom_sound.c/h` (+ `FEATURE_SOUND` in `src/doom/doomfeatures.h`) |
