@@ -2224,6 +2224,184 @@ static void test_directory_cycle_is_reported(void)
     exofs_unmount();
 }
 
+/*
+ * Where the directory walker's bound sits, and that there is one of them
+ * (SCRUM-224).
+ *
+ * Iteration and the free-slot search used to be two separate loops with two
+ * differently written bounds. They are now two filters over one walker, so
+ * this pins the walker: a directory whose chain runs through EVERY block of
+ * the volume is the longest one that can exist and must be walkable to its
+ * end; close that chain into a loop and both callers must report -EXO_EIO
+ * rather than spin -- having read a bounded number of blocks first.
+ *
+ * Done on a deliberately tiny volume. The property is about total_blocks,
+ * whatever it is, and walking all ~8000 blocks of the usual test volume
+ * would be several seconds of polled PIO to learn nothing more.
+ */
+static void test_directory_walk_is_bounded_by_the_volume(void)
+{
+    if (!drive_present()) return;
+
+    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, 64u), 0);
+    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+
+    exofs_volume_t *v = exofs_vol();
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v == NULL) return;
+
+    const uint32_t n = v->total_blocks;
+    CU_ASSERT_TRUE(n > 16u);
+    CU_ASSERT_TRUE(n < 64u);
+
+    /* Every block but the root becomes an empty directory block: zeroed, so
+     * all sixteen slots read as unused. (That includes the name block, which
+     * nothing below needs.) */
+    uint8_t *zero = libos_heap_alloc(EXOFS_BLOCK_SIZE);
+    CU_ASSERT_PTR_NOT_NULL(zero);
+    if (zero == NULL) { exofs_unmount(); return; }
+    memset(zero, 0, EXOFS_BLOCK_SIZE);
+
+    for (uint32_t i = 1; i < n; i++) {
+        if (exofs_write_block(i, zero) != 0) { CU_ASSERT_TRUE(0); break; }
+    }
+    libos_heap_free(zero);
+
+    /* root -> 1 -> 2 -> ... -> n-1 -> EOC, straight into the in-RAM FAT. */
+    const uint32_t root = v->root_block;
+    for (uint32_t i = 0; i + 1u < n; i++) v->fat[i] = i + 1u;
+    v->fat[n - 1u] = EXOFS_BLOCK_EOC;
+
+    /* The longest legal directory: walked to the end, finding exactly the
+     * root's own "." and "..". One read per block, plus the two extra reads
+     * of the first block the public iterator makes because it returned
+     * twice from inside it. */
+    uint32_t before = v->stat_block_reads;
+    uint32_t live = 0;
+    CU_ASSERT_EQUAL(count_entries(v, root, &live), 0);
+    CU_ASSERT_EQUAL(live, 2u);
+    CU_ASSERT_EQUAL(v->stat_block_reads - before, n + 2u);
+
+    /* Now there is no end to find. */
+    v->fat[n - 1u] = root;
+
+    before = v->stat_block_reads;
+    CU_ASSERT_EQUAL(count_entries(v, root, &live), -EXO_EIO);
+    CU_ASSERT_TRUE(v->stat_block_reads - before <= 2u * n + 8u);
+
+    /* exofs_dir_add() walks the same chain, and has to refuse the same way
+     * -- without having allocated a name or a block on the way. */
+    uint32_t free_before = exofs_fat_free_count(v);
+    before = v->stat_block_reads;
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, "newcomer", EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 0, NULL), -EXO_EIO);
+    CU_ASSERT_TRUE(v->stat_block_reads - before <= 2u * n + 8u);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
+
+    exofs_unmount();
+}
+
+/*
+ * The free-slot search and the iterator must describe the same directory
+ * (SCRUM-224): a slot is either one the iterator yields or one the search
+ * may hand out, and the search hands them out in chain order.
+ *
+ * Three full blocks, five entries removed from all over them, then new
+ * entries added one at a time. Each must land in the earliest hole left --
+ * by position in the CHAIN, then by slot -- and only when no hole remains
+ * may the directory grow. The existing reuse test covers one hole in one
+ * block; this is the multi-block order, which is the part the walk decides.
+ */
+static void test_free_slots_are_taken_in_chain_order(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    const uint32_t root = v->root_block;
+
+    /* "." and ".." hold two slots, so 46 more makes exactly three blocks. */
+    enum { FILL = 3 * EXOFS_ENTS_PER_BLOCK - 2, HOLES = 5 };
+    static exofs_entry_ref_t refs[FILL];
+    char name[32];
+
+    for (uint32_t i = 0; i < FILL; i++) {
+        make_name(name, 8u, i);
+        CU_ASSERT_EQUAL(exofs_dir_add(v, root, name, EXOFS_ATTR_FILE,
+                                      EXOFS_NO_BLOCK, 0, &refs[i]), 0);
+    }
+
+    uint32_t len = 0;
+    CU_ASSERT_EQUAL(exofs_chain_len(v, root, &len), 0);
+    CU_ASSERT_EQUAL(len, 3u);
+
+    /* Removed in no particular order, from all three blocks. */
+    static const uint32_t victims[HOLES] = { 40u, 3u, 20u, 33u, 9u };
+    for (uint32_t i = 0; i < HOLES; i++) {
+        CU_ASSERT_EQUAL(exofs_dir_remove(v, &refs[victims[i]]), 0);
+    }
+
+    /* The order they must be refilled in: by the block's position in the
+     * chain, then by slot. Block NUMBERS are whatever the allocator handed
+     * out, so the position is looked up rather than assumed. */
+    exofs_entry_ref_t want[HOLES];
+    uint32_t want_pos[HOLES];
+    for (uint32_t i = 0; i < HOLES; i++) {
+        want[i] = refs[victims[i]];
+        want_pos[i] = 0xFFFFFFFFu;
+        for (uint32_t p = 0; p < len; p++) {
+            uint32_t blk = 0;
+            CU_ASSERT_EQUAL(exofs_chain_nth(v, root, p, &blk), 0);
+            if (blk == want[i].block) want_pos[i] = p;
+        }
+        CU_ASSERT_NOT_EQUAL(want_pos[i], 0xFFFFFFFFu);
+    }
+    for (uint32_t i = 1; i < HOLES; i++) {
+        for (uint32_t j = i; j > 0; j--) {
+            int earlier = want_pos[j] < want_pos[j - 1] ||
+                          (want_pos[j] == want_pos[j - 1] &&
+                           want[j].index < want[j - 1].index);
+            if (!earlier) break;
+
+            exofs_entry_ref_t tr = want[j]; want[j] = want[j - 1]; want[j - 1] = tr;
+            uint32_t tp = want_pos[j]; want_pos[j] = want_pos[j - 1]; want_pos[j - 1] = tp;
+        }
+    }
+
+    /* The iterator agrees about what is left: 48 slots, 5 of them holes. */
+    uint32_t live = 0;
+    CU_ASSERT_EQUAL(count_entries(v, root, &live), 0);
+    CU_ASSERT_EQUAL(live, 3u * EXOFS_ENTS_PER_BLOCK - HOLES);
+
+    for (uint32_t i = 0; i < HOLES; i++) {
+        exofs_entry_ref_t got;
+        make_name(name, 9u, 100u + i);
+        CU_ASSERT_EQUAL(exofs_dir_add(v, root, name, EXOFS_ATTR_FILE,
+                                      EXOFS_NO_BLOCK, 0, &got), 0);
+        CU_ASSERT_EQUAL(got.block, want[i].block);
+        CU_ASSERT_EQUAL(got.index, want[i].index);
+    }
+
+    /* No holes left, so the chain is still three blocks... */
+    CU_ASSERT_EQUAL(exofs_chain_len(v, root, &len), 0);
+    CU_ASSERT_EQUAL(len, 3u);
+
+    /* ...and the next entry has nowhere to go but a fourth. */
+    exofs_entry_ref_t grown;
+    CU_ASSERT_EQUAL(exofs_dir_add(v, root, "one-more", EXOFS_ATTR_FILE,
+                                  EXOFS_NO_BLOCK, 0, &grown), 0);
+    CU_ASSERT_EQUAL(grown.index, 0u);
+    CU_ASSERT_EQUAL(exofs_chain_len(v, root, &len), 0);
+    CU_ASSERT_EQUAL(len, 4u);
+
+    uint32_t last = 0;
+    CU_ASSERT_EQUAL(exofs_chain_last(v, root, &last), 0);
+    CU_ASSERT_EQUAL(grown.block, last);
+
+    exofs_unmount();
+}
+
 /* ---- Directory operations ----------------------------------------------- */
 
 /* Whether `name` appears in the directory `path`, via the public readdir. */
@@ -3208,6 +3386,10 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "parent path resolution", test_path_resolve_parent);
     CU_add_test(s, "a directory cycle is reported",
                 test_directory_cycle_is_reported);
+    CU_add_test(s, "a directory walk is bounded by the volume",
+                test_directory_walk_is_bounded_by_the_volume);
+    CU_add_test(s, "free slots are taken in chain order",
+                test_free_slots_are_taken_in_chain_order);
 
     CU_add_test(s, "a fresh root has . and ..",
                 test_fresh_root_has_dot_entries);

@@ -203,6 +203,46 @@ The contract that walker holds, and that
 *error* there (`-EXO_EINVAL`, an offset past EOF) rather than the success
 condition, so it is a different walk, not a third copy of this one.
 
+The directory layer has the same shape (SCRUM-224). `dir_cursor_next()` in
+`exofs_dirent.c` is the only loop that follows a *directory's* chain: it
+yields every slot in chain order, live or not, and carries the one cycle
+bound and the one "link into a free block" check a directory walk has.
+Everything else is a filter over it:
+
+| Caller | Takes |
+|---|---|
+| `exofs_dir_iter_next()` — the public iterator, and through it `exofs_dir_lookup()` and `readdir` | the live slots |
+| `find_free_slot()` | the first slot that is not live |
+
+Before that, the iterator and the free-slot search were separate
+hand-written walks with differently written bounds (`steps > total_blocks`
+checked before a read, versus `steps <= total_blocks` wrapped around the
+whole per-block body). They happened to agree; nothing made them.
+`test_directory_walk_is_bounded_by_the_volume` pins the bound the same way
+the FAT tests do — a directory through every block of a (deliberately tiny)
+volume must be walkable to its end, and closing it into a loop must be
+`-EXO_EIO` from both the iterator and `exofs_dir_add()` after a bounded
+number of reads — and `test_free_slots_are_taken_in_chain_order` pins that
+the two filters describe the same directory across block boundaries.
+
+Two things about that walker worth knowing before changing it:
+
+- **It reads a block once for as long as its caller keeps the buffer.** The
+  cursor records whether the buffer already holds its block.
+  `find_free_slot()` owns the buffer for its whole search. The *public*
+  iterator cannot: `exofs_dir_iter_t` is a plain struct on the caller's
+  stack with nowhere to keep 512 bytes between calls (and a disk buffer has
+  to come from the LibOS window anyway), so it re-reads its block on every
+  call — one read per entry returned, not one per 16. Scans that live
+  inside `exofs_dirent.c` should hold the cursor themselves rather than go
+  through the public iterator.
+- **There is deliberately no cached tail** for the free-slot search, though
+  the FAT allocator and the name area both have a resume point. It could not
+  make a create cheaper: `exofs_dir_add()` must check the new name against
+  every existing entry first, which reads every block of the directory
+  whatever the slot search does. The avoidable cost is making that pass
+  twice, not how long the second one is.
+
 ---
 
 ## 6. Variable-length names
