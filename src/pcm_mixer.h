@@ -98,6 +98,7 @@
  * generation makes that stale handle detectable instead of silently
  * effective.  Negative values are errors, so a handle is always >= 0.
  */
+#define PCM_MIXER_OK        0     /* for the entry points that return no handle */
 #define PCM_MIXER_ENOVOICE  (-1)  /* all voices busy with more important work */
 #define PCM_MIXER_EINVAL    (-2)  /* NULL, empty, or an unplayable rate       */
 
@@ -130,6 +131,26 @@ int pcm_mixer_start(const doom_dmx_t *dmx, int vol, int sep, int priority);
 /* Stop `handle`'s voice if it is still that voice's sound.  A stale or
  * out-of-range handle is ignored. */
 void pcm_mixer_stop(int handle);
+
+/*
+ * Re-place a voice that is already sounding: recompute its gains from `vol`
+ * and `sep` -- same ranges, same panning law as pcm_mixer_start -- and leave
+ * everything else alone (SCRUM-214).
+ *
+ * This exists because Doom retunes live sounds.  I_UpdateSoundParams is
+ * called from S_UpdateSounds once a tic for every active channel, so a sound
+ * started to the player's left has to follow the player as they turn; a mixer
+ * that could only place a voice at the moment it started would freeze each
+ * effect at the geometry it was fired in.
+ *
+ * Deliberately NOT a re-admission: priority, phase and the sample pointer are
+ * untouched, so this changes how a voice is *heard*, never who holds it or
+ * where it has got to.  A voice that has finished, been stolen or was never
+ * started answers PCM_MIXER_ENOVOICE and nothing happens -- Doom retunes
+ * channels whose end it has not noticed yet, so that is an ordinary outcome
+ * rather than a caller error.  PCM_MIXER_OK otherwise.
+ */
+int pcm_mixer_set_params(int handle, int vol, int sep);
 
 /* Stop every voice.  Unlike pcm_mixer_reset(), generations are preserved, so
  * outstanding handles go stale rather than becoming ambiguous. */

@@ -78,6 +78,13 @@ SHIM_SOURCES=(
   # calls doom_sfx_tone(), so both belong to the Doom link.
   src/doom_sound.c
   src/doom_sfx_tone.c
+  # SCRUM-214's PCM leg of that module: doom_sound.c now tries the real DS*
+  # samples before the tone table, so it calls doom_sound_pcm_*(), which in
+  # turn calls doom_dmx_find_sfx() over the mounted WAD. doom_dmx.c is
+  # otherwise a kernel-only file -- it is here because this is the first ring-3
+  # caller it has ever had.
+  src/doom_sound_pcm.c
+  src/doom_dmx.c
   src/libos_heap.c
   src/libos_page_alloc.c
   src/libos_fb.c

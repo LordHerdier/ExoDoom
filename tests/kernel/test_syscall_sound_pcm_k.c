@@ -1,5 +1,6 @@
 /*
- * test_syscall_sound_pcm_k.c — exo_sound_pcm / exo_sound_pcm_stop (SCRUM-213).
+ * test_syscall_sound_pcm_k.c — exo_sound_pcm / exo_sound_pcm_stop (SCRUM-213),
+ * plus exo_sound_pcm_params (#30, SCRUM-214).
  *
  * Acceptance: "a ring-3 test LibOS queues a decoded sample through the syscall
  * and it comes out the speaker, proven the way tests/kernel/test_syscall_k.c
@@ -94,6 +95,12 @@ static int64_t do_pcm(uint64_t buf, uint64_t samples, uint64_t rate,
 static int64_t do_pcm_stop(uint64_t handle)
 {
     return exo_syscall_dispatch(EXO_SYS_SOUND_PCM_STOP, handle, 0, 0, 0, 0, 0);
+}
+
+static int64_t do_pcm_params(uint64_t handle, uint64_t vol, uint64_t sep)
+{
+    return exo_syscall_dispatch(EXO_SYS_SOUND_PCM_PARAMS, handle, vol, sep,
+                                0, 0, 0);
 }
 
 static int64_t do_alloc(void)
@@ -224,20 +231,28 @@ int syscall_sound_pcm_suite_cleanup(void)
 
 /* ── Binding ────────────────────────────────────────────────────────────── */
 
-/* The boot path must have bound both numbers; without this the rest of the
+/* The boot path must have bound all three numbers; without this the rest of the
  * suite would only be re-proving the dispatcher's -EXO_ENOSYS fallback. */
 static void test_handlers_are_bound(void)
 {
     CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_SOUND_PCM));
     CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_SOUND_PCM_STOP));
+    CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_SOUND_PCM_PARAMS));
 }
 
 /* The decision this ticket had to make, stated as an assertion: sound is
  * shared, so there is no acquire syscall to hold it. If a later ticket adds
- * one, this is the test that says the policy changed on purpose. */
+ * one, this is the test that says the policy changed on purpose.
+ *
+ * Phrased as "the sound numbers end at PCM_PARAMS" rather than "the table ends
+ * at PCM_STOP", which is what it said before SCRUM-214 appended #30: the claim
+ * is about which sound syscalls exist, and tying it to the end of the whole
+ * table made every later syscall anywhere in the kernel look like a change of
+ * sound policy. */
 static void test_there_is_no_sound_acquire(void)
 {
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_SOUND_PCM_STOP + 1);
+    CU_ASSERT_EQUAL(EXO_SYS_SOUND_PCM_PARAMS, EXO_SYS_SOUND_PCM_STOP + 1);
+    CU_ASSERT_EQUAL(EXO_SYS_SOUND_PCM_PARAMS, EXO_SYS_COUNT - 1);
 }
 
 /* ── Argument validation ────────────────────────────────────────────────── */
@@ -449,6 +464,104 @@ static void test_stop_refuses_another_contexts_voice(void)
     unmap_scratch(paddr);
 }
 
+/* ── #30, re-placing a voice (SCRUM-214) ────────────────────────────────── */
+
+/*
+ * Same ownership rule as #29, and the same reason it matters: a LibOS must not
+ * be able to reach into another one's sound. The distinction from #29 is what
+ * happens on the refusal -- the voice must be left *exactly* as it was, both
+ * playing and placed where its owner put it, so the check is followed by a
+ * render that proves the pan did not move.
+ */
+static void test_params_refuses_another_contexts_voice(void)
+{
+    page_owner_t me = context_current();
+    uint64_t paddr = map_scratch();
+
+    /* Hard left, so a stolen re-pan to the right would be unmistakable. */
+    int64_t handle = do_pcm(SCRATCH, TEST_SAMPLES, TEST_RATE_HZ,
+                            PCM_MIXER_VOL_MAX, 0, 64);
+    CU_ASSERT_TRUE(handle >= 0);
+
+    context_set_current(OTHER_LIBOS);
+    CU_ASSERT_EQUAL(do_pcm_params((uint64_t)handle, PCM_MIXER_VOL_MAX,
+                                  PCM_MIXER_SEP_MAX), -EXO_EPERM);
+    CU_ASSERT_EQUAL(pcm_mixer_is_playing((int)handle), 1);
+
+    context_set_current(me);
+
+    /* Still where its owner left it: a couple of frames rendered off to the
+     * side prove the refusal was total rather than partially applied. */
+    static int16_t frames[8 * PCM_MIXER_CHANNELS];
+    pcm_mixer_render(frames, 4);
+    int silent_right = 1;
+    for (uint32_t i = 0; i < 4; i++)
+        if (frames[i * PCM_MIXER_CHANNELS + 1] != 0)
+            silent_right = 0;
+    CU_ASSERT_TRUE(silent_right);
+
+    /* And the owner itself may retune it. */
+    CU_ASSERT_EQUAL(do_pcm_params((uint64_t)handle, 64, PCM_MIXER_SEP_CENTRE),
+                    0);
+
+    CU_ASSERT_EQUAL(do_pcm_stop((uint64_t)handle), 0);
+    hda_pcm_stop();
+    unmap_scratch(paddr);
+}
+
+/*
+ * The everyday case, and the one a stricter return code would have got wrong:
+ * Doom calls I_UpdateSoundParams for every channel it believes is active, and
+ * it notices a sound has ended a tic *after* the fact. So retuning a voice
+ * that is already gone has to be a quiet success -- 0, like #29's -- not an
+ * error the LibOS would have to learn to ignore.
+ */
+static void test_params_of_finished_or_unknown_handle(void)
+{
+    uint64_t paddr = map_scratch();
+
+    int64_t handle = do_pcm(SCRATCH, TEST_SAMPLES, TEST_RATE_HZ,
+                            PCM_MIXER_VOL_MAX, PCM_MIXER_SEP_CENTRE, 64);
+    CU_ASSERT_TRUE(handle >= 0);
+
+    /* Retired behind the syscall's back, as running out of samples would do
+     * inside hda_irq_handler(). */
+    pcm_mixer_stop((int)handle);
+    CU_ASSERT_EQUAL(do_pcm_params((uint64_t)handle, 64, PCM_MIXER_SEP_CENTRE),
+                    0);
+    CU_ASSERT_EQUAL(syscall_sound_pcm_pages_used(), 0u);
+
+    /* Never issued at all, and the one shape #28 never returns. */
+    CU_ASSERT_EQUAL(do_pcm_params(0x7FFFFFFFu, 64, PCM_MIXER_SEP_CENTRE), 0);
+    CU_ASSERT_EQUAL(do_pcm_params((uint64_t)(int64_t)-1, 64,
+                                 PCM_MIXER_SEP_CENTRE), -EXO_EINVAL);
+
+    hda_pcm_stop();
+    unmap_scratch(paddr);
+}
+
+/* Out-of-range vol/sep are clamped by the mixer rather than refused here, so a
+ * retune can never answer -EXO_EINVAL where #28 answered a handle for the same
+ * numbers. Checked at the ABI, since that asymmetry is the sort of thing a
+ * later "tightening" would add without noticing. */
+static void test_params_does_not_range_check_vol_or_sep(void)
+{
+    uint64_t paddr = map_scratch();
+
+    int64_t handle = do_pcm(SCRATCH, TEST_SAMPLES, TEST_RATE_HZ,
+                            PCM_MIXER_VOL_MAX, PCM_MIXER_SEP_CENTRE, 64);
+    CU_ASSERT_TRUE(handle >= 0);
+
+    CU_ASSERT_EQUAL(do_pcm_params((uint64_t)handle, 1000, 9999), 0);
+    CU_ASSERT_EQUAL(do_pcm_params((uint64_t)handle, (uint64_t)(int64_t)-5,
+                                  (uint64_t)(int64_t)-5), 0);
+    CU_ASSERT_EQUAL(pcm_mixer_is_playing((int)handle), 1);
+
+    CU_ASSERT_EQUAL(do_pcm_stop((uint64_t)handle), 0);
+    hda_pcm_stop();
+    unmap_scratch(paddr);
+}
+
 /* A handle nobody was ever issued is not an error to stop -- there is nothing
  * to stop -- but a negative one could never have come from #28. */
 static void test_stop_of_unknown_handle(void)
@@ -644,6 +757,12 @@ void suite_syscall_sound_pcm_tests(CU_pSuite s)
                 test_ninth_voice_is_refused_and_disturbs_nothing);
     CU_add_test(s, "stop refuses another context's voice",
                 test_stop_refuses_another_contexts_voice);
+    CU_add_test(s, "params refuses another context's voice",
+                test_params_refuses_another_contexts_voice);
+    CU_add_test(s, "params of a finished or unknown handle",
+                test_params_of_finished_or_unknown_handle);
+    CU_add_test(s, "params does not range-check vol/sep",
+                test_params_does_not_range_check_vol_or_sep);
     CU_add_test(s, "stop of an unknown handle", test_stop_of_unknown_handle);
     CU_add_test(s, "stop of a finished voice is ok",
                 test_stop_of_finished_voice_is_ok);
