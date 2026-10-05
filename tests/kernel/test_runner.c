@@ -80,6 +80,7 @@ void suite_syscall_stat_tests(CU_pSuite s);
 void suite_ata_tests(CU_pSuite s);
 void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
+void suite_exofs_tests(CU_pSuite s);
 void suite_launch_multi_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
@@ -94,6 +95,12 @@ int syscall_disk_suite_cleanup(void);
 
 int disk_binding_suite_init(void);
 int disk_binding_suite_cleanup(void);
+
+/* Same reason as syscall_disk's: ExoFS transfers go through
+ * exo_disk_read/exo_disk_write, which answer -EXO_EBUSY without the binding
+ * (SCRUM-189). */
+int exofs_suite_init(void);
+int exofs_suite_cleanup(void);
 
 /* Same idea as context_launch_rebind_suite_cleanup (SCRUM-196): each test
  * here launches real contexts (with real code/data/stack pages) via the
@@ -487,6 +494,12 @@ int run_tests(void)
     s = CU_add_suite("disk_binding", disk_binding_suite_init,
                      disk_binding_suite_cleanup);
     suite_disk_binding_tests(s);
+
+    /* After disk_binding: ExoFS assumes the binding primitives it leans on
+     * already work, so a binding failure should name that suite rather than
+     * surfacing here as a pile of -EXO_EBUSY (SCRUM-189). */
+    s = CU_add_suite("exofs", exofs_suite_init, exofs_suite_cleanup);
+    suite_exofs_tests(s);
 
     s = CU_add_suite("launch_multi", NULL, launch_multi_suite_cleanup);
     suite_launch_multi_tests(s);

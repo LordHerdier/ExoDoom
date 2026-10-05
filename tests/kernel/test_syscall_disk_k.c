@@ -59,6 +59,11 @@ static int64_t do_disk_acquire(void)
     return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, 0, 0, 0, 0, 0);
 }
 
+static int64_t do_disk_release(void)
+{
+    return exo_syscall_dispatch(EXO_SYS_DISK_RELEASE, 0, 0, 0, 0, 0, 0);
+}
+
 /* Acquire the binding for this suite's own context before the existing
  * hardware/round-trip tests run -- without this, every one of them would
  * now fail with the -EXO_EBUSY this ticket adds. A headless build has
@@ -73,7 +78,10 @@ int syscall_disk_suite_init(void)
 
 int syscall_disk_suite_cleanup(void)
 {
-    disk_binding_release(syscall_current_context());
+    /* Through #27 rather than disk_binding_release() directly: this is the
+     * teardown a real LibOS performs, so the suite may as well exercise it
+     * (SCRUM-189). */
+    do_disk_release();
     return 0;
 }
 
@@ -114,6 +122,8 @@ static void test_handlers_are_bound(void)
 {
     CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_DISK_READ));
     CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_DISK_WRITE));
+    CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_DISK_ACQUIRE));
+    CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_DISK_RELEASE));
 }
 
 static void test_zero_count_is_a_noop(void)
@@ -234,6 +244,82 @@ static void test_foreign_owner_blocks_read_write(void)
     CU_ASSERT_EQUAL(disk_binding_owner(), me);
 }
 
+/* #27, SCRUM-189. The acquire/release pair is what makes phase 2 of the
+ * revocation protocol reachable from ring 3 at all -- before this, a LibOS
+ * could take the disk and never give it back except by exiting. */
+static void test_release_returns_the_binding(void)
+{
+    if (!drive_present())
+        return;
+
+    page_owner_t me = syscall_current_context();
+
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+
+    CU_ASSERT_EQUAL(do_disk_release(), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
+
+    /* Released really means released: somebody else can now take it. */
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_OK);
+    disk_binding_release(OTHER_LIBOS);
+
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+}
+
+/* Releasing what you do not hold is success, not an error -- the mirror of
+ * #26 treating a re-acquire by the current owner as success. A LibOS
+ * unwinding an error path must be able to release unconditionally without
+ * first working out whether its acquire succeeded. */
+static void test_release_without_binding_is_a_noop(void)
+{
+    if (!drive_present())
+        return;
+
+    page_owner_t me = syscall_current_context();
+
+    CU_ASSERT_EQUAL(do_disk_release(), 0);
+    CU_ASSERT_EQUAL(do_disk_release(), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
+
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+}
+
+/* Scoped to the caller: releasing while ANOTHER context holds the disk must
+ * leave that context's binding alone. Same rule disk_binding_reclaim()
+ * follows for forced reclamation -- a release is not a way to evict
+ * somebody else. */
+static void test_release_does_not_touch_a_foreign_binding(void)
+{
+    if (!drive_present())
+        return;
+
+    page_owner_t me = syscall_current_context();
+
+    CU_ASSERT_EQUAL(do_disk_release(), 0);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(do_disk_release(), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(), OTHER_LIBOS);
+
+    disk_binding_release(OTHER_LIBOS);
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+}
+
+/* A headless machine answers 0, not -EXO_ENODEV: there is no binding to
+ * hold, so the release is a no-op either way, and failing here would make
+ * the unconditional-cleanup pattern above impossible on exactly the
+ * configuration that needs it least to work but most to not crash. */
+static void test_release_without_a_drive_still_succeeds(void)
+{
+    if (drive_present())
+        return;
+
+    CU_ASSERT_EQUAL(do_disk_release(), 0);
+}
+
 void suite_syscall_disk_tests(CU_pSuite s)
 {
     CU_add_test(s, "handlers are bound", test_handlers_are_bound);
@@ -250,4 +336,12 @@ void suite_syscall_disk_tests(CU_pSuite s)
     CU_add_test(s, "no drive reports ENODEV", test_no_drive_reports_enodev);
     CU_add_test(s, "foreign owner blocks read/write",
                test_foreign_owner_blocks_read_write);
+    CU_add_test(s, "release returns the binding",
+               test_release_returns_the_binding);
+    CU_add_test(s, "release without binding is a no-op",
+               test_release_without_binding_is_a_noop);
+    CU_add_test(s, "release does not touch a foreign binding",
+               test_release_does_not_touch_a_foreign_binding);
+    CU_add_test(s, "release without a drive still succeeds",
+               test_release_without_a_drive_still_succeeds);
 }

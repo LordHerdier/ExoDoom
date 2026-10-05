@@ -47,3 +47,4 @@ extern int exo_errno;
 #define EROFS        30  /* Read-only file system */
 #define ERANGE       34  /* Numerical result out of range */
 #define ENOSYS       38  /* Function not implemented */
+#define ENOTEMPTY    39  /* Directory not empty */
