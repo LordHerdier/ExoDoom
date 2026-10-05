@@ -136,17 +136,38 @@ int exofs_fat_free(exofs_volume_t *v, uint32_t blk)
  * -EXO_EIO rather than -EXO_EINVAL: the argument was fine, the disk is not.
  */
 
-int exofs_chain_last(exofs_volume_t *v, uint32_t head, uint32_t *out)
+/*
+ * Walk the chain from `head` to its end-of-chain entry, reporting the last
+ * block and/or the number of blocks. Either out pointer may be NULL.
+ *
+ * This is the ONE loop that follows a chain to its end (SCRUM-226).
+ * exofs_chain_last() and exofs_chain_len() used to be two copies of it that
+ * differed only in which of these two values they returned, which left the
+ * three checks below -- the bound, the link into a free block, the
+ * out-of-range link exofs_fat_get() refuses -- to be kept in step by hand.
+ * They are what stands between a corrupted FAT and either a hang or a walk
+ * off the end of the array, so a fix applied to one copy and not the other
+ * would have left half the callers with the weaker detection and no test
+ * able to say which half.
+ *
+ * Nothing is written to either out pointer unless the walk succeeds, so a
+ * caller's variable is not left holding a block from partway round a cycle.
+ */
+static int chain_walk(exofs_volume_t *v, uint32_t head,
+                      uint32_t *last_out, uint32_t *len_out)
 {
-    if (v == NULL || out == NULL) return -EXO_EINVAL;
-
     uint32_t cur = head;
+
     for (uint32_t steps = 0; steps <= v->total_blocks; steps++) {
         uint32_t next;
         int rc = exofs_fat_get(v, cur, &next);
         if (rc < 0) return rc;
 
-        if (next == EXOFS_BLOCK_EOC) { *out = cur; return 0; }
+        if (next == EXOFS_BLOCK_EOC) {
+            if (last_out != NULL) *last_out = cur;
+            if (len_out  != NULL) *len_out  = steps + 1u;
+            return 0;
+        }
 
         /* A free entry inside a chain is corruption too: the chain claims a
          * block that the allocator believes nobody owns. */
@@ -158,23 +179,18 @@ int exofs_chain_last(exofs_volume_t *v, uint32_t head, uint32_t *out)
     return -EXO_EIO;
 }
 
+int exofs_chain_last(exofs_volume_t *v, uint32_t head, uint32_t *out)
+{
+    if (v == NULL || out == NULL) return -EXO_EINVAL;
+
+    return chain_walk(v, head, out, NULL);
+}
+
 int exofs_chain_len(exofs_volume_t *v, uint32_t head, uint32_t *out)
 {
     if (v == NULL || out == NULL) return -EXO_EINVAL;
 
-    uint32_t cur = head;
-    for (uint32_t steps = 0; steps <= v->total_blocks; steps++) {
-        uint32_t next;
-        int rc = exofs_fat_get(v, cur, &next);
-        if (rc < 0) return rc;
-
-        if (next == EXOFS_BLOCK_EOC) { *out = steps + 1u; return 0; }
-        if (next == EXOFS_BLOCK_FREE) return -EXO_EIO;
-
-        cur = next;
-    }
-
-    return -EXO_EIO;
+    return chain_walk(v, head, NULL, out);
 }
 
 int exofs_chain_nth(exofs_volume_t *v, uint32_t head, uint32_t n,

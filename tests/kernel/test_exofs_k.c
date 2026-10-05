@@ -813,6 +813,157 @@ static void test_out_of_range_blocks_rejected(void)
     exofs_unmount();
 }
 
+/*
+ * exofs_chain_last() and exofs_chain_len() must agree about every chain
+ * (SCRUM-226).
+ *
+ * They were two hand-copied loops, so nothing but care kept their
+ * corruption checks the same; they are now one walker with two front ends,
+ * and this is the test that would notice the day somebody gives one of them
+ * its own loop again. Each shape is written straight into the in-RAM FAT --
+ * no allocator, no disk -- because half of them are states the allocator
+ * can never produce, which is exactly why they have to be handled.
+ *
+ * Asserted three ways per shape: the two answers match EACH OTHER, they
+ * match the expected code, and on success the values are right and agree
+ * with exofs_chain_nth() walking the same links independently.
+ */
+static void expect_chain(exofs_volume_t *v, uint32_t head, int want_rc,
+                         uint32_t want_last, uint32_t want_len)
+{
+    /* Sentinels, so "left untouched on failure" is checkable too. */
+    uint32_t last = 0xDEADBEEFu;
+    uint32_t len  = 0xDEADBEEFu;
+
+    int rc_last = exofs_chain_last(v, head, &last);
+    int rc_len  = exofs_chain_len(v, head, &len);
+
+    CU_ASSERT_EQUAL(rc_last, rc_len);
+    CU_ASSERT_EQUAL(rc_last, want_rc);
+
+    if (want_rc == 0) {
+        CU_ASSERT_EQUAL(last, want_last);
+        CU_ASSERT_EQUAL(len, want_len);
+
+        uint32_t nth = 0;
+        CU_ASSERT_EQUAL(exofs_chain_nth(v, head, want_len - 1u, &nth), 0);
+        CU_ASSERT_EQUAL(nth, want_last);
+    } else {
+        /* A caller's variable must not be left holding a block from partway
+         * round a cycle. */
+        CU_ASSERT_EQUAL(last, 0xDEADBEEFu);
+        CU_ASSERT_EQUAL(len, 0xDEADBEEFu);
+    }
+}
+
+static void test_chain_last_and_len_agree_on_every_shape(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    /* Seven blocks nobody has allocated, deliberately out of index order so
+     * the walk has to follow links rather than count upward. */
+    static const uint32_t b[7] = { 400u, 120u, 3000u, 70u, 2999u, 130u, 410u };
+    for (uint32_t i = 0; i < 7; i++) {
+        CU_ASSERT_TRUE(b[i] < v->total_blocks);
+        CU_ASSERT_EQUAL(v->fat[b[i]], EXOFS_BLOCK_FREE);
+    }
+
+    /* One block. */
+    v->fat[b[0]] = EXOFS_BLOCK_EOC;
+    expect_chain(v, b[0], 0, b[0], 1u);
+
+    /* All seven. */
+    for (uint32_t i = 0; i < 6; i++) v->fat[b[i]] = b[i + 1];
+    v->fat[b[6]] = EXOFS_BLOCK_EOC;
+    expect_chain(v, b[0], 0, b[6], 7u);
+
+    /* The same chain entered partway along is a shorter chain. */
+    expect_chain(v, b[4], 0, b[6], 3u);
+
+    /* A block that points at itself. */
+    v->fat[b[6]] = b[6];
+    expect_chain(v, b[6], -EXO_EIO, 0, 0);
+
+    /* A two-block loop. */
+    v->fat[b[6]] = b[5];
+    expect_chain(v, b[5], -EXO_EIO, 0, 0);
+
+    /* A tail that runs into a loop it is not itself part of. */
+    v->fat[b[6]] = b[3];
+    expect_chain(v, b[0], -EXO_EIO, 0, 0);
+
+    /* A link into a free block, at the end and in the middle. */
+    v->fat[b[6]] = EXOFS_BLOCK_FREE;
+    expect_chain(v, b[0], -EXO_EIO, 0, 0);
+    v->fat[b[6]] = EXOFS_BLOCK_EOC;
+    v->fat[b[3]] = EXOFS_BLOCK_FREE;
+    expect_chain(v, b[0], -EXO_EIO, 0, 0);
+
+    /* A chain that "starts" on a free block. */
+    expect_chain(v, b[3], -EXO_EIO, 0, 0);
+
+    /* A link that leaves the volume, three ways: the first index past the
+     * end, one far outside, and one that is a real slot in the FAT array but
+     * not a real block (the array is sized to whole sectors -- see
+     * test_out_of_range_blocks_rejected). Each is exofs_fat_get()'s
+     * -EXO_EINVAL, passed straight through. */
+    v->fat[b[3]] = b[4];
+    v->fat[b[6]] = v->total_blocks;
+    expect_chain(v, b[0], -EXO_EINVAL, 0, 0);
+    v->fat[b[6]] = 0x7FFFFFFFu;
+    expect_chain(v, b[0], -EXO_EINVAL, 0, 0);
+    uint32_t slack = v->fat_blocks * EXOFS_FAT_PER_BLOCK - 1u;
+    if (slack >= v->total_blocks) {
+        v->fat[b[6]] = slack;
+        expect_chain(v, b[0], -EXO_EINVAL, 0, 0);
+    }
+
+    /* And a head that was never on the volume at all. */
+    expect_chain(v, v->total_blocks, -EXO_EINVAL, 0, 0);
+
+    /* The FAT was edited behind the dirty bitmap's back on purpose: none of
+     * this reaches the disk, and the next test formats anyway. */
+    exofs_unmount();
+}
+
+/*
+ * Where exactly the cycle bound sits (SCRUM-226).
+ *
+ * A chain cannot be longer than the volume has blocks, so that is the
+ * longest walk that may succeed -- and it must succeed, or a directory or
+ * file that genuinely fills the volume becomes unreadable. One link more
+ * than that can only be a cycle. Both halves are pinned here because the
+ * bound now lives in one place, and "tighten it by one" is a one-character
+ * edit that would otherwise have no test standing in its way.
+ *
+ * Built in the in-RAM FAT for the same reason test_exhaustion_reports_enospc
+ * fills it directly: allocating ~8000 blocks for real is minutes of PIO.
+ */
+static void test_chain_through_every_block_is_the_longest_legal_one(void)
+{
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    uint32_t n = v->total_blocks;
+    CU_ASSERT_TRUE(n > 2u);
+
+    /* 0 -> 1 -> ... -> n-1 -> EOC: every block on the volume, root included. */
+    for (uint32_t i = 0; i + 1u < n; i++) v->fat[i] = i + 1u;
+    v->fat[n - 1u] = EXOFS_BLOCK_EOC;
+
+    expect_chain(v, 0u, 0, n - 1u, n);
+
+    /* Close it. Now there is no end to find, from any block on it. */
+    v->fat[n - 1u] = 0u;
+    expect_chain(v, 0u, -EXO_EIO, 0, 0);
+    expect_chain(v, n / 2u, -EXO_EIO, 0, 0);
+
+    exofs_unmount();
+}
+
 /* Filling the volume must report -EXO_ENOSPC rather than calling exit(),
  * which is what cfat's findFreeBlock() did. */
 static void test_exhaustion_reports_enospc(void)
@@ -2671,6 +2822,10 @@ void suite_exofs_tests(CU_pSuite s)
                 test_chain_into_free_block_is_reported);
     CU_add_test(s, "out-of-range blocks rejected",
                 test_out_of_range_blocks_rejected);
+    CU_add_test(s, "chain_last and chain_len agree on every shape",
+                test_chain_last_and_len_agree_on_every_shape);
+    CU_add_test(s, "a chain through every block is the longest legal one",
+                test_chain_through_every_block_is_the_longest_legal_one);
     CU_add_test(s, "exhaustion reports ENOSPC",
                 test_exhaustion_reports_enospc);
     CU_add_test(s, "a chain survives a remount",
