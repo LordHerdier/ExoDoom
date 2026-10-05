@@ -211,8 +211,8 @@ Everything else is a filter over it:
 
 | Caller | Takes |
 |---|---|
-| `exofs_dir_iter_next()` — the public iterator, and through it `exofs_dir_lookup()` and `readdir` | the live slots |
-| `find_free_slot()` | the first slot that is not live |
+| `exofs_dir_iter_next()` — the public iterator, and through it `readdir` and the emptiness check | the live slots |
+| `dir_scan_for_name()` — behind `exofs_dir_lookup()` and `exofs_dir_add()` | every slot: the live ones for their names, and the first that is not, for a create to use (SCRUM-225) |
 
 Before that, the iterator and the free-slot search were separate
 hand-written walks with differently written bounds (`steps > total_blocks`
@@ -229,19 +229,18 @@ Two things about that walker worth knowing before changing it:
 
 - **It reads a block once for as long as its caller keeps the buffer.** The
   cursor records whether the buffer already holds its block.
-  `find_free_slot()` owns the buffer for its whole search. The *public*
+  `dir_scan_for_name()` owns the buffer for its whole scan. The *public*
   iterator cannot: `exofs_dir_iter_t` is a plain struct on the caller's
   stack with nowhere to keep 512 bytes between calls (and a disk buffer has
   to come from the LibOS window anyway), so it re-reads its block on every
   call — one read per entry returned, not one per 16. Scans that live
   inside `exofs_dirent.c` should hold the cursor themselves rather than go
-  through the public iterator.
-- **There is deliberately no cached tail** for the free-slot search, though
+  through the public iterator, which is what lookup and create now do.
+- **There is deliberately no cached tail** for finding a free slot, though
   the FAT allocator and the name area both have a resume point. It could not
   make a create cheaper: `exofs_dir_add()` must check the new name against
-  every existing entry first, which reads every block of the directory
-  whatever the slot search does. The avoidable cost is making that pass
-  twice, not how long the second one is.
+  every existing entry, which reads every block of the directory regardless.
+  The avoidable cost was making that pass twice — §6b.
 
 ---
 
@@ -340,6 +339,48 @@ and one name block.
 entries here, a shell listing wants them, and filtering them would cost a
 name comparison on every iteration to hide something the caller can skip for
 free.
+
+### What a create and a lookup cost
+
+A directory is a linear list, so finding a name in it — or establishing that
+it is not there, which is what every create has to do first — means reading
+the directory. That much is inherent in the format. What is not inherent is
+reading it more than once, and until SCRUM-225 a create read it many times
+over:
+
+- `exofs_dir_add()` ran a whole `exofs_dir_lookup()` to rule out a
+  duplicate, then walked the chain a second time from the head to find a
+  free slot.
+- That lookup went through the public iterator, which re-reads its block on
+  every entry it returns (§5) — so the "one" pass was a read per *entry*,
+  not per block.
+
+Both are now a single pass, `dir_scan_for_name()`, which holds the walker
+and its buffer: **each directory block is read exactly once**, the first
+free slot is noted on the way past at no I/O cost, and a duplicate ends the
+scan where it is found. `exofs_dir_lookup()` is the same scan with nothing
+to add, so path resolution gets the same saving on every component.
+
+| In one directory of mixed-length names | before | after |
+|---|---|---|
+| block reads to create 100 files | 6,320 | 1,076 |
+| one more create at that size (7 blocks, 102 entries) | 112 | 9 |
+| one lookup of a name that is not there | 104 | 7 |
+
+The only reads besides directory blocks are name blocks, one for each entry
+whose `name_len` matches — the cheap rejection that keeps most candidates
+free.
+
+**The scan does not stop at the first free slot.** That is the one mistake a
+merged pass can make that two separate ones could not: a hole that comes
+before the name in chain order is met first, and taking it there would put
+the same name in the directory twice. The slot is remembered and the scan
+runs on. `a create looks past a hole for a duplicate` is that case.
+
+What this does *not* change: a create is still O(entries), so filling one
+directory with M files is still O(M²) directory reads — several times fewer
+than before, as the table shows, but quadratic. Removing that would take an
+index, not a better walk.
 
 **`rmdir` unlinks from the parent before freeing the directory's blocks** —
 §1's rule at its sharpest. This order leaks a block chain nothing references
