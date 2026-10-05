@@ -65,6 +65,10 @@
  * cannot be, having IF clear, but kernel_main and its callees can).  The cost
  * of sweeping late is that a finished effect holds its pages until the next
  * sound syscall, bounded by PCM_MIXER_VOICES buffers.
+ *
+ * #30 (SCRUM-214) joins them on the same terms: it re-places a voice the
+ * caller already owns and carries no buffer of its own, so the per-voice owner
+ * check is the whole of its policy.
  */
 
 static page_owner_t tone_holder = PAGE_OWNER_FREE;
@@ -330,6 +334,45 @@ static int64_t sys_sound_pcm_stop(uint64_t handle, uint64_t a2, uint64_t a3,
     return 0;
 }
 
+/* #30 -- re-place a voice that is already sounding.
+ *   0              retuned; also when the sound has already finished or been
+ *                  taken over, for the reason #29 returns 0 there -- Doom calls
+ *                  I_UpdateSoundParams for every channel it believes is active,
+ *                  a tic or so before it notices one has ended, so "that voice
+ *                  is gone" is the ordinary case and not a caller error
+ *   -EXO_EINVAL    a negative handle, which was never issued
+ *   -EXO_EPERM     that voice is playing another context's sound; untouched
+ * Backs a LibOS sound module's UpdateSoundParams (docs/syscall_spec.md §3.2
+ * #30).  vol/sep are not range-checked here: pcm_mixer_set_params() clamps
+ * both to Doom's own ranges, which is the same arithmetic #28 hands them to,
+ * so a rejection here would answer -EXO_EINVAL where #28 answers a handle. */
+static int64_t sys_sound_pcm_params(uint64_t handle, uint64_t vol, uint64_t sep,
+                                    uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a4; (void)a5; (void)a6;
+
+    if ((int64_t)handle < 0)
+        return -EXO_EINVAL;
+
+    pcm_reap();
+
+    pcm_slot_t *slot = slot_for_handle((int)(int64_t)handle);
+    if (slot == NULL)
+        return 0;
+
+    if (slot->owner != syscall_current_context())
+        return -EXO_EPERM;
+
+    /* The mixer's own answer is discarded deliberately: the only failure it
+     * has is "that voice is no longer yours to place", which the reap above
+     * has already turned into the 0 return a few lines up.  Reporting it here
+     * would mean two different results for one outcome, decided by whether a
+     * completion interrupt landed inside this syscall. */
+    (void)pcm_mixer_set_params(slot->handle, (int)(int64_t)vol,
+                               (int)(int64_t)sep);
+    return 0;
+}
+
 uint32_t syscall_sound_pcm_slots_used(void)
 {
     uint32_t used = 0;
@@ -385,4 +428,5 @@ void syscall_sound_init(void)
     exo_syscall_register(EXO_SYS_SOUND_STOP, sys_sound_stop);
     exo_syscall_register(EXO_SYS_SOUND_PCM, sys_sound_pcm);
     exo_syscall_register(EXO_SYS_SOUND_PCM_STOP, sys_sound_pcm_stop);
+    exo_syscall_register(EXO_SYS_SOUND_PCM_PARAMS, sys_sound_pcm_params);
 }

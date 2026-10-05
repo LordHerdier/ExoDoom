@@ -210,12 +210,12 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Intel HDA audio (CORB/RIRB, BDL stream DMA, INTx, SCRUM-210) | `src/hda.c/h` |
 | PC speaker (PIT channel 2, SCRUM-98) | `src/speaker.c/h` |
 | Doom SFX → speaker tone table (SCRUM-99) | `src/doom_sfx_tone.c/h` |
-| Doom `sound_module_t` over the speaker (SCRUM-101) | `src/doom_sound.c/h` (+ `FEATURE_SOUND` in `src/doom/doomfeatures.h`) |
+| Doom `sound_module_t` (PCM first, speaker fallback) | `src/doom_sound.c/h` (speaker sequencer, SCRUM-101), `src/doom_sound_pcm.c/h` (real `DS*` samples, SCRUM-214) (+ `FEATURE_SOUND` in `src/doom/doomfeatures.h`) |
 | WAD DMX sound lump decoder (`DS*` → 8-bit PCM, SCRUM-211) | `src/doom_dmx.c/h` |
 | Software PCM mixer (8 voices, resample + sum + clip, SCRUM-212) | `src/pcm_mixer.c/h` (+ `hda_pcm_*` in `src/hda.c/h`) |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
-| Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h`, `src/syscall_sound.c/h` (speaker SCRUM-100, PCM SCRUM-213) |
+| Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h`, `src/syscall_sound.c/h` (speaker SCRUM-100, PCM SCRUM-213, PCM re-place #30 SCRUM-214) |
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer), `src/disk_binding.c/h` (disk, SCRUM-188) |
 | LibOS-space filesystem (ExoFS, over the disk syscalls) | `src/libos_fs/` (SCRUM-189) — **not part of the kernel**; see `docs/filesystem.md` |
 | Resource revocation (repossession) | `src/revoke.c/h` (protocol), the `page_revoke_*`/`fb_binding_revoke_*`/`disk_binding_revoke_*` primitives |
@@ -825,9 +825,34 @@ convention and calls it from `kernel_main` instead of a test harness.
     zero-copy rule that holds in ring 0. Those pages are swept back at the
     start of each sound syscall, never from the IRQ (`free_page_owned()` there
     would race the PMM bitmap). `docs/syscall_spec.md` §3.5b.
-  Still open: Doom's sound module remains SCRUM-101's one-voice speaker
-  sequencer, and `src/revoke.c` has no sound leg — an exiting LibOS loses its
-  voices, a revoked one keeps them.
+  - **Doom plays through all of it now, and the two sound back ends coexist by
+    a *runtime* rule (SCRUM-214).** `DG_sound_module`'s `StartSound` tries
+    `src/doom_sound_pcm.c` first — `doom_dmx_find_sfx()` over the mounted WAD,
+    then `exo_sound_pcm` — and falls back to SCRUM-101's tone sequencer per
+    effect. That was an explicit requirement of the ticket, since only one
+    wiring can own `I_StartSound`. Three things about it are load-bearing:
+    **`-EXO_EBUSY` is success**, not a fallback trigger — the mixer declined
+    that sound on purpose, so a tone would answer a refused request a second
+    time and louder; **`-EXO_ENODEV` latches the whole path off** for the run
+    rather than costing a failed syscall per effect; and **which back end owns
+    a channel is recorded at start** (`chan_path[]` in `src/doom_sound.c`), not
+    inferred from "does it hold a voice?", because the `-EXO_EBUSY` case owns
+    the channel while holding none. **The lump name is the link's where there is
+    one** — `s_sound.c` does not follow `sfxinfo_t::link` for you, and `chgun`
+    is linked to `sfx_pistol` with no `DSCHGUN` in any IWAD, so skipping it
+    drops the chaingun alone to a tone. Nothing is copied LibOS-side —
+    `LIBOS_WAD_VADDR` is inside the user window and #28 checks its buffer
+    *readable* — and `SoundIsPlaying` is answered from `DG_GetTicksMs()` and
+    the lump's own `num_samples/rate_hz` rather than a syscall, which is why
+    there is no "is this voice playing" number. `exo_sound_pcm_params` (#30)
+    and `pcm_mixer_set_params()` were added for `I_UpdateSoundParams`: Doom
+    retunes live sounds once a tic, and the mixer could previously only place a
+    voice at the moment it started. #30 is not a re-admission — priority,
+    phase and sample pointer are untouched, since a reset phase would restart
+    the effect every tic it is retuned. `docs/syscall_spec.md` §6 Option C.
+  Still open: `src/revoke.c` has no sound leg — an exiting LibOS loses its
+  voices, a revoked one keeps them — and Doom's music is still silent
+  (`DG_music_module` is MUS/MIDI, not PCM).
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - **The context table (SCRUM-107, `src/context.c/h`) tracks live LibOS
