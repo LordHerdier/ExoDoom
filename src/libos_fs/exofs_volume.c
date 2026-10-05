@@ -100,6 +100,7 @@ int exofs_read_block(uint32_t blk, void *buf)
     if (v == NULL) return -EXO_EINVAL;
     if (blk >= v->total_blocks) return -EXO_EINVAL;
 
+    v->stat_block_reads++;
     return exofs_bdev_read(exofs_block_lba(v, blk), buf, 1);
 }
 
@@ -109,6 +110,7 @@ int exofs_write_block(uint32_t blk, const void *buf)
     if (v == NULL) return -EXO_EINVAL;
     if (blk >= v->total_blocks) return -EXO_EINVAL;
 
+    v->stat_block_writes++;
     return exofs_bdev_write(exofs_block_lba(v, blk), buf, 1);
 }
 
@@ -179,6 +181,7 @@ static void release_volume(void)
     libos_heap_free(g_vol.fat);
     libos_heap_free(g_vol.fat_dirty);
     libos_heap_free(g_vol.scratch);
+    libos_heap_free(g_vol.name_room);   /* NULL if no name was stored */
     memset(&g_vol, 0, sizeof(g_vol));
 }
 

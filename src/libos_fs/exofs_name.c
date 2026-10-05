@@ -216,6 +216,146 @@ int exofs_name_chain_len(exofs_volume_t *v, uint32_t *out)
     return exofs_chain_len(v, v->name_head, out);
 }
 
+/* ---- Room table (SCRUM-223) ----------------------------------------------
+ *
+ * exofs_volume_t::name_room, and exofs_internal.h says what it is and why it
+ * is a table rather than a single hint. What matters here is the one rule
+ * that makes it safe to consult:
+ *
+ *   an entry is written only from a block this file has just scanned from
+ *   end to end, and only in the two places a name block ever changes.
+ *
+ * So an entry is always an exact statement about the block as this code last
+ * left it, and place_in_block(need) would succeed on that block exactly when
+ * need <= entry. Skipping a block whose entry is below `need` therefore
+ * skips precisely the reads that would have ended in -EXO_ENOSPC, and the
+ * allocation lands where it always did -- tests/kernel/test_exofs_k.c runs
+ * the same workload with the table wiped before every call and compares the
+ * placements record for record.
+ *
+ * The one thing that does change: a block already known to be too small is
+ * no longer re-read, so damage that appears in it later (not through this
+ * code) goes unnoticed until something needs that block again.
+ */
+
+/*
+ * The longest name place_in_block() could put in `blk` right now: the
+ * largest free record, or the unused tail if that is bigger. Mirrors that
+ * function's own walk, so the two cannot disagree about what fits.
+ *
+ * EXOFS_NAME_ROOM_UNKNOWN for a block with a bad header. Nothing can be said
+ * about such a block except that the next allocation should read it and
+ * report it, exactly as before.
+ */
+static uint16_t block_room(const uint8_t *blk)
+{
+    uint16_t best = 0;
+    uint16_t off = 0;
+
+    while (off + EXOFS_NAME_HDR_SIZE <= EXOFS_BLOCK_SIZE) {
+        uint16_t h = hdr_read(blk, off);
+
+        if (hdr_is_unused_tail(h)) {
+            uint16_t tail =
+                (uint16_t)(EXOFS_BLOCK_SIZE - off - EXOFS_NAME_HDR_SIZE);
+            return tail > best ? tail : best;
+        }
+
+        uint16_t cap = hdr_cap(h);
+        if (cap == 0) return EXOFS_NAME_ROOM_UNKNOWN;
+        if ((uint32_t)off + EXOFS_NAME_HDR_SIZE + cap > EXOFS_BLOCK_SIZE) {
+            return EXOFS_NAME_ROOM_UNKNOWN;
+        }
+
+        if (hdr_free(h) && cap > best) best = cap;
+
+        off = (uint16_t)(off + EXOFS_NAME_HDR_SIZE + cap);
+    }
+
+    return best;
+}
+
+/* Whether the table already knows the block at chain position `pos` cannot
+ * take `need` bytes. "Don't know" is always answered no. */
+static int room_rules_out(const exofs_volume_t *v, uint32_t pos, uint16_t need)
+{
+    if (v->name_room == NULL || pos >= v->name_room_cap) return 0;
+
+    uint16_t room = v->name_room[pos];
+    return room != EXOFS_NAME_ROOM_UNKNOWN && room < need;
+}
+
+/* Record what `blk`, the block at chain position `pos`, can take now. A
+ * position past the table is dropped: it stays "read it and see". */
+static void room_note(exofs_volume_t *v, uint32_t pos, const uint8_t *blk)
+{
+    if (v->name_room == NULL || pos >= v->name_room_cap) return;
+
+    v->name_room[pos] = block_room(blk);
+}
+
+/* Small enough to cost nothing on a volume with a handful of names, and
+ * doubled from there, so growing it stays amortised O(1) per name block. */
+#define ROOM_TABLE_MIN 16u
+
+/*
+ * Make sure the table has an entry for every block of the chain, plus one
+ * for the block this allocation may be about to add.
+ *
+ * Best effort. If the heap has nothing to give, the table stays as it is --
+ * possibly NULL -- and the allocation carries on reading blocks it has no
+ * entry for. That is slower and otherwise identical, which is the right
+ * trade for a failure that is about a few bytes of bookkeeping: refusing to
+ * store a name over it would turn an optimisation into a point of failure.
+ */
+static void room_reserve(exofs_volume_t *v)
+{
+    uint32_t len;
+    if (exofs_name_chain_len(v, &len) < 0) return;
+
+    uint32_t want = len + 1u;
+    if (v->name_room != NULL && v->name_room_cap >= want) return;
+
+    uint32_t cap = v->name_room_cap != 0 ? v->name_room_cap : ROOM_TABLE_MIN;
+    while (cap < want) cap *= 2u;
+
+    uint16_t *table = libos_heap_alloc((size_t)cap * sizeof(uint16_t));
+    if (table == NULL) return;
+
+    uint32_t kept = v->name_room != NULL ? v->name_room_cap : 0u;
+    for (uint32_t i = 0; i < kept; i++) table[i] = v->name_room[i];
+    for (uint32_t i = kept; i < cap; i++) table[i] = EXOFS_NAME_ROOM_UNKNOWN;
+
+    libos_heap_free(v->name_room);
+    v->name_room     = table;
+    v->name_room_cap = cap;
+}
+
+/*
+ * Where `blk` sits in the name chain (0 = name_head). Returns 1 with
+ * *pos_out set, or 0 if it is not on the chain at all -- which a dirent
+ * carrying a corrupt name reference can cause, and which must not be turned
+ * into a table write at some unrelated position.
+ *
+ * An in-RAM FAT walk: no disk access.
+ */
+static int name_chain_pos(exofs_volume_t *v, uint32_t blk, uint32_t *pos_out)
+{
+    uint32_t cur = v->name_head;
+
+    for (uint32_t pos = 0; pos <= v->total_blocks; pos++) {
+        if (cur == blk) { *pos_out = pos; return 1; }
+
+        uint32_t next;
+        if (exofs_fat_get(v, cur, &next) < 0) return 0;
+        if (next == EXOFS_BLOCK_EOC || next == EXOFS_BLOCK_FREE) return 0;
+
+        cur = next;
+    }
+
+    return 0;
+}
+
 /* ---- Allocation --------------------------------------------------------- */
 
 int exofs_name_alloc(exofs_volume_t *v, const char *name, uint32_t len,
@@ -264,24 +404,44 @@ int exofs_name_alloc(exofs_volume_t *v, const char *name, uint32_t len,
         if (rc < 0) { v->name_head = EXOFS_NO_BLOCK; goto out; }
     }
 
-    /* Walk the chain looking for a block with room. */
-    uint32_t blk = v->name_head;
-    for (uint32_t steps = 0; steps <= v->total_blocks; steps++) {
-        rc = exofs_read_block(blk, buf);
-        if (rc < 0) goto out;
+    room_reserve(v);
 
-        uint16_t off;
-        rc = place_in_block(buf, need, &off);
-        if (rc == 0) {
-            memcpy(buf + off, name, len);
-            rc = exofs_write_block(blk, buf);
+    /*
+     * Walk the chain looking for a block with room -- first fit, in chain
+     * order, as it has always been. `pos` counts blocks so the room table
+     * can be consulted and kept up to date; the walk itself is over the
+     * in-RAM FAT and costs no I/O.
+     *
+     * What used to make this quadratic was the read: every block on the way
+     * to the one with room was fetched from disk just to be told it was
+     * full, on every call (SCRUM-223). A block the table rules out is now
+     * stepped over without being read, so the common case is one read, of
+     * the block the name goes into.
+     */
+    uint32_t blk = v->name_head;
+    for (uint32_t pos = 0; pos <= v->total_blocks; pos++) {
+        if (!room_rules_out(v, pos, need)) {
+            rc = exofs_read_block(blk, buf);
             if (rc < 0) goto out;
 
-            *blk_out = blk;
-            *off_out = off;
-            goto out;
+            uint16_t off;
+            rc = place_in_block(buf, need, &off);
+            if (rc == 0) {
+                memcpy(buf + off, name, len);
+                rc = exofs_write_block(blk, buf);
+                if (rc < 0) goto out;   /* disk unchanged, so is the table */
+
+                room_note(v, pos, buf);
+                *blk_out = blk;
+                *off_out = off;
+                goto out;
+            }
+            if (rc != -EXO_ENOSPC) goto out;   /* -EXO_EIO: corrupt block */
+
+            /* Scanned to the end and nothing fit: worth remembering, so the
+             * next name this size or longer does not come back to ask. */
+            room_note(v, pos, buf);
         }
-        if (rc != -EXO_ENOSPC) goto out;   /* -EXO_EIO: corrupt block */
 
         uint32_t next;
         rc = exofs_fat_get(v, blk, &next);
@@ -412,6 +572,15 @@ int exofs_name_free(exofs_volume_t *v, uint32_t blk, uint16_t off)
     if (rc < 0) goto out;
 
     rc = exofs_write_block(blk, buf);
+    if (rc < 0) goto out;
+
+    /* The block has room it did not have a moment ago, and the room table
+     * has to hear about it: an entry left saying "full" would have every
+     * later allocation step over this block without reading it, and the
+     * record just freed would never be found again (SCRUM-223). After the
+     * write, so the table never describes a block the disk does not hold. */
+    uint32_t pos;
+    if (name_chain_pos(v, blk, &pos)) room_note(v, pos, buf);
 
 out:
     libos_heap_free(buf);
