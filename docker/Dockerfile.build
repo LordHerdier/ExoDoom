@@ -3,6 +3,16 @@ FROM debian:bookworm-slim AS builder
 ARG BINUTILS_VERSION=2.42
 ARG GCC_VERSION=13.2.0
 
+# Pinned sha256 of each tarball, kept next to the version it belongs to so a
+# version bump cannot leave a stale checksum behind. fetch-gnu-tarball.sh
+# refuses any copy that does not match -- see that script for why fetching
+# from several mirrors makes verifying mandatory rather than nice to have.
+# Both values were cross-checked against three independent mirrors
+# (sourceware.org/mirrors.kernel.org/ftp.nluug.nl for binutils,
+# mirrors.kernel.org/ftp.nluug.nl/mirror.csclub.uwaterloo.ca for gcc).
+ARG BINUTILS_SHA256=f6e4d41fd5fc778b06b7891457b3620da5ecea1006c6a4a41ae998109f85a800
+ARG GCC_SHA256=e275e76442a6067341a27f04c5c6b83d8613144004c0413528863dc6b5c743da
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
       wget \
@@ -19,8 +29,20 @@ ENV PATH="$PREFIX/bin:$PATH"
 
 WORKDIR /tmp/src
 
+# Copied in ahead of the two toolchain builds below, which means editing it
+# invalidates both of their (very expensive) layers. That is the right way
+# round: a change to how sources are fetched or verified should rebuild what
+# was fetched.
+COPY scripts/fetch-gnu-tarball.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/fetch-gnu-tarball.sh
+
 # ── binutils ────────────────────────────────────────────────────────────────
-RUN wget -q https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz \
+# sourceware.org is passed as an extra fallback because it is binutils'
+# own upstream release host -- independent of the GNU mirror network, so it
+# survives an outage that takes all of /gnu with it.
+RUN fetch-gnu-tarball.sh "$BINUTILS_SHA256" \
+      binutils/binutils-${BINUTILS_VERSION}.tar.xz \
+      https://sourceware.org/pub/binutils/releases/binutils-${BINUTILS_VERSION}.tar.xz \
  && tar xf binutils-${BINUTILS_VERSION}.tar.xz \
  && mkdir build-binutils && cd build-binutils \
  && ../binutils-${BINUTILS_VERSION}/configure \
@@ -30,7 +52,8 @@ RUN wget -q https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz
  && make install
 
 # ── gcc (freestanding cross-compiler) ───────────────────────────────────────
-RUN wget -q https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz \
+RUN fetch-gnu-tarball.sh "$GCC_SHA256" \
+      gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz \
  && tar xf gcc-${GCC_VERSION}.tar.xz \
  && mkdir build-gcc && cd build-gcc \
  && ../gcc-${GCC_VERSION}/configure \
