@@ -115,6 +115,19 @@ make clean                     # rm -rf build
   libc shim rather than a one-function probe.
 - CI (`.github/workflows/ci.yml`) runs `make docker-ci` and greps serial
   output for `ALL TESTS PASSED` / `TESTS FAILED`.
+- **Every `docker-*` target leads with the same `docker buildx build` of
+  `docker/Dockerfile.build`**, so a failure fetching the cross-toolchain
+  sources fails all of them — with a `wget` error that says nothing about the
+  tree being built. `docker/scripts/fetch-gnu-tarball.sh` is why that is no
+  longer one host's decision: it tries ftp.gnu.org, then three independent
+  GNU mirrors (plus sourceware.org for binutils, its upstream release host),
+  with a bounded 20s per host so a dead one costs seconds rather than
+  hanging the build. **The sha256 pin in `Dockerfile.build` is not optional
+  and lives next to the version ARG it belongs to** — fetching from more
+  hosts means trusting more hosts, and the pin is also what rejects the
+  truncated transfer or HTML error page a mirror actually serves when it
+  misbehaves, at the download instead of as a baffling `tar` error minutes
+  later. A version bump must update the checksum beside it.
 - QEMU shortcuts: `Ctrl+A` then `X` to exit; `Ctrl+A` then `C` for the QEMU
   monitor.
 - Pressing Enter at the GRUB menu is currently broken — use
