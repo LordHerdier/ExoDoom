@@ -583,4 +583,72 @@ driver playing that lump rather than a voice having been started.
 Still open on this line: revocation (`src/revoke.c`) has no sound leg — an
 exiting LibOS loses its voices via `syscall_sound_release()`, a revoked one does
 not — and Doom's music is still silent, since `DG_music_module` is MUS/MIDI
-rather than PCM.
+rather than PCM. The mixer end of the music path now exists (§12.7); what
+feeds it does not yet.
+
+### 12.7 The music voice (SCRUM-218)
+
+Everything above mixes 8-bit mono DMX lumps of known, finite length, read in
+place from the IWAD. Music is none of those: 16-bit stereo, already at 48 kHz,
+continuous for minutes, and produced a chunk at a time by a synthesiser in
+ring 3. So `src/pcm_mixer.c` has a second *kind* of voice rather than a ninth
+entry in its table:
+
+- **One voice, outside the sfx table.** It takes no slot and has no priority,
+  so `pcm_mixer_start()`'s stealing cannot reach it and `pcm_mixer_stop_all()`
+  does not touch it. A sound effect must never be able to silence the
+  soundtrack.
+- **A ring of interleaved stereo frames**, filled by `pcm_mixer_music_write()`
+  and drained one frame per output frame by `pcm_mixer_render()` — summed into
+  the same accumulators as the sfx voices, so the existing saturating clip is
+  still applied exactly once, to the total. No resampling: the synthesiser
+  resamples on its side, where the cost is visible to the application
+  spending it.
+- **Its own level**, `pcm_mixer_music_set_volume()`, 0..127 with 127 a
+  bit-exact pass-through. It belongs to the voice rather than to the ring, so
+  it survives a song change — Doom sets it before the first song exists.
+
+**The mixer does not own the ring.** `pcm_mixer_music_open()` is handed the
+storage, which keeps `pcm_mixer.c` allocation-free and leaves the pages with
+whoever can account for them (the stream syscalls, SCRUM-219). Close the voice
+before freeing its ring.
+
+**Size.** 48 kHz × 2 channels × 2 bytes is 192 KB/s, so every 100 ms of buffer
+is ~19 KB of kernel memory held while a song plays. `PCM_MIXER_MUSIC_PAGES` =
+12 gives 12288 frames, **256 ms**: enough for a refill to arrive eight Doom
+tics late before the ring runs dry. Smaller and any hitch in the game loop is
+audible; larger and the soundtrack trails the game by the fill level, and a
+pause or song change is late by however much was queued. It is a starting
+point with a way to judge it — see the underrun counter below — not a derived
+constant. Nothing in the mixer requires that size; the tests exercise the wrap
+with a 16-frame ring.
+
+**Underrun is silence, not a stall.** `pcm_mixer_render()` runs here, inside
+`hda_irq_handler()` with interrupts off, so an empty ring cannot be waited
+on — the producer cannot run until the handler returns. A frame with no music
+renders the music voice as zero, the sfx voices are unaffected, and
+`pcm_mixer_music_underruns()` counts it. Only a voice that is actually
+*playing* is counted: one that has been opened but never written to, or
+stopped with `pcm_mixer_music_flush()`, is idle on purpose, and counting that
+would make the number measure how long nothing was playing rather than how
+often something was late.
+
+**A write never blocks and never overwrites.** `pcm_mixer_music_write()`
+returns how many frames it took, which may be fewer than offered. The copy
+itself runs with the lock dropped: the only thing that can interleave with a
+producer is the render interrupt, which only consumes from the front of the
+ring, so the free region past the write position is the producer's alone
+until it publishes the new count in a single guarded store.
+
+**Latency, end to end.** The fill level of this ring is one delay; the refill
+policy of §12.2 is another, and a larger one: an entry is re-rendered just
+after the DMA engine has finished with it, so what is rendered now is heard
+nearly a whole 341 ms buffer later. For a continuous soundtrack that lag is
+inaudible except at the edges — `pcm_mixer_music_flush()` makes a stop
+immediate *at the mixer*, but frames already rendered into the HDA buffer
+still play out.
+
+`tests/kernel/test_pcm_mixer_music_k.c` is the suite. Its music is not a tone
+but a counter — every frame carries its own index, differently per channel —
+so a repeated, skipped, swapped or stale frame is a wrong number at a known
+position rather than something that would have to be heard.

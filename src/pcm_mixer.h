@@ -101,6 +101,7 @@
 #define PCM_MIXER_OK        0     /* for the entry points that return no handle */
 #define PCM_MIXER_ENOVOICE  (-1)  /* all voices busy with more important work */
 #define PCM_MIXER_EINVAL    (-2)  /* NULL, empty, or an unplayable rate       */
+#define PCM_MIXER_EBUSY     (-3)  /* the music voice already has a ring       */
 
 /* Forget every voice.  Does not touch any buffer -- silence appears on the
  * next pcm_mixer_render(), which is the only thing that writes samples. */
@@ -181,5 +182,148 @@ uint32_t pcm_mixer_active_voices(void);
  * Called from hda_irq_handler() with interrupts off, so it must not block,
  * allocate or print; it does none of those.  Cost is O(frames x active
  * voices) integer multiply-adds.
+ *
+ * The music voice below is summed into the same accumulators, before that
+ * one clip.
  */
 void pcm_mixer_render(int16_t *dst, uint32_t frames);
+
+/*
+ * ── The music voice (SCRUM-218) ────────────────────────────────────────
+ *
+ * Everything above mixes 8-bit mono DMX lumps of known, finite length, read
+ * in place from the IWAD.  Music is none of those things: it is 16-bit
+ * stereo, already at PCM_MIXER_RATE_HZ, continuous for minutes, and made a
+ * chunk at a time by a synthesiser running in ring 3 (SCRUM-217).  So it is
+ * a second KIND of voice rather than a ninth entry in the table:
+ *
+ *   - ONE voice, outside the sfx table.  It takes no sfx slot and no
+ *     priority, so pcm_mixer_start()'s stealing can never reach it: a sound
+ *     effect must not be able to silence the soundtrack.
+ *   - Its source is a RING of interleaved stereo frames that a producer
+ *     fills and pcm_mixer_render() drains.  No resampling -- the synthesiser
+ *     resamples on its side, where the cost is visible to the application
+ *     spending it.
+ *   - Its OWN volume.  Doom has separate sfxVolume and musicVolume sliders,
+ *     and I_SetMusicVolume has to move this and nothing else.
+ *
+ * ── The mixer does not own the ring ────────────────────────────────────
+ *
+ * pcm_mixer_music_open() is handed the storage.  That keeps this file what
+ * its header says it is -- nothing here allocates or frees -- and leaves
+ * the pages with whoever can account for them: src/syscall_sound.c takes
+ * them from the PMM when a LibOS binds the stream and gives them back when
+ * it stops or exits (SCRUM-219).  The corollary is the same as the sfx
+ * voices' zero-copy note: close the voice BEFORE freeing its ring.
+ *
+ * ── How big, and why ───────────────────────────────────────────────────
+ *
+ * 48 kHz x 2 channels x 2 bytes is 192 KB a second, so every 100 ms of
+ * buffer is ~19 KB -- nearly five pages -- of kernel memory held for as
+ * long as a song plays.  The ring exists to cover the gap between two
+ * refills by the producer, which is one frame of Doom's loop: ~29 ms at 35
+ * tics a second, more when a frame runs long.
+ *
+ *   too small   any hitch in that loop is longer than the buffer, the ring
+ *               runs dry and the gap is audible.  At 12 pages a refill can
+ *               arrive eight tics late before that happens.
+ *   too large   the soundtrack trails the game by the fill level, and a
+ *               producer that keeps it topped up has committed that much
+ *               audio it can no longer take back: a pause or a song change
+ *               is late by however much was queued.
+ *
+ * PCM_MIXER_MUSIC_PAGES = 12 is 12288 frames, 256 ms.  It is a starting
+ * point with a way to judge it, not a derived constant:
+ * pcm_mixer_music_underruns() counts every frame that had to be rendered as
+ * silence for want of data, so "is this enough?" has a number for an answer.
+ * Raising it is this one line; the cost is the pages and the lag.
+ *
+ * Nothing in this file requires that size.  The ring is whatever
+ * pcm_mixer_music_open() is given, which is how the tests exercise a wrap
+ * with sixteen frames rather than twelve thousand.
+ *
+ * ── Underrun is silence, not a stall ───────────────────────────────────
+ *
+ * pcm_mixer_render() runs inside hda_irq_handler() with interrupts off, so
+ * an empty ring cannot be waited on: there is nothing to wait FOR until the
+ * producer runs again, and it cannot run while this is.  A frame with no
+ * music renders the music voice as zero, the sfx voices carry on unaffected,
+ * and the frame is counted.
+ *
+ * Only a voice that is actually playing can underrun.  One that has been
+ * opened but not yet written to, or stopped with pcm_mixer_music_flush(), is
+ * idle -- silent on purpose -- and is not counted, or the counter would
+ * measure how long nothing was playing rather than how often something was
+ * late.
+ *
+ * ── Who calls what ─────────────────────────────────────────────────────
+ *
+ * pcm_mixer_render() is the consumer and runs in interrupt context.  Every
+ * other function below is the producer side and runs in ordinary kernel
+ * context -- a syscall body, or a test -- never from an interrupt handler.
+ * They guard their shared state the way the sfx mutators do.
+ */
+
+/* The recommended ring, in pages, bytes and stereo frames.  See above. */
+#define PCM_MIXER_MUSIC_PAGES   12u
+#define PCM_MIXER_MUSIC_BYTES   (PCM_MIXER_MUSIC_PAGES * 4096u)
+#define PCM_MIXER_MUSIC_FRAMES  (PCM_MIXER_MUSIC_BYTES / \
+                                 (PCM_MIXER_CHANNELS * 2u))
+
+/*
+ * Give the music voice a ring of `frames` stereo frames at `ring` (so
+ * frames * PCM_MIXER_CHANNELS int16_t), empty it and clear the underrun
+ * count.  The volume is NOT reset: it belongs to the voice, not the ring,
+ * and Doom sets it before the first song exists.
+ *
+ * PCM_MIXER_OK, PCM_MIXER_EINVAL for a NULL ring or zero frames, or
+ * PCM_MIXER_EBUSY if a ring is already attached -- there is one music voice,
+ * and silently swapping its storage would strand whoever owns the old one.
+ */
+int pcm_mixer_music_open(int16_t *ring, uint32_t frames);
+
+/* Detach the ring.  After this returns pcm_mixer_render() will not read it
+ * again, so the caller may free it.  Harmless when nothing is attached. */
+void pcm_mixer_music_close(void);
+
+/* 1 while a ring is attached. */
+int pcm_mixer_music_is_open(void);
+
+/*
+ * Queue up to `frames` interleaved stereo frames from `src` and return how
+ * many were taken -- which is fewer than offered, possibly zero, when the
+ * ring is short of room.  It never blocks and never overwrites audio that
+ * has not been played: a full ring is the producer's cue to come back
+ * later, and the alternative (dropping the oldest) is a skip in the song.
+ *
+ * Returns 0 with no ring attached.  Frames already queued are untouched by
+ * a short write, and what was accepted will be played in order after them.
+ */
+uint32_t pcm_mixer_music_write(const int16_t *src, uint32_t frames);
+
+/*
+ * Stop: drop everything queued, now.  The next rendered frame is silent
+ * rather than the tail of whatever was buffered, and the voice goes idle,
+ * so the silence that follows is not counted as an underrun.  The ring
+ * stays attached and the next write starts it again.
+ */
+void pcm_mixer_music_flush(void);
+
+/* Set the music level, 0..PCM_MIXER_VOL_MAX, clamped.  Linear, and
+ * PCM_MIXER_VOL_MAX passes samples through bit for bit.  Affects only the
+ * music voice; persists across open/close; pcm_mixer_reset() puts it back
+ * to full. */
+void pcm_mixer_music_set_volume(int vol);
+int  pcm_mixer_music_volume(void);
+
+/* Frames queued and not yet played, and frames a write would be accepted
+ * right now.  They sum to the ring's size while one is attached and are both
+ * 0 otherwise.  A snapshot: render may have drained more by the time the
+ * caller looks at the answer, so a write can only ever find MORE room than
+ * pcm_mixer_music_space() promised, never less. */
+uint32_t pcm_mixer_music_fill(void);
+uint32_t pcm_mixer_music_space(void);
+
+/* Frames rendered as silence because a playing voice had nothing queued,
+ * since the last pcm_mixer_music_open().  Still readable after a close. */
+uint32_t pcm_mixer_music_underruns(void);
