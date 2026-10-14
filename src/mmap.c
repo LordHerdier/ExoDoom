@@ -96,3 +96,37 @@ int mmap_find_module(uint64_t *start, uint64_t *end) {
 
     return -1;
 }
+
+int mmap_find_module_named(const char *name, uint64_t *start, uint64_t *end) {
+    if (saved_info == NULL || name == NULL) {
+        return -1;
+    }
+
+    const struct mb2_tag *tag = mb2_first_tag(saved_info);
+    const uintptr_t tags_end = (uintptr_t)saved_info + saved_info->total_size;
+
+    while ((uintptr_t)tag < tags_end && tag->type != MB2_TAG_END) {
+        if (tag->type == MB2_TAG_MODULE) {
+            const struct mb2_tag_module *m = (const struct mb2_tag_module *)tag;
+            /* The command line follows the fixed fields and is NUL-terminated
+             * by GRUB; bound the compare by the tag's own size anyway, so a
+             * malformed tag cannot walk us off the end of the tag list. */
+            const char *cmdline = (const char *)m + 16;
+            const char *limit   = (const char *)m + m->size;
+            const char *p = cmdline;
+            const char *q = name;
+            while (p < limit && *p != '\0' && *q != '\0' && *p == *q) {
+                p++;
+                q++;
+            }
+            if (p < limit && *p == '\0' && *q == '\0') {
+                if (start != NULL) *start = m->mod_start;
+                if (end != NULL)   *end   = m->mod_end;
+                return 0;
+            }
+        }
+        tag = mb2_next_tag(tag);
+    }
+
+    return -1;
+}

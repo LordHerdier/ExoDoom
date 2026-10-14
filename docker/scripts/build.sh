@@ -330,6 +330,31 @@ if [[ "$wad_file" != "$blob_name" || "$wad_file" != "$grub_wad" ]]; then
 fi
 echo "    IWAD name agrees across build.sh, grub.cfg and DG_Init ($wad_file)"
 
+# -- Same guard for the boot animation module ------------------------------
+#
+# The animation (src/boot_anim.c) finds its frames by module command line, so
+# the asset's basename, the `module2` line that loads it and BOOT_ANIM_MODULE
+# have to agree exactly. A mismatch produces no error anywhere: the kernel
+# looks for a module nobody named that, finds none, and boots straight to the
+# log -- which looks identical to "the animation is switched off".
+ANIM_PATH="assets/tenor.gif"
+anim_file="$(basename "$ANIM_PATH")"
+anim_name="$(sed -n 's/^#define BOOT_ANIM_MODULE "\(.*\)"$/\1/p' src/boot_anim.h)"
+grub_anim="$(sed -n 's@.*module2 /boot/\([^ ]*\).*@\1@p' src/grub.cfg | sed -n '2p')"
+
+if [[ ! -f "$ANIM_PATH" ]]; then
+  echo "    ERROR: boot animation asset missing: $ANIM_PATH"
+  exit 1
+fi
+if [[ "$anim_file" != "$anim_name" || "$anim_file" != "$grub_anim" ]]; then
+  echo "    ERROR: boot animation filename disagreement --"
+  echo "             asset in the tree        : $anim_file"
+  echo "             loaded by src/grub.cfg   : $grub_anim"
+  echo "             matched by boot_anim.h   : $anim_name"
+  exit 1
+fi
+echo "    Boot animation name agrees across build.sh, grub.cfg and boot_anim.h ($anim_file)"
+
 echo "[2c/7] Build shell LibOS (SCRUM-110)"
 # Unlike libos_c_probe/libc_shim_probe (built further down, inside the
 # TESTING=1 block), this target is built UNCONDITIONALLY, and ahead of step
@@ -806,6 +831,7 @@ echo "[6/7] Build ISO staging tree"
 mkdir -p build/isodir/boot
 cp build/exodoom build/isodir/boot/exodoom
 cp build/freedoom2.wad build/isodir/boot/freedoom2.wad
+cp "$ANIM_PATH" "build/isodir/boot/$anim_file"
 cp src/grub.cfg build/isodir/boot/grub/grub.cfg
 
 echo "[7/7] Create ISO -> build/exodoom.iso"

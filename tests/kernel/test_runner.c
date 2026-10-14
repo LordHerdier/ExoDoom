@@ -68,6 +68,7 @@ void suite_clock_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
 void suite_fb_shadow_tests(CU_pSuite s);
 void suite_fixed_math_tests(CU_pSuite s);
+void suite_gif_tests(CU_pSuite s);
 void suite_doom_panic_tests(CU_pSuite s);
 void suite_dg_init_tests(CU_pSuite s);
 void suite_fpconv_tests(CU_pSuite s);
@@ -483,6 +484,13 @@ int run_tests(void)
 
     s = CU_add_suite("fixed_math", NULL, NULL);
     suite_fixed_math_tests(s);
+
+    /* The boot animation's GIF decoder.  Needs no framebuffer -- src/gif.c
+     * writes palette indices into a caller-owned canvas and knows nothing
+     * about hardware -- so it asserts exact pixels here, and reads the real
+     * tenor.gif module for the half a fixture cannot cover. */
+    s = CU_add_suite("gif", NULL, NULL);
+    suite_gif_tests(s);
     s = CU_add_suite("doom_panic", NULL, NULL);
     suite_doom_panic_tests(s);
     s = CU_add_suite("dg_init", NULL, NULL);

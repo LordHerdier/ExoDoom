@@ -174,6 +174,7 @@ serial_init() -> framebuffer tag discovery (serial diagnostics only)
   -> syscall_pit_init()
   [if -DTESTING]  serial_flush() -> qemu_exit(run_tests())
   [normal boot]   fb_init_bgrx8888() + fbcon_init()  (halts if absent)
+                  -> boot_anim_play()  (GIF module; skipped if absent)
                   -> banner/mmap dump -> ownership self-check
                   -> idt_set_gate(33, irq1_stub) -> kbd_init()
                   -> sti -> `sti; hlt` idle loop
@@ -228,6 +229,7 @@ convention and calls it from `kernel_main` instead of a test harness.
 | Software PCM mixer (8 voices, resample + sum + clip, SCRUM-212) | `src/pcm_mixer.c/h` (+ `hda_pcm_*` in `src/hda.c/h`) |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
+| Boot animation (GIF decode + scaled blit) | `src/gif.c/h`, `src/boot_anim.c/h`, `assets/tenor.gif` |
 | Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_mem.c/h`, `src/syscall_fb.c/h`, `src/syscall_serial.c/h`, `src/syscall_sound.c/h` (speaker SCRUM-100, PCM SCRUM-213, PCM re-place #30 SCRUM-214) |
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h` (framebuffer), `src/disk_binding.c/h` (disk, SCRUM-188) |
 | LibOS-space filesystem (ExoFS, over the disk syscalls) | `src/libos_fs/` (SCRUM-189) — **not part of the kernel**; see `docs/filesystem.md` |
@@ -881,6 +883,36 @@ convention and calls it from `kernel_main` instead of a test harness.
   Still open: `src/revoke.c` has no sound leg — an exiting LibOS loses its
   voices, a revoked one keeps them — and Doom's music is still silent
   (`DG_music_module` is MUS/MIDI, not PCM).
+- **The boot animation is decoded, not pre-rendered, and it runs before the
+  boot log.** `assets/tenor.gif` ships as a *second* GRUB module
+  (`src/grub.cfg`), so it is identity-mapped and PMM-reserved exactly like the
+  IWAD, and `src/gif.c` decodes it in place into one canvas
+  (`GIF_CANVAS_BYTES` of `.bss` in `src/boot_anim.c`) with no allocation at
+  all. Converting it to raw frames at build time instead would have cost a
+  multi-megabyte `.rodata` blob and an image-tooling dependency in
+  `docker/Dockerfile.build`, for output nothing in-tree could check; the
+  decoder is drivable from ring 0, so `tests/kernel/test_gif_k.c` asserts
+  every pixel of a 4x4 fixture *and* decodes the real 20-frame module.
+  Four things to know before editing it:
+  - **`mmap_find_module()` still means "the WAD"**, because it returns the
+    *first* module tag and GRUB emits them in `grub.cfg` order. The IWAD's
+    `module2` line must stay first; anything added after it is found by
+    command line with `mmap_find_module_named()`.
+  - **The name is spelled in three places** (the asset, the `module2` line,
+    `BOOT_ANIM_MODULE`) and `build.sh` fails the build if they disagree —
+    the same guard, for the same reason, as the IWAD's: a mismatch is not an
+    error anywhere at runtime, just an animation that never plays.
+  - **`boot_anim_play()` enables interrupts and restores IF itself.** It is
+    called from the pre-`sti` part of `kernel_main` (the only placement that
+    makes it a *boot* animation), and frame pacing is
+    `kernel_get_ticks_ms()`, which only advances from IRQ0 — so with IF left
+    masked it would `hlt` forever on frame 1. IRQ1 is still masked at the PIC
+    there, so the timer is the only interrupt this lets in.
+  - **It is bounded twice over**, by `BOOT_ANIM_LOOPS` and by
+    `BOOT_ANIM_MAX_MS` checked between frames, and a keypress ends it early.
+    A malformed delay field or a decode that stalls must cost a boot seconds,
+    not the boot.
+
 - **Framebuffer pixel format is BGRX8888** (empirically confirmed on QEMU),
   not RGB — relevant to anything touching `src/fb.c` or blit code.
 - **The context table (SCRUM-107, `src/context.c/h`) tracks live LibOS

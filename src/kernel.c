@@ -19,6 +19,7 @@
 #include "sleep.h"
 #include "fb.h"
 #include "fb_console.h"
+#include "boot_anim.h"
 #include "syscall.h"
 #include "syscall_mem.h"
 #include "syscall_fb.h"
@@ -484,6 +485,36 @@ void kernel_main(void *mb2_info_ptr) {
         serial_print("FATAL: no framebuffer\n");
         serial_flush();
         for (;;);
+    }
+
+    // ── Boot animation ───────────────────────────────────────────────────
+    // Plays before the banner, which is the only placement that makes it a
+    // boot animation rather than an interlude: the first thing on the screen
+    // after the framebuffer exists, and gone before the first log line.
+    //
+    // The frames are a GRUB module (src/grub.cfg), found by name rather than
+    // by mmap_find_module() -- that one means the WAD and must keep meaning
+    // it. A miss is the normal case on a `-kernel` boot (make docker-run-
+    // kernel passes no modules at all), so it is silent apart from serial and
+    // boot carries on.
+    //
+    // boot_anim_play() enables interrupts for its own duration and restores
+    // IF on the way out (see src/boot_anim.h): frame pacing comes from IRQ0,
+    // which pit_init() above already wired, and the normal-boot `sti` is
+    // still a long way below. IRQ1 stays masked at the PIC until kbd_init()
+    // runs down there, so the only interrupt this lets in is the timer.
+    {
+        uint64_t anim_start = 0, anim_end = 0;
+        if (mmap_find_module_named(BOOT_ANIM_MODULE, &anim_start, &anim_end) == 0 &&
+            anim_end > anim_start) {
+            boot_anim_play(&fb,
+                           (const uint8_t *)(uintptr_t)anim_start,
+                           (size_t)(anim_end - anim_start),
+                           BOOT_ANIM_LOOPS,
+                           BOOT_ANIM_MAX_MS);
+        } else {
+            serial_print("boot_anim: no " BOOT_ANIM_MODULE " module; skipping\n");
+        }
     }
 
     // ── Boot banner ─────────────────────────────────────────────────────
