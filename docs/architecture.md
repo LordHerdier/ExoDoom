@@ -728,6 +728,80 @@ full `FILE*` interface. See `docs/syscall_spec.md` §2 for the complete audit.
 > subtraction is done in `uint32_t` so it stays correct across the counter's
 > ~49.7-day wrap, matching `kernel_sleep_ms` and Doom's own `I_GetTime`.
 
+### Networking: stubbed, single player only
+
+ExoDoom has no network stack, but Doom's game loop does not know that. There
+is no separate single-player loop in the engine: every
+tic of every game runs through the same code that drives a netgame.
+`src/doom/d_loop.c` samples input into a `ticcmd_t`, files it in a ring of
+`BACKUPTICS` (128) slots, works out from the clock how many tics are due and
+hands each to the game along with a mask of who is playing; `src/doom/d_net.c`
+is the Doom-specific glue on top (settings in and out of the game's globals,
+`RunTic` → `G_Ticker`). "Single player" is that machinery with nobody else
+connected.
+
+What was left out of the vendor (SCRUM-63) is everything *beneath* those two
+files — `net_client.c`, `net_server.c`, `net_io.c`, the SDL transport. Three
+things stand in for it:
+
+| Mechanism | Where | Effect |
+| --- | --- | --- |
+| `#undef FEATURE_MULTIPLAYER` | `src/doom/doomfeatures.h` | Compiles out every call into the missing layer (`NET_CL_Run`, `NET_SV_Run`, `NET_CL_SendTiccmd`, the `-server`/`-connect`/`-autojoin` handling — twelve `NET_*` functions in `d_loop.c` alone). `D_InitNetGame()` reduces to: register `D_QuitNetGame` as an exit hook, remember the player class, return false. |
+| `#undef ORIGCODE` | `src/doom/config.h` | Replaces `D_StartNetGame()`'s server handshake with an invented reply: one player, console 0, `ticdup` 1, vanilla (old) sync. |
+| `net_client_connected = false`, `drone = false` | `src/doom_net_stub.c` | The two globals the loop still reads from `net_client.h`. They keep it on its local-only side: commands get built (a drone builds none), `PlayersInGame()` answers yes, and `TryRunTics()` clears every `ingame[]` slot but the local player's. |
+
+`libos_doom.c` passes Doom `argv = { "exodoom" }`, so `M_CheckParm()` returns
+0 for every net-related switch (`-solo-net`, `-left`, `-right`, `-timer`,
+`-avg`, …) and `netgame` stays false for the life of the process. The one
+exception is playback of a multiplayer *demo*, where `G_DoPlayDemo` sets it
+from the demo header and `G_CheckDemoStatus` clears it again when the demo
+ends.
+
+> ✅ **SCRUM-97:** verified, and one real defect fixed. The acceptance is "no
+> crashes from uninitialized net state", so the audit was of what the loop
+> reads on its way past where the network would have been:
+>
+> - **`D_ConnectNetGame()` read an uninitialised stack field on every boot.**
+>   It keeps a `net_connect_data_t` on its stack, and `InitConnectData()`
+>   never writes two of its fields — `player_class` (Hexen's; no Doom code
+>   assigns it) and `deh_sha1sum` (its writer is under `#if ORIGCODE`) — yet
+>   `D_InitNetGame()` reads `player_class` unconditionally and stores it.
+>   Nothing in Doom consumes a player class, so it never showed; it was still
+>   undefined behaviour, and the struct is exactly what a network layer would
+>   serialise to a server. Fixed with `= {0}` in `src/doom/d_net.c`, marked
+>   `ExoDoom (SCRUM-97)` like the tree's other patches.
+> - **`ticdup` is a divisor that starts at zero.** `d_loop.c` divides by it in
+>   ten places and it only becomes 1 inside `D_StartNetGame()`. `D_DoomMain`
+>   reaches that (via `D_CheckNetGame()`) before `D_DoomLoop()`, and nothing
+>   earlier calls `NetUpdate`/`TryRunTics`, so the order is safe — but a call
+>   into the tic loop from earlier in startup would be a ring-3 `#DE`.
+> - **The loop relies on a zeroed `.bss`.** With `ORIGCODE` off,
+>   `D_StartNetGame()` no longer assigns `localplayer`,
+>   `local_playeringame[]`, `recvtic` or `offsetms`. `libos_build_image()`
+>   zeroes `.bss` on every launch, including a second Doom (SCRUM-196), so it
+>   holds.
+> - **A stall costs time, not correctness.** The loop may only run tics it
+>   has built and builds at most five ahead, so a ten-second hitch runs five
+>   tics and drops the rest instead of tripping `I_Error("gametic>lowtic")`.
+>   The same cap is what bounds the very first frame: `D_DoomLoop()` calls
+>   `TryRunTics()` *before* `D_StartGameLoop()` has set the loop's start
+>   time, so that call believes every tic since boot is owed at once.
+>
+> `tests/kernel/test_doom_net_k.c` is the regression test. It links the
+> **real** `d_loop.c` and `d_net.c` into the test kernel — the second
+> exception, after `tables.c` (SCRUM-41), to "nothing in `src/doom/` links
+> into `build/exodoom`", and likewise `TESTING=1` only — and drives one
+> continuous single-player session through them from ring 0 in the order
+> `D_DoomMain`/`D_DoomLoop` do: connect, check, the pre-clock first frame,
+> ten seconds at one tic per tic, a stall, a phantom `playeringame[]` entry
+> (retired through `PlayerQuitGame`, not simulated on input nobody built), a
+> multiplayer demo, then 20,000 frames at an uneven frame rate. The engine
+> below is faked in that TU; each built command is stamped with its tic
+> number and `G_Ticker` checks the stamp, which is what turns "it did not
+> crash" into "it ran the right input" across well over a hundred laps of the
+> ring. The uninitialised read is caught by poisoning the stack first —
+> before the fix the test read back `0xA5A5A5A5`.
+
 ### Multi-application (Sprint 12)
 
 The eventual goal is **cooperative multitasking** between the Doom LibOS and a
@@ -1025,7 +1099,7 @@ sprint number that was never assigned:
 | SCRUM-151 Resource Protection & Secure Binding | To Do (epic), but its stories are almost entirely done | Page ownership table ✅ SCRUM-152, ownership enforcement in `exo_page_map`/`_unmap` ✅ SCRUM-153, framebuffer secure binding ✅ SCRUM-154, ownership-driven reclamation on `exo_exit` ✅ SCRUM-155, revocation protocol stub ✅ SCRUM-156, isolation test ✅ SCRUM-157, mapping teardown on free/revocation ✅ SCRUM-159, quota page-table pages per LibOS ✅ SCRUM-160; still open: manage all usable memory regions ⬜ SCRUM-158, `split_large_page` PAT-bit bug ⬜ SCRUM-161 |
 | SCRUM-147 Multi-LibOS & Scheduling | To Do (epic), core mechanism done, hardening ongoing | Context table ✅ SCRUM-107, context switch ✅ SCRUM-108, `exo_yield` ✅ SCRUM-109, shell LibOS ✅ SCRUM-110, Ctrl+Tab hotkey ✅ SCRUM-111, FB multiplexing ✅ SCRUM-112; **in progress:** per-context FB binding + VA window replacing the single global ones — SCRUM-166; Ctrl+Tab's `context_current()`-flipped-before-the-real-switch race ✅ fixed for syscall attribution — SCRUM-179 (`context_switch_request()` no longer updates `context_current()` itself; `context_switch_tail` commits it after the real CR3 swap); SCRUM-180 (the same root cause, for `fb_compositor`'s foreground pick) likely resolved as a side effect but not yet verified/closed; still open: moving the compositor's FB copy out of `irq0_handler` — SCRUM-181, `swapgs`/per-CPU rework — SCRUM-176, generalized single-syscall launch dispatch — SCRUM-184, preemptive (stretch) — SCRUM-127 |
 | SCRUM-142 Ring 3 & LibOS Runtime | **In Progress** (epic) | LibOS launch mechanism, entry convention, link target, and app-loading convention (SCRUM-47/48/49/50/51/173/175) are all done; the WAD/flat/automap viewer (SCRUM-165/178) and the demo-app line (clock ✅ SCRUM-168, Snake — **In Review**, SCRUM-182, calculator ⬜ SCRUM-169, Tetris ⬜ SCRUM-183) are what's currently exercising it |
-| SCRUM-144/145 Doom Port & Gameplay Verification | To Do | Everything from linking the Doom ELF (SCRUM-66) through E1M1 playability (SCRUM-81/84–96) — none of this has started; Doom is still not linked into `build/exodoom` |
+| SCRUM-144/145 Doom Port & Gameplay Verification | In Progress (epic) | Doom is linked into `build/exodoom` as the `libos_doom` ring-3 target and playable from the shell's `doom` command (SCRUM-66/77/79) — this row used to say otherwise. Verified so far: the net layer, stubbed to single player with no uninitialised net state ✅ SCRUM-97 (§7 "Networking: stubbed, single player only", `tests/kernel/test_doom_net_k.c`). Still open: game-loop timing (SCRUM-89) and frame-time profiling (SCRUM-87) are in draft PRs, IWAD compatibility (SCRUM-90), and save/load + config persistence (SCRUM-92/93), which wait on the file layer (SCRUM-42/44) |
 | SCRUM-146 Audio | In Progress | PC speaker driver ✅ SCRUM-98 (`src/speaker.c/h`, PIT channel 2, non-blocking duration via IRQ0); SFX→tone table ✅ SCRUM-99 (`src/doom_sfx_tone.c/h`, 1–4 freq/duration steps per `sfxenum_t` id); `exo_sound_tone`/`exo_sound_stop` syscalls ✅ SCRUM-100 (#17/#18, `src/syscall_sound.c/h`; ring-3 port access to the speaker proven to #GP); Doom `sound_module_t` ✅ SCRUM-101 (`src/doom_sound.c/h`, `FEATURE_SOUND` on, one-voice sequencer driven from `I_UpdateSound`, Doom priority rule; music is a silent module). All four stories done — `docs/syscall_spec.md` §6 Option B. **Real PCM audio has since started on top of that:** PCI enumeration + config space ✅ SCRUM-209 (`src/pci.c/h`, mechanism #1 over 0xCF8/0xCFC, `docs/drivers/pci.md`) and the Intel HDA controller driver ✅ SCRUM-210 (`src/hda.c/h`, CORB/RIRB codec ring + BDL stream DMA + INTx completion interrupt, `docs/drivers/hda.md`) — a synthesized tone now plays by DMA out of system memory, with register/DMA/IRQ state asserted by the `hda` KUnit suite. The other end of that path is now real too: the WAD DMX sound lump decoder ✅ SCRUM-211 (`src/doom_dmx.c/h`, `DS*` → 8-bit unsigned PCM, zero-copy out of the mounted module, 16 padding samples stripped at each end), acceptance-tested against the vendored `freedoom2.wad` by the `doom_dmx` suite. **That decode disproved the ticket's premise and the mixer must not inherit it:** DMX lumps are not "almost universally 11025 Hz" — of freedoom2 v0.13.0's 109 `DS*` lumps, 67 are 22050 Hz, 38 are 11025, 2 are 17990, 1 is 16000 and 1 is 44100, so with HDA pinned at 48 kHz/16-bit/stereo, resampling is unavoidable rather than optional. **And the two ends are now joined:** the software PCM mixer ✅ SCRUM-212 (`src/pcm_mixer.c/h`, 8 voices matching Doom's `snd_channels`, per-voice 16.16 phase accumulator with linear interpolation so each lump plays at *its* rate, int32 summation saturating to int16, Doom's own squared-separation panning law) plus a streaming mode in the driver (`hda_pcm_start()`, the BDL rediced from 2 entries to `HDA_BDL_ENTRIES_PCM` = 16 so a slice is ~21 ms rather than ~171 ms, refilled from the stream-completion IRQ) — `docs/drivers/hda.md` §12. Overlap and the non-disturbance of frame timing are both asserted from hardware state by the `hda_pcm` suite, the latter as a ratio between the PIT clock and the audio DMA rate, since timing a wait against the clock that gates it proves nothing; the arithmetic itself is asserted sample-for-sample by the hardware-free `pcm_mixer` suite. **And ring 3 can now reach it:** the PCM sound syscalls ✅ SCRUM-213 (`exo_sound_pcm` #28 / `exo_sound_pcm_stop` #29, `src/syscall_sound.c`), which resolved the story's own open design question by making sound **shared rather than exclusively bound** — there is no `exo_sound_acquire` and no `src/sound_binding.c`, because `pcm_mixer_start()`'s eight voices, Doom priority rule and non-disturbing refusal already are the admission policy a binding table would answer worse; what is owned is a voice, not the device (`docs/syscall_spec.md` §3.5b). The samples are copied into kernel pages rather than played in place: the mixer renders from `hda_irq_handler()` under whatever CR3 is loaded, and the caller may free its buffer the moment the syscall returns. A ring-3 LibOS queueing its own samples and the controller then DMA'ing them is asserted end to end by the `syscall_sound_pcm` suite. The ring-0 boot demo SCRUM-212 added to `kernel_main` is gone with it — the boot tone stays. **And Doom itself now plays through it:** the sound module's PCM leg ✅ SCRUM-214 (`src/doom_sound_pcm.c/h`, plus `pcm_mixer_set_params()` and `exo_sound_pcm_params` #30 — Doom retunes live sounds once a tic via `I_UpdateSoundParams`, which the mixer had no way to honour), so firing the shotgun in-game plays `DSSHOTGN` itself, the epic's own definition of done. **The two wirings coexist by a runtime rule rather than a build-time switch**, which the ticket asked for explicitly since only one can own `I_StartSound`: PCM is tried first and SCRUM-101's tone sequencer is the per-effect fallback — no WAD or no such lump costs that one effect, a `-EXO_ENODEV` (no audio controller) latches the whole path off for the run, and a `-EXO_EBUSY` counts as handled rather than failed, since the mixer declined that sound on purpose and a tone would answer it a second time (`docs/syscall_spec.md` §6 Option C). Nothing is copied LibOS-side: `LIBOS_WAD_VADDR` is inside the user window and #28 checks its buffer readable, so a decoded DMX lump is already a valid argument. The `doom_sound_pcm` suite asserts the shotgun's own first sample on the voice — 3072, the unity-gain conversion of DMX 140 — and then that those bytes leave RAM. Still open on that line: `src/revoke.c` has no sound leg (an exiting LibOS loses its voices, a revoked one does not), and music is still silent (`DG_music_module` is MUS/MIDI, not PCM) |
 | SCRUM-143 Storage & File I/O | To Do (epic), the whole bottom half of the stack now done | ATA PIO driver ✅ SCRUM-102 (`src/ata.c/h`, polled, primary bus/master); `exo_disk_read`/`exo_disk_write` syscalls ✅ SCRUM-103 (`src/syscall_disk.c/h`, #24/#25, sector-addressed, zero filesystem knowledge); disk ownership/binding ✅ SCRUM-188 (`src/disk_binding.c/h`, #26 `exo_disk_acquire`, one exclusive owner); ported FAT-like filesystem ✅ SCRUM-189 (`src/libos_fs/`, **LibOS-space, not kernel** — `docs/filesystem.md`; variable-length names, superblock, mkdir/rmdir/readdir, open/read/write/seek/unlink, 66 tests in `tests/kernel/test_exofs_k.c`). Note this **supersedes the in-kernel ramdisk** that `docs/syscall_spec.md` §4 used to recommend — see the note at the head of that section. Still open: FAT-formatted QEMU disk image ⬜ SCRUM-190 (which also retires the multiboot WAD module), `exo_file_*` syscalls and the `FILE*` shim over ExoFS ⬜ SCRUM-42/44/75, save/config persistence ⬜ SCRUM-92/93/104/106, shell filesystem commands ⬜ SCRUM-202 |
 | SCRUM-148 Testing, CI & Isolation | Mostly done | CI pipeline ✅ SCRUM-120 (Docker build + QEMU boot + serial suite on push, now a required status check on `main`); test harness ✅ SCRUM-58, regression suite ✅ SCRUM-114, syscall fuzzing ✅ SCRUM-115, syscall benchmarks ✅ SCRUM-60; still open: memory isolation stress test — SCRUM-59 (PR #110 open), IWAD compat suite — SCRUM-116 |

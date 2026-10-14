@@ -214,7 +214,18 @@ static void InitConnectData(net_connect_data_t *connect_data)
 
 void D_ConnectNetGame(void)
 {
-    net_connect_data_t connect_data;
+    /* ExoDoom (SCRUM-97): zero-initialised.  Upstream leaves this as stack
+     * garbage and relies on InitConnectData() to fill it, but that function
+     * never writes two of its fields: `player_class` (Hexen's; no Doom code
+     * assigns it) and `deh_sha1sum` (its only writer, DEH_Checksum, is under
+     * `#if ORIGCODE` above).  D_InitNetGame() then reads
+     * connect_data->player_class unconditionally and keeps it in a d_loop.c
+     * static, so a single-player boot was reading an indeterminate value off
+     * D_DoomMain's stack on every startup.  Nothing in Doom consumes a player
+     * class, which is why it never showed -- but it is undefined behaviour,
+     * and this struct is exactly what NET_CL_Connect() would serialise to a
+     * server.  tests/kernel/test_doom_net_k.c holds it at zero. */
+    net_connect_data_t connect_data = {0};
 
     InitConnectData(&connect_data);
     netgame = D_InitNetGame(&connect_data);
