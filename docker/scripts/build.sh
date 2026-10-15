@@ -405,8 +405,30 @@ echo "[2c/7] Build shell LibOS (SCRUM-110)"
 #
 # shell_main.c MUST come first in this list -- see build_ring3_link_target's
 # own comment on why source order determines entry_vaddr.
+#
+# SCRUM-202 adds src/libos_fs/*.c (ExoFS). Step [3b5/7] below's allowlist
+# says ExoFS's *own* object files reduce to just memcpy/memset/memcmp/
+# strlen/libos_heap_alloc/_free, but those aren't the only functions in the
+# TUs that provide them: src/string.c also defines strcasecmp/strdup (which
+# call tolower()/malloc()), and src/libos_heap.c/src/libos_page_alloc.c call
+# printf() on their diagnostic paths (heap-grow failures, double frees).
+# Pulling in just the three files the allowlist names left those
+# undefined at link time, so this is the same full libc-shim set
+# tests/kernel/libc_shim_probe/ already links (step [3b2/7] below) --
+# src/stdlib.c (malloc/free/realloc -> libos_heap_alloc/_free/_realloc),
+# src/stdio.c (printf -> exo_serial_write), src/string.c, src/ctype.c,
+# src/errno.c, src/fpconv.c (stdio/stdlib's float support) -- plus
+# src/libos_heap.c/src/libos_page_alloc.c/src/libos_fb.c. Budget is not a
+# concern: LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES are 192/192 (raised for
+# Doom, which alone uses ~97/~99 of them).
 build_ring3_link_target shell src/shell "" "" \
-  src/shell/shell_main.c src/fb.c src/fb_console.c src/libos_fb.c
+  src/shell/shell_main.c src/fb.c src/fb_console.c src/libos_fb.c \
+  src/stdlib.c src/stdio.c src/string.c src/ctype.c \
+  src/errno.c src/fpconv.c src/libos_heap.c src/libos_page_alloc.c \
+  src/libos_fs/exofs_volume.c src/libos_fs/exofs_fat.c \
+  src/libos_fs/exofs_name.c src/libos_fs/exofs_dirent.c \
+  src/libos_fs/exofs_path.c src/libos_fs/exofs_dir.c \
+  src/libos_fs/exofs_file.c src/libos_fs/exofs_blockdev.c
 
 echo "[2d/7] Build WAD/flat/automap viewer LibOS (SCRUM-178)"
 # Same reasoning and same mechanism as the shell step just above: built
@@ -617,11 +639,14 @@ echo "[3a/7] Compile ExoFS into the kernel (SCRUM-189, SCRUM-190)"
 # EXO_KERNEL comment, and src/libos_page_alloc.c's, for why a ring-0 caller
 # must not execute a stub: `sysretq` forces CPL 3 on return).
 #
-# Still no ring-3 ExoFS target: no app other than the kernel's own launch
-# path uses it yet (SCRUM-202 shell commands, SCRUM-44 exo_file_*, SCRUM-237
-# per-program volumes are what will). Step [3b5/7] below, TESTING-only,
-# keeps proving that porting it to one is still "a build_ring3_link_target
-# call and nothing more" whenever it is wanted.
+# The shell target (step [2c/7], SCRUM-202) is now a second, independent
+# ring-3 compile of these same sources -- its own object files
+# (build/shell_exofs_*.o via build_ring3_link_target's naming), not these
+# kernel-view ones, so the two coexist with no symbol collision. SCRUM-44
+# (exo_file_*) and SCRUM-237 (per-program volumes) are future ring-3
+# consumers of the same library. Step [3b5/7] below, TESTING-only, keeps
+# proving ExoFS stays portable to a ring-3 target with nothing more than a
+# build_ring3_link_target call -- which is exactly what step [2c/7] now is.
 _compile_exofs_one() {
   local c="$1" o="$2"
   echo "    CC $(basename "$c") (exofs)"
@@ -735,13 +760,13 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   echo "[3b5/7] Gate: ExoFS still builds as a ring-3 target (SCRUM-189)"
   # Step [3a/7] above (now unconditional, SCRUM-190) compiles ExoFS one way
   # only -- WITH -DEXO_KERNEL, for both the kernel's own launch-time disk
-  # read and tests/kernel/test_exofs_k.c. But the whole point of this
-  # library is that it is LibOS-space code, and the first ring-3 consumer
-  # (SCRUM-202 shell commands, SCRUM-44 exo_file_*, SCRUM-237 per-program
-  # volumes) is not written yet. Without this step, nothing in the tree
-  # would notice ExoFS acquiring a kernel-only dependency, and "a
-  # build_ring3_link_target call and nothing more" would quietly stop being
-  # true months before anyone tried it.
+  # read and tests/kernel/test_exofs_k.c. The real ring-3 consumer now
+  # exists (the shell target, step [2c/7], SCRUM-202), but this gate still
+  # earns its keep: it catches a kernel-only dependency creeping into
+  # src/libos_fs/ at the moment it is introduced, rather than at the next
+  # full rebuild of the shell target, which may be a while after whatever
+  # broke it. SCRUM-44 (exo_file_*) and SCRUM-237 (per-program volumes) are
+  # future ring-3 consumers besides the shell.
   #
   # So: compile every source a second time with probe_cflags (the ring-3
   # CFLAGS, -mcmodel=large) and WITHOUT -DEXO_KERNEL, which selects the

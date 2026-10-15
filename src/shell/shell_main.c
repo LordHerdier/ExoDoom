@@ -11,19 +11,40 @@
  * exo_kbd_poll()/exo_get_ticks() to see real IRQ-driven state instead of
  * launching with interrupts globally masked.
  *
- * Deliberately does not link the libc shim (src/stdlib.c/src/string.c/...):
- * everything here is static/stack state and a handful of local helpers, to
- * keep this comfortably inside LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES without
- * pulling in libos_heap.c/libos_page_alloc.c's allocator machinery this
- * shell has no use for.
+ * Used to not link the libc shim at all; SCRUM-202 is what changes that.
+ * The filesystem commands below (mkfs/mkdir/ls/cat/rm) need the ExoFS
+ * library (src/libos_fs/), whose own object files reduce to just
+ * memcpy/memset/memcmp/strlen/libos_heap_alloc/_free (the allowlist
+ * docker/scripts/build.sh's [3b5/7] gate asserts) -- but src/string.c also
+ * defines strcasecmp/strdup (which call tolower()/malloc()) and
+ * src/libos_heap.c/src/libos_page_alloc.c call printf() on their
+ * diagnostic paths, so this target ends up linking the same full shim set
+ * tests/kernel/libc_shim_probe/ already proves fits a ring-3 target:
+ * src/stdlib.c/src/stdio.c/src/string.c/src/ctype.c/src/errno.c/
+ * src/fpconv.c plus src/libos_heap.c/src/libos_page_alloc.c. This file's
+ * own commands still format their own output by hand (shell_write_u32/
+ * _i64 below) rather than reaching for printf. Budget is not a concern:
+ * LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES are 192/192 (raised for Doom, which
+ * alone uses ~97/~99 of them).
  *
- * Command set is intentionally trivial ("help"/"clear"/"about"/"wadview") —
- * the acceptance criterion is "can type commands and see output", not a
- * real shell language. It is also bounded by what src/ps2.c's scancode
- * decoder can produce: letters, digits, a handful of punctuation, space,
- * backspace, enter. "wadview" (SCRUM-178) is the first real cooperative
- * handoff: exo_launch() (src/exo_syscall.h #21) builds the WAD/
- * flat/automap viewer as a second LibOS context and switches to it.
+ * Command set is intentionally trivial ("help"/"clear"/"about"/"wadview"/
+ * "mkfs"/"mkdir"/"ls"/"cat"/"rm") — the acceptance criterion is "can type
+ * commands and see output", not a real shell language. It is also bounded
+ * by what src/ps2.c's scancode decoder can produce: letters, digits, a
+ * handful of punctuation, space, backspace, enter. "wadview" (SCRUM-178) is
+ * the first real cooperative handoff: exo_launch() (src/exo_syscall.h #21)
+ * builds the WAD/flat/automap viewer as a second LibOS context and switches
+ * to it.
+ *
+ * SCRUM-202: mkfs/mkdir/ls/cat/rm wire the ExoFS library (src/libos_fs/,
+ * SCRUM-189) into this shell as its first ring-3 consumer, over a scratch
+ * volume at SHELL_FS_BASE_LBA -- NOT the volume at LIBOS_WAD_DISK_BASE_LBA
+ * (src/doom_wad_disk.h) that holds freedoom2.wad, which `mkfs` must never
+ * touch or `doom` breaks for the rest of the boot. Disk ownership
+ * (exo_disk_acquire/_release, #26/#27) is acquired, mounted, used for
+ * exactly one filesystem call, and released again by shell_fs_release()
+ * below -- never held across the idle loop -- so a `wadview`/`clock`/`snake`/
+ * `doom` launch from this shell never contends with a held-open volume.
  *
  * SCRUM-111: the idle loop below used to call exo_yield() once per
  * iteration, on the theory that it would "bring control back once the
@@ -58,9 +79,27 @@
 #include "fb.h"
 #include "fb_console.h"
 #include "libos_fb.h"
+#include "libos_fs/exofs.h"
 #include "ps2.h"
 
 #define SHELL_CMD_BUF_LEN 64
+
+/*
+ * The shell's own scratch ExoFS volume -- deliberately NOT
+ * LIBOS_WAD_DISK_BASE_LBA (src/doom_wad_disk.h), which holds freedoom2.wad
+ * and must never be reformatted out from under `doom`. src/doom_wad_disk.h's
+ * own comment documents [8192, 16383] as reserved, zeroed scratch space on
+ * every build/exodoom_disk.img -- the same range
+ * tests/kernel/test_exofs_k.c's EXOFS_TEST_BASE_LBA/VOL_SECTORS (8192/8192)
+ * already uses under TESTING=1, unused here on a normal boot. If
+ * src/doom_wad_disk.h's layout ever moves, this must move with it. */
+#define SHELL_FS_BASE_LBA    8192u
+#define SHELL_FS_VOL_SECTORS 8192u
+
+/* Longest line of text `cat <path> <text...>` will write in one call --
+ * bounded by SHELL_CMD_BUF_LEN, since the text comes straight out of
+ * cmd_buf. Not a filesystem limit. */
+#define SHELL_FS_PATH_BUF_LEN SHELL_CMD_BUF_LEN
 
 /* .data, not string literals (which would land in .rodata, merged into the
  * read-only code blob) -- keeps this target's .data section non-empty.
@@ -71,7 +110,9 @@ static char shell_banner[] = "ExoDoom Shell\n";
 static char shell_help_text[] = "type 'help' for a list of commands\n";
 static char shell_prompt[] = "exodoom> ";
 static char shell_commands_text[] =
-    "commands: help, clear, about, wadview, clock, snake, doom, memstat, pslist\n";
+    "commands: help, clear, about, wadview, clock, snake, doom, memstat,\n"
+    "          pslist, mkfs, mkdir <path>, ls [path], cat <path> [text...],\n"
+    "          rm <path>\n";
 static char shell_about_text[] = "ExoDoom shell LibOS -- SCRUM-110\n";
 static char shell_unknown_prefix[] = "unknown command: ";
 static char shell_wadview_fail_text[] = "wadview: launch failed\n";
@@ -80,6 +121,13 @@ static char shell_snake_fail_text[] = "snake: launch failed\n";
 static char shell_doom_fail_text[] = "doom: launch failed\n";
 static char shell_memstat_fail_text[] = "memstat: query failed\n";
 static char shell_pslist_fail_text[] = "pslist: query failed\n";
+static char shell_fs_disk_busy_text[] = "disk busy: err=";
+static char shell_fs_mount_fail_text[] = "mount failed (run mkfs?): err=";
+static char shell_fs_noarg_text[] = "usage: path argument required\n";
+static char shell_fs_ok_text[] = "ok\n";
+static char shell_fs_err_prefix[] = "error: err=";
+static char shell_ls_dir_suffix[] = "/\n";
+static char shell_ls_file_prefix[] = "  ";
 
 static int str_eq(const char *a, const char *b);
 static char shell_key_to_ascii(uint8_t key, uint8_t modifiers);
@@ -87,8 +135,17 @@ static void shell_backspace(fb_console_t *con);
 static void shell_print_prompt(fb_console_t *con);
 static void shell_run_command(fb_console_t *con, const char *line);
 static void shell_write_u32(fb_console_t *con, uint32_t v);
+static void shell_write_i64(fb_console_t *con, int64_t v);
 static void shell_run_memstat(fb_console_t *con);
 static void shell_run_pslist(fb_console_t *con);
+static int shell_cmd_match(const char *line, const char *cmd, const char **rest);
+static int shell_fs_acquire_and_mount(fb_console_t *con);
+static void shell_fs_release(void);
+static void shell_run_mkfs(fb_console_t *con);
+static void shell_run_mkdir(fb_console_t *con, const char *arg);
+static void shell_run_ls(fb_console_t *con, const char *arg);
+static void shell_run_cat(fb_console_t *con, const char *arg);
+static void shell_run_rm(fb_console_t *con, const char *arg);
 
 void shell_main(void) {
     libos_fb_t fb;
@@ -213,10 +270,22 @@ static void shell_print_prompt(fb_console_t *con) {
 }
 
 static void shell_run_command(fb_console_t *con, const char *line) {
+    const char *rest;
+
     if (line[0] == '\0') {
         return;
     }
-    if (str_eq(line, "help")) {
+    if (shell_cmd_match(line, "mkfs", &rest)) {
+        shell_run_mkfs(con);
+    } else if (shell_cmd_match(line, "mkdir", &rest)) {
+        shell_run_mkdir(con, rest);
+    } else if (shell_cmd_match(line, "ls", &rest)) {
+        shell_run_ls(con, rest);
+    } else if (shell_cmd_match(line, "cat", &rest)) {
+        shell_run_cat(con, rest);
+    } else if (shell_cmd_match(line, "rm", &rest)) {
+        shell_run_rm(con, rest);
+    } else if (str_eq(line, "help")) {
         fbcon_write(con, shell_commands_text);
     } else if (str_eq(line, "clear")) {
         fbcon_clear(con);
@@ -310,6 +379,289 @@ static void shell_write_u32(fb_console_t *con, uint32_t v) {
         v /= 10;
     } while (v != 0);
     fbcon_write(con, &buf[i]);
+}
+
+/* Decimal, signed -- for printing a negative EXO_E* error code alongside
+ * shell_fs_err_prefix/shell_fs_disk_busy_text/shell_fs_mount_fail_text.
+ * INT64_MIN is never reached here (every EXO_E* code is a tiny negative
+ * int), so negating it unconditionally is safe. */
+static void shell_write_i64(fb_console_t *con, int64_t v) {
+    if (v < 0) {
+        fbcon_putc(con, '-');
+        v = -v;
+    }
+    char buf[21];
+    int i = 20;
+    buf[20] = '\0';
+    uint64_t u = (uint64_t)v;
+    do {
+        buf[--i] = (char)('0' + (u % 10));
+        u /= 10;
+    } while (u != 0);
+    fbcon_write(con, &buf[i]);
+}
+
+/*
+ * Match `line` against the literal command word `cmd`. On a match, *rest
+ * points at whatever follows: the trailing '\0' for a bare command, or the
+ * first non-space character of the argument text for "cmd <args>" (which
+ * may itself be "\0" if the line was all trailing spaces). Does not match
+ * "cmd" as a prefix of a longer word ("mkdirfoo" does not match "mkdir").
+ */
+static int shell_cmd_match(const char *line, const char *cmd, const char **rest) {
+    int i = 0;
+    while (cmd[i] != '\0') {
+        if (line[i] != cmd[i]) {
+            return 0;
+        }
+        i++;
+    }
+    if (line[i] == '\0') {
+        *rest = &line[i];
+        return 1;
+    }
+    if (line[i] != ' ') {
+        return 0;
+    }
+    while (line[i] == ' ') {
+        i++;
+    }
+    *rest = &line[i];
+    return 1;
+}
+
+/*
+ * Disk ownership policy for every filesystem command (SCRUM-202, see this
+ * file's own top comment): acquire, mount, do exactly one exofs_* call,
+ * unmount, release -- never held across the idle loop. This is the
+ * acquire+mount half, shared by every command below; shell_fs_release() is
+ * the matching unmount+release half. Prints its own diagnostic and returns
+ * 0 on failure so each caller can just return.
+ */
+static int shell_fs_acquire_and_mount(fb_console_t *con) {
+    int64_t rc = exo_disk_acquire();
+    if (rc != 0) {
+        fbcon_write(con, shell_fs_disk_busy_text);
+        shell_write_i64(con, rc);
+        fbcon_write(con, "\n");
+        return 0;
+    }
+
+    int mrc = exofs_mount(SHELL_FS_BASE_LBA);
+    if (mrc != 0) {
+        fbcon_write(con, shell_fs_mount_fail_text);
+        shell_write_i64(con, mrc);
+        fbcon_write(con, "\n");
+        exo_disk_release();
+        return 0;
+    }
+
+    return 1;
+}
+
+static void shell_fs_release(void) {
+    exofs_unmount();
+    exo_disk_release();
+}
+
+/* `mkfs` -- exofs_format() on the shell's own scratch volume (decision #1,
+ * this file's own top comment). No mount needed afterwards: exofs_format()
+ * does not leave the volume mounted, and this command has nothing further
+ * to do with it. Destroys whatever the volume held before, same as any
+ * other filesystem's mkfs. */
+static void shell_run_mkfs(fb_console_t *con) {
+    int64_t rc = exo_disk_acquire();
+    if (rc != 0) {
+        fbcon_write(con, shell_fs_disk_busy_text);
+        shell_write_i64(con, rc);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    int frc = exofs_format(SHELL_FS_BASE_LBA, SHELL_FS_VOL_SECTORS);
+    exo_disk_release();
+
+    if (frc != 0) {
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, frc);
+        fbcon_write(con, "\n");
+        return;
+    }
+    fbcon_write(con, shell_fs_ok_text);
+}
+
+/* `mkdir <path>` -- exofs_mkdir(). `arg` is already trimmed of leading
+ * spaces by shell_cmd_match() and is a suffix of the null-terminated
+ * command buffer, so it can be passed straight through as the path with no
+ * copy. */
+static void shell_run_mkdir(fb_console_t *con, const char *arg) {
+    if (arg[0] == '\0') {
+        fbcon_write(con, shell_fs_noarg_text);
+        return;
+    }
+    if (!shell_fs_acquire_and_mount(con)) {
+        return;
+    }
+    int rc = exofs_mkdir(arg);
+    shell_fs_release();
+
+    if (rc != 0) {
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, rc);
+        fbcon_write(con, "\n");
+        return;
+    }
+    fbcon_write(con, shell_fs_ok_text);
+}
+
+/* `ls [path]` -- exofs_opendir()/exofs_readdir() loop, defaulting to "/"
+ * when no argument is given. Directories print with a trailing "/" so
+ * mkdir'd entries are visually distinct from files, same spirit as `ls -F`. */
+static void shell_run_ls(fb_console_t *con, const char *arg) {
+    const char *path = (arg[0] != '\0') ? arg : "/";
+
+    if (!shell_fs_acquire_and_mount(con)) {
+        return;
+    }
+
+    exofs_dir_t dir;
+    int rc = exofs_opendir(path, &dir);
+    if (rc != 0) {
+        shell_fs_release();
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, rc);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    for (;;) {
+        exofs_dirinfo_t info;
+        int64_t got = exofs_readdir(&dir, &info);
+        if (got <= 0) {
+            break;
+        }
+        fbcon_write(con, shell_ls_file_prefix);
+        fbcon_write(con, info.name);
+        if (info.attributes & EXOFS_ATTR_DIRECTORY) {
+            fbcon_write(con, shell_ls_dir_suffix);
+        } else {
+            fbcon_write(con, " (");
+            shell_write_u32(con, info.size);
+            fbcon_write(con, " bytes)\n");
+        }
+    }
+
+    exofs_closedir(&dir);
+    shell_fs_release();
+}
+
+/*
+ * `cat <path>` reads and prints the file. `cat <path> <text...>` (trailing
+ * words present) creates/truncates `path` and writes `text...` as its
+ * entire content instead -- the one overload this shell needs to satisfy
+ * "create a file" with the exact five-command set the ticket names, rather
+ * than inventing a sixth verb.
+ */
+static void shell_run_cat(fb_console_t *con, const char *arg) {
+    char path[SHELL_FS_PATH_BUF_LEN];
+    int i = 0;
+    while (arg[i] != '\0' && arg[i] != ' ' && i < SHELL_FS_PATH_BUF_LEN - 1) {
+        path[i] = arg[i];
+        i++;
+    }
+    path[i] = '\0';
+    if (i == 0) {
+        fbcon_write(con, shell_fs_noarg_text);
+        return;
+    }
+
+    const char *text = &arg[i];
+    while (*text == ' ') {
+        text++;
+    }
+    int writing = (*text != '\0');
+
+    if (!shell_fs_acquire_and_mount(con)) {
+        return;
+    }
+
+    exofs_file_t f;
+    int orc = writing
+        ? exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f)
+        : exofs_open(path, EXOFS_O_READ, &f);
+    if (orc != 0) {
+        shell_fs_release();
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, orc);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    if (writing) {
+        uint32_t len = 0;
+        while (text[len] != '\0') {
+            len++;
+        }
+        int64_t wrc = exofs_write(&f, text, len);
+        exofs_close(&f);
+        shell_fs_release();
+        if (wrc < 0) {
+            fbcon_write(con, shell_fs_err_prefix);
+            shell_write_i64(con, wrc);
+            fbcon_write(con, "\n");
+            return;
+        }
+        fbcon_write(con, shell_fs_ok_text);
+        return;
+    }
+
+    char buf[64];
+    for (;;) {
+        int64_t got = exofs_read(&f, buf, sizeof(buf));
+        if (got < 0) {
+            fbcon_write(con, shell_fs_err_prefix);
+            shell_write_i64(con, got);
+            fbcon_write(con, "\n");
+            break;
+        }
+        if (got == 0) {
+            break;
+        }
+        for (int64_t j = 0; j < got; j++) {
+            fbcon_putc(con, buf[j]);
+        }
+    }
+    fbcon_write(con, "\n");
+
+    exofs_close(&f);
+    shell_fs_release();
+}
+
+/* `rm <path>` -- tries exofs_unlink() first; falls back to exofs_rmdir() on
+ * -EXO_EISDIR, so one command removes either a file or an (empty)
+ * directory, matching the ticket's five-command list (no separate rmdir). */
+static void shell_run_rm(fb_console_t *con, const char *arg) {
+    if (arg[0] == '\0') {
+        fbcon_write(con, shell_fs_noarg_text);
+        return;
+    }
+    if (!shell_fs_acquire_and_mount(con)) {
+        return;
+    }
+
+    int rc = exofs_unlink(arg);
+    if (rc == -EXO_EISDIR) {
+        rc = exofs_rmdir(arg);
+    }
+    shell_fs_release();
+
+    if (rc != 0) {
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, rc);
+        fbcon_write(con, "\n");
+        return;
+    }
+    fbcon_write(con, shell_fs_ok_text);
 }
 
 /* `memstat` -- exo_memstat (#22, src/syscall_stat.c). The output struct is
