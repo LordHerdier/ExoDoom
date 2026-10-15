@@ -39,10 +39,16 @@
  * absolute LBA `base_lba`: superblock, a FAT with every block free, and a
  * zeroed root directory block.
  *
- * The caller supplies `total_sectors` because there is no disk-capacity
- * syscall — ata_init() issues IDENTIFY, which carries the sector count, but
- * src/ata.c does not surface it. Geometry is derived from that number and
- * recorded in the superblock, so exofs_mount() needs only the base.
+ * The caller still supplies `total_sectors` explicitly -- not because there
+ * is no way to learn the disk's capacity (`exo_diskstat`, syscall #31,
+ * SCRUM-202/`docs/syscall_spec.md` §3.2, surfaces exactly that), but because
+ * several fixed-base-LBA volumes can share one disk (the shell's scratch
+ * volume and the WAD volume, `src/doom_wad_disk.h`): "the whole disk" is
+ * never the right size for one of them, so the caller still has to decide
+ * how much of the disk its volume gets. `exofs_region_sectors()` below is
+ * that computation. Geometry is derived from whatever `total_sectors` ends
+ * up being and recorded in the superblock, so `exofs_mount()` needs only
+ * the base.
  *
  * Destroys whatever was in [base_lba, base_lba + total_sectors). Returns 0,
  * -EXO_EINVAL (`total_sectors` below EXOFS_MIN_SECTORS, or a volume whose
@@ -53,6 +59,19 @@
  * Does not leave the volume mounted; call exofs_mount() afterwards.
  */
 int exofs_format(uint32_t base_lba, uint32_t total_sectors);
+
+/*
+ * How many sectors a volume starting at `base_lba` may claim, given the
+ * next fixed region on the same disk starts at `region_end_lba` and the
+ * disk itself reports `disk_total_sectors` (`exo_diskstat`, #31). Pure
+ * arithmetic, no I/O: `min(region_end_lba, disk_total_sectors) - base_lba`,
+ * clamped to 0 if that would underflow -- a disk smaller than `base_lba`,
+ * or a region that leaves no room at all. The caller (e.g. the shell's
+ * `mkfs`) passes the result straight to `exofs_format()`, treating 0 as
+ * "no room for this volume" rather than attempting a doomed format.
+ */
+uint32_t exofs_region_sectors(uint32_t base_lba, uint32_t region_end_lba,
+                              uint32_t disk_total_sectors);
 
 /*
  * Mount the volume at `base_lba`: read and validate the superblock, then

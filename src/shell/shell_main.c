@@ -102,9 +102,15 @@
  * every build/exodoom_disk.img -- the same range
  * tests/kernel/test_exofs_k.c's EXOFS_TEST_BASE_LBA/VOL_SECTORS (8192/8192)
  * already uses under TESTING=1, unused here on a normal boot. If
- * src/doom_wad_disk.h's layout ever moves, this must move with it. */
+ * src/doom_wad_disk.h's layout ever moves, this must move with it.
+ *
+ * There used to be a SHELL_FS_VOL_SECTORS = 8192u alongside this (how big a
+ * volume `mkfs` lays down there) -- SCRUM-203 replaced it with
+ * exofs_region_sectors(SHELL_FS_BASE_LBA, LIBOS_WAD_DISK_BASE_LBA, ...)
+ * against the disk's real capacity (exo_diskstat, #31), so `mkfs` sizes the
+ * volume from the drive that's actually attached instead of a constant that
+ * silently assumed one. */
 #define SHELL_FS_BASE_LBA    8192u
-#define SHELL_FS_VOL_SECTORS 8192u
 
 /* Longest line of text `cat <path> <text...>` will write in one call --
  * bounded by SHELL_CMD_BUF_LEN, since the text comes straight out of
@@ -142,6 +148,7 @@ static char shell_fs_mount_fail_text[] = "mount failed (run mkfs?): err=";
 static char shell_fs_noarg_text[] = "usage: path argument required\n";
 static char shell_fs_ok_text[] = "ok\n";
 static char shell_fs_err_prefix[] = "error: err=";
+static char shell_fs_no_room_text[] = "mkfs: no room for shell volume on this disk\n";
 static char shell_ls_dir_suffix[] = "/\n";
 static char shell_ls_file_prefix[] = "  ";
 static char shell_fs_usage2_text[] = "usage: <src> <dst>\n";
@@ -635,7 +642,13 @@ static void shell_fs_release(void) {
  * this file's own top comment). No mount needed afterwards: exofs_format()
  * does not leave the volume mounted, and this command has nothing further
  * to do with it. Destroys whatever the volume held before, same as any
- * other filesystem's mkfs. */
+ * other filesystem's mkfs.
+ *
+ * Sizes the volume from the disk's real capacity (exo_diskstat, #31) via
+ * exofs_region_sectors(), rather than a hardcoded sector count -- SCRUM-203.
+ * The region stops at LIBOS_WAD_DISK_BASE_LBA regardless of how big the
+ * disk actually is: that LBA is where the WAD's own volume lives, and mkfs
+ * must never claim sectors it owns. */
 static void shell_run_mkfs(fb_console_t *con) {
     int64_t rc = exo_disk_acquire();
     if (rc != 0) {
@@ -645,7 +658,20 @@ static void shell_run_mkfs(fb_console_t *con) {
         return;
     }
 
-    int frc = exofs_format(SHELL_FS_BASE_LBA, SHELL_FS_VOL_SECTORS);
+    exo_diskstat_t stat;
+    int64_t src = exo_diskstat(&stat);
+    uint32_t vol_sectors = (src == 0)
+        ? exofs_region_sectors(SHELL_FS_BASE_LBA, LIBOS_WAD_DISK_BASE_LBA,
+                               stat.total_sectors)
+        : 0u;
+
+    if (vol_sectors == 0u) {
+        exo_disk_release();
+        fbcon_write(con, shell_fs_no_room_text);
+        return;
+    }
+
+    int frc = exofs_format(SHELL_FS_BASE_LBA, vol_sectors);
     exo_disk_release();
 
     if (frc != 0) {
@@ -1031,11 +1057,12 @@ static void shell_run_echo(fb_console_t *con, const char *arg) {
     fbcon_write(con, "\n");
 }
 
-/* `disk` -- exo_diskstat() (#31) for presence/capacity, plus the two LBA
- * ranges this shell already knows about at compile time (no syscall needed
- * for those -- SHELL_FS_BASE_LBA/_VOL_SECTORS above, LIBOS_WAD_DISK_BASE_LBA
- * from src/doom_wad_disk.h), so "what disk is present" also answers "and
- * what's on it". */
+/* `disk` -- exo_diskstat() (#31) for presence/capacity, plus the WAD's LBA
+ * range this shell already knows about at compile time
+ * (LIBOS_WAD_DISK_BASE_LBA, src/doom_wad_disk.h). The shell volume's own
+ * size is computed live from the same capacity via exofs_region_sectors()
+ * (SCRUM-203) -- the same number `mkfs` would format, so the two commands
+ * can't disagree. */
 static void shell_run_disk(fb_console_t *con) {
     exo_diskstat_t stat;
     if (exo_diskstat(&stat) != 0) {
@@ -1058,7 +1085,9 @@ static void shell_run_disk(fb_console_t *con) {
     fbcon_write(con, "  shell volume: lba ");
     shell_write_u32(con, SHELL_FS_BASE_LBA);
     fbcon_write(con, "+ (");
-    shell_write_u32(con, SHELL_FS_VOL_SECTORS);
+    shell_write_u32(con, exofs_region_sectors(SHELL_FS_BASE_LBA,
+                                              LIBOS_WAD_DISK_BASE_LBA,
+                                              stat.total_sectors));
     fbcon_write(con, " sectors)\n");
 }
 
