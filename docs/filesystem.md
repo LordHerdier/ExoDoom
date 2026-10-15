@@ -507,10 +507,20 @@ difference.
 
 `src/libos_fs/` is a **subdirectory**, which is what keeps it out of
 `docker/scripts/build.sh`'s `src/*.c` glob — the same opt-out
-`tests/kernel/libos_c_probe/` uses. It is compiled only under `TESTING=1`, by
-step `[3b4/7]`, so a shipped kernel links none of it.
+`tests/kernel/libos_c_probe/` uses. Its kernel-view compile (`-DEXO_KERNEL`)
+is step `[3a/7]`, **unconditional** since SCRUM-190 — `src/syscall_launch.c`'s
+`LAUNCH_NEEDS_WAD` path mounts it and reads `/freedoom2.wad` off it on every
+normal boot, not just under `TESTING=1` — and a `TESTING=1`-only gate at
+step `[3b5/7]` compiles it a second time without `-DEXO_KERNEL` to assert it
+still builds as a ring-3 target, with no shipped kernel linking that second
+compile.
 
-Nothing links ExoFS into a ring-3 target yet. SCRUM-202 (shell filesystem
-commands) or SCRUM-44 (`exo_file_*`) is what will, and the sources already
-build cleanly without `-DEXO_KERNEL`, so that step is a
-`build_ring3_link_target` call and nothing more.
+SCRUM-202 is now the first real ring-3 consumer: the shell LibOS
+(`src/shell/shell_main.c`, step `[2c/7]`) links `src/libos_fs/*.c` plus the
+small slice of the libc shim it needs (`src/string.c`, `src/libos_heap.c`,
+`src/libos_page_alloc.c`) as its `mkfs`/`mkdir`/`ls`/`cat`/`rm` commands,
+over its own scratch volume — not the one holding the IWAD. SCRUM-44
+(`exo_file_*`) is a still-future second consumer, and the sources needed no
+change to support either: the whole point of step `[3b5/7]`'s gate was that
+porting ExoFS to a ring-3 target would be "a `build_ring3_link_target` call
+and nothing more," and that held.

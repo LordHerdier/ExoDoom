@@ -125,6 +125,11 @@
  * channel -- so a sound fired to the player's left has to follow them as they
  * turn. Same per-voice ownership as #29. */
 #define EXO_SYS_SOUND_PCM_PARAMS 30
+/* Disk capacity (SCRUM-202) -- unscoped introspection like MEMSTAT/PSLIST,
+ * appended rather than grouped with #24-27 for the same reason #28-30 were
+ * appended above: the numbers below are ABI for as long as this kernel image
+ * is the only thing that speaks it. */
+#define EXO_SYS_DISK_STAT     31
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -134,7 +139,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        31
+#define EXO_SYS_COUNT        32
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -299,6 +304,18 @@ typedef struct {
     uint32_t page_count;    /* pages currently owned by this context        */
 } exo_ps_info_t;
 
+/* exo_diskstat(out) — #31 (SCRUM-202). Unscoped introspection, same family
+ * as exo_memstat_t/exo_ps_info_t above: whether the one ATA drive this
+ * kernel ever speaks to (src/ata.c) answered at boot, and its total 28-bit
+ * LBA sector count (0 if it didn't). No ownership check -- same reasoning
+ * as exo_memstat/exo_pslist, and it touches no hardware: both fields are
+ * read from state ata_init() already latched at boot. */
+typedef struct {
+    uint8_t  present;       /* 1 if ata_init() found a drive, else 0        */
+    uint8_t  reserved[3];   /* zeroed by the kernel                         */
+    uint32_t total_sectors; /* 0 if !present                                */
+} exo_diskstat_t;
+
 /* EXO_PSLIST_MAX *is* CONTEXT_MAX (src/context.h) — included here rather than
  * restated as a separate literal, so the two can never drift the way they
  * did across SCRUM-193: that ticket raised VMM_MAX_ADDRESS_SPACES (and so
@@ -325,6 +342,7 @@ _Static_assert(sizeof(exo_kbd_event_t)   ==  4, "exo_kbd_event_t layout is ABI")
 _Static_assert(sizeof(exo_mouse_state_t) ==  6, "exo_mouse_state_t layout is ABI");
 _Static_assert(sizeof(exo_memstat_t)     == 24, "exo_memstat_t layout is ABI");
 _Static_assert(sizeof(exo_ps_info_t)     ==  8, "exo_ps_info_t layout is ABI");
+_Static_assert(sizeof(exo_diskstat_t)    ==  8, "exo_diskstat_t layout is ABI");
 #endif /* __ASSEMBLER__ */
 
 #ifndef EXO_KERNEL
@@ -692,6 +710,16 @@ static inline int64_t exo_disk_acquire(void)
 static inline int64_t exo_disk_release(void)
 {
     return exo_syscall0(EXO_SYS_DISK_RELEASE);
+}
+
+/* #31 — presence and total 28-bit LBA sector count of the one ATA drive
+ * this kernel ever speaks to (SCRUM-202). No acquire needed first: unscoped
+ * introspection like exo_memstat/exo_pslist, not a resource grant. Returns
+ * 0 with *out filled, or -EXO_EFAULT if [out, out + sizeof(exo_diskstat_t))
+ * is not entirely inside the LibOS window and mapped writable. */
+static inline int64_t exo_diskstat(exo_diskstat_t *out)
+{
+    return exo_syscall1(EXO_SYS_DISK_STAT, (uint64_t)(uintptr_t)out);
 }
 
 /* #28 — queue `num_samples` bytes of 8-bit *unsigned* mono PCM at `buf`,
