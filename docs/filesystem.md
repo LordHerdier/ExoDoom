@@ -531,3 +531,57 @@ over its own scratch volume — not the one holding the IWAD. SCRUM-44
 change to support either: the whole point of step `[3b5/7]`'s gate was that
 porting ExoFS to a ring-3 target would be "a `build_ring3_link_target` call
 and nothing more," and that held.
+
+## 10. Mounting a volume on the build host (`tools/exofsfuse`)
+
+`build/exodoom_disk.img` cannot be mounted with `mount(8)`. Step `[1b/7]`'s
+name says "FAT-formatted", but the image holds an ExoFS volume, Linux has no
+driver for one, and the volume does not even begin at LBA 0 —
+`LIBOS_WAD_DISK_BASE_LBA` (`src/doom_wad_disk.h`) leaves the low sectors
+zeroed for the raw-sector KUnit fixtures, so the image has no boot sector and
+no signature at offset 0 to recognise.
+
+`tools/exofsfuse` is that driver, in user space:
+
+```bash
+make mount-disk          # builds .exofsfuse/exofsfuse, mounts build/exodoom_disk.img on ./mnt
+ls -l mnt
+make umount-disk         # fusermount3 -u mnt
+```
+
+`MNT=` and `DISK_IMG=` override the mountpoint and image; the binary takes
+`-o base_lba=N` for a volume at some other base (the shell's scratch volume,
+or SCRUM-237's per-program ones) and the usual FUSE `-f`/`-d`.
+
+**It links the real `src/libos_fs/` sources.** There is no second reader of
+the on-disk format here that could drift from the kernel's — the only thing
+written for the host is a third implementation of `exofs_blockdev.h`'s seam,
+and it is `tools/mkexofsimg/host_blockdev.c`, the one the image builder
+already uses, extended with `host_blockdev_open_existing()` so an existing
+volume is attached rather than overwritten. The compile split is step
+`[1b/7]`'s exactly: `src/libos_fs/*.c` with `-I src`, the host-side files
+without it, because that flag is what decides whether a file sees the
+project's freestanding `<stdio.h>` or the real one.
+
+Five behaviours are worth knowing before using it on anything you care
+about:
+
+- **Single-threaded, always.** `exofs.h` is explicit that the mounted volume
+  is one static state with no locking, so `main()` appends `-s` to the FUSE
+  argument list itself rather than trusting a caller to pass it.
+- **Read-only unless the image is writable.** The Docker build runs as root,
+  so `build/exodoom_disk.img` normally is not, and the driver says so and
+  mounts read-only rather than failing every write at the device layer
+  partway through a structural operation (§1).
+- **No `rename`.** ExoFS has none, and emulating one as copy-then-unlink
+  would turn a call callers expect to be atomic into one that can lose the
+  file.
+- **`truncate` only to 0, or upward.** Those are the two ExoFS expresses
+  (`EXOFS_O_TRUNC`, and a write past the end over blocks that are zeroed at
+  allocation, §1.1). Shrinking to a non-zero length needs a chain teardown
+  that the API exposes no call for, and open-coding one from outside the
+  filesystem is exactly what §1.2's ordering rule exists to prevent.
+- **Timestamps read as epoch 0 and `df` shows the volume full.** ExoFS
+  records `exo_get_ticks()`, which is boot-relative and not a wall clock, and
+  it exposes no free-block count. Both are missing numbers reported as
+  missing, rather than plausible-looking inventions.
