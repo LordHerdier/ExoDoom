@@ -42,7 +42,7 @@
 #include "doom_dmx.h"
 #include "doom_wad.h"
 #include "wad.h"
-#include "mmap.h"
+#include "doom_wad_disk.h"
 #include "pit.h"
 
 #include <stdint.h>
@@ -83,11 +83,12 @@ static const wad_t *real_wad(void)
 
 static int suite_init(void)
 {
-    uint64_t start = 0, end = 0;
+    uint64_t paddr = 0, size = 0;
     pcm_mixer_reset();
-    if (mmap_find_module(&start, &end) == 0 && end > start) {
-        (void)doom_wad_mount((const void *)(uintptr_t)start,
-                             (uint32_t)(end - start));
+    /* SCRUM-190: via doom_wad_disk_get()/ExoFS now, not the retired
+     * mmap_find_module()/GRUB module lookup. */
+    if (doom_wad_disk_get(&paddr, &size) == 0) {
+        (void)doom_wad_mount((const void *)(uintptr_t)paddr, (uint32_t)size);
     }
     return 0;
 }

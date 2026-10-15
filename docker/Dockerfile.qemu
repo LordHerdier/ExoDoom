@@ -9,5 +9,9 @@ RUN apt-get update \
 WORKDIR /work
 
 # default: boot ISO with a serial console hooked to your terminal
+#
+# -drive ...build/exodoom_disk.img: the ExoFS volume holding freedoom2.wad
+# (SCRUM-190), built by docker/scripts/build.sh's step [1b/7]. Replaces the
+# old GRUB multiboot2 module -- see src/syscall_launch.c.
 ENTRYPOINT ["bash", "-lc"]
-CMD ["qemu-system-x86_64 -cdrom build/exodoom.iso -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -display curses -serial mon:stdio"]
+CMD ["qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -display curses -serial mon:stdio"]

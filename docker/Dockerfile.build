@@ -77,6 +77,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libmpc3 \
       libgmp10 \
       libmpfr6 \
+      gcc \
+      libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/cross /opt/cross
