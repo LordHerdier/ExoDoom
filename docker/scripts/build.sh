@@ -49,6 +49,91 @@ else
   echo "    downloaded and verified"
 fi
 
+# -- The IWAD filename is spelled in two places; assert they agree --------
+#
+# LIBOS_WAD_FILE_NAME (src/libos_wad_params.h) is the one #define
+# src/doomgeneric_exo.c's DOOM_IWAD_BLOB_NAME and src/syscall_launch.c's
+# ExoFS open both now source their copy of this name from (SCRUM-190) --
+# see that header's own comment for the three places that have to agree.
+# Before SCRUM-190 a third spelling (src/grub.cfg's module2 line) had to
+# agree too; now that the WAD arrives via the disk image built below
+# instead of a multiboot module, the image builder is handed $wad_file
+# directly (see step [1b/7]) rather than carrying a third hardcoded copy of
+# the name. Review feedback on PR #101 called the old three-way drift out
+# as a real fragility; keeping this check costs two lines and turns a "Game
+# mode indeterminate. No IWAD file was found" runtime failure into a build
+# error.
+wad_file="$(basename "$WAD_PATH")"
+blob_name="$(sed -n 's/^#define LIBOS_WAD_FILE_NAME "\(.*\)"$/\1/p' \
+             src/libos_wad_params.h)"
+
+if [[ -z "$blob_name" ]]; then
+  echo "    ERROR: could not read LIBOS_WAD_FILE_NAME from src/libos_wad_params.h"
+  exit 1
+fi
+if [[ "$wad_file" != "$blob_name" ]]; then
+  echo "    ERROR: IWAD filename disagreement --"
+  echo "             downloaded by this script  : $wad_file"
+  echo "             LIBOS_WAD_FILE_NAME         : $blob_name"
+  echo "           Both must match, or Doom's D_FindIWAD() will not find the"
+  echo "           WAD the disk image carries."
+  exit 1
+fi
+echo "    IWAD name agrees across build.sh and LIBOS_WAD_FILE_NAME ($wad_file)"
+
+echo "[1b/7] Build FAT-formatted disk image (SCRUM-190)"
+# Replaces the old GRUB multiboot2 module: freedoom2.wad now lives in a real
+# ExoFS volume on build/exodoom_disk.img, read back through
+# exo_disk_read/exo_disk_write + src/libos_fs/ at launch time
+# (src/syscall_launch.c, src/doom_wad_disk.c) instead of being mapped in by
+# GRUB before the kernel ever runs. tools/mkexofsimg links the real ExoFS
+# sources against a host-side block-device shim
+# (tools/mkexofsimg/host_blockdev.c) -- see that tool's own header comment
+# for why it is a legitimate independent implementation of
+# exofs_blockdev.h's seam, not a format reimplemented by hand.
+#
+# This one image is now attached to every QEMU invocation (see Makefile),
+# test and normal boot alike -- src/ata.c only ever speaks to one drive, so
+# there is exactly one image to share. wad_base_lba (read from
+# src/doom_wad_disk.h, the same #define src/doom_wad_disk.c mounts at) is
+# past every LBA the pre-existing raw-sector/ExoFS KUnit fixtures already
+# reserve on the image this one replaces, build/ata_scratch.img -- see that
+# header's own comment for the exact layout. SCRUM-237 (per-program
+# filesystem isolation) reuses the same mechanism with a different
+# base_lba per program.
+wad_base_lba="$(sed -n 's/^#define LIBOS_WAD_DISK_BASE_LBA \([0-9]*\)u\?$/\1/p' \
+                src/doom_wad_disk.h)"
+if [[ -z "$wad_base_lba" ]]; then
+  echo "    ERROR: could not read LIBOS_WAD_DISK_BASE_LBA from src/doom_wad_disk.h"
+  exit 1
+fi
+#
+# Native gcc (gcc + libc6-dev, Dockerfile.build's runtime image -- distinct
+# from the builder stage's build-essential, which only exists to compile
+# the x86_64-elf cross toolchain and is discarded), not x86_64-elf-gcc: this
+# runs on the build host, not on the target kernel. Deliberately NOT passed
+# "-I src" when compiling tools/mkexofsimg/*.c -- see those files' own
+# comments for why that would shadow their real <stdio.h>/<stdlib.h> with
+# the project's freestanding shims.
+mkdir -p build/mkexofsimg_obj
+gcc -std=c99 -O2 -Wall -Wextra -Werror \
+  -I src/libos_fs -c tools/mkexofsimg/main.c \
+  -o build/mkexofsimg_obj/main.o
+gcc -std=c99 -O2 -Wall -Wextra -Werror \
+  -I src/libos_fs -c tools/mkexofsimg/host_blockdev.c \
+  -o build/mkexofsimg_obj/host_blockdev.o
+gcc -std=c99 -O2 -Wall -Wextra -Werror \
+  -c tools/mkexofsimg/host_libos_heap.c \
+  -o build/mkexofsimg_obj/host_libos_heap.o
+for f in exofs_volume exofs_fat exofs_dir exofs_dirent exofs_name exofs_path \
+         exofs_file; do
+  gcc -std=c99 -O2 -Wall -Wextra -Werror \
+    -I src -c "src/libos_fs/$f.c" -o "build/mkexofsimg_obj/$f.o"
+done
+gcc -o build/mkexofsimg build/mkexofsimg_obj/*.o
+
+build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba"
+
 if [[ "${DEBUG:-0}" == "1" ]]; then
   CFLAGS=(-std=gnu99 -ffreestanding -g -O0 -Wall -Wextra -mno-red-zone -mcmodel=small -mno-sse -mno-sse2 -mno-mmx)
 else
@@ -297,39 +382,6 @@ build_ring3_link_target() {
   objs+=("build/${name}_code_blob.o" "build/${name}_data_blob.o")
 }
 
-# -- The IWAD filename is spelled in three places; assert they agree --------
-#
-# DG_Init() registers the mounted WAD with the libc shim's blob table under a
-# hardcoded name (DOOM_IWAD_BLOB_NAME, src/doomgeneric_exo.c), because the
-# multiboot module arrives as bytes with no name attached. Doom then finds it
-# only because D_FindIWAD() happens to fopen() that same string.
-#
-# So three spellings have to agree: the file this script downloads, the module
-# src/grub.cfg loads, and the name the blob is registered under. Rename any one
-# of them alone and nothing fails here -- the failure is at runtime, deep in
-# Doom startup, as "Game mode indeterminate. No IWAD file was found", which
-# says nothing about a filename mismatch. Review feedback on PR #101 called
-# this out as a real fragility; it costs three lines to make it a build error.
-wad_file="$(basename "$WAD_PATH")"
-blob_name="$(sed -n 's/^#define DOOM_IWAD_BLOB_NAME "\(.*\)"$/\1/p' \
-             src/doomgeneric_exo.c)"
-grub_wad="$(sed -n 's@.*module2 /boot/\([^ ]*\).*@\1@p' src/grub.cfg | head -1)"
-
-if [[ -z "$blob_name" ]]; then
-  echo "    ERROR: could not read DOOM_IWAD_BLOB_NAME from src/doomgeneric_exo.c"
-  exit 1
-fi
-if [[ "$wad_file" != "$blob_name" || "$wad_file" != "$grub_wad" ]]; then
-  echo "    ERROR: IWAD filename disagreement --"
-  echo "             downloaded by this script : $wad_file"
-  echo "             loaded by src/grub.cfg     : $grub_wad"
-  echo "             registered by DG_Init      : $blob_name"
-  echo "           All three must match, or Doom's D_FindIWAD() will not find"
-  echo "           the WAD the kernel mounted."
-  exit 1
-fi
-echo "    IWAD name agrees across build.sh, grub.cfg and DG_Init ($wad_file)"
-
 echo "[2c/7] Build shell LibOS (SCRUM-110)"
 # Unlike libos_c_probe/libc_shim_probe (built further down, inside the
 # TESTING=1 block), this target is built UNCONDITIONALLY, and ahead of step
@@ -550,6 +602,39 @@ for s in src/*.s; do
 done
 run_parallel "${cmds[@]}" || { echo "    ERROR: kernel assembly failed"; exit 1; }
 
+echo "[3a/7] Compile ExoFS into the kernel (SCRUM-189, SCRUM-190)"
+# src/libos_fs/ is the ported FAT-like filesystem. It is LibOS-space code by
+# design (the kernel knows sectors; this library decides what a file is), so
+# it deliberately lives in a subdirectory, which step 3's `src/*.c` glob
+# never descends into.
+#
+# Unconditional as of SCRUM-190, not TESTING-only: src/syscall_launch.c's
+# LAUNCH_NEEDS_WAD path now mounts the ExoFS volume built by step [1b/7] and
+# reads /freedoom2.wad off it at ring 0, on every normal boot, not just
+# under the KUnit harness. -DEXO_KERNEL picks the in-process
+# exo_syscall_dispatch() form of src/libos_fs/exofs_blockdev.c's disk I/O
+# rather than the inline `syscall` stubs (see that file's own #ifdef
+# EXO_KERNEL comment, and src/libos_page_alloc.c's, for why a ring-0 caller
+# must not execute a stub: `sysretq` forces CPL 3 on return).
+#
+# Still no ring-3 ExoFS target: no app other than the kernel's own launch
+# path uses it yet (SCRUM-202 shell commands, SCRUM-44 exo_file_*, SCRUM-237
+# per-program volumes are what will). Step [3b5/7] below, TESTING-only,
+# keeps proving that porting it to one is still "a build_ring3_link_target
+# call and nothing more" whenever it is wanted.
+_compile_exofs_one() {
+  local c="$1" o="$2"
+  echo "    CC $(basename "$c") (exofs)"
+  x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+}
+cmds=()
+for c in src/libos_fs/*.c; do
+  o="build/exofs_$(basename "${c%.c}.o")"
+  objs+=("$o")
+  cmds+=("$(qcmd _compile_exofs_one "$c" "$o")")
+done
+run_parallel "${cmds[@]}" || { echo "    ERROR: exofs compile failed"; exit 1; }
+
 if [[ "${TESTING:-0}" == "1" ]]; then
   echo "[3b/7] Build LibOS C probe (SCRUM-173)"
   # tests/kernel/libos_c_probe/ is its own directory, not tests/kernel/*.c,
@@ -647,51 +732,16 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL
   objs+=("build/doom_sounds.o")
 
-  echo "[3b4/7] Compile ExoFS for the kernel-side test suite (SCRUM-189)"
-  # src/libos_fs/ is the ported FAT-like filesystem. It is LibOS-space code
-  # by design (the kernel knows sectors; this library decides what a file
-  # is), so it deliberately lives in a subdirectory, which step 3's
-  # `src/*.c` glob never descends into -- a shipped kernel links none of
-  # it. This step is the only thing that compiles it today, and it is
-  # inside the TESTING block, so that stays true.
-  #
-  # -DEXO_KERNEL, like every other compile in this script, and it is what
-  # picks the in-process exo_syscall_dispatch() form of
-  # src/libos_fs/exofs_blockdev.c's disk I/O rather than the inline
-  # `syscall` stubs (see that file's own #ifdef EXO_KERNEL comment, and
-  # src/libos_page_alloc.c's, for why a ring-0 caller must not execute a
-  # stub: `sysretq` forces CPL 3 on return). That is what lets
-  # tests/kernel/test_exofs_k.c drive the real filesystem from ring 0.
-  #
-  # The mirror-image step does not exist yet: nothing links ExoFS into a
-  # ring-3 target, because no ring-3 app uses it until the shell commands
-  # (SCRUM-202) or exo_file_* (SCRUM-44). These sources are written to
-  # build cleanly WITHOUT -DEXO_KERNEL as well, the same way src/stdlib.c
-  # and src/libos_page_alloc.c are, so that step is a
-  # build_ring3_link_target call and nothing more when it is wanted --
-  # which step [3b5/7] below exists to keep true rather than merely
-  # asserted here.
-  _compile_exofs_one() {
-    local c="$1" o="$2"
-    echo "    CC $(basename "$c") (exofs)"
-    x86_64-elf-gcc -c "$c" -o "$o" "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
-  }
-  cmds=()
-  for c in src/libos_fs/*.c; do
-    o="build/exofs_$(basename "${c%.c}.o")"
-    objs+=("$o")
-    cmds+=("$(qcmd _compile_exofs_one "$c" "$o")")
-  done
-  run_parallel "${cmds[@]}" || { echo "    ERROR: exofs compile failed"; exit 1; }
-
   echo "[3b5/7] Gate: ExoFS still builds as a ring-3 target (SCRUM-189)"
-  # The step above compiles ExoFS one way only -- WITH -DEXO_KERNEL, for
-  # tests/kernel/test_exofs_k.c. But the whole point of this library is that
-  # it is LibOS-space code, and the first ring-3 consumer (SCRUM-202 shell
-  # commands, SCRUM-44 exo_file_*) is not written yet. Without this step,
-  # nothing in the tree would notice ExoFS acquiring a kernel-only
-  # dependency, and "a build_ring3_link_target call and nothing more" would
-  # quietly stop being true months before anyone tried it.
+  # Step [3a/7] above (now unconditional, SCRUM-190) compiles ExoFS one way
+  # only -- WITH -DEXO_KERNEL, for both the kernel's own launch-time disk
+  # read and tests/kernel/test_exofs_k.c. But the whole point of this
+  # library is that it is LibOS-space code, and the first ring-3 consumer
+  # (SCRUM-202 shell commands, SCRUM-44 exo_file_*, SCRUM-237 per-program
+  # volumes) is not written yet. Without this step, nothing in the tree
+  # would notice ExoFS acquiring a kernel-only dependency, and "a
+  # build_ring3_link_target call and nothing more" would quietly stop being
+  # true months before anyone tried it.
   #
   # So: compile every source a second time with probe_cflags (the ring-3
   # CFLAGS, -mcmodel=large) and WITHOUT -DEXO_KERNEL, which selects the
@@ -830,13 +880,15 @@ else
 fi
 
 echo "[6/7] Build ISO staging tree"
+# No more freedoom2.wad module here (SCRUM-190): the WAD now lives in
+# build/exodoom_disk.img, built by step [1b/7] and attached as a separate
+# QEMU -drive (see Makefile), not staged into the ISO at all.
 mkdir -p build/isodir/boot
 cp build/exodoom build/isodir/boot/exodoom
-cp build/freedoom2.wad build/isodir/boot/freedoom2.wad
 cp src/grub.cfg build/isodir/boot/grub/grub.cfg
 
 echo "[7/7] Create ISO -> build/exodoom.iso"
 grub-mkrescue -o build/exodoom.iso build/isodir >/dev/null
 
 echo "Done:"
-ls -lh build/exodoom build/exodoom.iso
+ls -lh build/exodoom build/exodoom.iso build/exodoom_disk.img

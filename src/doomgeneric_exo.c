@@ -75,11 +75,15 @@
 #define DOOM_PARAMS_UNSET 0xFFFFFFFFFFFFFFFFULL
 
 /*
- * The filename DG_Init registers the mounted WAD under (SCRUM-66). Must be a
- * name src/doom/d_iwad.c actually searches for, and must match the module
- * src/grub.cfg loads -- see the registration call at the end of DG_Init().
+ * The filename DG_Init registers the mounted WAD under (SCRUM-66). Must be
+ * a name src/doom/d_iwad.c actually searches for -- see the registration
+ * call at the end of DG_Init(). Sourced from LIBOS_WAD_FILE_NAME
+ * (src/libos_wad_params.h) rather than its own literal since SCRUM-190:
+ * that is also the name docker/scripts/build.sh writes the WAD under on
+ * ExoFS and the name src/syscall_launch.c opens at launch time, and that
+ * header's own comment explains why one #define beats three strings.
  */
-#define DOOM_IWAD_BLOB_NAME "freedoom2.wad"
+#define DOOM_IWAD_BLOB_NAME LIBOS_WAD_FILE_NAME
 
 libos_wad_params_t g_doom_params = {
     .wad_vaddr = DOOM_PARAMS_UNSET,
@@ -220,17 +224,22 @@ void DG_SleepMs(uint32_t ms)
  * is exo_fb_acquire (#4) plus exo_page_map (#2), composed LibOS-side by
  * libos_fb_map() (src/libos_fb.c, SCRUM-36), and none of it has anything to
  * do with an IWAD. The Jira description flags this on the ticket itself. The
- * mapping that matters here is the multiboot module one: SCRUM-16's
- * mmap_find_module() finds freedoom2.wad's physical range, and
- * libos_map_wad() (src/libos_wad_map.c) maps those existing pages read-only
- * into this LibOS's address space at LIBOS_WAD_VADDR before it is ever
- * entered.
+ * mapping that matters here is libos_map_wad() (src/libos_wad_map.c), which
+ * maps a physical range read-only into this LibOS's address space at
+ * LIBOS_WAD_VADDR before it is ever entered. Through SCRUM-73 that range was
+ * a GRUB multiboot module's, found by src/mmap.c's mmap_find_module(); as of
+ * SCRUM-190 it is a buffer src/syscall_launch.c reads off the ExoFS-mounted
+ * disk image instead (src/doom_wad_disk.c), with the GRUB module retired
+ * entirely. Either way, this file does not know or care which: by the time
+ * DG_Init runs, g_doom_params.wad_vaddr/wad_size already name a mapped,
+ * readable range, and that is the entire interface this file depends on.
  *
  * So there is no loading to do in the read-a-file sense, and nowhere to load
- * 28 MB to if there were. The bytes are already mapped. DG_Init's job is to
- * confirm that what is mapped is really a WAD, record it, and say so on
- * serial -- which is exactly the acceptance criterion: "Doom init sequence
- * runs; serial shows WAD loaded without I_Error".
+ * 28 MB to if there were -- that already happened, one layer below, before
+ * this LibOS was ever entered. DG_Init's job is to confirm that what is
+ * mapped is really a WAD, record it, and say so on serial -- which is
+ * exactly the acceptance criterion: "Doom init sequence runs; serial shows
+ * WAD loaded without I_Error".
  *
  * ── Why a failure here reports rather than halts ───────────────────────
  *
@@ -362,12 +371,14 @@ void DG_Init(void)
      * unit-tested -- tests/kernel/test_libc_gaps_k.c registers this very
      * name -- but nothing in the shipping path had ever called it.
      *
-     * The name is the one src/grub.cfg loads the module as, and it is on
-     * d_iwad.c's search list. It is hardcoded because the multiboot module
-     * arrives as bytes with no name attached: libos_wad_params_t carries an
-     * address and a length and nothing else. Ship a different IWAD and this
-     * is the line to change; SCRUM-75/SCRUM-190, which move storage onto a
-     * real filesystem, are where it stops being a constant.
+     * DOOM_IWAD_BLOB_NAME is on d_iwad.c's search list, and is now
+     * LIBOS_WAD_FILE_NAME (src/libos_wad_params.h) rather than its own
+     * literal (SCRUM-190) -- the same name the ExoFS volume stores the file
+     * under and src/syscall_launch.c opens by, so all three agree by
+     * construction instead of by convention. It is still a name rather than
+     * something read off the volume, because libos_wad_params_t carries an
+     * address and a length and nothing else: ship a different IWAD and
+     * LIBOS_WAD_FILE_NAME's own definition is the line to change.
      *
      * Reported but not fatal: the mount itself succeeded, and D_FindIWAD's
      * own error is clearer than anything this layer could say about a full

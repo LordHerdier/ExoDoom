@@ -1,42 +1,25 @@
 /*
- * test_vmm_fb_wad_k.c — SCRUM-16: framebuffer + WAD module reachable through
- * the paged kernel map.
+ * test_vmm_fb_wad_k.c — SCRUM-16: the framebuffer aperture reachable
+ * through the paged kernel map.
  *
- * Both are already mapped by vmm_init() before run_tests() is ever called
- * (the WAD incidentally, as part of every usable RAM region; the framebuffer
- * aperture explicitly, since it sits in the MMIO hole no mmap region covers)
- * — these tests are the proof, not the mechanism. The WAD one goes one step
- * further than a translate check and actually reads the magic bytes back
- * through the mapped virtual address, which is what "WAD parsing still
- * works" after paging actually depends on.
+ * Mapped by vmm_init() before run_tests() is ever called, since it sits in
+ * the MMIO hole no mmap region covers -- this test is the proof, not the
+ * mechanism.
+ *
+ * This file used to carry a second test, proving the GRUB multiboot WAD
+ * module was identity-mapped and its magic bytes readable straight through
+ * that mapping. SCRUM-190 retired the module -- the IWAD now arrives via
+ * ExoFS/ATA instead (src/doom_wad_disk.h) -- so there is no longer a module
+ * for that test to find; coverage for the disk-backed path lives in
+ * tests/kernel/test_doom_wad_disk_k.c instead.
  */
 
 #include "kunit.h"
 #include "vmm.h"
 #include "mmap.h"
 #include "multiboot2.h"
-#include "string.h"
 
 #include <stdint.h>
-
-static void test_wad_module_is_mapped_and_readable(void)
-{
-    uint64_t start = 0, end = 0;
-    CU_ASSERT_EQUAL(mmap_find_module(&start, &end), 0);
-    CU_ASSERT_TRUE(end > start);
-    if (end <= start) return;
-
-    uint64_t paddr = 0, flags = 0;
-    CU_ASSERT_EQUAL(vmm_translate(start, &paddr, &flags), VMM_OK);
-    CU_ASSERT_EQUAL(paddr, start);
-    CU_ASSERT_TRUE((flags & VMM_PRESENT) != 0);
-
-    /* Identity-mapped, so the physical and virtual addresses are the same
-     * number -- read the WAD's magic straight through it. */
-    const char *magic = (const char *)(uintptr_t)start;
-    CU_ASSERT_TRUE(memcmp(magic, "IWAD", 4) == 0 ||
-                   memcmp(magic, "PWAD", 4) == 0);
-}
 
 static void test_framebuffer_aperture_is_mapped(void)
 {
@@ -67,8 +50,6 @@ static void test_framebuffer_aperture_is_mapped(void)
 
 void suite_vmm_fb_wad_tests(CU_pSuite s)
 {
-    CU_add_test(s, "WAD module is mapped and readable through its VA",
-                test_wad_module_is_mapped_and_readable);
     CU_add_test(s, "framebuffer aperture is mapped end to end",
                 test_framebuffer_aperture_is_mapped);
 }

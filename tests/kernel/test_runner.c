@@ -85,6 +85,7 @@ void suite_ata_tests(CU_pSuite s);
 void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
 void suite_exofs_tests(CU_pSuite s);
+void suite_doom_wad_disk_tests(CU_pSuite s);
 void suite_launch_multi_tests(CU_pSuite s);
 void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
@@ -544,6 +545,13 @@ int run_tests(void)
      * surfacing here as a pile of -EXO_EBUSY (SCRUM-189). */
     s = CU_add_suite("exofs", exofs_suite_init, exofs_suite_cleanup);
     suite_exofs_tests(s);
+
+    /* After "exofs": doom_wad_disk_get() (src/doom_wad_disk.c) is ExoFS
+     * plus a contiguous allocation and a cache on top, mounting the real
+     * IWAD's own volume at LIBOS_WAD_DISK_BASE_LBA rather than a throwaway
+     * test volume (SCRUM-190). */
+    s = CU_add_suite("doom_wad_disk", NULL, NULL);
+    suite_doom_wad_disk_tests(s);
 
     s = CU_add_suite("launch_multi", NULL, launch_multi_suite_cleanup);
     suite_launch_multi_tests(s);

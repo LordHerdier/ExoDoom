@@ -7,15 +7,20 @@
 /*
  * doom_wad — the mounted IWAD, as DG_Init leaves it (SCRUM-73).
  *
- * v1 has no filesystem.  freedoom2.wad arrives as a GRUB multiboot 2 module
- * (tag type 3, src/grub.cfg's `module2` line), the kernel identity-maps it at
- * vmm_init() and page_alloc_init() reserves its pages as PAGE_OWNER_KERNEL,
- * and a launched LibOS gets it read-only at LIBOS_WAD_VADDR via
- * libos_map_wad() (src/libos_wad_map.h) rather than by opening anything.
+ * freedoom2.wad lives on ExoFS, at base LBA 0 of build/exodoom_disk.img
+ * (SCRUM-190, docker/scripts/build.sh step [1b/7]). src/syscall_launch.c
+ * mounts that volume, reads the file into a freshly allocated contiguous
+ * buffer (cached after the first launch -- see get_wad_buffer() there) and
+ * page_alloc_init() has already reserved those pages as PAGE_OWNER_KERNEL,
+ * the same tag the old GRUB multiboot module's pages carried; a launched
+ * LibOS gets the buffer read-only at LIBOS_WAD_VADDR via libos_map_wad()
+ * (src/libos_wad_map.h) exactly as before, just fed a disk-backed physical
+ * range instead of a module's.
  *
- * So "loading the IWAD" is not a read into a buffer -- the bytes are already
- * mapped and there is nowhere to copy 28 MB to.  What DG_Init actually has to
- * do is prove the mapped region really is a WAD and record where it is, which
+ * So "loading the IWAD" is still not DG_Init's job -- the read into that
+ * buffer already happened before this LibOS was ever entered, same as when
+ * the bytes came from a multiboot module. What DG_Init actually has to do
+ * is prove the mapped region really is a WAD and record where it is, which
  * is what this registry holds.
  *
  * ── Why this is its own file ───────────────────────────────────────────

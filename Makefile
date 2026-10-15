@@ -15,11 +15,26 @@ docker-run: docker-build
 	docker run --rm -it -v "$(PWD):/work" exodoom-qemu
 
 # Optional: boot the kernel directly (no GRUB menu)
+#
+# -drive ...build/exodoom_disk.img: the ExoFS volume holding freedoom2.wad
+# (SCRUM-190, docker/scripts/build.sh step [1b/7]), replacing the old GRUB
+# multiboot2 module -- see src/syscall_launch.c. `-kernel` bypasses GRUB
+# entirely, but the drive is attached the same way as every other
+# normal-boot target below.
 docker-run-kernel: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm -it -v "$(PWD):/work" exodoom-qemu \
-	  'qemu-system-x86_64 -kernel build/exodoom -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -display curses -serial mon:stdio'
+	  'qemu-system-x86_64 -kernel build/exodoom -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -display curses -serial mon:stdio'
 
+# build/exodoom_disk.img (built by docker/scripts/build.sh step [1b/7],
+# SCRUM-190) replaces build/ata_scratch.img here too: its low LBAs keep that
+# scratch image's exact layout (see src/doom_wad_disk.h's own comment for
+# the reserved ranges), so test_ata_k.c/test_syscall_disk_k.c/test_exofs_k.c
+# need no changes, and the same image now also lets the WAD-dependent KUnit
+# suites (test_doom_sound_pcm_k.c, test_hda_pcm_k.c, test_doom_dmx_k.c) read
+# the real IWAD through doom_wad_disk_get() instead of the retired
+# mmap_find_module()/GRUB-module lookup. No dd step needed: build.sh's
+# image builder already produces the whole file, scratch region included.
 docker-test:
 	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
 	docker run --rm -e DEBUG=$(DEBUG) -e TESTING=1 -v "$(PWD):/work" exodoom-build
@@ -27,10 +42,9 @@ docker-test:
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
 	  set -eu; \
 	  rm -f /work/serial.log; \
-	  dd if=/dev/zero of=/work/build/ata_scratch.img bs=1M count=8 status=none; \
 	  timeout 180 qemu-system-x86_64 \
 	  -cdrom build/exodoom.iso \
-	  -drive file=/work/build/ata_scratch.img,format=raw,if=ide \
+	  -drive file=/work/build/exodoom_disk.img,format=raw,if=ide \
 	  -device intel-hda \
 	  -device hda-output,audiodev=snd0 \
 	  -audiodev none,id=snd0 \
@@ -51,10 +65,9 @@ docker-ci:
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
 	  set -eu; \
 	  rm -f /work/serial.log; \
-	  dd if=/dev/zero of=/work/build/ata_scratch.img bs=1M count=8 status=none; \
 	  timeout 180 qemu-system-x86_64 \
 	  -cdrom build/exodoom.iso \
-	  -drive file=/work/build/ata_scratch.img,format=raw,if=ide \
+	  -drive file=/work/build/exodoom_disk.img,format=raw,if=ide \
 	  -device intel-hda \
 	  -device hda-output,audiodev=snd0 \
 	  -audiodev none,id=snd0 \
@@ -86,7 +99,7 @@ docker-link-doom:
 docker-run-debug: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm -it -p 1234:1234 -v "$(PWD):/work" exodoom-qemu \
-	'qemu-system-x86_64 -cdrom build/exodoom.iso -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -serial mon:stdio -s -S'
+	'qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -serial mon:stdio -s -S'
 
 # Boots on the HOST's qemu rather than in the container, which is the only
 # place a speaker exists -- swap `-audiodev none,id=snd0` below for
@@ -95,7 +108,7 @@ docker-run-debug: docker-build
 # the full BDL DMA and completion-interrupt path, which is what the KUnit
 # suite asserts on, and headless Docker has no audio backend to hand.
 run: docker-build
-	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -serial stdio
+	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -serial stdio
 
 clean:
 	rm -rf build

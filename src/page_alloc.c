@@ -229,10 +229,14 @@ void page_alloc_init(const struct mb2_info* mb) {
     reserve_region((uintptr_t)mb, (uintptr_t)mb + mb->total_size);
     serial_print("page_alloc: multiboot info reserved\n");
 
-    /* This kernel's boot setup loads exactly one GRUB module (the
-     * WAD, see grub.cfg) -- mmap_find_module() only reports the
-     * first MB2_TAG_MODULE tag, which is why one call is enough
-     * here. */
+    /* src/grub.cfg loaded exactly one GRUB module (the WAD) before
+     * SCRUM-190 moved the IWAD onto the ExoFS-backed disk image instead --
+     * mmap_find_module() only reports the first MB2_TAG_MODULE tag, which
+     * was why one call was enough here. A normal boot now passes no
+     * module at all, so this is permanently a no-op until something else
+     * loads one; left in rather than removed since mmap_find_module()
+     * itself is still a general multiboot-module lookup other code may
+     * yet want. */
     uint64_t mod_start, mod_end;
     if (mmap_find_module(&mod_start, &mod_end) == 0) {
         reserve_region((uintptr_t)mod_start, (uintptr_t)mod_end);
