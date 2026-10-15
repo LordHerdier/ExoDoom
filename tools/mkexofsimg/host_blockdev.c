@@ -19,6 +19,8 @@
 #include <stdio.h>
 
 static FILE *g_img = NULL;
+static int   g_read_only = 0;
+static uint32_t g_sectors = 0;
 
 int host_blockdev_open(const char *path, uint32_t total_sectors)
 {
@@ -26,6 +28,8 @@ int host_blockdev_open(const char *path, uint32_t total_sectors)
     if (!g_img) {
         return -1;
     }
+    g_read_only = 0;
+    g_sectors = total_sectors;
 
     static const uint8_t zero[EXOFS_BLOCK_SIZE] = {0};
     for (uint32_t i = 0; i < total_sectors; i++) {
@@ -43,12 +47,42 @@ int host_blockdev_open(const char *path, uint32_t total_sectors)
     return 0;
 }
 
+int host_blockdev_open_existing(const char *path, int read_only)
+{
+    g_img = fopen(path, read_only ? "rb" : "r+b");
+    if (!g_img) {
+        return -1;
+    }
+    g_read_only = read_only;
+
+    if (fseek(g_img, 0, SEEK_END) != 0) {
+        fclose(g_img);
+        g_img = NULL;
+        return -1;
+    }
+    long bytes = ftell(g_img);
+    if (bytes < 0 || (bytes % EXOFS_BLOCK_SIZE) != 0 || bytes == 0) {
+        fclose(g_img);
+        g_img = NULL;
+        return -1;
+    }
+    g_sectors = (uint32_t)(bytes / EXOFS_BLOCK_SIZE);
+    return 0;
+}
+
+uint32_t host_blockdev_sectors(void)
+{
+    return g_img ? g_sectors : 0;
+}
+
 void host_blockdev_close(void)
 {
     if (g_img) {
         fclose(g_img);
         g_img = NULL;
     }
+    g_read_only = 0;
+    g_sectors = 0;
 }
 
 int exofs_bdev_acquire(void)
@@ -83,7 +117,7 @@ int exofs_bdev_read(uint32_t lba, void *buf, uint32_t count)
 int exofs_bdev_write(uint32_t lba, const void *buf, uint32_t count)
 {
     if (count == 0) return 0;
-    if (!g_img || buf == NULL) return -1;
+    if (!g_img || buf == NULL || g_read_only) return -1;
 
     if (fseek(g_img, (long)lba * EXOFS_BLOCK_SIZE, SEEK_SET) != 0) {
         return -1;

@@ -1,4 +1,4 @@
-.PHONY: docker-build docker-run docker-run-kernel docker-test docker-build-doom docker-link-doom clean
+.PHONY: docker-build docker-run docker-run-kernel docker-test docker-build-doom docker-link-doom exofsfuse mount-disk umount-disk clean
 
 DEBUG ?= 0
 
@@ -110,5 +110,56 @@ docker-run-debug: docker-build
 run: docker-build
 	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -serial stdio
 
+# ---- Host-side ExoFS mount (tools/exofsfuse) -----------------------------
+#
+# build/exodoom_disk.img is an ExoFS volume, not FAT, and it starts at
+# LIBOS_WAD_DISK_BASE_LBA rather than LBA 0 -- Linux has no driver for it,
+# so mount(8) has nothing to bind at any offset. tools/exofsfuse is that
+# driver in user space, linking the real src/libos_fs/ sources so what you
+# see through ./mnt is what the kernel's own filesystem reads.
+#
+# These three run on the HOST, not in Docker: a FUSE mount has to appear in
+# this machine's namespace, and libfuse is a host dependency (libfuse3-dev /
+# fuse3-devel; on NixOS see tools/exofsfuse/build.sh's header). OUTDIR
+# defaults to build/, which belongs to root once a Docker build has run --
+# hence OUTDIR=.exofsfuse here, an ordinary user-writable directory.
+EXOFSFUSE_OUTDIR ?= .exofsfuse
+EXOFSFUSE       := $(EXOFSFUSE_OUTDIR)/exofsfuse
+MNT             ?= mnt
+DISK_IMG        ?= build/exodoom_disk.img
+
+# Which volume on that image to mount. One image carries several, each at a
+# fixed base LBA (exofs.h: "several fixed-base-LBA volumes can share one
+# disk"), so "the image" is never enough to say what you want to see:
+#
+#   (unset)         LIBOS_WAD_DISK_BASE_LBA, src/doom_wad_disk.h -- the IWAD
+#                   volume `doom` reads, and what step [1b/7] writes. Left
+#                   empty rather than restated here: the driver's own
+#                   default is read out of that header at build time
+#                   (tools/exofsfuse/build.sh), so there is one place it
+#                   can disagree with the kernel, not two.
+#   BASE_LBA=8192   SHELL_FS_BASE_LBA, src/shell/shell_main.c -- the shell's
+#                   scratch volume, i.e. what `ls` inside ExoDoom lists.
+#                   Note TESTING=1 reuses this exact range for the ExoFS
+#                   fixtures (EXOFS_TEST_BASE_LBA), so a test boot
+#                   overwrites whatever the shell left there.
+BASE_LBA        ?=
+EXOFSFUSE_BASE_ARG := $(if $(BASE_LBA),-o base_lba=$(BASE_LBA))
+
+exofsfuse:
+	OUTDIR=$(EXOFSFUSE_OUTDIR) tools/exofsfuse/build.sh
+
+# Mounts read-only whenever the image is not writable by you, which is the
+# normal case for one a root-owned Docker build produced.
+#
+#   make mount-disk                                   # the IWAD volume on ./mnt
+#   make mount-disk BASE_LBA=8192 MNT=mnt-shell       # the shell's volume
+mount-disk: exofsfuse
+	mkdir -p $(MNT)
+	$(EXOFSFUSE) $(DISK_IMG) $(MNT) $(EXOFSFUSE_BASE_ARG)
+
+umount-disk:
+	fusermount3 -u $(MNT)
+
 clean:
-	rm -rf build
+	rm -rf build $(EXOFSFUSE_OUTDIR)
