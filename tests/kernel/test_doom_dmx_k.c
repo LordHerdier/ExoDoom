@@ -31,7 +31,7 @@
 
 #include "doom_dmx.h"
 #include "doom_wad.h"
-#include "mmap.h"
+#include "doom_wad_disk.h"
 #include "string.h"
 #include "wad.h"
 
@@ -347,15 +347,15 @@ static const wad_t *real_wad(void)
 
 int suite_doom_dmx_init(void)
 {
-    uint64_t start = 0, end = 0;
+    uint64_t paddr = 0, size = 0;
 
-    if (mmap_find_module(&start, &end) != 0 || end <= start) {
-        return 0;   /* no module; the tests below report it */
+    /* SCRUM-190: via doom_wad_disk_get()/ExoFS now, not the retired
+     * mmap_find_module()/GRUB module lookup. */
+    if (doom_wad_disk_get(&paddr, &size) != 0) {
+        return 0;   /* no disk/volume/file; the tests below report it */
     }
 
-    /* Identity-mapped by vmm_init() before run_tests() -- the same access
-     * tests/kernel/test_vmm_fb_wad_k.c relies on. */
-    (void)doom_wad_mount((const void *)(uintptr_t)start, (uint32_t)(end - start));
+    (void)doom_wad_mount((const void *)(uintptr_t)paddr, (uint32_t)size);
     return 0;
 }
 

@@ -21,10 +21,16 @@
  * Only two things actually varied between the old handlers, and both are
  * flags rather than code:
  *
- *   LAUNCH_NEEDS_WAD    map the multiboot WAD module into the new address
- *                       space and patch its address/length into the image's
- *                       params page. The WAD viewer and Doom need it; the
- *                       clock and Snake have no external resource to stage.
+ *   LAUNCH_NEEDS_WAD    map the IWAD into the new address space and patch
+ *                       its address/length into the image's params page.
+ *                       The WAD viewer and Doom need it; the clock and
+ *                       Snake have no external resource to stage. The IWAD
+ *                       itself arrives via ExoFS/ATA, cached after its
+ *                       first disk read (SCRUM-190, doom_wad_disk_get()
+ *                       below) -- it used to be a GRUB multiboot module
+ *                       mapped in before the kernel ever ran, which is
+ *                       where "the multiboot WAD module" in some of the
+ *                       comments below still refers to.
  *
  *   LAUNCH_RELEASES_FB  release whoever currently holds the framebuffer
  *                       binding before entering.
@@ -55,7 +61,7 @@
 #include "libos_clock/libos_clock_layout.h"
 #include "libos_snake/libos_snake_layout.h"
 #include "libos_doom/libos_doom_layout.h"
-#include "mmap.h"
+#include "doom_wad_disk.h"
 #include "page_alloc.h"
 #include "vmm.h"
 #include "fb_binding.h"
@@ -200,15 +206,16 @@ static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
         }
     }
 
-    /* Looked up before context_create() so a missing module fails without
-     * having allocated anything -- the ordering the old WAD-viewer handler
-     * used, preserved. */
-    uint64_t wad_start = 0, wad_end = 0, wad_size = 0;
+    /* Looked up before context_create() so a missing/unreadable WAD fails
+     * without having allocated anything -- the ordering the old WAD-viewer
+     * handler used for the GRUB module lookup, preserved for the disk-backed
+     * one (SCRUM-190). */
+    uint64_t wad_paddr = 0, wad_size = 0;
     if (app->flags & LAUNCH_NEEDS_WAD) {
-        if (mmap_find_module(&wad_start, &wad_end) != 0) {
-            return -EXO_ENODEV;
+        int64_t wad_rc = doom_wad_disk_get(&wad_paddr, &wad_size);
+        if (wad_rc != 0) {
+            return wad_rc;
         }
-        wad_size = wad_end - wad_start;
     }
 
     page_owner_t id;
@@ -237,8 +244,13 @@ static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
     }
 
     if (app->flags & LAUNCH_NEEDS_WAD) {
+        /* wad_paddr/wad_size name the shared, cached buffer doom_wad_disk_get()
+         * above returned -- never this launch's alone -- so a failure here
+         * or below tears down this app's own image/context but must not
+         * free those pages; some other still-live app (or a future launch)
+         * may be mapping the same buffer. */
         if (libos_map_wad((uint64_t *)(uintptr_t)img.pml4_phys,
-                          wad_start, wad_size) != VMM_OK) {
+                          wad_paddr, wad_size) != VMM_OK) {
             libos_destroy_image(id, &img);
             context_destroy(id);
             return -EXO_EINVAL;
