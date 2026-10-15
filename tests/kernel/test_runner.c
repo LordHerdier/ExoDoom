@@ -93,6 +93,7 @@ void suite_doom_dmx_tests(CU_pSuite s);
 void suite_pcm_mixer_tests(CU_pSuite s);
 void suite_hda_pcm_tests(CU_pSuite s);
 void suite_doom_sound_pcm_tests(CU_pSuite s);
+void suite_exo_pkg_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -605,13 +606,21 @@ int run_tests(void)
                      suite_doom_sound_pcm_cleanup);
     suite_doom_sound_pcm_tests(s);
 
+    /* The ExoDoom program package format (SCRUM-229): pure buffer logic, no
+     * device or syscall dependency, so (NULL, NULL) the same way "pci" is.
+     * Placed ahead of syscall_fuzz deliberately -- see that suite's own
+     * comment on running last. */
+    s = CU_add_suite("exo_pkg", NULL, NULL);
+    suite_exo_pkg_tests(s);
+
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not
      * shadow which earlier suite actually broke a handler (SCRUM-115). */
     s = CU_add_suite("syscall_fuzz", NULL, NULL);
     suite_syscall_fuzz_tests(s);
 
-    /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it. */
+    /* ADD NEW SUITES HERE: declare suite_*_tests above, then register it
+     * before syscall_fuzz, which must stay last (see its own comment). */
 
     CU_run_all_tests();
 
