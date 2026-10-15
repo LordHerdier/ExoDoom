@@ -193,6 +193,17 @@ void exofs_unmount(void)
     release_volume();
 }
 
+/* ---- Capacity --------------------------------------------------------- */
+
+uint32_t exofs_region_sectors(uint32_t base_lba, uint32_t region_end_lba,
+                              uint32_t disk_total_sectors)
+{
+    uint32_t end = region_end_lba;
+    if (disk_total_sectors < end) end = disk_total_sectors;
+
+    return end > base_lba ? end - base_lba : 0u;
+}
+
 /* ---- Format -------------------------------------------------------------
  *
  * Writes three things, in an order chosen so an interrupted format does not
