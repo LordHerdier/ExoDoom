@@ -320,6 +320,48 @@ static void test_release_without_a_drive_still_succeeds(void)
     CU_ASSERT_EQUAL(do_disk_release(), 0);
 }
 
+/* #31, SCRUM-202. Unscoped introspection like exo_memstat/exo_pslist: no
+ * ownership check, no hardware touch -- just the presence flag and the
+ * sector count ata_init() already cached at boot. */
+static int64_t do_disk_stat(uint64_t out)
+{
+    return exo_syscall_dispatch(EXO_SYS_DISK_STAT, out, 0, 0, 0, 0, 0);
+}
+
+static void test_disk_stat_handler_is_bound(void)
+{
+    CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_DISK_STAT));
+}
+
+static void test_disk_stat_bad_buffer_rejected(void)
+{
+    CU_ASSERT_EQUAL(do_disk_stat(0), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_disk_stat(EXO_USER_VA_BASE - 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_disk_stat(UNMAPPED), -EXO_EFAULT);
+}
+
+static void test_disk_stat_reports_presence_and_capacity(void)
+{
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p,
+                          EXO_PAGE_WRITE | EXO_PAGE_USER), 0);
+
+    CU_ASSERT_EQUAL(do_disk_stat(SCRATCH), 0);
+    exo_diskstat_t *stat = (exo_diskstat_t *)(uintptr_t)SCRATCH;
+
+    if (drive_present()) {
+        CU_ASSERT_EQUAL(stat->present, 1);
+        CU_ASSERT_EQUAL(stat->total_sectors, ata_get_sector_count());
+        CU_ASSERT(stat->total_sectors > 0);
+    } else {
+        CU_ASSERT_EQUAL(stat->present, 0);
+    }
+
+    CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+}
+
 void suite_syscall_disk_tests(CU_pSuite s)
 {
     CU_add_test(s, "handlers are bound", test_handlers_are_bound);
@@ -344,4 +386,10 @@ void suite_syscall_disk_tests(CU_pSuite s)
                test_release_does_not_touch_a_foreign_binding);
     CU_add_test(s, "release without a drive still succeeds",
                test_release_without_a_drive_still_succeeds);
+    CU_add_test(s, "disk_stat handler is bound",
+               test_disk_stat_handler_is_bound);
+    CU_add_test(s, "disk_stat bad buffer rejected",
+               test_disk_stat_bad_buffer_rejected);
+    CU_add_test(s, "disk_stat reports presence and capacity",
+               test_disk_stat_reports_presence_and_capacity);
 }

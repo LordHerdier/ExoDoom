@@ -46,3 +46,9 @@ int ata_init(void);
  */
 int ata_read_sector(uint32_t lba, uint8_t *buf);
 int ata_write_sector(uint32_t lba, const uint8_t *buf);
+
+/* Total user-addressable 28-bit LBA sector count, read out of the IDENTIFY
+ * payload's words 60/61 (low word first) by a successful ata_init() --
+ * SCRUM-202's `disk` shell command is the first caller. 0 if ata_init()
+ * never succeeded (ATA_ENODEV/timeout) or has not been called yet. */
+uint32_t ata_get_sector_count(void);
