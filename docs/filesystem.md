@@ -95,10 +95,17 @@ SCRUM-190 place a volume at a partition-like offset without a format change.
 Block size equals sector size (512 B), which is what lets a block index
 become an LBA with one addition.
 
-`exofs_format()` takes the sector count from its caller because **there is no
-disk-capacity syscall**: `ata_init()` issues IDENTIFY, which carries the
-count, but `src/ata.c` does not surface it. Worth a small follow-up. The
-geometry derived from that count is recorded in the superblock, so
+`exofs_format()` still takes the sector count from its caller — not because
+there is no disk-capacity syscall (`exo_diskstat`, #31,
+`docs/syscall_spec.md` §3.2, surfaces `ata_init()`'s IDENTIFY sector count via
+`ata_get_sector_count()`, SCRUM-202), but because several fixed-base-LBA
+volumes can share one disk (§2 above; the shell's scratch volume and the
+WAD's own, `src/doom_wad_disk.h`), so "the whole disk" is never the right
+size for one of them. `exofs_region_sectors()` (`src/libos_fs/exofs.h`,
+SCRUM-203) is the caller-side computation — `min(next region's base,
+disk capacity) - this volume's base` — that the shell's `mkfs`/`disk`
+commands use instead of a hardcoded constant. The geometry derived from
+whatever sector count results is recorded in the superblock, so
 `exofs_mount()` needs only the base.
 
 ---
