@@ -7,6 +7,7 @@
  */
 
 #include "pcm_mixer.h"
+#include "string.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -26,6 +27,32 @@ typedef struct {
 } voice_t;
 
 static voice_t g_voice[PCM_MIXER_VOICES];
+
+/*
+ * The music voice (SCRUM-218): one ring of interleaved stereo frames in
+ * storage the caller owns.  See src/pcm_mixer.h for why it is not a ninth
+ * voice_t.
+ *
+ * `rd` and `count` are the whole of the ring's state -- the write position
+ * is derived, (rd + count) mod cap, rather than stored.  That is not thrift.
+ * With a separate write index there are two fields a wrap has to keep
+ * consistent with the count and three ways to get it wrong by one, which in
+ * a ring is a tick once per lap; with one, "where does the next frame go"
+ * and "how many are there" cannot disagree.
+ */
+typedef struct {
+    int16_t  *ring;       /* NULL while no ring is attached                  */
+    uint32_t  cap;        /* frames the ring holds                           */
+    uint32_t  rd;         /* next frame pcm_mixer_render() will take         */
+    uint32_t  count;      /* frames queued                                   */
+    int32_t   gain;       /* Q8, 0..256: 256 passes samples through exactly  */
+    uint32_t  underruns;  /* frames rendered as silence while playing        */
+    uint8_t   playing;    /* written to since the last open or flush         */
+} music_t;
+
+#define MUSIC_GAIN_UNITY 256
+
+static music_t g_music = { NULL, 0, 0, 0, MUSIC_GAIN_UNITY, 0, 0 };
 
 /*
  * Handle packing.  The generation occupies bits 31:8 and the voice index
@@ -164,6 +191,18 @@ void pcm_mixer_reset(void)
         g_voice[i].generation  = 0;
         g_voice[i].active      = 0;
     }
+
+    /* "Forget every voice" includes the one that is not in the table: the
+     * ring is detached (never freed -- it is the caller's) and the level
+     * goes back to full, so nothing a previous user of the mixer set up can
+     * colour the next one's output. */
+    g_music.ring      = NULL;
+    g_music.cap       = 0;
+    g_music.rd        = 0;
+    g_music.count     = 0;
+    g_music.gain      = MUSIC_GAIN_UNITY;
+    g_music.underruns = 0;
+    g_music.playing   = 0;
     irq_restore(flags);
 }
 
@@ -322,6 +361,167 @@ static inline int16_t clip16(int32_t v)
     return (int16_t)v;
 }
 
+/* ── The music voice ───────────────────────────────────────────────────── */
+
+int pcm_mixer_music_open(int16_t *ring, uint32_t frames)
+{
+    if (ring == NULL || frames == 0) {
+        return PCM_MIXER_EINVAL;
+    }
+
+    uint64_t flags = irq_save();
+    if (g_music.ring != NULL) {
+        irq_restore(flags);
+        return PCM_MIXER_EBUSY;
+    }
+
+    /* `ring` last: it is what pcm_mixer_render() tests, so the voice only
+     * becomes visible to the interrupt once everything it will read through
+     * that pointer is in place.  Interrupts are off here anyway; the order
+     * is so the code is right without having to check that they are. */
+    g_music.cap       = frames;
+    g_music.rd        = 0;
+    g_music.count     = 0;
+    g_music.underruns = 0;
+    g_music.playing   = 0;
+    g_music.ring      = ring;
+    irq_restore(flags);
+    return PCM_MIXER_OK;
+}
+
+void pcm_mixer_music_close(void)
+{
+    uint64_t flags = irq_save();
+    g_music.ring    = NULL;
+    g_music.cap     = 0;
+    g_music.rd      = 0;
+    g_music.count   = 0;
+    g_music.playing = 0;
+    irq_restore(flags);
+}
+
+int pcm_mixer_music_is_open(void)
+{
+    return g_music.ring != NULL;
+}
+
+uint32_t pcm_mixer_music_write(const int16_t *src, uint32_t frames)
+{
+    if (src == NULL || frames == 0) {
+        return 0;
+    }
+
+    /*
+     * Snapshot where the free region starts and how big it is, then copy
+     * with the lock DROPPED and take it again only to publish.
+     *
+     * That is safe because of who else can run.  The producer side is never
+     * re-entered (see the header), so the only thing that can interleave is
+     * pcm_mixer_render(), and all it does to the ring is consume from the
+     * front: `rd` advances and `count` falls by the same amount.  The write
+     * position, rd + count, is unchanged by that, and the region past it is
+     * one render never reads -- so the frames can be copied in at leisure.
+     * Until `count` is raised they are not part of the stream, and the
+     * raise is a single store under the lock.
+     *
+     * The alternative, holding interrupts off across the memcpy, would put a
+     * 48 KB copy inside a critical section whose only purpose is to make two
+     * words consistent.
+     */
+    uint64_t flags = irq_save();
+    int16_t *ring  = g_music.ring;
+    uint32_t cap   = g_music.cap;
+    uint32_t space = cap - g_music.count;
+    uint32_t wr    = g_music.rd + g_music.count;
+    irq_restore(flags);
+
+    if (ring == NULL) {
+        return 0;
+    }
+    if (wr >= cap) {
+        wr -= cap;
+    }
+    if (frames > space) {
+        frames = space;
+    }
+    if (frames == 0) {
+        return 0;
+    }
+
+    /* Up to two pieces: to the end of the storage, then from its start. */
+    uint32_t first = cap - wr;
+    if (first > frames) {
+        first = frames;
+    }
+    memcpy(ring + (size_t)wr * PCM_MIXER_CHANNELS, src,
+           (size_t)first * PCM_MIXER_CHANNELS * sizeof(int16_t));
+    memcpy(ring, src + (size_t)first * PCM_MIXER_CHANNELS,
+           (size_t)(frames - first) * PCM_MIXER_CHANNELS * sizeof(int16_t));
+
+    flags = irq_save();
+    g_music.count  += frames;
+    g_music.playing = 1;
+    irq_restore(flags);
+    return frames;
+}
+
+void pcm_mixer_music_flush(void)
+{
+    uint64_t flags = irq_save();
+    g_music.rd      = 0;
+    g_music.count   = 0;
+    g_music.playing = 0;
+    irq_restore(flags);
+}
+
+void pcm_mixer_music_set_volume(int vol)
+{
+    if (vol < 0) {
+        vol = 0;
+    } else if (vol > PCM_MIXER_VOL_MAX) {
+        vol = PCM_MIXER_VOL_MAX;
+    }
+
+    /* The same 0..127 -> Q8 mapping gain_for() ends with, without the
+     * panning law: the music arrives already stereo, so there is nothing to
+     * place.  Full volume is exactly 256, which is what makes it a bit-exact
+     * pass-through.  One aligned store, so no lock: render sees the old
+     * level or the new one, and either is a level somebody asked for. */
+    g_music.gain = (vol * MUSIC_GAIN_UNITY + 63) / PCM_MIXER_VOL_MAX;
+}
+
+int pcm_mixer_music_volume(void)
+{
+    /* The inverse of the mapping above, rounded the same way, so a level
+     * that was set reads back as itself across the whole range. */
+    return (g_music.gain * PCM_MIXER_VOL_MAX + MUSIC_GAIN_UNITY / 2)
+           / MUSIC_GAIN_UNITY;
+}
+
+uint32_t pcm_mixer_music_fill(void)
+{
+    uint64_t flags = irq_save();
+    uint32_t n = g_music.count;
+    irq_restore(flags);
+    return n;
+}
+
+uint32_t pcm_mixer_music_space(void)
+{
+    uint64_t flags = irq_save();
+    uint32_t n = g_music.cap - g_music.count;
+    irq_restore(flags);
+    return n;
+}
+
+uint32_t pcm_mixer_music_underruns(void)
+{
+    uint64_t flags = irq_save();
+    uint32_t n = g_music.underruns;
+    irq_restore(flags);
+    return n;
+}
+
 void pcm_mixer_render(int16_t *dst, uint32_t frames)
 {
     if (dst == NULL) {
@@ -376,6 +576,38 @@ void pcm_mixer_render(int16_t *dst, uint32_t frames)
             acc_r += (s * v->gain_r) >> 8;
 
             v->phase += v->step;
+        }
+
+        /*
+         * The music voice, into the same accumulators and so under the same
+         * single clip below.  One frame in, one frame out -- it is already
+         * at PCM_MIXER_RATE_HZ, so there is no phase to step.
+         *
+         * `rd` wraps by comparison rather than by `% cap`: the ring is
+         * whatever size it was opened with, not a power of two, and this is
+         * once per frame inside an interrupt handler.
+         *
+         * An empty ring contributes nothing and the frame is counted, but
+         * only while the voice is playing -- see the header on why an idle
+         * one is not an underrun.  There is nothing else to do about it
+         * here: this runs with interrupts off, and the producer cannot run
+         * until it returns.
+         */
+        if (g_music.ring != NULL) {
+            if (g_music.count != 0) {
+                const int16_t *m = g_music.ring
+                                   + (size_t)g_music.rd * PCM_MIXER_CHANNELS;
+
+                acc_l += ((int32_t)m[0] * g_music.gain) >> 8;
+                acc_r += ((int32_t)m[1] * g_music.gain) >> 8;
+
+                if (++g_music.rd == g_music.cap) {
+                    g_music.rd = 0;
+                }
+                g_music.count--;
+            } else if (g_music.playing) {
+                g_music.underruns++;
+            }
         }
 
         dst[f * PCM_MIXER_CHANNELS]     = clip16(acc_l);
