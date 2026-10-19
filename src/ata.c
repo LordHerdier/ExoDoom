@@ -94,7 +94,7 @@ static int ata_wait_drq(void) {
 /* Wait for the drive to settle after a command: poll BSY clear (the ATA
  * protocol forbids writing the command-block registers -- drive/head,
  * sector count, LBA, command -- while BSY is set, so this must run before
- * ata_select_sector()/ATA_COMMAND for the *next* call, not just before
+ * ata_select()/ATA_COMMAND for the *next* call, not just before
  * inspecting this command's result), then check ERR/DF. Returns ATA_OK,
  * ATA_ETIMEOUT if BSY never clears, or ATA_EIO if the drive reported an
  * error. */
@@ -110,11 +110,15 @@ static int ata_wait_ready(void) {
     return ATA_OK;
 }
 
-/* Program the drive/head + LBA registers and sector count = 1 common to
- * every single-sector command. Caller writes ATA_COMMAND next. */
-static void ata_select_sector(uint32_t lba) {
+/* Program the drive/head + LBA + sector-count registers common to every
+ * READ/WRITE SECTORS command, single- or multi-sector. Caller writes
+ * ATA_COMMAND next. `count` is cast straight into the 8-bit SECCOUNT
+ * register, so it must be in [1, 255] -- the only callers below cap well
+ * under that (EXO_DISK_MAX_SECTORS is 128). Count 0 would mean "256
+ * sectors" per the ATA spec, which nothing here needs or checks for. */
+static void ata_select(uint32_t lba, uint32_t count) {
     outb(ATA_DRIVE_HEAD, ATA_DRIVE_HEAD_LBA_MASTER | ((lba >> 24) & 0x0F));
-    outb(ATA_SECCOUNT, 1);
+    outb(ATA_SECCOUNT, (uint8_t)count);
     outb(ATA_LBA_LO, (uint8_t)(lba & 0xFF));
     outb(ATA_LBA_MID, (uint8_t)((lba >> 8) & 0xFF));
     outb(ATA_LBA_HI, (uint8_t)((lba >> 16) & 0xFF));
@@ -155,68 +159,100 @@ int ata_init(void) {
     return ATA_OK;
 }
 
-int ata_read_sector(uint32_t lba, uint8_t *buf) {
-    ata_select_sector(lba);
+/* Multi-sector PIO: the command, the LBA and the sector count are programmed
+ * ONCE for the whole run (SCRUM-190) -- a fresh command would reset the
+ * drive's internal auto-incrementing LBA, which is exactly what multi-sector
+ * mode exists to avoid paying for per sector. The drive still signals
+ * readiness per sector (BSY clears, then DRQ sets, same as the single-sector
+ * case) before each sector's 256-word transfer, so that part of the
+ * single-sector loop is still paid once per sector -- only the command
+ * issue, the 400ns turnaround and the drive/head+LBA+seccount register
+ * writes are amortized across the whole run. `count` must be in [1, 255]
+ * (see ata_select()); callers below never exceed EXO_DISK_MAX_SECTORS
+ * (128, src/syscall_disk.h). */
+int ata_read_sectors(uint32_t lba, uint8_t *buf, uint32_t count) {
+    if (count == 0) {
+        return ATA_OK;
+    }
+
+    ata_select(lba, count);
     outb(ATA_COMMAND, ATA_CMD_READ_SECTORS);
     ata_delay_400ns();
 
-    int rc = ata_wait_not_busy();
-    if (rc != ATA_OK) {
-        return rc;
-    }
+    for (uint32_t s = 0; s < count; s++) {
+        int rc = ata_wait_not_busy();
+        if (rc != ATA_OK) {
+            return rc;
+        }
 
-    rc = ata_wait_drq();
-    if (rc != ATA_OK) {
-        return rc;
-    }
+        rc = ata_wait_drq();
+        if (rc != ATA_OK) {
+            return rc;
+        }
 
-    for (int i = 0; i < 256; i++) {
-        uint16_t word = inw(ATA_DATA);
-        buf[2 * i] = (uint8_t)(word & 0xFF);
-        buf[2 * i + 1] = (uint8_t)(word >> 8);
+        uint8_t *dst = buf + s * 512u;
+        for (int i = 0; i < 256; i++) {
+            uint16_t word = inw(ATA_DATA);
+            dst[2 * i] = (uint8_t)(word & 0xFF);
+            dst[2 * i + 1] = (uint8_t)(word >> 8);
+        }
     }
 
     /* Let BSY settle before returning -- a drive may briefly reassert it
      * after the last data word, and the caller's next command-block write
-     * (ata_select_sector(), possibly on the very next call) must not race
-     * that. */
+     * (ata_select(), possibly on the very next call) must not race that. */
     return ata_wait_ready();
 }
 
-int ata_write_sector(uint32_t lba, const uint8_t *buf) {
-    ata_select_sector(lba);
+int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count) {
+    if (count == 0) {
+        return ATA_OK;
+    }
+
+    ata_select(lba, count);
     outb(ATA_COMMAND, ATA_CMD_WRITE_SECTORS);
     ata_delay_400ns();
 
-    int rc = ata_wait_not_busy();
-    if (rc != ATA_OK) {
-        return rc;
-    }
+    for (uint32_t s = 0; s < count; s++) {
+        int rc = ata_wait_not_busy();
+        if (rc != ATA_OK) {
+            return rc;
+        }
 
-    rc = ata_wait_drq();
-    if (rc != ATA_OK) {
-        return rc;
-    }
+        rc = ata_wait_drq();
+        if (rc != ATA_OK) {
+            return rc;
+        }
 
-    for (int i = 0; i < 256; i++) {
-        uint16_t word = (uint16_t)buf[2 * i] | ((uint16_t)buf[2 * i + 1] << 8);
-        outw(ATA_DATA, word);
+        const uint8_t *src = buf + s * 512u;
+        for (int i = 0; i < 256; i++) {
+            uint16_t word = (uint16_t)src[2 * i] | ((uint16_t)src[2 * i + 1] << 8);
+            outw(ATA_DATA, word);
+        }
     }
 
     /* BSY must clear before the command-block registers (ATA_COMMAND
      * included) can be written again -- the drive may still be busy
      * committing the WRITE SECTORS data right after the last data word. */
-    rc = ata_wait_ready();
+    int rc = ata_wait_ready();
     if (rc != ATA_OK) {
         return rc;
     }
 
-    /* CACHE FLUSH so a read of this same LBA right after can see the write
-     * without depending on QEMU's write-back timing (round-trip tests do
-     * exactly this). ata_wait_ready() below both settles BSY and checks
+    /* CACHE FLUSH so a read of these same LBAs right after can see the
+     * write without depending on QEMU's write-back timing (round-trip tests
+     * do exactly this). ata_wait_ready() below both settles BSY and checks
      * ERR/DF, so a flush the drive actually rejected is reported as
      * ATA_EIO rather than silently coming back ATA_OK. */
     outb(ATA_COMMAND, ATA_CMD_CACHE_FLUSH);
     ata_delay_400ns();
     return ata_wait_ready();
+}
+
+int ata_read_sector(uint32_t lba, uint8_t *buf) {
+    return ata_read_sectors(lba, buf, 1);
+}
+
+int ata_write_sector(uint32_t lba, const uint8_t *buf) {
+    return ata_write_sectors(lba, buf, 1);
 }

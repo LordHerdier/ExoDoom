@@ -42,7 +42,22 @@ int ata_init(void);
 /* Read/write exactly one 512-byte sector at 28-bit LBA `lba`. `buf` must
  * point to (at least) 512 bytes. Returns ATA_OK, or a negative ATA_* status.
  * Undefined behaviour (a hardware timeout, not a crash) if called before a
- * successful ata_init().
+ * successful ata_init(). Thin wrappers around ata_read_sectors()/
+ * ata_write_sectors() below, count 1.
  */
 int ata_read_sector(uint32_t lba, uint8_t *buf);
 int ata_write_sector(uint32_t lba, const uint8_t *buf);
+
+/* Read/write `count` consecutive 512-byte sectors starting at 28-bit LBA
+ * `lba`, as one multi-sector PIO command rather than `count` single-sector
+ * ones (SCRUM-190) -- the command issue, 400ns turnaround and command-block
+ * register writes are paid once for the whole run instead of once per
+ * sector. `buf` must point to (at least) count * 512 bytes. `count` must be
+ * in [1, 255] (0 would select 256 sectors per the ATA spec encoding, which
+ * nothing here needs); count == 0 is a no-op that returns ATA_OK without
+ * touching hardware. Returns ATA_OK, or a negative ATA_* status. Same
+ * precondition as the single-sector calls: ata_init() must have succeeded
+ * first.
+ */
+int ata_read_sectors(uint32_t lba, uint8_t *buf, uint32_t count);
+int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count);

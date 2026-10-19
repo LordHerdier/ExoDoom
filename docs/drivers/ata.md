@@ -1,7 +1,8 @@
 # Driver: ATA (PIO, primary bus, master drive)
 
-**Files:** `src/ata.c`, `src/ata.h` **Status:** ✅ Complete (SCRUM-102)
-**Last updated:** 22 Sep 2026
+**Files:** `src/ata.c`, `src/ata.h` **Status:** ✅ Complete (SCRUM-102,
+multi-sector PIO SCRUM-190)
+**Last updated:** 19 Oct 2026
 
 ---
 
@@ -96,23 +97,42 @@ selected into a known state yet.
 
 ## 4. Sector read/write
 
-Both `ata_read_sector(lba, buf)` and `ata_write_sector(lba, buf)`:
+`ata_read_sector(lba, buf)`/`ata_write_sector(lba, buf)` are thin,
+count-1 wrappers around `ata_read_sectors(lba, buf, count)`/
+`ata_write_sectors(lba, buf, count)` (SCRUM-190). Both do:
 
-1. Program drive/head (LBA mode, master, top 4 LBA bits), sector count = 1,
-   and the low/mid/high LBA bytes (`ata_select_sector`).
-2. Issue `READ SECTORS` (`0x20`) or `WRITE SECTORS` (`0x30`).
-3. Poll `BSY` clear, then `DRQ` set (identical polling helpers to
-   `ata_init`).
-4. Transfer 256 words (512 bytes) through the data port — `inw`/`outw` in a
+1. Program drive/head (LBA mode, master, top 4 LBA bits), sector count, and
+   the low/mid/high LBA bytes (`ata_select`) — **once**, for the whole run,
+   not once per sector. Re-issuing the command block per sector would reset
+   the drive's internal auto-incrementing LBA, which is exactly what
+   multi-sector PIO exists to avoid paying for.
+2. Issue `READ SECTORS` (`0x20`) or `WRITE SECTORS` (`0x30`) once.
+3. For each of the `count` sectors: poll `BSY` clear, then `DRQ` set
+   (identical polling helpers to `ata_init`) — the drive still signals
+   readiness per sector even though the command was issued once — then
+   transfer 256 words (512 bytes) through the data port — `inw`/`outw` in a
    loop, not a `rep insw`/`outsw` string instruction; this project's `io.h`
    already establishes plain `inb`/`outb` wrappers as the house style for
    every port-I/O driver (`pic.c`, `pit.c`, `ps2.c`), and a 256-iteration
    loop costs nothing that matters against QEMU's timing.
-5. **Write only:** issues `CACHE FLUSH` (`0xE7`) and waits for `BSY` to
+4. **Write only:** issues `CACHE FLUSH` (`0xE7`) and waits for `BSY` to
    clear again before returning `ATA_OK`. Without this, a read of the same
-   LBA immediately after a write is racing QEMU's own write-back timing
-   rather than observing a guaranteed-durable sector — exactly what the
+   LBAs immediately after a write is racing QEMU's own write-back timing
+   rather than observing guaranteed-durable sectors — exactly what the
    round-trip test in §6 depends on.
+
+**Why this exists.** SCRUM-190's WAD-on-disk load used to walk ExoFS's file
+read path one 512-byte block at a time, each costing one `exo_disk_read`
+syscall and (before this) one freshly-issued single-sector `READ SECTORS`
+command — ~57,000 of each for a 28 MB file, observed as a multi-second
+stall on the first `doom`/`wadview` launch. `exofs_file.c`'s `exofs_read()`
+now batches contiguous on-disk blocks into one `exofs_bdev_read()` call
+(src/libos_fs's own docs), and this driver is the matching half: one
+multi-sector PIO command actually amortizes the per-command overhead
+instead of just the syscall overhead on top of it. The 256-word-per-sector
+data transfer itself is unavoidable PIO cost either way — there is no DMA
+here — so this does not make the transfer free, only each sector's command
+overhead shared across the whole run.
 
 ---
 
@@ -127,11 +147,20 @@ Both `ata_read_sector(lba, buf)` and `ata_write_sector(lba, buf)`:
 int ata_init(void);
 int ata_read_sector(uint32_t lba, uint8_t *buf);
 int ata_write_sector(uint32_t lba, const uint8_t *buf);
+int ata_read_sectors(uint32_t lba, uint8_t *buf, uint32_t count);
+int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count);
 ```
 
-`buf` must point to at least 512 bytes. LBA is 28-bit (`lba` fits in the
-low 28 bits of a `uint32_t`); 48-bit LBA addressing is not implemented —
-not needed for the small FAT image SCRUM-190 will attach.
+`buf` must point to at least `count` (1 for the single-sector calls) * 512
+bytes. LBA is 28-bit (`lba` fits in the low 28 bits of a `uint32_t`); 48-bit
+LBA addressing is not implemented — not needed for the FAT-formatted image
+SCRUM-190 attaches. `count` must be in `[1, 255]` (0 would select 256
+sectors per the ATA spec's own encoding of the sector-count register, which
+nothing here needs); `count == 0` returns `ATA_OK` without touching
+hardware rather than being rejected, as a defensive no-op symmetrical with
+every other layer above it (`exofs_bdev_read`/`_write`,
+`src/syscall_disk.c`) treating it the same way, even though the one caller
+below never actually reaches here with 0.
 
 ---
 
