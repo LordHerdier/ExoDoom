@@ -81,7 +81,7 @@ if [[ "$wad_file" != "$blob_name" ]]; then
 fi
 echo "    IWAD name agrees across build.sh and LIBOS_WAD_FILE_NAME ($wad_file)"
 
-echo "[1b/7] Build FAT-formatted disk image (SCRUM-190)"
+echo "[1b/7] Build ExoFS-formatted disk image (SCRUM-190)"
 # Replaces the old GRUB multiboot2 module: freedoom2.wad now lives in a real
 # ExoFS volume on build/exodoom_disk.img, read back through
 # exo_disk_read/exo_disk_write + src/libos_fs/ at launch time

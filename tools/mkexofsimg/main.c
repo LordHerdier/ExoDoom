@@ -30,6 +30,7 @@
 #include "exofs.h"
 #include "host_blockdev.h"
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +42,25 @@
  * isn't a hairline fit. See EXOFS_MAX_BLOCKS's own comment (src/libos_fs/
  * exofs.h) for why this is nowhere near that ceiling. */
 #define SLACK_SECTORS (4096u)
+
+/* strtoul() alone can't tell "0" from "garbage" or "4294967296" from
+ * "4294967295 trailing junk" -- all three otherwise land on base_lba = 0.
+ * Reject anything that isn't purely decimal digits or that overflows
+ * uint32_t rather than silently misplacing the volume on disk. */
+static int parse_base_lba(const char *s, uint32_t *out)
+{
+    if (*s == '\0') {
+        return -1;
+    }
+    errno = 0;
+    char *end;
+    unsigned long v = strtoul(s, &end, 10);
+    if (*end != '\0' || errno == ERANGE || v > UINT32_MAX) {
+        return -1;
+    }
+    *out = (uint32_t)v;
+    return 0;
+}
 
 static int write_file_into_volume(const char *host_path,
                                    const char *volume_path)
@@ -101,7 +121,11 @@ int main(int argc, char **argv)
     const char *img_path       = argv[1];
     const char *wad_path       = argv[2];
     const char *name_on_volume = argv[3];
-    uint32_t    base_lba       = (uint32_t)strtoul(argv[4], NULL, 10);
+    uint32_t    base_lba;
+    if (parse_base_lba(argv[4], &base_lba) != 0) {
+        fprintf(stderr, "mkexofsimg: invalid <base-lba> '%s'\n", argv[4]);
+        return 1;
+    }
 
     FILE *probe = fopen(wad_path, "rb");
     if (!probe) {
