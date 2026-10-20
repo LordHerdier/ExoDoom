@@ -146,6 +146,10 @@ static int ata_wait_ready(void) {
     return ATA_OK;
 }
 
+/* Captured from IDENTIFY words 60/61 by ata_init() -- see ata_get_sector_
+ * count()'s own comment in src/ata.h. Zero until a successful ata_init(). */
+static uint32_t g_ata_sector_count = 0;
+
 /* Program the drive/head + LBA + sector-count registers common to every
  * READ/WRITE SECTORS command, single- or multi-sector. Caller writes
  * ATA_COMMAND next. `count` is cast straight into the 8-bit SECCOUNT
@@ -162,6 +166,7 @@ static void ata_select(uint32_t lba, uint32_t count) {
 
 int ata_init(void) {
     g_ata_block = 1;
+    g_ata_sector_count = 0;
 
     outb(ATA_DRIVE_HEAD, ATA_DRIVE_HEAD_LBA_MASTER);
     outb(ATA_SECCOUNT, 0);
@@ -189,7 +194,10 @@ int ata_init(void) {
     }
 
     /* The 256-word IDENTIFY payload. Detection only needs the fact that it
-     * arrived intact; the one field parsed is word 47, below. */
+     * arrived intact; the fields parsed are word 47 (below) and words 60/61
+     * (the 28-bit-LBA total sector count, low word first -- the standard
+     * ATA/ATAPI-7 IDENTIFY field), kept because SCRUM-202's `disk` shell
+     * command is the first thing that reports capacity at all. */
     uint16_t id[256];
     insw(ATA_DATA, id, 256);
 
@@ -217,8 +225,13 @@ int ata_init(void) {
             g_ata_block = mult;
         }
     }
+    g_ata_sector_count = (uint32_t)id[60] | ((uint32_t)id[61] << 16);
 
     return ATA_OK;
+}
+
+uint32_t ata_get_sector_count(void) {
+    return g_ata_sector_count;
 }
 
 uint32_t ata_multiple_block(void) {

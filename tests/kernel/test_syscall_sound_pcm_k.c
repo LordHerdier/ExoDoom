@@ -248,11 +248,14 @@ static void test_handlers_are_bound(void)
  * at PCM_STOP", which is what it said before SCRUM-214 appended #30: the claim
  * is about which sound syscalls exist, and tying it to the end of the whole
  * table made every later syscall anywhere in the kernel look like a change of
- * sound policy. */
+ * sound policy. That framing cost a second, unrelated assertion here
+ * (EXO_SYS_SOUND_PCM_PARAMS == EXO_SYS_COUNT - 1) until SCRUM-202 appended
+ * #31 (exo_diskstat) and broke it for exactly the reason this comment
+ * warned about -- removed rather than updated again, since the single
+ * assertion below already states the actual policy. */
 static void test_there_is_no_sound_acquire(void)
 {
     CU_ASSERT_EQUAL(EXO_SYS_SOUND_PCM_PARAMS, EXO_SYS_SOUND_PCM_STOP + 1);
-    CU_ASSERT_EQUAL(EXO_SYS_SOUND_PCM_PARAMS, EXO_SYS_COUNT - 1);
 }
 
 /* ── Argument validation ────────────────────────────────────────────────── */

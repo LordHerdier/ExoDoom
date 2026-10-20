@@ -174,6 +174,31 @@ static int64_t sys_disk_release(uint64_t a1, uint64_t a2, uint64_t a3,
     return 0;
 }
 
+/* #31 -- presence + capacity (SCRUM-202). Unscoped introspection like
+ * sys_memstat/sys_pslist (src/syscall_stat.c): no ownership check, and no
+ * hardware touch -- both fields are state ata_init() already latched at
+ * boot (disk_binding_present(), ata_get_sector_count()). */
+static int64_t sys_disk_stat(uint64_t out, uint64_t a2, uint64_t a3,
+                             uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+
+    if (!exo_range_in_user_window(out, sizeof(exo_diskstat_t)) ||
+        !exo_user_range_mapped(out, sizeof(exo_diskstat_t), 1))
+        return -EXO_EFAULT;
+
+    exo_diskstat_t *stat_out = (exo_diskstat_t *)(uintptr_t)out;
+
+    int present = disk_binding_present();
+    stat_out->present = present ? 1 : 0;
+    stat_out->reserved[0] = 0;
+    stat_out->reserved[1] = 0;
+    stat_out->reserved[2] = 0;
+    stat_out->total_sectors = present ? ata_get_sector_count() : 0;
+
+    return 0;
+}
+
 void syscall_disk_init(int drive_present)
 {
     disk_binding_init(drive_present);
@@ -181,4 +206,5 @@ void syscall_disk_init(int drive_present)
     exo_syscall_register(EXO_SYS_DISK_WRITE, sys_disk_write);
     exo_syscall_register(EXO_SYS_DISK_ACQUIRE, sys_disk_acquire);
     exo_syscall_register(EXO_SYS_DISK_RELEASE, sys_disk_release);
+    exo_syscall_register(EXO_SYS_DISK_STAT, sys_disk_stat);
 }
