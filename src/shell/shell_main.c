@@ -39,8 +39,10 @@
  * library (src/libos_fs/, SCRUM-189) into this shell as its first ring-3
  * consumer, over a scratch volume at SHELL_FS_BASE_LBA -- NOT the volume at
  * LIBOS_WAD_DISK_BASE_LBA (src/doom_wad_disk.h) that holds freedoom2.wad,
- * which `mkfs` must never touch or `doom` breaks for the rest of the boot
- * (`dd` is the one deliberate exception to that rule -- see its own comment).
+ * which `mkfs` must never touch or `doom` breaks for the rest of the boot.
+ * `dd read` may read any LBA, the IWAD volume included; `dd write` is
+ * confined to [0, SHELL_FS_BASE_LBA) so it can reach neither volume -- see
+ * shell_run_dd_write()'s own comment.
  * Disk ownership (exo_disk_acquire/_release, #26/#27) is acquired, mounted,
  * used for exactly one filesystem call (or, for `dd`, one raw-sector loop
  * plus one filesystem call on the same acquired disk), and released again
@@ -127,7 +129,8 @@ static char shell_commands_text[] =
     "commands: help, clear, about, wadview, clock, snake, doom, memstat,\n"
     "          pslist, disk, mkfs, mkdir <path>, ls [path],\n"
     "          cat <path> [text...], rm <path>, cp <src> <dst>,\n"
-    "          mv <src> <dst>, touch <path>, cd [path], pwd, echo <text...>,\n"
+    "          mv <src> <dst> (copy+delete, not atomic), touch <path>,\n"
+    "          cd [path], pwd, echo <text...>,\n"
     "          dd read <lba> <count> <path>, dd write <path> <lba>\n";
 static char shell_about_text[] = "ExoDoom shell LibOS -- SCRUM-110\n";
 static char shell_unknown_prefix[] = "unknown command: ";
@@ -145,6 +148,11 @@ static char shell_fs_err_prefix[] = "error: err=";
 static char shell_ls_dir_suffix[] = "/\n";
 static char shell_ls_file_prefix[] = "  ";
 static char shell_fs_usage2_text[] = "usage: <src> <dst>\n";
+static char shell_fs_toolong_text[] = "error: argument or path too long\n";
+static char shell_fs_same_text[] = "error: source and destination are the same file\n";
+static char shell_dd_badnum_text[] = "dd: not a number: ";
+static char shell_dd_range_text[] =
+    "dd: write refused -- only lbas below the shell volume are writable\n";
 static char shell_disk_fail_text[] = "disk: query failed\n";
 static char shell_disk_none_text[] = "disk: no drive present\n";
 static char shell_dd_usage_text[] =
@@ -169,10 +177,14 @@ static void shell_run_pslist(fb_console_t *con);
 static int shell_cmd_match(const char *line, const char *cmd, const char **rest);
 static int shell_fs_acquire_and_mount(fb_console_t *con);
 static void shell_fs_release(void);
-static void shell_resolve_path(const char *in, char *out, size_t out_len);
+static int shell_resolve_path(const char *in, char *out, size_t out_len);
+static int shell_resolve_arg(fb_console_t *con, const char *in, char *out,
+                             size_t out_len);
 static int shell_split_two(const char *rest, char *a, size_t alen,
                           char *b, size_t blen);
-static size_t shell_next_token(const char **p, char *out, size_t out_len);
+static int shell_next_token(const char **p, char *out, size_t out_len);
+static int shell_parse_u32(const char *s, uint32_t *out);
+static int shell_write_all(exofs_file_t *f, const void *buf, uint32_t n);
 static int shell_fs_copy_file(const char *src, const char *dst);
 static void shell_run_mkfs(fb_console_t *con);
 static void shell_run_mkdir(fb_console_t *con, const char *arg);
@@ -188,6 +200,8 @@ static void shell_run_echo(fb_console_t *con, const char *arg);
 static void shell_run_disk(fb_console_t *con);
 static void shell_run_dd(fb_console_t *con, const char *arg);
 static void shell_run_dd_read(fb_console_t *con, const char *rest);
+static int shell_dd_number(fb_console_t *con, const char **p, char *tok,
+                           size_t tok_len, uint32_t *out);
 static void shell_run_dd_write(fb_console_t *con, const char *rest);
 
 void shell_main(void) {
@@ -500,8 +514,13 @@ static int shell_cmd_match(const char *line, const char *cmd, const char **rest)
  * /'..' through real directory entries (docs/filesystem.md §7), so there is
  * no need to canonicalize the result any further than this for it to work
  * correctly in exofs_* calls -- only `pwd`/`cd ..`'s own display can still
- * show an uncollapsed ".." component (shell_run_cd()'s own comment). */
-static void shell_resolve_path(const char *in, char *out, size_t out_len) {
+ * show an uncollapsed ".." component (shell_run_cd()'s own comment).
+ *
+ * Returns 0, or -EXO_EINVAL if the result does not fit in `out`. A truncated
+ * path is a *different* path -- `rm`/`mv`/`cp` would act on whatever the
+ * cut-off prefix happens to name -- so callers refuse rather than proceed;
+ * shell_resolve_arg() below is that check plus its diagnostic. */
+static int shell_resolve_path(const char *in, char *out, size_t out_len) {
     if (in[0] == '/') {
         size_t i = 0;
         while (in[i] != '\0' && i < out_len - 1) {
@@ -509,7 +528,7 @@ static void shell_resolve_path(const char *in, char *out, size_t out_len) {
             i++;
         }
         out[i] = '\0';
-        return;
+        return in[i] == '\0' ? 0 : -EXO_EINVAL;
     }
 
     size_t i = 0;
@@ -520,22 +539,45 @@ static void shell_resolve_path(const char *in, char *out, size_t out_len) {
     if (i > 0 && out[i - 1] != '/' && i < out_len - 1) {
         out[i++] = '/';
     }
+    if (shell_cwd[i] != '\0') {
+        out[i] = '\0';
+        return -EXO_EINVAL;
+    }
     size_t j = 0;
     while (in[j] != '\0' && i < out_len - 1) {
         out[i++] = in[j++];
     }
     out[i] = '\0';
+    return in[j] == '\0' ? 0 : -EXO_EINVAL;
+}
+
+/* shell_resolve_path(), printing the diagnostic itself on failure. Returns 1
+ * if `out` holds the full resolved path, 0 (already reported) if not. */
+static int shell_resolve_arg(fb_console_t *con, const char *in, char *out,
+                             size_t out_len) {
+    if (shell_resolve_path(in, out, out_len) != 0) {
+        fbcon_write(con, shell_fs_toolong_text);
+        return 0;
+    }
+    return 1;
 }
 
 /* Extract the next whitespace-delimited token from *p into `out`, then
- * advance *p past it and any following spaces. Returns the token length (0
- * if *p was already empty/all spaces -- the caller's "missing argument"
- * case). Shared by `cp`/`mv`'s two-path split and `dd`'s numeric/path
- * arguments. */
-static size_t shell_next_token(const char **p, char *out, size_t out_len) {
+ * advance *p past it and any following spaces. Returns the token length, 0
+ * if *p was already empty/all spaces (the caller's "missing argument"
+ * case), or -1 if the token does not fit in `out`. An over-long token is
+ * refused rather than split: splitting it would hand its tail to the
+ * caller as the *next* argument, so `cp <long-name> dst` would take part of
+ * the first name as its destination. Shared by `cat`, `cp`/`mv`'s two-path
+ * split and `dd`'s numeric/path arguments. */
+static int shell_next_token(const char **p, char *out, size_t out_len) {
     const char *s = *p;
     size_t i = 0;
-    while (s[i] != '\0' && s[i] != ' ' && i < out_len - 1) {
+    while (s[i] != '\0' && s[i] != ' ') {
+        if (i >= out_len - 1) {
+            out[0] = '\0';
+            return -1;
+        }
         out[i] = s[i];
         i++;
     }
@@ -545,26 +587,76 @@ static size_t shell_next_token(const char **p, char *out, size_t out_len) {
         s++;
     }
     *p = s;
-    return i;
+    return (int)i;
 }
 
+/* 1 with both tokens filled, 0 if either is missing, -1 if either is too
+ * long (shell_next_token()). */
 static int shell_split_two(const char *rest, char *a, size_t alen,
                           char *b, size_t blen) {
     const char *p = rest;
-    if (shell_next_token(&p, a, alen) == 0) {
-        return 0;
+    int n = shell_next_token(&p, a, alen);
+    if (n <= 0) {
+        return n;
     }
-    if (shell_next_token(&p, b, blen) == 0) {
-        return 0;
+    n = shell_next_token(&p, b, blen);
+    if (n <= 0) {
+        return n;
     }
     return 1;
+}
+
+/* Decimal digits only, no sign, no overflow past UINT32_MAX. atoi() is not
+ * fit for an LBA: "-1" would cast to 0xFFFFFFFF and "12abc" to 12. Returns
+ * 1 with *out set, or 0. */
+static int shell_parse_u32(const char *s, uint32_t *out) {
+    uint32_t v = 0;
+    if (*s == '\0') {
+        return 0;
+    }
+    for (; *s != '\0'; s++) {
+        if (*s < '0' || *s > '9') {
+            return 0;
+        }
+        uint32_t d = (uint32_t)(*s - '0');
+        if (v > (0xFFFFFFFFu - d) / 10u) {
+            return 0;
+        }
+        v = v * 10u + d;
+    }
+    *out = v;
+    return 1;
+}
+
+/* exofs_write() all of `buf`, or fail. exofs_write() can return fewer bytes
+ * than asked when the volume fills; treating that as success is how `mv`
+ * would unlink a source whose copy was cut short. Returns 0, the negative
+ * error exofs_write() reported, or -EXO_ENOSPC for a short write. */
+static int shell_write_all(exofs_file_t *f, const void *buf, uint32_t n) {
+    int64_t wrote = exofs_write(f, buf, n);
+    if (wrote < 0) {
+        return (int)wrote;
+    }
+    if ((uint64_t)wrote != n) {
+        return -EXO_ENOSPC;
+    }
+    return 0;
 }
 
 /* Shared by `cp` and `mv` (mv = this, then exofs_unlink(src) on success).
  * Streams through a 512-byte stack buffer rather than one allocation sized
  * to the whole file -- same shape `cat`'s read loop already uses, works for
- * any file size. Returns 0, or the first negative error either open or any
- * read/write step reports. */
+ * any file size. Returns 0, -EXO_EEXIST if `src` and `dst` are the same
+ * file, -EXO_ENOSPC if the volume filled mid-copy, or the first negative
+ * error either open or any read/write step reports. A non-zero return is
+ * what keeps `mv` from unlinking its source.
+ *
+ * `dst` is opened WITHOUT EXOFS_O_TRUNC first, so the same-file check runs
+ * before anything is destroyed: `cp a a` would otherwise truncate the source
+ * it is about to read, and `mv a a` would then unlink the (now empty) only
+ * copy. The check compares directory-entry refs, not path text, so aliases
+ * like "a", "./a" and "/dir/../a" are all caught. The truncating reopen
+ * only happens once the two are known to differ. */
 static int shell_fs_copy_file(const char *src, const char *dst) {
     exofs_file_t fsrc, fdst;
 
@@ -572,8 +664,19 @@ static int shell_fs_copy_file(const char *src, const char *dst) {
     if (rc != 0) {
         return rc;
     }
-    rc = exofs_open(dst, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC,
-                    &fdst);
+    rc = exofs_open(dst, EXOFS_O_WRITE | EXOFS_O_CREATE, &fdst);
+    if (rc != 0) {
+        exofs_close(&fsrc);
+        return rc;
+    }
+    int same = fdst.ent_block == fsrc.ent_block &&
+               fdst.ent_index == fsrc.ent_index;
+    exofs_close(&fdst);
+    if (same) {
+        exofs_close(&fsrc);
+        return -EXO_EEXIST;
+    }
+    rc = exofs_open(dst, EXOFS_O_WRITE | EXOFS_O_TRUNC, &fdst);
     if (rc != 0) {
         exofs_close(&fsrc);
         return rc;
@@ -582,9 +685,8 @@ static int shell_fs_copy_file(const char *src, const char *dst) {
     uint8_t buf[512];
     int64_t got;
     while ((got = exofs_read(&fsrc, buf, sizeof(buf))) > 0) {
-        int64_t wrote = exofs_write(&fdst, buf, (uint32_t)got);
-        if (wrote < 0) {
-            rc = (int)wrote;
+        rc = shell_write_all(&fdst, buf, (uint32_t)got);
+        if (rc != 0) {
             break;
         }
     }
@@ -665,7 +767,9 @@ static void shell_run_mkdir(fb_console_t *con, const char *arg) {
         return;
     }
     char path[SHELL_FS_RESOLVED_BUF_LEN];
-    shell_resolve_path(arg, path, sizeof(path));
+    if (!shell_resolve_arg(con, arg, path, sizeof(path))) {
+        return;
+    }
 
     if (!shell_fs_acquire_and_mount(con)) {
         return;
@@ -689,7 +793,9 @@ static void shell_run_mkdir(fb_console_t *con, const char *arg) {
 static void shell_run_ls(fb_console_t *con, const char *arg) {
     char path[SHELL_FS_RESOLVED_BUF_LEN];
     if (arg[0] != '\0') {
-        shell_resolve_path(arg, path, sizeof(path));
+        if (!shell_resolve_arg(con, arg, path, sizeof(path))) {
+            return;
+        }
     } else {
         size_t i = 0;
         while (shell_cwd[i] != '\0' && i < sizeof(path) - 1) {
@@ -743,23 +849,21 @@ static void shell_run_ls(fb_console_t *con, const char *arg) {
  */
 static void shell_run_cat(fb_console_t *con, const char *arg) {
     char path_raw[SHELL_FS_PATH_BUF_LEN];
-    int i = 0;
-    while (arg[i] != '\0' && arg[i] != ' ' && i < SHELL_FS_PATH_BUF_LEN - 1) {
-        path_raw[i] = arg[i];
-        i++;
+    const char *text = arg;
+    int n = shell_next_token(&text, path_raw, sizeof(path_raw));
+    if (n < 0) {
+        fbcon_write(con, shell_fs_toolong_text);
+        return;
     }
-    path_raw[i] = '\0';
-    if (i == 0) {
+    if (n == 0) {
         fbcon_write(con, shell_fs_noarg_text);
         return;
     }
     char path[SHELL_FS_RESOLVED_BUF_LEN];
-    shell_resolve_path(path_raw, path, sizeof(path));
-
-    const char *text = &arg[i];
-    while (*text == ' ') {
-        text++;
+    if (!shell_resolve_arg(con, path_raw, path, sizeof(path))) {
+        return;
     }
+
     int writing = (*text != '\0');
 
     if (!shell_fs_acquire_and_mount(con)) {
@@ -783,7 +887,7 @@ static void shell_run_cat(fb_console_t *con, const char *arg) {
         while (text[len] != '\0') {
             len++;
         }
-        int64_t wrc = exofs_write(&f, text, len);
+        int wrc = shell_write_all(&f, text, len);
         exofs_close(&f);
         shell_fs_release();
         if (wrc < 0) {
@@ -827,7 +931,9 @@ static void shell_run_rm(fb_console_t *con, const char *arg) {
         return;
     }
     char path[SHELL_FS_RESOLVED_BUF_LEN];
-    shell_resolve_path(arg, path, sizeof(path));
+    if (!shell_resolve_arg(con, arg, path, sizeof(path))) {
+        return;
+    }
 
     if (!shell_fs_acquire_and_mount(con)) {
         return;
@@ -852,14 +958,21 @@ static void shell_run_rm(fb_console_t *con, const char *arg) {
  * shell_cwd first. */
 static void shell_run_cp(fb_console_t *con, const char *arg) {
     char src_raw[SHELL_FS_PATH_BUF_LEN], dst_raw[SHELL_FS_PATH_BUF_LEN];
-    if (!shell_split_two(arg, src_raw, sizeof(src_raw),
-                        dst_raw, sizeof(dst_raw))) {
+    int split = shell_split_two(arg, src_raw, sizeof(src_raw),
+                                dst_raw, sizeof(dst_raw));
+    if (split < 0) {
+        fbcon_write(con, shell_fs_toolong_text);
+        return;
+    }
+    if (split == 0) {
         fbcon_write(con, shell_fs_usage2_text);
         return;
     }
     char src[SHELL_FS_RESOLVED_BUF_LEN], dst[SHELL_FS_RESOLVED_BUF_LEN];
-    shell_resolve_path(src_raw, src, sizeof(src));
-    shell_resolve_path(dst_raw, dst, sizeof(dst));
+    if (!shell_resolve_arg(con, src_raw, src, sizeof(src)) ||
+        !shell_resolve_arg(con, dst_raw, dst, sizeof(dst))) {
+        return;
+    }
 
     if (!shell_fs_acquire_and_mount(con)) {
         return;
@@ -867,6 +980,10 @@ static void shell_run_cp(fb_console_t *con, const char *arg) {
     int rc = shell_fs_copy_file(src, dst);
     shell_fs_release();
 
+    if (rc == -EXO_EEXIST) {
+        fbcon_write(con, shell_fs_same_text);
+        return;
+    }
     if (rc != 0) {
         fbcon_write(con, shell_fs_err_prefix);
         shell_write_i64(con, rc);
@@ -883,14 +1000,21 @@ static void shell_run_cp(fb_console_t *con, const char *arg) {
  * case. */
 static void shell_run_mv(fb_console_t *con, const char *arg) {
     char src_raw[SHELL_FS_PATH_BUF_LEN], dst_raw[SHELL_FS_PATH_BUF_LEN];
-    if (!shell_split_two(arg, src_raw, sizeof(src_raw),
-                        dst_raw, sizeof(dst_raw))) {
+    int split = shell_split_two(arg, src_raw, sizeof(src_raw),
+                                dst_raw, sizeof(dst_raw));
+    if (split < 0) {
+        fbcon_write(con, shell_fs_toolong_text);
+        return;
+    }
+    if (split == 0) {
         fbcon_write(con, shell_fs_usage2_text);
         return;
     }
     char src[SHELL_FS_RESOLVED_BUF_LEN], dst[SHELL_FS_RESOLVED_BUF_LEN];
-    shell_resolve_path(src_raw, src, sizeof(src));
-    shell_resolve_path(dst_raw, dst, sizeof(dst));
+    if (!shell_resolve_arg(con, src_raw, src, sizeof(src)) ||
+        !shell_resolve_arg(con, dst_raw, dst, sizeof(dst))) {
+        return;
+    }
 
     if (!shell_fs_acquire_and_mount(con)) {
         return;
@@ -901,6 +1025,10 @@ static void shell_run_mv(fb_console_t *con, const char *arg) {
     }
     shell_fs_release();
 
+    if (rc == -EXO_EEXIST) {
+        fbcon_write(con, shell_fs_same_text);
+        return;
+    }
     if (rc != 0) {
         fbcon_write(con, shell_fs_err_prefix);
         shell_write_i64(con, rc);
@@ -922,7 +1050,9 @@ static void shell_run_touch(fb_console_t *con, const char *arg) {
         return;
     }
     char path[SHELL_FS_RESOLVED_BUF_LEN];
-    shell_resolve_path(arg, path, sizeof(path));
+    if (!shell_resolve_arg(con, arg, path, sizeof(path))) {
+        return;
+    }
 
     if (!shell_fs_acquire_and_mount(con)) {
         return;
@@ -989,8 +1119,8 @@ static void shell_run_cd(fb_console_t *con, const char *arg) {
             }
             target[i] = '\0';
         }
-    } else {
-        shell_resolve_path(arg, target, sizeof(target));
+    } else if (!shell_resolve_arg(con, arg, target, sizeof(target))) {
+        return;
     }
 
     if (!shell_fs_acquire_and_mount(con)) {
@@ -1062,10 +1192,29 @@ static void shell_run_disk(fb_console_t *con) {
     fbcon_write(con, " sectors)\n");
 }
 
+/* Next token of a `dd` command line as a uint32_t (shell_parse_u32()).
+ * Prints usage for a missing token and names the offending text for a bad
+ * one; returns 1 with *out set, or 0 (already reported). */
+static int shell_dd_number(fb_console_t *con, const char **p, char *tok,
+                           size_t tok_len, uint32_t *out) {
+    int n = shell_next_token(p, tok, tok_len);
+    if (n == 0) {
+        fbcon_write(con, shell_dd_usage_text);
+        return 0;
+    }
+    if (n < 0 || !shell_parse_u32(tok, out)) {
+        fbcon_write(con, shell_dd_badnum_text);
+        fbcon_write(con, n < 0 ? "(too long)" : tok);
+        fbcon_write(con, "\n");
+        return 0;
+    }
+    return 1;
+}
+
 /* `dd read <lba> <count> <path>` / `dd write <path> <lba>` -- raw sector
- * I/O, bypassing ExoFS entirely for the disk side (this file's own top
- * comment on why it is the one deliberate exception to "never touch the
- * IWAD volume"). Just dispatches on the sub-verb; see
+ * I/O, bypassing ExoFS entirely for the disk side. `dd read` may read any
+ * LBA, the IWAD volume included; `dd write` is range-checked (see
+ * shell_run_dd_write()). Just dispatches on the sub-verb; see
  * shell_run_dd_read()/_write() for the actual transfers. */
 static void shell_run_dd(fb_console_t *con, const char *arg) {
     const char *rest;
@@ -1088,25 +1237,21 @@ static void shell_run_dd(fb_console_t *con, const char *arg) {
 static void shell_run_dd_read(fb_console_t *con, const char *rest) {
     char tok[16];
     const char *p = rest;
+    uint32_t lba, count;
 
-    if (shell_next_token(&p, tok, sizeof(tok)) == 0) {
-        fbcon_write(con, shell_dd_usage_text);
+    if (!shell_dd_number(con, &p, tok, sizeof(tok), &lba) ||
+        !shell_dd_number(con, &p, tok, sizeof(tok), &count)) {
         return;
     }
-    uint32_t lba = (uint32_t)atoi(tok);
-
-    if (shell_next_token(&p, tok, sizeof(tok)) == 0) {
-        fbcon_write(con, shell_dd_usage_text);
-        return;
-    }
-    uint32_t count = (uint32_t)atoi(tok);
 
     if (*p == '\0') {
         fbcon_write(con, shell_dd_usage_text);
         return;
     }
     char path[SHELL_FS_RESOLVED_BUF_LEN];
-    shell_resolve_path(p, path, sizeof(path));
+    if (!shell_resolve_arg(con, p, path, sizeof(path))) {
+        return;
+    }
 
     if (count == 0) {
         fbcon_write(con, shell_fs_ok_text);
@@ -1135,9 +1280,8 @@ static void shell_run_dd_read(fb_console_t *con, const char *rest) {
             rc = (int)got;
             break;
         }
-        int64_t wrote = exofs_write(&f, sector, sizeof(sector));
-        if (wrote < 0) {
-            rc = (int)wrote;
+        rc = shell_write_all(&f, sector, sizeof(sector));
+        if (rc != 0) {
             break;
         }
     }
@@ -1157,24 +1301,36 @@ static void shell_run_dd_read(fb_console_t *con, const char *rest) {
  * ExoFS and writes it, 512 bytes at a time, to raw sectors starting at
  * `lba`. Sector count is derived from the file (ceil(size / 512)), not
  * passed in -- a final short read is zero-padded so the last sector is
- * still a full 512-byte write. */
+ * still a full 512-byte write.
+ *
+ * The whole target range must lie below SHELL_FS_BASE_LBA, checked before
+ * the first sector is written. Above that is this shell's own volume --
+ * mounted for the duration of this very command, so its FAT cache would be
+ * flushed back over the raw bytes on unmount -- and then the IWAD volume at
+ * LIBOS_WAD_DISK_BASE_LBA, which `doom` reads for the rest of the boot. */
 static void shell_run_dd_write(fb_console_t *con, const char *rest) {
     char path_raw[SHELL_FS_PATH_BUF_LEN];
     const char *p = rest;
 
-    if (shell_next_token(&p, path_raw, sizeof(path_raw)) == 0) {
+    int n = shell_next_token(&p, path_raw, sizeof(path_raw));
+    if (n < 0) {
+        fbcon_write(con, shell_fs_toolong_text);
+        return;
+    }
+    if (n == 0) {
         fbcon_write(con, shell_dd_usage_text);
         return;
     }
     char tok[16];
-    if (shell_next_token(&p, tok, sizeof(tok)) == 0) {
-        fbcon_write(con, shell_dd_usage_text);
+    uint32_t lba;
+    if (!shell_dd_number(con, &p, tok, sizeof(tok), &lba)) {
         return;
     }
-    uint32_t lba = (uint32_t)atoi(tok);
 
     char path[SHELL_FS_RESOLVED_BUF_LEN];
-    shell_resolve_path(path_raw, path, sizeof(path));
+    if (!shell_resolve_arg(con, path_raw, path, sizeof(path))) {
+        return;
+    }
 
     if (!shell_fs_acquire_and_mount(con)) {
         return;
@@ -1187,6 +1343,15 @@ static void shell_run_dd_write(fb_console_t *con, const char *rest) {
         fbcon_write(con, shell_fs_err_prefix);
         shell_write_i64(con, rc);
         fbcon_write(con, "\n");
+        return;
+    }
+
+    /* 64-bit so neither the round-up nor lba + sectors can wrap. */
+    uint64_t sectors = ((uint64_t)f.size + 511u) / 512u;
+    if ((uint64_t)lba + sectors > SHELL_FS_BASE_LBA) {
+        exofs_close(&f);
+        shell_fs_release();
+        fbcon_write(con, shell_dd_range_text);
         return;
     }
 
