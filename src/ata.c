@@ -190,12 +190,9 @@ int ata_read_sectors(uint32_t lba, uint8_t *buf, uint32_t count) {
             return rc;
         }
 
-        uint8_t *dst = buf + s * 512u;
-        for (int i = 0; i < 256; i++) {
-            uint16_t word = inw(ATA_DATA);
-            dst[2 * i] = (uint8_t)(word & 0xFF);
-            dst[2 * i + 1] = (uint8_t)(word >> 8);
-        }
+        /* One `rep insw` per sector, not 256 inw()s: under KVM each
+         * standalone IN is its own VM exit, see insw() in io.h. */
+        insw(ATA_DATA, buf + s * 512u, 256);
     }
 
     /* Let BSY settle before returning -- a drive may briefly reassert it
@@ -224,11 +221,7 @@ int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count) {
             return rc;
         }
 
-        const uint8_t *src = buf + s * 512u;
-        for (int i = 0; i < 256; i++) {
-            uint16_t word = (uint16_t)src[2 * i] | ((uint16_t)src[2 * i + 1] << 8);
-            outw(ATA_DATA, word);
-        }
+        outsw(ATA_DATA, buf + s * 512u, 256);
     }
 
     /* BSY must clear before the command-block registers (ATA_COMMAND

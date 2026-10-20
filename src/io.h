@@ -33,6 +33,32 @@ static inline uint16_t inw(uint16_t port) {
 }
 
 /*
+ * insw/outsw — `count` 16-bit transfers between `port` and memory, as one
+ * `rep insw`/`rep outsw` string instruction rather than a C loop over
+ * inw()/outw(). Same bytes in the same order (x86 is little-endian, so the
+ * low byte of each word lands first either way); the difference is cost
+ * under virtualization. Each standalone IN/OUT is a VM exit to the device
+ * model, while KVM batches a REP string I/O instruction into one exit per
+ * buffer-sized chunk -- for ATA's 256-word sector that is ~1 exit instead
+ * of 256. SCRUM-190's 28 MB WAD load is ~14M words, which as single inw()s
+ * took ~3 minutes under -enable-kvm with interrupts off. Relies on DF
+ * being clear, which the SysV ABI guarantees at every C call boundary.
+ */
+static inline void insw(uint16_t port, void *buf, uint32_t count) {
+    __asm__ volatile ("rep insw"
+                      : "+D"(buf), "+c"(count)
+                      : "d"(port)
+                      : "memory");
+}
+
+static inline void outsw(uint16_t port, const void *buf, uint32_t count) {
+    __asm__ volatile ("rep outsw"
+                      : "+S"(buf), "+c"(count)
+                      : "d"(port)
+                      : "memory");
+}
+
+/*
  * outl — 32-bit port write (used by qemu_exit via isa-debug-exit).
  */
 static inline void outl(uint16_t port, uint32_t val) {

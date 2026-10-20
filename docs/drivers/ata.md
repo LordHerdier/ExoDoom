@@ -110,11 +110,15 @@ count-1 wrappers around `ata_read_sectors(lba, buf, count)`/
 3. For each of the `count` sectors: poll `BSY` clear, then `DRQ` set
    (identical polling helpers to `ata_init`) — the drive still signals
    readiness per sector even though the command was issued once — then
-   transfer 256 words (512 bytes) through the data port — `inw`/`outw` in a
-   loop, not a `rep insw`/`outsw` string instruction; this project's `io.h`
-   already establishes plain `inb`/`outb` wrappers as the house style for
-   every port-I/O driver (`pic.c`, `pit.c`, `ps2.c`), and a 256-iteration
-   loop costs nothing that matters against QEMU's timing.
+   transfer 256 words (512 bytes) through the data port as one
+   `rep insw`/`rep outsw` (`insw()`/`outsw()` in `io.h`), **not** an
+   `inw`/`outw` loop. The loop was the original choice on the theory that
+   256 iterations cost nothing against QEMU's timing — true under TCG, false
+   under `-enable-kvm`, where every standalone `IN`/`OUT` is a full VM exit
+   to QEMU's device model while a `REP` string instruction is batched into
+   about one exit per sector. For SCRUM-190's 28 MB WAD load that was ~14M
+   exits and **~3 minutes with interrupts off** (it looked like a hang) vs.
+   ~5 s now. CI runs under TCG and cannot see this difference.
 4. **Write only:** issues `CACHE FLUSH` (`0xE7`) and waits for `BSY` to
    clear again before returning `ATA_OK`. Without this, a read of the same
    LBAs immediately after a write is racing QEMU's own write-back timing
@@ -130,9 +134,8 @@ now batches contiguous on-disk blocks into one `exofs_bdev_read()` call
 (src/libos_fs's own docs), and this driver is the matching half: one
 multi-sector PIO command actually amortizes the per-command overhead
 instead of just the syscall overhead on top of it. The 256-word-per-sector
-data transfer itself is unavoidable PIO cost either way — there is no DMA
-here — so this does not make the transfer free, only each sector's command
-overhead shared across the whole run.
+data transfer itself is still PIO — there is no DMA here — but see step 3:
+under KVM it must be a string instruction or it dominates everything else.
 
 ---
 
