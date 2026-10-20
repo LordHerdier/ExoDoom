@@ -112,8 +112,9 @@ count-1 wrappers around `ata_read_sectors(lba, buf, count)`/
 3. For each DRQ *block* of `ata_multiple_block()` sectors (the last one
    short if `count` is not a multiple of it): poll `BSY` clear, then `DRQ`
    set (identical polling helpers to `ata_init`), then transfer the whole
-   block through the data port as one `rep insw`/`rep outsw`
-   (`insw()`/`outsw()` in `io.h`), **not** an `inw`/`outw` loop. The loop
+   block through the data port as one 32-bit `rep insl`/`rep outsl`
+   (`insl()`/`outsl()` in `io.h`; see **32-bit PIO** below), **not** an
+   `inw`/`outw` loop. The loop
    was the original choice on the theory that 256 iterations cost nothing
    against QEMU's timing — true under TCG, false under `-enable-kvm`, where
    every standalone `IN`/`OUT` is a full VM exit to QEMU's device model
@@ -135,7 +136,22 @@ driver on the single-sector commands: slower, never wrong. §6's
 `multiple mode negotiated` test fails if QEMU's drive ever lands there, so
 a silent fallback cannot quietly give the time back.
 
-**What is left is the PIO floor.** `perf` on QEMU during the remaining
+**32-bit PIO.** The data register and the PATA cable are 16 bits wide;
+a 32-bit `in` at `0x1F0` works only because the host controller splits it
+into two 16-bit cable transfers. PCI IDE controllers such as the PIIX
+QEMU emulates do; older ISA/VLB controllers did not, some chipsets needed
+enabling first, and nothing reliably reports it (IDENTIFY word 48 is
+obsolete and described the drive, not the controller), which is why Linux
+leaves it off unless `hdparm -c` asks. Where it is unsupported the result
+is garbage, not an error. It is used anyway because this driver is
+QEMU-only in practice: real boards have no PATA and increasingly no IDE
+compatibility mode, and SCRUM-242 (AHCI) is the real-hardware disk path.
+IDENTIFY in `ata_init()` still uses 16-bit `insw()`, so probing a drive
+assumes nothing beyond the spec. Measured Enter→`W_Init` under KVM:
+**~2.7 s → ~0.92 s**.
+
+**What is left is the PIO floor.** (Profiled before the 32-bit change,
+which halved the access count without changing its shape.) `perf` on QEMU during the remaining
 ~2.7 s: ~75% of it is the vCPU thread in QEMU *userspace*, and the profile
 is entirely the per-access port-I/O dispatch
 (`kvm_cpu_exec → address_space_rw → flatview_read → portio_read →
@@ -143,7 +159,7 @@ ide_data_readw`, ~40% of it a mutex lock/unlock per access). KVM hands
 QEMU a whole `rep insw` per exit, but QEMU still dispatches it one 16-bit
 word at a time, ~14M times for the WAD. Block I/O does not show up at all.
 Only bus-master DMA, which QEMU services as one block request straight into
-guest memory, gets under this.
+guest memory, gets under this: SCRUM-241.
 
 4. **Write only:** issues `CACHE FLUSH` (`0xE7`) and waits for `BSY` to
    clear again before returning `ATA_OK`. Without this, a read of the same

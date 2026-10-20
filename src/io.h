@@ -59,6 +59,29 @@ static inline void outsw(uint16_t port, const void *buf, uint32_t count) {
 }
 
 /*
+ * insl/outsl — `count` 32-bit transfers, the `rep insl`/`rep outsl`
+ * counterparts of insw/outsw above. Half the accesses for the same bytes,
+ * which is what matters under QEMU: KVM hands a whole REP instruction to
+ * QEMU in one exit, but QEMU still dispatches it one access at a time, each
+ * through its memory-region dispatch and a mutex (SCRUM-190, measured with
+ * perf). Only for ports whose device accepts a 32-bit access -- see ata.c's
+ * ATA_DATA note for the one user and why that is a QEMU assumption.
+ */
+static inline void insl(uint16_t port, void *buf, uint32_t count) {
+    __asm__ volatile ("rep insl"
+                      : "+D"(buf), "+c"(count)
+                      : "d"(port)
+                      : "memory");
+}
+
+static inline void outsl(uint16_t port, const void *buf, uint32_t count) {
+    __asm__ volatile ("rep outsl"
+                      : "+S"(buf), "+c"(count)
+                      : "d"(port)
+                      : "memory");
+}
+
+/*
  * outl — 32-bit port write (used by qemu_exit via isa-debug-exit).
  */
 static inline void outl(uint16_t port, uint32_t val) {

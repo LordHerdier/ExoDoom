@@ -3,7 +3,9 @@
 
 /* Primary ATA bus, port I/O command block + control block (SCRUM-102's own
  * ticket note, 2026-09-19: QEMU `-drive if=ide` -> port I/O, not SCSI). */
-#define ATA_DATA        0x1F0
+#define ATA_DATA        0x1F0  /* 16-bit per the ATA spec; sector data is
+                                 * moved 32 bits at a time -- see
+                                 * ATA_DATA_DWORDS_PER_SECTOR */
 #define ATA_ERROR       0x1F1  /* read */
 #define ATA_FEATURES    0x1F1  /* write */
 #define ATA_SECCOUNT    0x1F2
@@ -16,6 +18,27 @@
 #define ATA_CONTROL     0x3F6  /* write: device control; read: alternate
                                  * status (same bits as ATA_STATUS, but
                                  * reading it never clears a pending IRQ) */
+
+/* Sector data moves through ATA_DATA as 32-bit `rep insl`/`rep outsl`
+ * (SCRUM-190), half the port accesses of 16-bit `rep insw`. After READ
+ * MULTIPLE, the WAD load's remaining time was QEMU dispatching each data
+ * port access individually (perf: kvm_cpu_exec -> address_space_rw ->
+ * ... -> ide_data_readw, ~14M of them), so halving the accesses roughly
+ * halves the time.
+ *
+ * This is a QEMU assumption, not an ATA one. The data register and the
+ * PATA cable are 16 bits wide; a 32-bit access works only because the host
+ * controller splits it into two 16-bit cable transfers. PCI IDE
+ * controllers such as the PIIX that QEMU emulates do; older ISA/VLB ones
+ * did not, some chipsets needed enabling first, and nothing reliably
+ * reports which (IDENTIFY word 48 described the drive, not the controller,
+ * and is obsolete) -- which is why Linux leaves it off unless `hdparm -c`
+ * asks. Where unsupported the result is garbage, not an error. Accepted
+ * because this driver is QEMU-only in practice: real hardware has no PATA
+ * and increasingly no IDE compatibility mode (SCRUM-242 is the real-
+ * hardware disk path). IDENTIFY in ata_init() still uses 16-bit insw(),
+ * so probing a drive assumes nothing beyond the spec. */
+#define ATA_DATA_DWORDS_PER_SECTOR 128u
 
 #define ATA_STATUS_ERR  0x01
 #define ATA_STATUS_DRQ  0x08
@@ -237,9 +260,10 @@ int ata_read_sectors(uint32_t lba, uint8_t *buf, uint32_t count) {
 
         uint32_t n = count - s < block ? count - s : block;
 
-        /* One `rep insw` per DRQ block, not 256 inw()s per sector: under
-         * KVM each standalone IN is its own VM exit, see insw() in io.h. */
-        insw(ATA_DATA, buf + s * 512u, 256u * n);
+        /* One `rep insl` per DRQ block, not a loop of single INs: under
+         * KVM each standalone IN is its own VM exit (insw() in io.h), and
+         * 32-bit halves QEMU's per-access cost (ATA_DATA_DWORDS_PER_SECTOR). */
+        insl(ATA_DATA, buf + s * 512u, ATA_DATA_DWORDS_PER_SECTOR * n);
     }
 
     /* Let BSY settle before returning -- a drive may briefly reassert it
@@ -271,7 +295,7 @@ int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count) {
         }
 
         uint32_t n = count - s < block ? count - s : block;
-        outsw(ATA_DATA, buf + s * 512u, 256u * n);
+        outsl(ATA_DATA, buf + s * 512u, ATA_DATA_DWORDS_PER_SECTOR * n);
     }
 
     /* BSY must clear before the command-block registers (ATA_COMMAND
