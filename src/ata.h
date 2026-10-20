@@ -67,3 +67,9 @@ int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count);
  * SCRUM-202's `disk` shell command is the first caller. 0 if ata_init()
  * never succeeded (ATA_ENODEV/timeout) or has not been called yet. */
 uint32_t ata_get_sector_count(void);
+
+/* Sectors per DRQ data block the transfers above use: what ata_init()'s
+ * SET MULTIPLE MODE was accepted with (READ/WRITE MULTIPLE), or 1 if the
+ * drive has no multiple mode (plain READ/WRITE SECTORS). Exposed for the
+ * test suite; nothing else needs to know. */
+uint32_t ata_multiple_block(void);
