@@ -43,11 +43,29 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* How many blocks exofs_read()'s whole-block path batches into one
+ * exofs_bdev_read() call (SCRUM-190). Deliberately NOT read straight into
+ * the caller's buffer: exofs_blockdev.h's own contract is that a disk I/O
+ * buffer must lie in the LibOS VA window, and exofs_read()'s caller is not
+ * guaranteed to -- doom_wad_disk.c, the reason this batching exists at all,
+ * hands in kernel memory from alloc_pages_contig_owned() precisely because
+ * it is NOT a LibOS-window buffer. So every transfer still bounces through
+ * an in-window scratch buffer; what changes is that scratch buffer now
+ * holds a batch of blocks instead of exactly one, so one exo_disk_read
+ * syscall (and, below this file, one multi-sector ATA command) covers the
+ * whole batch and one memcpy lands it in dst, rather than one syscall and
+ * one memcpy per 512 bytes. 128 matches EXO_DISK_MAX_SECTORS
+ * (src/syscall_disk.h) so a batch is exactly one syscall's worth rather
+ * than being chunked again inside exofs_bdev_read(); this file does not
+ * include that header; see exofs_blockdev.h. */
+#define READ_BATCH_BLOCKS 128u
+
 /* ---- Chain navigation ---------------------------------------------------
  *
  * block_at() finds the block holding chain index `want`, using and updating
  * the handle's cached position. ensure_block() does the same but allocates
- * whatever is missing.
+ * whatever is missing. contig_run() looks ahead from an already-found block
+ * for exofs_read()'s bulk path below.
  */
 
 static int block_at(exofs_volume_t *v, exofs_file_t *f, uint32_t want,
@@ -87,6 +105,36 @@ static int block_at(exofs_volume_t *v, exofs_file_t *f, uint32_t want,
     f->cur_index = idx;
     *out = cur;
     return 0;
+}
+
+/* How many further chain blocks after `blk` (chain index `idx`) sit at
+ * consecutive on-disk block numbers -- blk+1, blk+2, ... -- so exofs_read()
+ * can hand them to exofs_bdev_read() as one transfer instead of one
+ * exofs_read_block() per block (SCRUM-190: that was one exo_disk_read
+ * syscall per 512-byte block, ~57,000 of them for a 28 MB file). Pure
+ * v->fat[] lookups -- it is memory-resident (exofs_internal.h) -- so this
+ * costs no disk I/O on top of the FAT-chain walk block_at() would have
+ * made one hop at a time anyway. Bounded by `max` (how many whole blocks
+ * the caller still wants) and stops at the first non-contiguous hop or the
+ * chain's own end. *last_blk is the block the run ends on, so the caller
+ * can fast-forward the handle's position cache past the whole run without
+ * re-walking it. */
+static uint32_t contig_run(exofs_volume_t *v, uint32_t blk, uint32_t max,
+                           uint32_t *last_blk)
+{
+    uint32_t run = 1;
+    uint32_t cur = blk;
+
+    while (run < max) {
+        uint32_t next;
+        if (exofs_fat_get(v, cur, &next) < 0) break;
+        if (next != cur + 1) break;
+        cur = next;
+        run++;
+    }
+
+    *last_blk = cur;
+    return run;
 }
 
 static int ensure_block(exofs_volume_t *v, exofs_file_t *f, uint32_t want,
@@ -283,7 +331,16 @@ int64_t exofs_read(exofs_file_t *f, void *buf, uint32_t n)
     uint32_t avail = f->size - f->pos;
     if (n > avail) n = avail;
 
-    uint8_t *block = libos_heap_alloc(EXOFS_BLOCK_SIZE);
+    /* A scratch buffer the disk I/O actually targets -- see
+     * READ_BATCH_BLOCKS's own comment for why this cannot be dst itself.
+     * Sized to what this call could actually use: at most READ_BATCH_BLOCKS,
+     * but never more than n needs (the "+ 1" covers a leading/trailing
+     * partial block), so a small read -- most of them, in practice -- costs
+     * the same one-block scratch allocation it always did. */
+    uint32_t want_blocks = n / EXOFS_BLOCK_SIZE + 1u;
+    uint32_t batch_blocks = want_blocks < READ_BATCH_BLOCKS
+                          ? want_blocks : READ_BATCH_BLOCKS;
+    uint8_t *block = libos_heap_alloc(batch_blocks * EXOFS_BLOCK_SIZE);
     if (block == NULL) return -EXO_ENOMEM;
 
     uint8_t *dst = (uint8_t *)buf;
@@ -293,12 +350,43 @@ int64_t exofs_read(exofs_file_t *f, void *buf, uint32_t n)
     while (done < n) {
         uint32_t idx = f->pos / EXOFS_BLOCK_SIZE;
         uint32_t off = f->pos % EXOFS_BLOCK_SIZE;
-        uint32_t take = EXOFS_BLOCK_SIZE - off;
-        if (take > n - done) take = n - done;
 
         uint32_t blk;
         rc = block_at(v, f, idx, &blk);
         if (rc < 0) goto out;
+
+        if (off == 0 && n - done >= EXOFS_BLOCK_SIZE) {
+            /* A run of whole blocks: batch every block that is contiguous
+             * on disk from here, up to what is left to read and
+             * batch_blocks, into one exofs_bdev_read() into the scratch
+             * buffer, then one bulk memcpy into dst. Still far fewer
+             * syscalls than one exofs_read_block() per block (SCRUM-190:
+             * ~57,000 of them for a 28 MB file down to ~450), just not
+             * zero-copy -- see READ_BATCH_BLOCKS. */
+            uint32_t whole_left = (n - done) / EXOFS_BLOCK_SIZE;
+            uint32_t cap = whole_left < batch_blocks
+                         ? whole_left : batch_blocks;
+            uint32_t last;
+            uint32_t run = contig_run(v, blk, cap, &last);
+
+            rc = exofs_bdev_read(exofs_block_lba(v, blk), block, run);
+            if (rc < 0) goto out;
+            v->stat_block_reads += run;
+
+            memcpy(dst + done, block, (size_t)run * EXOFS_BLOCK_SIZE);
+
+            f->cur_block = last;
+            f->cur_index = idx + run - 1;
+
+            uint32_t bytes = run * EXOFS_BLOCK_SIZE;
+            done   += bytes;
+            f->pos += bytes;
+            continue;
+        }
+
+        /* The read's leading or trailing partial block. */
+        uint32_t take = EXOFS_BLOCK_SIZE - off;
+        if (take > n - done) take = n - done;
 
         rc = exofs_read_block(blk, block);
         if (rc < 0) goto out;

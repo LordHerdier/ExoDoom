@@ -23,10 +23,14 @@
  * touches hardware guards on drive_present() first, same as test_ata_k.c and
  * test_syscall_disk_k.c.
  *
- * LBA RANGE. All I/O here is at EXOFS_TEST_BASE_LBA (8192) and above — the
- * upper half of docker-test's 8 MiB build/ata_scratch.img, clear of
- * test_ata_k.c's LBA 2048/2049 and test_syscall_disk_k.c's LBA 3072. Later
- * steps format a whole volume starting there, which is why the base is
+ * LBA RANGE. All I/O here is at EXOFS_TEST_BASE_LBA (8192) through 16383 --
+ * the upper half of what used to be docker-test's own 8 MiB
+ * build/ata_scratch.img, clear of test_ata_k.c's LBA 2048/2049 and
+ * test_syscall_disk_k.c's LBA 3072. That 8 MiB scratch region is now the
+ * low end of the shared build/exodoom_disk.img (SCRUM-190,
+ * src/doom_wad_disk.h), which keeps this range's layout unchanged and adds
+ * the real IWAD's own volume past LBA 16384, out of this suite's way.
+ * Later steps format a whole volume starting there, which is why the base is
  * reserved wholesale rather than a sector at a time.
  *
  * BUFFERS. libos_heap_alloc(), never malloc(). Under EXO_KERNEL malloc() is

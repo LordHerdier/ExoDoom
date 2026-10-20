@@ -20,17 +20,6 @@ static int64_t ata_err_to_exo(int rc)
     }
 }
 
-/* ata_write_sector takes `const uint8_t *`; disk_transfer()'s callback type
- * is `uint8_t *` (the shape ata_read_sector already has) so one loop can
- * drive either direction. Adapting here, rather than casting the function
- * pointer itself, keeps every call through it correctly typed -- casting a
- * function pointer to a signature whose parameter type differs is undefined
- * behaviour even when the underlying calling convention matches. */
-static int ata_write_sector_adapter(uint32_t lba, uint8_t *buf)
-{
-    return ata_write_sector(lba, buf);
-}
-
 /* First half of the shared validation: pure argument shape, no buffer, no
  * hardware, no binding. `count`/`lba` are taken as the full 64-bit values
  * the dispatcher hands every handler -- not the narrower uint32_t the
@@ -79,24 +68,6 @@ static int64_t validate_disk_buf(uint64_t buf, uint64_t count, int writable)
     return 1; /* validated, proceed */
 }
 
-/* Shared sector loop for both directions -- `xfer` is ata_read_sector for a
- * read, ata_write_sector_adapter for a write. `lba`/`count` are already
- * known to fit their 28-bit/EXO_DISK_MAX_SECTORS ranges by the time this
- * runs (validate_disk_args checked the untruncated 64-bit values). */
-static int64_t disk_transfer(uint32_t lba, uint64_t buf, uint32_t count,
-                             int (*xfer)(uint32_t, uint8_t *))
-{
-    uint8_t *p = (uint8_t *)(uintptr_t)buf;
-
-    for (uint32_t i = 0; i < count; i++) {
-        int rc = xfer(lba + i, p + (uint64_t)i * 512u);
-        if (rc != ATA_OK)
-            return ata_err_to_exo(rc);
-    }
-
-    return (int64_t)count;
-}
-
 /* SCRUM-188: shared ownership gate for both handlers, run after shape and
  * device-presence checks and before the buffer check -- "no such device" is
  * more fundamental than "you don't own it" (a headless machine answers
@@ -130,8 +101,12 @@ static int64_t sys_disk_read(uint64_t lba, uint64_t buf, uint64_t count,
     if (v <= 0)
         return v;
 
-    return disk_transfer((uint32_t)lba, buf, (uint32_t)count,
-                         ata_read_sector);
+    int rc = ata_read_sectors((uint32_t)lba, (uint8_t *)(uintptr_t)buf,
+                              (uint32_t)count);
+    if (rc != ATA_OK)
+        return ata_err_to_exo(rc);
+
+    return (int64_t)count;
 }
 
 /* #25 -- write `count` sectors starting at `lba` from `buf`. */
@@ -154,8 +129,12 @@ static int64_t sys_disk_write(uint64_t lba, uint64_t buf, uint64_t count,
     if (v <= 0)
         return v;
 
-    return disk_transfer((uint32_t)lba, buf, (uint32_t)count,
-                         ata_write_sector_adapter);
+    int rc = ata_write_sectors((uint32_t)lba, (const uint8_t *)(uintptr_t)buf,
+                               (uint32_t)count);
+    if (rc != ATA_OK)
+        return ata_err_to_exo(rc);
+
+    return (int64_t)count;
 }
 
 /* #26 -- bind the disk to the caller. */

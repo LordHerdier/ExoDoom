@@ -53,7 +53,7 @@
 #include "wad.h"
 #include "pcm_mixer.h"
 #include "hda.h"
-#include "mmap.h"
+#include "doom_wad_disk.h"
 #include "syscall.h"
 #include "exo_syscall.h"
 #include "vmm.h"
@@ -97,17 +97,18 @@ static const wad_t *real_wad(void)
     return w != NULL ? &w->wad : NULL;
 }
 
-/* Mount the module the same way the doom_dmx suite does. Split out because two
- * tests unmount deliberately and have to put it back. */
+/* Mount the real IWAD the same way the doom_dmx suite does (SCRUM-190: via
+ * doom_wad_disk_get()/ExoFS now, not the retired mmap_find_module()/GRUB
+ * module lookup). Split out because two tests unmount deliberately and
+ * have to put it back. */
 static void mount_real_wad(void)
 {
-    uint64_t start = 0, end = 0;
+    uint64_t paddr = 0, size = 0;
 
-    if (mmap_find_module(&start, &end) != 0 || end <= start)
+    if (doom_wad_disk_get(&paddr, &size) != 0)
         return;
 
-    (void)doom_wad_mount((const void *)(uintptr_t)start,
-                         (uint32_t)(end - start));
+    (void)doom_wad_mount((const void *)(uintptr_t)paddr, (uint32_t)size);
 }
 
 static void clear_out(void)
