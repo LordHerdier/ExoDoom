@@ -73,7 +73,7 @@ Two consequences worth internalising:
 
 Everything the controller touches by DMA — CORB, RIRB, BDL, samples — comes
 from `alloc_pages_contig_owned()` (`src/page_alloc.c`), never `kmalloc`: the
-bump allocator is finished once `page_alloc_init()` has run (see `CLAUDE.md`),
+bump allocator is finished once `page_alloc_init()` has run (see `docs/memory.md` §5),
 and the BDL names *physical* addresses, so the pages have to be contiguous.
 The kernel map is an identity map, so the pointer the driver writes through is
 the address the controller is given.
