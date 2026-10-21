@@ -111,6 +111,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | PC speaker | `src/speaker.c/h` |
 | Doom sound (tone table, speaker sequencer, PCM path) | `src/doom_sfx_tone.c/h`, `src/doom_sound.c/h`, `src/doom_sound_pcm.c/h` |
 | WAD DMX sound lump decoder | `src/doom_dmx.c/h` |
+| MUS/MIDI song reader + sequencer (ring 3 only) | `src/libos_doom/doom_midi.c/h` |
 | Software PCM mixer (8 sfx voices + 1 music voice) | `src/pcm_mixer.c/h` (+ `hda_pcm_*` in `src/hda.c/h`) |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |

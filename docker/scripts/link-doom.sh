@@ -85,6 +85,8 @@ SHIM_SOURCES=(
   # caller it has ever had.
   src/doom_sound_pcm.c
   src/doom_dmx.c
+  # SCRUM-215's music reader, the only caller of mus2mid().
+  src/libos_doom/doom_midi.c
   src/libos_heap.c
   src/libos_page_alloc.c
   src/libos_fb.c

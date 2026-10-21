@@ -717,3 +717,69 @@ still play out.
 but a counter — every frame carries its own index, differently per channel —
 so a repeated, skipped, swapped or stale frame is a wrong number at a known
 position rather than something that would have to be heard.
+
+### 12.8 Where the music comes from: the song reader (SCRUM-215)
+
+§12.7 is the mixer end of the music path. The other end is
+`src/libos_doom/doom_midi.c/h`:
+the counterpart of `doom_dmx.c` (§11.1) that turns a `D_*` lump into a timed
+stream of MIDI events. It decides what note happens when and nothing about how
+it sounds; the GENMIDI decoder (SCRUM-216) and OPL3 synth (SCRUM-217) sit
+behind it. It runs in ring 3 and is built into the `libos_doom` link; a
+`TESTING` kernel also compiles it explicitly so the `doom_midi` suite can run
+it from ring 0. A shipped kernel does not carry it.
+
+- **Two input formats, sniffed.** Commercial IWADs store DMX MUS; the pinned
+  freedoom2 v0.13.0 stores raw SMF (all 35 `D_*` lumps, 1,258,992 bytes, begin
+  `MThd`). `doom_midi_open()` reads the first four bytes: `MThd` is parsed in
+  place, `MUS\x1a` is converted first.
+- **Why it lives in `src/libos_doom/`.** MUS goes through the vendored
+  `src/doom/mus2mid.c`, which allocates through Doom's zone allocator, and
+  nothing under `src/doom/` links into a shipped kernel. A subdirectory is out
+  of reach of the kernel's `src/` glob, so the reader can call `mus2mid()`
+  directly instead of through an installable hook. Under `TESTING` the reader,
+  the converter and `memio.c` are compiled into the kernel image
+  (`build.sh` step 3b3) with `tests/kernel/z_zone_shim.c` backing
+  `Z_Malloc`/`Z_Free` by `kmalloc`/`kfree`. The shim halts on an exhausted
+  heap rather than return NULL, matching the real allocator's contract
+  (`I_Error`, never NULL), which `memio.c` depends on.
+- **`mus2mid` output relies on the default tempo.** It writes division 70 and
+  no tempo meta, so the SMF spec's 120 BPM default is what makes a MUS tick
+  exactly 1/140 s. It also emits an all-notes-off controller (`B0 7B 00`) the
+  first time each channel is used, so a converted song has events the MUS
+  lump does not.
+- **Every track is validated end to end at open**, on a scratch copy, so a
+  song that opens can be advanced without meeting a malformed byte. The bytes
+  are inside the read-only mapped IWAD and a runaway parse walks into the next
+  lump; every read goes through a cursor that stops at the track's end, a
+  varlen is capped at four bytes, and a chunk length is checked against what
+  remains. A missing end-of-track is `ETRUNC`.
+- **Time is exact integers.** Ticks convert to microseconds with the tempo in
+  force at that point, carrying the remainder in 1/division µs so a division
+  that does not divide the tempo (7, say) does not drift; no floating point.
+  Format-1 tracks merge lazily — the unfinished track with the earliest next
+  tick wins, ties to the lower index, which keeps a conductor track ahead of
+  the notes it shares a tick with.
+- **Looping restarts at the longest track's end-of-track** and resets the tempo
+  to the default. Event times stay on one song clock that does not reset at a
+  loop, so they never run backwards, even when one `doom_midi_advance()` call
+  spans a wrap. Since every pass is identical, any pass the clock has wholly
+  overtaken (a long stall, or a loop shorter than the call's interval) is
+  skipped arithmetically rather than replayed: no burst of stale notes, and no
+  call whose cost scales with interval / loop length. A song of zero length
+  finishes instead of looping, as it has nothing to repeat.
+- **`mus2mid` is patched to reset its file-scope state** (`queuedtime`,
+  `channelvelocities`) on entry. Upstream converts once per song change and
+  relies on the initialisers, so a failed conversion's queued delay and every
+  song's last channel volumes would otherwise leak into the next song.
+- **Not supported, rejected as `EFORMAT`:** SMF format 2, SMPTE division, a
+  format-0 header declaring other than one track, and a zero tempo.
+- **Running status survives a meta event, not a sysex.** The spec says both
+  cancel it, but files that carry on with running status after a track name or
+  marker are common and players accept them, so rejecting the song would only
+  silence a PWAD. More than `DOOM_MIDI_MAX_TRACKS` (32) tracks is `ETOOMANY`.
+
+`tests/kernel/test_doom_midi_k.c` is the suite: synthetic songs for exact
+times and for every rejection (including that every proper prefix of a valid
+song is refused), a hand-written MIDI twin for a MUS lump, and all 35 real
+lumps opened and played to the end with the count asserted.
