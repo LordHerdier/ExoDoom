@@ -504,6 +504,15 @@ convention and calls it from `kernel_main` instead of a test harness.
     with it wiped before every call and compares every record, so a
     placement difference is a bug in the table, not a tuning choice.
     `docs/filesystem.md` §6.
+  - **The image is mountable on the build host, but not with `mount(8)`.**
+    `tools/exofsfuse` (`make mount-disk` / `make umount-disk`) is a FUSE
+    driver that links the real `src/libos_fs/` sources over
+    `tools/mkexofsimg/host_blockdev.c`'s seam, so `./mnt` shows what the
+    kernel's own filesystem reads rather than a second reader that could
+    drift. Read-only whenever the image is not writable (the Docker build
+    leaves it root-owned), single-threaded by construction (one static
+    volume, no locking), no `rename`, and `truncate` only to 0 or upward.
+    `docs/filesystem.md` §10.
 - **`format()` mounts the volume it just wrote**, which surprises people
   reading `exofs_volume.c`. Creating a directory entry allocates a name
   record, which needs the FAT cache and the superblock's `name_head`, so the
