@@ -531,3 +531,44 @@ over its own scratch volume — not the one holding the IWAD. SCRUM-44
 change to support either: the whole point of step `[3b5/7]`'s gate was that
 porting ExoFS to a ring-3 target would be "a `build_ring3_link_target` call
 and nothing more," and that held.
+
+That claim is enforced rather than asserted. Step `[3b5/7]` compiles the same
+sources with the ring-3 `probe_cflags` and no `-DEXO_KERNEL`, then runs
+`nm -u` over the objects and **fails the build if any undefined symbol is
+neither an `exofs_*` function (which resolves within the library) nor
+something a ring-3 target provides** — today `memcpy`/`memset`/`memcmp`/
+`strlen` and `libos_heap_alloc`/`_free`. Without the gate ExoFS could pick up
+a kernel-only dependency and nobody would find out until the first real ring-3
+consumer.
+
+### Pitfalls when writing code against it
+
+- **`exofs_blockdev.c` is the only file with an `#ifdef EXO_KERNEL`**, and it
+  is the same dual-compile seam `src/libos_page_alloc.c` documents at length:
+  the kernel build calls `exo_syscall_dispatch()` directly so a ring-0 KUnit
+  suite can drive the whole filesystem, and the ring-3 build uses the inline
+  `syscall` stubs. It is a necessity and not a convenience: a stub's `sysretq`
+  forces CPL 3 on return, so a ring-0 caller executing one would drop the rest
+  of the boot to ring 3.
+- **Disk buffers come from `libos_heap_alloc()`, never `malloc()`.**
+  `exo_disk_read` rejects any buffer outside
+  `[EXO_USER_VA_BASE, EXO_USER_VA_END)` with `-EXO_EFAULT`, and it does so
+  under `EXO_KERNEL` too, because it is the same handler. Under the kernel
+  build `malloc()` is `kmalloc()` and returns a kernel address from outside
+  that window. This is the single most likely thing to go wrong when adding a
+  test.
+- **A fresh volume has two blocks in use, not one:** the root directory and
+  one name block (§6b — `exofs_format()` mounts what it wrote so it can create
+  the root's `.`/`..`, and creating an entry allocates a name record). Keep
+  that in mind when asserting on FAT contents or free-block counts.
+- **Costs are asserted, not assumed (SCRUM-223).** `exofs_volume_t` counts its
+  own data-block transfers (`stat_block_reads`/`stat_block_writes`, bumped in
+  `exofs_read_block()`/`exofs_write_block()`), and the suite states costs as
+  numbers — "storing a name reads one block" — because every disk read is a
+  syscall with interrupts off and a chain re-walk is invisible to a test that
+  only checks results. The name allocator is what that first caught (§6).
+- **Write ordering is load-bearing** (§1). Allocation zeroes a block before
+  claiming it, chain teardown validates before it frees, `format` writes the
+  superblock last, and `rmdir`/`unlink` unlink from the parent before freeing
+  blocks. Reversing any of them turns a harmless leak into two files sharing
+  storage; do not "tidy" them into a more natural-looking order.

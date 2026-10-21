@@ -122,9 +122,15 @@ Both must pass before merge.
 - `docs/memory.md` — paging, allocators, address-space layout.
 - `docs/debugging.md` — GDB setup and bare-metal-specific debugging tips.
 - `docs/testing.md` — the full KUnit guide referenced above.
+- `docs/filesystem.md` — ExoFS, the LibOS-space filesystem.
+- `docs/libc_audit.md` — per-function libc shim audit.
 - `docs/drivers/` — per-driver notes (IDT, PIC, PIT, serial, keyboard,
-  framebuffer).
+  framebuffer, ATA, PCI, HDA, speaker).
 
 Read the section relevant to what you're touching before making a non-trivial
 change — these docs are kept up to date per sprint and usually contain the "why"
 that isn't in the code itself.
+
+`CLAUDE.md` at the repo root is the short onboarding/quick-reference file for
+AI-assisted sessions. It points into these docs and should not duplicate them:
+new architectural facts belong in the doc that owns the subsystem.

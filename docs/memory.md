@@ -799,6 +799,20 @@ user-accessible) so that syscall entry doesn't require a separate PML4 switch.
 The LibOS's own code, heap, and stack live in the lower virtual address range.
 The full 64-bit virtual address space provides ample room for separation.
 
+**The primitives (SCRUM-48).** `vmm_create_address_space()` builds a real
+per-LibOS PML4, sharing the kernel's own PML4[0] link so kernel memory needs no
+synchronisation between address spaces; `vmm_destroy_address_space()` tears it
+down; `vmm_switch_address_space()` loads CR3. A `page_owner_t`-keyed registry
+(`vmm_bind_address_space()` / `vmm_address_space_for()`) records which context
+runs on which root, and `exo_page_map`/`exo_page_unmap` in `src/syscall_mem.c`
+already resolve the caller's root through it. The context table
+(`src/context.c`, `docs/architecture.md` §7 "Multi-application") deliberately does not duplicate
+that binding — `vmm.c`'s registry stays the single source of truth for which
+PML4 a context runs on. How an image is placed into one of these address
+spaces, and where, is `docs/architecture.md` §7 "LibOS launch conventions".
+The per-syscall ownership and VA-window rules (`may_map_phys()` and friends)
+are `docs/syscall_spec.md` §3.3 and §3.7.
+
 ### Page fault handler (SCRUM-17) ✅
 
 Vector 14 is handled by `pf_stub` (`src/isr.s`) → `page_fault_handler()`
@@ -865,8 +879,8 @@ the kernel has no knowledge of it beyond handing out physical pages.
 > the kernel heap (§6b) when defined (every kernel `.c` compile, and every
 > `tests/kernel/*.c` suite compiled through the shared loop), this allocator
 > (`libos_heap_alloc`/`_free`/`_realloc`) when not. The "not" case is the ring-3
-> LibOS link target `tests/kernel/libc_shim_probe/` builds (see CLAUDE.md and
-> `docs/architecture.md` §7) — the same target SCRUM-173 introduced for a
+> LibOS link target `tests/kernel/libc_shim_probe/` builds (see `docs/architecture.md` §9 and
+> §7) — the same target SCRUM-173 introduced for a
 > single throwaway probe function, now also carrying the real
 > `src/stdlib.c`/`src/stdio.c`/`src/string.c`/`src/ctype.c`. `libos_page_alloc.c`
 > itself is gated the same way — see the next paragraph, updated by SCRUM-51.

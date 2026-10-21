@@ -8,7 +8,7 @@
  * did: an exact upward shift of pixel rows, with the newly exposed bottom
  * row cleared to the console background colour.
  *
- * The framebuffer does not exist during a TESTING boot (CLAUDE.md), so this
+ * The framebuffer does not exist during a TESTING boot (docs/architecture.md §4), so this
  * suite builds a synthetic one over a real, kernel-identity-mapped page from
  * alloc_page() rather than the machine's real MMIO aperture — scroll_up_one_row
  * only ever deals in fb->addr/pitch/width/height, so a RAM-backed

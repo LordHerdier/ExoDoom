@@ -161,8 +161,8 @@ void libos_clock_main(void)
              * gate as fast as the CPU can go
              * measurably starves the PIT: IA32_FMASK clears IF for the
              * duration of every syscall (docs/syscall_spec.md §3.4,
-             * CLAUDE.md's own note on exo_serial_write() being a DoS risk
-             * against IRQs for the same reason), and with no pacing at all
+             * and the exo_serial_write() length cap, which exists for the
+             * same reason), and with no pacing at all
              * between calls, the aggregate time IF spends off is enough to
              * lose a real fraction of the 1000 Hz PIT's edges -- this
              * exact loop, unthrottled, measured at ~83% of real speed

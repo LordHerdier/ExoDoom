@@ -73,7 +73,7 @@ Two consequences worth internalising:
 
 Everything the controller touches by DMA — CORB, RIRB, BDL, samples — comes
 from `alloc_pages_contig_owned()` (`src/page_alloc.c`), never `kmalloc`: the
-bump allocator is finished once `page_alloc_init()` has run (see `CLAUDE.md`),
+bump allocator is finished once `page_alloc_init()` has run (see `docs/memory.md` §5),
 and the BDL names *physical* addresses, so the pages have to be contiguous.
 The kernel map is an identity map, so the pointer the driver writes through is
 the address the controller is given.
@@ -475,6 +475,34 @@ including the 16 padding samples stripped at each end. The corollary is a
 lifetime rule: **a voice must not outlive its mount**, so anything calling
 `doom_wad_unmount()` calls `pcm_mixer_reset()` first.
 
+### 11.1 The decoder (`src/doom_dmx.c/h`, SCRUM-211)
+
+A `DS*` DMX lump is an 8-byte header (format tag, rate, sample count) followed
+by 8-bit *unsigned* mono PCM. Three properties of the decoder are
+load-bearing:
+
+- **It is zero-copy, deliberately.** `doom_dmx_t.samples` points into the
+  mounted IWAD — the same "there is nowhere to copy 28 MiB to" reasoning
+  `src/doom_wad.h` gives for the mount itself. Nothing is allocated and nothing
+  freed; `doom_dmx_to_s16()` is the one call that writes, and only into a buffer
+  the caller supplies.
+- **The 16 padding samples at each end are dropped**, which is why
+  `num_samples` is the header count minus 32. They are not silence (DSPISTOL's
+  raw body starts 145, 144, 141; its first audible sample is 156), so keeping
+  them clicks at both ends of every effect.
+- **The rate is reported, never assumed** — see the histogram above. HDA output
+  is pinned at 48 kHz, so resampling is the mixer's job, per voice.
+
+The sfx lookup is **name-based** (`doom_dmx_find_sfx(wad, "pistol", …)`), not
+`sfxenum_t`-based, because the enum → name mapping lives only in
+`src/doom/sounds.c`'s `S_sfx[]` and `doom_dmx.c` is globbed into *shipped*
+kernels, where nothing from `src/doom/` links. To still prove the enum leg,
+`build.sh` compiles `src/doom/sounds.c` under `TESTING` — the second instance
+of the narrow exception `src/doom/tables.c` already is (see
+`docs/syscall_spec.md` §2.4, which lists all four vendored files the kernel
+image links). Rewiring Doom's sound module onto the decoder is §12.6, not
+this section.
+
 ---
 
 ## 12. Streaming mode: the software mixer
@@ -485,6 +513,23 @@ lump at its own rate, summed and clipped into the interleaved stereo frames
 this driver DMAs. It is the *second* of two mutually exclusive modes on the
 same stream descriptor and the same 64 KiB buffer; `hda_play_tone()` is the
 first.
+
+**It is two files for a reason.** `src/pcm_mixer.c` includes no device header;
+the streaming loop that feeds the controller (`hda_pcm_*`) lives in
+`src/hda.c`. That is the same split `src/doom_sfx_tone.c` has from
+`src/speaker.c`, and it is what lets `tests/kernel/test_pcm_mixer_k.c` assert
+the *exact samples* with no controller present. A mixer written inside the IRQ
+handler could only ever be checked by "`SDnLPIB` moved and nothing crashed" —
+precisely the assertion that misses a phase step computed the wrong way round.
+The cost is that `PCM_MIXER_RATE_HZ`/`_CHANNELS` restate
+`HDA_SAMPLE_RATE_HZ`/`HDA_CHANNELS`; `test_hda_pcm_k.c` sees both headers and
+asserts they agree.
+
+Each voice reads its lump in place, resampled by its own 16.16 phase
+accumulator with linear interpolation; voices are summed in `int32_t` and
+**saturated**, not wrapped, to `int16_t`. `pcm_mixer_render()` writes *every*
+frame it is given — silence for an empty mixer — which is also what stops a
+finished effect looping in the cyclic buffer.
 
 ### 12.1 Why the BDL is diced differently
 
@@ -653,6 +698,12 @@ itself runs with the lock dropped: the only thing that can interleave with a
 producer is the render interrupt, which only consumes from the front of the
 ring, so the free region past the write position is the producer's alone
 until it publishes the new count in a single guarded store.
+
+**The write position is derived, `(rd + count) mod cap`, not stored.** A ring
+that is off by one at the wrap is a tick once per lap forever, and one less
+field is one less thing for the wrap to keep consistent.
+`test_pcm_mixer_music_k.c` feeds a *counter* rather than a tone, so a lost,
+repeated or stale frame is a wrong number rather than something to hear.
 
 **Latency, end to end.** The fill level of this ring is one delay; the refill
 policy of §12.2 is another, and a larger one: an entry is re-rendered just

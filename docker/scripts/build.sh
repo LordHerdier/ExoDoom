@@ -664,7 +664,7 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   echo "[3b/7] Build LibOS C probe (SCRUM-173)"
   # tests/kernel/libos_c_probe/ is its own directory, not tests/kernel/*.c,
   # specifically so the shared test-compile loop below (step 3c) never needs
-  # to know this file exists -- CLAUDE.md's "no build-script change needed to
+  # to know this file exists -- docs/testing.md's "no build-script change needed to
   # add a test file" promise stays true for that loop; this probe simply
   # isn't a file the loop's glob ever sees, rather than an exception it has
   # to special-case.
