@@ -106,15 +106,61 @@ count-1 wrappers around `ata_read_sectors(lba, buf, count)`/
    not once per sector. Re-issuing the command block per sector would reset
    the drive's internal auto-incrementing LBA, which is exactly what
    multi-sector PIO exists to avoid paying for.
-2. Issue `READ SECTORS` (`0x20`) or `WRITE SECTORS` (`0x30`) once.
-3. For each of the `count` sectors: poll `BSY` clear, then `DRQ` set
-   (identical polling helpers to `ata_init`) — the drive still signals
-   readiness per sector even though the command was issued once — then
-   transfer 256 words (512 bytes) through the data port — `inw`/`outw` in a
-   loop, not a `rep insw`/`outsw` string instruction; this project's `io.h`
-   already establishes plain `inb`/`outb` wrappers as the house style for
-   every port-I/O driver (`pic.c`, `pit.c`, `ps2.c`), and a 256-iteration
-   loop costs nothing that matters against QEMU's timing.
+2. Issue `READ MULTIPLE` (`0xC4`) / `WRITE MULTIPLE` (`0xC5`) once — or
+   `READ SECTORS` (`0x20`) / `WRITE SECTORS` (`0x30`) if the drive has no
+   multiple mode (see below).
+3. For each DRQ *block* of `ata_multiple_block()` sectors (the last one
+   short if `count` is not a multiple of it): poll `BSY` clear, then `DRQ`
+   set (identical polling helpers to `ata_init`), then transfer the whole
+   block through the data port as one 32-bit `rep insl`/`rep outsl`
+   (`insl()`/`outsl()` in `io.h`; see **32-bit PIO** below), **not** an
+   `inw`/`outw` loop. The loop
+   was the original choice on the theory that 256 iterations cost nothing
+   against QEMU's timing — true under TCG, false under `-enable-kvm`, where
+   every standalone `IN`/`OUT` is a full VM exit to QEMU's device model
+   while a `REP` string instruction is batched into about one exit per
+   page. For SCRUM-190's 28 MB WAD load that was ~14M exits and **~3
+   minutes with interrupts off** (it looked like a hang). CI runs under TCG
+   and cannot see this difference.
+
+**Multiple mode.** `ata_init()` reads IDENTIFY word 47 (bits 7:0, the most
+sectors the drive moves per DRQ block) and issues `SET MULTIPLE MODE`
+(`0xC6`) with it; QEMU reports and accepts 16. With plain `READ SECTORS`
+the drive raises DRQ once per 512-byte sector, and each of those
+handshakes — a BSY poll, a DRQ poll and the `rep insw` — was ~5 VM exits
+per sector, measured with QEMU's `info stats vcpu` over the WAD load. A
+16-sector block pays that once per 8 KiB. Measured Enter→`W_Init` for
+`doom` under KVM: **~6.3 s → ~2.7 s**, `io_exits` ~253K → ~59K. A drive
+that reports 0/1 or rejects the command leaves the block at 1 and the
+driver on the single-sector commands: slower, never wrong. §6's
+`multiple mode negotiated` test fails if QEMU's drive ever lands there, so
+a silent fallback cannot quietly give the time back.
+
+**32-bit PIO.** The data register and the PATA cable are 16 bits wide;
+a 32-bit `in` at `0x1F0` works only because the host controller splits it
+into two 16-bit cable transfers. PCI IDE controllers such as the PIIX
+QEMU emulates do; older ISA/VLB controllers did not, some chipsets needed
+enabling first, and nothing reliably reports it (IDENTIFY word 48 is
+obsolete and described the drive, not the controller), which is why Linux
+leaves it off unless `hdparm -c` asks. Where it is unsupported the result
+is garbage, not an error. It is used anyway because this driver is
+QEMU-only in practice: real boards have no PATA and increasingly no IDE
+compatibility mode, and SCRUM-242 (AHCI) is the real-hardware disk path.
+IDENTIFY in `ata_init()` still uses 16-bit `insw()`, so probing a drive
+assumes nothing beyond the spec. Measured Enter→`W_Init` under KVM:
+**~2.7 s → ~0.92 s**.
+
+**What is left is the PIO floor.** (Profiled before the 32-bit change,
+which halved the access count without changing its shape.) `perf` on QEMU during the remaining
+~2.7 s: ~75% of it is the vCPU thread in QEMU *userspace*, and the profile
+is entirely the per-access port-I/O dispatch
+(`kvm_cpu_exec → address_space_rw → flatview_read → portio_read →
+ide_data_readw`, ~40% of it a mutex lock/unlock per access). KVM hands
+QEMU a whole `rep insw` per exit, but QEMU still dispatches it one 16-bit
+word at a time, ~14M times for the WAD. Block I/O does not show up at all.
+Only bus-master DMA, which QEMU services as one block request straight into
+guest memory, gets under this: SCRUM-241.
+
 4. **Write only:** issues `CACHE FLUSH` (`0xE7`) and waits for `BSY` to
    clear again before returning `ATA_OK`. Without this, a read of the same
    LBAs immediately after a write is racing QEMU's own write-back timing
@@ -130,9 +176,8 @@ now batches contiguous on-disk blocks into one `exofs_bdev_read()` call
 (src/libos_fs's own docs), and this driver is the matching half: one
 multi-sector PIO command actually amortizes the per-command overhead
 instead of just the syscall overhead on top of it. The 256-word-per-sector
-data transfer itself is unavoidable PIO cost either way — there is no DMA
-here — so this does not make the transfer free, only each sector's command
-overhead shared across the whole run.
+data transfer itself is still PIO — there is no DMA here — but see step 3:
+under KVM it must be a string instruction or it dominates everything else.
 
 ---
 
@@ -178,6 +223,13 @@ attached to the primary bus:
   `docker-run`/`docker-run-kernel` attach none.
 - A read of an untouched sector (LBA 2049) returns `ATA_OK` with no fault,
   as a cheap regression check on the polling loop's exit condition.
+- `multiple mode negotiated`: `ata_multiple_block() > 1` once a drive is
+  present (QEMU accepts 16) — see §4's multiple-mode note for why a silent
+  fallback to 1 is worth failing on.
+- A 37-sector `ata_write_sectors`/`ata_read_sectors` round trip at LBA
+  2112 (16 + 16 + 5 with QEMU's block), so the short final DRQ block is
+  exercised in both directions, plus a single-sector read of the last one
+  to prove the run landed at the right LBAs.
 
 **`docker-test`/`docker-ci` only** attach a scratch drive: the `Makefile`
 creates an 8 MB zeroed `build/ata_scratch.img` and passes

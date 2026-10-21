@@ -3,7 +3,9 @@
 
 /* Primary ATA bus, port I/O command block + control block (SCRUM-102's own
  * ticket note, 2026-09-19: QEMU `-drive if=ide` -> port I/O, not SCSI). */
-#define ATA_DATA        0x1F0
+#define ATA_DATA        0x1F0  /* 16-bit per the ATA spec; sector data is
+                                 * moved 32 bits at a time -- see
+                                 * ATA_DATA_DWORDS_PER_SECTOR */
 #define ATA_ERROR       0x1F1  /* read */
 #define ATA_FEATURES    0x1F1  /* write */
 #define ATA_SECCOUNT    0x1F2
@@ -17,6 +19,27 @@
                                  * status (same bits as ATA_STATUS, but
                                  * reading it never clears a pending IRQ) */
 
+/* Sector data moves through ATA_DATA as 32-bit `rep insl`/`rep outsl`
+ * (SCRUM-190), half the port accesses of 16-bit `rep insw`. After READ
+ * MULTIPLE, the WAD load's remaining time was QEMU dispatching each data
+ * port access individually (perf: kvm_cpu_exec -> address_space_rw ->
+ * ... -> ide_data_readw, ~14M of them), so halving the accesses roughly
+ * halves the time.
+ *
+ * This is a QEMU assumption, not an ATA one. The data register and the
+ * PATA cable are 16 bits wide; a 32-bit access works only because the host
+ * controller splits it into two 16-bit cable transfers. PCI IDE
+ * controllers such as the PIIX that QEMU emulates do; older ISA/VLB ones
+ * did not, some chipsets needed enabling first, and nothing reliably
+ * reports which (IDENTIFY word 48 described the drive, not the controller,
+ * and is obsolete) -- which is why Linux leaves it off unless `hdparm -c`
+ * asks. Where unsupported the result is garbage, not an error. Accepted
+ * because this driver is QEMU-only in practice: real hardware has no PATA
+ * and increasingly no IDE compatibility mode (SCRUM-242 is the real-
+ * hardware disk path). IDENTIFY in ata_init() still uses 16-bit insw(),
+ * so probing a drive assumes nothing beyond the spec. */
+#define ATA_DATA_DWORDS_PER_SECTOR 128u
+
 #define ATA_STATUS_ERR  0x01
 #define ATA_STATUS_DRQ  0x08
 #define ATA_STATUS_DF   0x20
@@ -24,10 +47,23 @@
 
 #define ATA_CMD_READ_SECTORS   0x20
 #define ATA_CMD_WRITE_SECTORS  0x30
+#define ATA_CMD_READ_MULTIPLE  0xC4
+#define ATA_CMD_WRITE_MULTIPLE 0xC5
+#define ATA_CMD_SET_MULTIPLE   0xC6
 #define ATA_CMD_CACHE_FLUSH    0xE7
 #define ATA_CMD_IDENTIFY       0xEC
 
 #define ATA_DRIVE_HEAD_LBA_MASTER 0xE0  /* LBA mode, master drive select   */
+
+/* IDENTIFY DEVICE word 47, bits 7:0: the most sectors the drive will move
+ * per DRQ block under READ/WRITE MULTIPLE (0 = not supported). */
+#define ATA_IDENTIFY_MULT_WORD 47
+
+/* Sectors per DRQ data block for every transfer below: the value
+ * SET MULTIPLE MODE was accepted with, or 1 if the drive does not support
+ * it (or refused it), in which case the plain READ/WRITE SECTORS commands
+ * are used. Set by ata_init(); see there. */
+static uint32_t g_ata_block = 1;
 
 /* Bounded busy-wait, not a PIT-timed one: on real/QEMU hardware BSY/DRQ
  * resolve in microseconds, and tying this to kernel_get_ticks_ms() would
@@ -110,16 +146,16 @@ static int ata_wait_ready(void) {
     return ATA_OK;
 }
 
-/* Captured from IDENTIFY words 60/61 by ata_init() -- see ata_get_sector_
- * count()'s own comment in src/ata.h. Zero until a successful ata_init(). */
-static uint32_t g_ata_sector_count = 0;
-
 /* Program the drive/head + LBA + sector-count registers common to every
  * READ/WRITE SECTORS command, single- or multi-sector. Caller writes
  * ATA_COMMAND next. `count` is cast straight into the 8-bit SECCOUNT
  * register, so it must be in [1, 255] -- the only callers below cap well
  * under that (EXO_DISK_MAX_SECTORS is 128). Count 0 would mean "256
  * sectors" per the ATA spec, which nothing here needs or checks for. */
+/* Captured from IDENTIFY words 60/61 by ata_init() -- see ata_get_sector_
+ * count()'s own comment in src/ata.h. Zero until a successful ata_init(). */
+static uint32_t g_ata_sector_count = 0;
+
 static void ata_select(uint32_t lba, uint32_t count) {
     outb(ATA_DRIVE_HEAD, ATA_DRIVE_HEAD_LBA_MASTER | ((lba >> 24) & 0x0F));
     outb(ATA_SECCOUNT, (uint8_t)count);
@@ -129,6 +165,8 @@ static void ata_select(uint32_t lba, uint32_t count) {
 }
 
 int ata_init(void) {
+    g_ata_block = 1;
+
     outb(ATA_DRIVE_HEAD, ATA_DRIVE_HEAD_LBA_MASTER);
     outb(ATA_SECCOUNT, 0);
     outb(ATA_LBA_LO, 0);
@@ -154,18 +192,39 @@ int ata_init(void) {
         return rc;
     }
 
-    /* Drain the 256-word IDENTIFY payload. Detection only needs the fact
-     * that it arrived intact, but words 60/61 (the 28-bit-LBA total sector
-     * count, low word first -- the standard ATA/ATAPI-7 IDENTIFY field) are
-     * worth keeping: SCRUM-202's `disk` shell command is the first thing
-     * that reports capacity at all. */
-    uint16_t word60 = 0, word61 = 0;
-    for (int i = 0; i < 256; i++) {
-        uint16_t w = inw(ATA_DATA);
-        if (i == 60) word60 = w;
-        if (i == 61) word61 = w;
+    /* The 256-word IDENTIFY payload. Detection only needs the fact that it
+     * arrived intact; the one field parsed is word 47, below. */
+    uint16_t id[256];
+    insw(ATA_DATA, id, 256);
+
+    /* Words 60/61: 28-bit-LBA total sector count, low word first. SCRUM-202's
+     * `disk` command and SCRUM-203's mkfs sizing are what read it. */
+    g_ata_sector_count = (uint32_t)id[60] | ((uint32_t)id[61] << 16);
+
+    rc = ata_wait_ready();
+    if (rc != ATA_OK) {
+        return rc;
     }
-    g_ata_sector_count = (uint32_t)word60 | ((uint32_t)word61 << 16);
+
+    /* SET MULTIPLE MODE to the drive's own maximum (SCRUM-190). With plain
+     * READ/WRITE SECTORS the drive raises DRQ once per 512-byte sector, and
+     * every one of those handshakes -- a BSY poll, a DRQ poll and a
+     * `rep insw` -- is a VM exit to QEMU's device model under KVM, ~5 per
+     * sector measured over the 28 MB WAD load; QEMU also issues one block
+     * request per DRQ block. A multiple-mode block of N sectors pays that
+     * once per N. A drive that reports no support, or rejects the command
+     * (ERR -> ATA_EIO from ata_wait_ready()), leaves g_ata_block at 1, which
+     * keeps the single-sector-per-DRQ commands -- slower, never wrong. */
+    uint32_t mult = id[ATA_IDENTIFY_MULT_WORD] & 0xFF;
+    if (mult > 1) {
+        outb(ATA_DRIVE_HEAD, ATA_DRIVE_HEAD_LBA_MASTER);
+        outb(ATA_SECCOUNT, (uint8_t)mult);
+        outb(ATA_COMMAND, ATA_CMD_SET_MULTIPLE);
+        ata_delay_400ns();
+        if (ata_wait_ready() == ATA_OK) {
+            g_ata_block = mult;
+        }
+    }
 
     return ATA_OK;
 }
@@ -174,27 +233,33 @@ uint32_t ata_get_sector_count(void) {
     return g_ata_sector_count;
 }
 
+uint32_t ata_multiple_block(void) {
+    return g_ata_block;
+}
+
 /* Multi-sector PIO: the command, the LBA and the sector count are programmed
  * ONCE for the whole run (SCRUM-190) -- a fresh command would reset the
  * drive's internal auto-incrementing LBA, which is exactly what multi-sector
- * mode exists to avoid paying for per sector. The drive still signals
- * readiness per sector (BSY clears, then DRQ sets, same as the single-sector
- * case) before each sector's 256-word transfer, so that part of the
- * single-sector loop is still paid once per sector -- only the command
- * issue, the 400ns turnaround and the drive/head+LBA+seccount register
- * writes are amortized across the whole run. `count` must be in [1, 255]
- * (see ata_select()); callers below never exceed EXO_DISK_MAX_SECTORS
- * (128, src/syscall_disk.h). */
+ * mode exists to avoid paying for per sector. The drive then signals
+ * readiness (BSY clears, then DRQ sets) once per DRQ *block* of
+ * g_ata_block sectors -- READ/WRITE MULTIPLE when ata_init() set multiple
+ * mode, else READ/WRITE SECTORS with a block of one sector. The last block
+ * of a run is short when `count` is not a multiple of the block size; the
+ * drive sizes it the same way, so the loop just takes what is left.
+ * `count` must be in [1, 255] (see ata_select()); callers below never
+ * exceed EXO_DISK_MAX_SECTORS (128, src/syscall_disk.h). */
 int ata_read_sectors(uint32_t lba, uint8_t *buf, uint32_t count) {
     if (count == 0) {
         return ATA_OK;
     }
 
+    uint32_t block = g_ata_block;
     ata_select(lba, count);
-    outb(ATA_COMMAND, ATA_CMD_READ_SECTORS);
+    outb(ATA_COMMAND, block > 1 ? ATA_CMD_READ_MULTIPLE
+                                : ATA_CMD_READ_SECTORS);
     ata_delay_400ns();
 
-    for (uint32_t s = 0; s < count; s++) {
+    for (uint32_t s = 0; s < count; s += block) {
         int rc = ata_wait_not_busy();
         if (rc != ATA_OK) {
             return rc;
@@ -205,12 +270,12 @@ int ata_read_sectors(uint32_t lba, uint8_t *buf, uint32_t count) {
             return rc;
         }
 
-        uint8_t *dst = buf + s * 512u;
-        for (int i = 0; i < 256; i++) {
-            uint16_t word = inw(ATA_DATA);
-            dst[2 * i] = (uint8_t)(word & 0xFF);
-            dst[2 * i + 1] = (uint8_t)(word >> 8);
-        }
+        uint32_t n = count - s < block ? count - s : block;
+
+        /* One `rep insl` per DRQ block, not a loop of single INs: under
+         * KVM each standalone IN is its own VM exit (insw() in io.h), and
+         * 32-bit halves QEMU's per-access cost (ATA_DATA_DWORDS_PER_SECTOR). */
+        insl(ATA_DATA, buf + s * 512u, ATA_DATA_DWORDS_PER_SECTOR * n);
     }
 
     /* Let BSY settle before returning -- a drive may briefly reassert it
@@ -224,11 +289,13 @@ int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count) {
         return ATA_OK;
     }
 
+    uint32_t block = g_ata_block;
     ata_select(lba, count);
-    outb(ATA_COMMAND, ATA_CMD_WRITE_SECTORS);
+    outb(ATA_COMMAND, block > 1 ? ATA_CMD_WRITE_MULTIPLE
+                                : ATA_CMD_WRITE_SECTORS);
     ata_delay_400ns();
 
-    for (uint32_t s = 0; s < count; s++) {
+    for (uint32_t s = 0; s < count; s += block) {
         int rc = ata_wait_not_busy();
         if (rc != ATA_OK) {
             return rc;
@@ -239,11 +306,8 @@ int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count) {
             return rc;
         }
 
-        const uint8_t *src = buf + s * 512u;
-        for (int i = 0; i < 256; i++) {
-            uint16_t word = (uint16_t)src[2 * i] | ((uint16_t)src[2 * i + 1] << 8);
-            outw(ATA_DATA, word);
-        }
+        uint32_t n = count - s < block ? count - s : block;
+        outsl(ATA_DATA, buf + s * 512u, ATA_DATA_DWORDS_PER_SECTOR * n);
     }
 
     /* BSY must clear before the command-block registers (ATA_COMMAND

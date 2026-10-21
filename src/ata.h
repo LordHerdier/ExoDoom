@@ -62,6 +62,12 @@ int ata_write_sector(uint32_t lba, const uint8_t *buf);
 int ata_read_sectors(uint32_t lba, uint8_t *buf, uint32_t count);
 int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count);
 
+/* Sectors per DRQ data block the transfers above use: what ata_init()'s
+ * SET MULTIPLE MODE was accepted with (READ/WRITE MULTIPLE), or 1 if the
+ * drive has no multiple mode (plain READ/WRITE SECTORS). Exposed for the
+ * test suite; nothing else needs to know. */
+uint32_t ata_multiple_block(void);
+
 /* Total user-addressable 28-bit LBA sector count, read out of the IDENTIFY
  * payload's words 60/61 (low word first) by a successful ata_init() --
  * SCRUM-202's `disk` shell command is the first caller. 0 if ata_init()
