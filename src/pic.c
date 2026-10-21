@@ -65,3 +65,66 @@ void pic_send_EOI(unsigned char irq) {
 
     outb(PIC1_COMMAND, 0x20);
 }
+
+// Read both PICs' IRR or ISR through OCW3 (0x0A selects IRR, 0x0B ISR) and
+// return them as slave<<8 | master (SCRUM-227: the spurious-IRQ handlers
+// below need the ISR, and diagnostics want both). The OCW3 read select is
+// sticky, so this restores IRR -- the power-on default -- afterwards, in
+// case anything ever reads the command port without asking first.
+static uint16_t pic_read_ocw3(uint8_t ocw3) {
+    outb(PIC1_COMMAND, ocw3);
+    outb(PIC2_COMMAND, ocw3);
+    uint16_t v = (uint16_t)((inb(PIC2_COMMAND) << 8) | inb(PIC1_COMMAND));
+    outb(PIC1_COMMAND, 0x0A);
+    outb(PIC2_COMMAND, 0x0A);
+    return v;
+}
+
+uint16_t pic_read_irr(void) { return pic_read_ocw3(0x0A); }
+uint16_t pic_read_isr(void) { return pic_read_ocw3(0x0B); }
+
+uint16_t pic_read_imr(void) {
+    return (uint16_t)((inb(PIC2_DATA) << 8) | inb(PIC1_DATA));
+}
+
+// PIIX3 Edge/Level Control Registers, 0x4D0 (IRQ0-7) and 0x4D1 (IRQ8-15).
+// A set bit makes that line level-triggered. Firmware (SeaBIOS) programs
+// these for the PCI interrupt lines; pic_remap()'s ICW1 does not touch them.
+uint16_t pic_read_elcr(void) {
+    return (uint16_t)((inb(0x4D1) << 8) | inb(0x4D0));
+}
+
+static volatile uint32_t g_spurious_irq7;
+static volatile uint32_t g_spurious_irq15;
+
+// Vector 0x27. No driver owns IRQ7, so if the master's ISR says it really
+// is in service it is a genuine but unclaimed interrupt and gets its EOI;
+// otherwise the master never put anything in service and must not get one
+// (a non-specific EOI would retire whatever *is* in service instead).
+void pic_irq7_spurious(void) {
+    if (pic_read_isr() & (1u << 7)) {
+        pic_send_EOI(7);
+        return;
+    }
+    g_spurious_irq7++;
+}
+
+// Vector 0x2F. A spurious IRQ15 comes from the slave, which put nothing in
+// service -- but the master acknowledged IRQ2 to cascade to it and *did*,
+// so the master still needs its EOI. Without it IRQ2 stays in service and
+// masks every slave line (8-15) for good while IRQ0/IRQ1, at higher
+// priority, carry on as if nothing happened. That was SCRUM-227: the HDA
+// refill count frozen at zero, one boot in ten, with the clock still
+// ticking. If a driver ever claims line 15 it replaces this gate and must
+// make the same ISR check itself.
+void pic_irq15_spurious(void) {
+    if (pic_read_isr() & (1u << 15)) {
+        pic_send_EOI(15);
+        return;
+    }
+    g_spurious_irq15++;
+    outb(PIC1_COMMAND, 0x20);
+}
+
+uint32_t pic_spurious_irq7_count(void)  { return g_spurious_irq7; }
+uint32_t pic_spurious_irq15_count(void) { return g_spurious_irq15; }

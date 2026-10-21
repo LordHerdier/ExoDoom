@@ -412,6 +412,20 @@ Two ways to go further, both worth knowing:
   written as 0 deliberately, not by omission: on a 256 MiB machine every page
   is below 4 GiB, and the code that computes them (`phys >> 32`) is correct
   for a machine where they are not.
+- **A completion cleared while IF is off makes the slave PIC raise a spurious
+  IRQ15 (SCRUM-227).** IRQ11 is level-triggered at the slave but reaches the
+  master on edge-triggered IRQ2. When `SDnSTS.BCIS` latches with interrupts
+  off and `stream_program()` clears it before `sti`, the master still holds
+  the request and the slave doesn't. This is normal 8259 behaviour, not a
+  driver bug, so the fix belongs at the PIC: `docs/drivers/pic.md` §9's
+  vector-0x2F handler EOIs the master. Before that existed, the spurious IRQ
+  hit `default_stub`, IRQ2 stayed in service, and HDA's completion interrupt
+  stopped for the rest of the boot. The failure: DMA advancing, the PIT
+  ticking, and the refill count frozen at 0, roughly one test boot in ten.
+  If refills stall again, `test_hda_pcm_k.c`'s refill assertions now print a
+  dump on failure (controller, PCI INTx status per function, PIC
+  IRR/ISR/IMR/ELCR, and handler entries vs. counted completions). An `isr`
+  with bit 2 set is this bug.
 - **No FPU or XMM state is involved.** This driver is integer-only and names
   no XMM register, so the "nothing saves FPU/XMM on kernel entry" invariant
   (`docs/syscall_spec.md` §3.4a) is untouched — including inside

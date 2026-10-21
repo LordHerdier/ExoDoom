@@ -324,6 +324,18 @@ convention and calls it from `kernel_main` instead of a test harness.
   range user-accessible (`#ifdef TESTING`), because `vmm_init()` runs before
   `run_tests()` and the ring-3 probe executes against the kernel map. Change one
   and change the other, or a test build triple-faults.
+- **Spurious IRQ7/IRQ15 have real handlers, and IRQ15's still EOIs the
+  master (SCRUM-227).** `kernel_main` installs `irq7_spurious_stub`/
+  `irq15_spurious_stub` on vectors `0x27`/`0x2F` straight after
+  `pic_remap()`. The slave case really happens here: SeaBIOS makes PCI lines
+  10/11 level-triggered (ELCR `0x0C00`), while the master sees the slave on
+  edge-triggered IRQ2. So when an HDA completion (IRQ11) rises and is then
+  cleared with IF off, the master still holds the request and the slave
+  answers spurious IRQ15 at the next `sti`. On `default_stub` that left IRQ2
+  in service forever and killed every slave line while the PIT kept
+  ticking. That was the "flaky" `hda_pcm` refill failures, about one boot in
+  ten. **Anything that claims vector `0x27` or `0x2F` must make the same ISR
+  check.** `docs/drivers/pic.md` §9.
 - **SCRUM-135 (error-code IDT vectors) resolved on `feat/x64`:** `default_stub`
   in `src/isr.s` used to do a bare `iretq` without popping the hardware error
   code that vectors 8, 10–14, 17, 21, 29, 30 push, which triple-faulted the

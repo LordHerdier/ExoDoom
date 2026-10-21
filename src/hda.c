@@ -58,6 +58,7 @@ static uint16_t  g_corb_wp;
 static uint16_t  g_rirb_rp;
 
 static volatile uint32_t g_irq_count;
+static volatile uint32_t g_irq_entries;   /* every handler entry, ours or not */
 static volatile uint8_t  g_stream_err;
 
 static volatile uint8_t  g_playing;
@@ -682,6 +683,7 @@ static void pcm_refill(void)
 
 void hda_irq_handler(void)
 {
+    g_irq_entries++;
     if (g_bar != NULL) {
         uint32_t ints = mmio_r32(HDA_REG_INTSTS);
         if (ints & (1u << g_stream)) {
@@ -992,6 +994,7 @@ uint32_t hda_stream_position(void)
 }
 
 uint32_t hda_irq_count(void)    { return g_irq_count; }
+uint32_t hda_irq_entries(void)  { return g_irq_entries; }
 uint8_t  hda_stream_errors(void) { return g_stream_err; }
 
 void hda_dump(void)
