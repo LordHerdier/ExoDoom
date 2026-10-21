@@ -43,6 +43,8 @@
 extern void irq0_stub();
 extern void irq1_stub();
 extern void irq12_stub();
+extern void irq7_spurious_stub();
+extern void irq15_spurious_stub();
 extern void kbd_init();
 
 /* Embedded shell LibOS code/data blobs -- produced at build time by
@@ -348,6 +350,14 @@ void kernel_main(void *mb2_info_ptr) {
     // where this gets narrated to the console -- later in this same
     // function, once one exists.
     pic_remap();
+    // The two vectors an 8259 answers with when a request vanishes between
+    // INTR and the CPU's acknowledge (SCRUM-227). Unmasking does not gate
+    // them -- a spurious IRQ is delivered whatever the IMR says -- so they
+    // need real handlers from the moment pic_remap() puts the PICs at
+    // 0x20/0x28. A spurious IRQ15 left on default_stub never EOIs the
+    // master's cascade and kills every slave line for the rest of the boot.
+    idt_set_gate(32 + 7,  (uintptr_t)irq7_spurious_stub);
+    idt_set_gate(32 + 15, (uintptr_t)irq15_spurious_stub);
     idt_set_gate(32, (uintptr_t)irq0_stub);
     pit_init(1000);
 

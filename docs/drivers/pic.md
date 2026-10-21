@@ -202,6 +202,23 @@ then always to the master.
 
 ---
 
+```c
+uint16_t pic_read_irr(void);
+uint16_t pic_read_isr(void);
+uint16_t pic_read_imr(void);
+uint16_t pic_read_elcr(void);
+uint32_t pic_spurious_irq7_count(void);
+uint32_t pic_spurious_irq15_count(void);
+```
+
+The first four return a register from both PICs as `slave << 8 | master`.
+IRR/ISR are read through OCW3, and the read select is restored to IRR
+afterwards. ELCR is the PIIX edge/level register at `0x4D0`/`0x4D1`. The two
+counters report how many spurious interrupts §9's handlers have absorbed
+(SCRUM-227).
+
+---
+
 ## 8. IRQ to vector mapping
 
 Post-remap mapping used throughout the codebase:
@@ -212,8 +229,10 @@ Post-remap mapping used throughout the codebase:
 | 1   | 0x21 (33) | PS/2 keyboard            | ✅ `irq1_stub` → `irq1_handler` |
 | 2   | 0x22 (34) | Cascade — not a real IRQ | —                               |
 | 4   | 0x24 (36) | COM1 serial (unused)     | —                               |
+| 7   | 0x27 (39) | Spurious (master)        | ✅ `irq7_spurious_stub` (§9)    |
 | 12  | 0x2C (44) | PS/2 mouse               | ⬜ Sprint 2 (SCRUM-19)          |
 | 14  | 0x2E (46) | Primary ATA              | ⬜ Sprint 11 (SCRUM-102)        |
+| 15  | 0x2F (47) | Spurious (slave)         | ✅ `irq15_spurious_stub` (§9)   |
 
 ---
 
@@ -230,12 +249,40 @@ out that IRQ line permanently until the PIC is reset.
 PIC initialisation bugs on real hardware. QEMU is more forgiving but the delays
 are cheap and correct — leave them in.
 
-**Spurious IRQs (IRQ7 and IRQ15).** The 8259A can generate a spurious IRQ7
-(master) or IRQ15 (slave) if an IRQ is deasserted between the CPU's interrupt
-acknowledge cycles. The correct response is to check the In-Service Register
-(ISR) — if bit 7 is not set, it is spurious and no EOI should be sent. The
-current driver does not handle this. For the IRQs ExoDoom uses (0, 1, 12) this
-is not a practical concern, but a production driver should handle it.
+**Spurious IRQs (IRQ7 and IRQ15) are handled, and IRQ15's case needs a
+master EOI (SCRUM-227).** An 8259A answers with its lowest-priority vector
+(IRQ7 on the master, IRQ15 on the slave) when the request it raised INTR for
+is gone by the time the CPU acknowledges it. Spurious IRQs are delivered
+whatever the IMR says, so `kernel_main` installs `irq7_spurious_stub` /
+`irq15_spurious_stub` on vectors `0x27`/`0x2F` immediately after
+`pic_remap()`, ahead of the `TESTING` branch. Both read the ISR
+(`pic_read_isr()`) to tell a real IRQ from a spurious one:
+
+- **IRQ7**: bit 7 clear means the master put nothing in service, so **no
+  EOI**. A non-specific EOI there would retire whatever *is* in service.
+- **IRQ15**: bit 15 clear means the slave put nothing in service, but the
+  master acknowledged IRQ2 to cascade to it and *did*. So the handler sends
+  **a master-only EOI**. "Spurious means no EOI" is wrong for this one.
+
+This used to be a comment saying it was "not a practical concern". It was:
+with IRQ15 on `default_stub`, master IRQ2 stayed in service for the rest of
+the boot, which silently blocked every slave line (8–15) while IRQ0/IRQ1 kept
+running at higher priority. In CI it showed up as SCRUM-227's flaky `hda_pcm`
+suite. The trigger is specific to this platform:
+
+- Firmware (SeaBIOS) sets the PIIX ELCR so the PCI lines (10 and 11) are
+  **level-triggered** at the slave. `pic_remap()`'s ICW1 does not change
+  that; `pic_read_elcr()` reads `0x0C00` on QEMU.
+- The master sees the slave's output on IRQ2, which is **edge-triggered**.
+
+So if IRQ11 rises while IF is clear, the master latches IRR2. If the HDA
+driver then clears the source while still masked (`stream_program()` does,
+on every stream start), the slave forgets the request but the master doesn't.
+At the next `sti` the CPU acknowledges IRQ2 and the slave answers spurious
+IRQ15. `test_hda_pcm_k.c`'s "a completion cleared while masked" case drives
+that sequence on purpose and asserts the spurious count rose and IRQ2 is not
+left in service. If a driver ever claims line 7 or 15, its gate replaces the
+spurious stub, and its handler must make the same ISR check.
 
 **IRQ2 (cascade) must stay unmasked when using slave IRQs.** When the PS/2 mouse
 driver is added (SCRUM-19), IRQ12 is on the slave. Unmasking IRQ12 in the slave

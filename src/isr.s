@@ -129,6 +129,37 @@ irq12_stub:
     iretq
 
 /*
+ * ── Spurious IRQ7 / IRQ15 (vectors 0x27 / 0x2F, SCRUM-227) ─────────────
+ * What an 8259 delivers when the request it raised INTR for is gone by the
+ * time the CPU acknowledges it. The slave case is not hypothetical here:
+ * IRQ11 (HDA) is level-triggered at the slave, but the master sees the
+ * slave on IRQ2 *edge*-triggered, so a completion cleared while IF is off
+ * leaves the master holding a request the slave no longer has. Both C
+ * handlers check the ISR to tell a real IRQ from a spurious one and EOI
+ * accordingly -- see pic_irq7_spurious()/pic_irq15_spurious() in src/pic.c.
+ */
+.global irq7_spurious_stub
+.global irq15_spurious_stub
+.extern pic_irq7_spurious
+.extern pic_irq15_spurious
+
+irq7_spurious_stub:
+    PUSH_REGS
+    ALIGN_CALL_STACK
+    call pic_irq7_spurious
+    RESTORE_CALL_STACK
+    POP_REGS
+    iretq
+
+irq15_spurious_stub:
+    PUSH_REGS
+    ALIGN_CALL_STACK
+    call pic_irq15_spurious
+    RESTORE_CALL_STACK
+    POP_REGS
+    iretq
+
+/*
  * ── Intel HDA — PCI INTx (vector 32 + Interrupt Line) ─────────────────
  * (SCRUM-210) Unlike IRQ0/IRQ1 this stub's vector is not fixed: the
  * controller's 8259 line comes from its PCI Interrupt Line register, so

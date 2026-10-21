@@ -394,6 +394,7 @@ uint64_t hda_bdl_phys(void);
 uint64_t hda_buf_phys(void);
 uint32_t hda_stream_position(void); /* SDnLPIB                              */
 uint32_t hda_irq_count(void);       /* completion interrupts seen so far    */
+uint32_t hda_irq_entries(void);     /* handler entries, incl. not-ours      */
 uint8_t  hda_stream_errors(void);   /* latched FIFOE/DESE bits from SDnSTS  */
 
 /* Print the controller/codec/stream state on serial. Called from kernel_main
