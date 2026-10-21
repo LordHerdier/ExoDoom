@@ -144,8 +144,11 @@ static int track_step(doom_midi_track_t *t, step_t *r)
         }
         t->cur += len;
     } else if (status == 0xFFu) {
-        t->running = 0;
-
+        /* Running status is left alone.  The SMF spec says a meta cancels
+         * it, but files that carry on with running status after a track name
+         * or marker are common, and players accept them; rejecting the whole
+         * song over it would silence a PWAD's music for no gain.  A sysex
+         * still cancels it, as above. */
         if (t->cur >= t->end) {
             return DOOM_MIDI_ETRUNC;
         }
@@ -210,16 +213,20 @@ static int open_smf(const uint8_t *d, uint32_t size, doom_midi_song_t *s)
     if (format > 1u || ntrks == 0 || div == 0 || (div & 0x8000u)) {
         return DOOM_MIDI_EFORMAT;   /* format 2, or SMPTE timing */
     }
+    if (format == 0u && ntrks != 1u) {
+        return DOOM_MIDI_EFORMAT;   /* format 0 is one track by definition */
+    }
     if (ntrks > DOOM_MIDI_MAX_TRACKS) {
         return DOOM_MIDI_ETOOMANY;
     }
 
-    doom_midi_song_t tmp;
-    tmp.ntracks  = 0;
-    tmp.division = div;
+    /* `s` is doom_midi_open()'s scratch song, not the caller's: filling it
+     * in place and failing halfway leaves nothing visible. */
+    s->ntracks  = 0;
+    s->division = div;
 
     uint32_t pos = 8u + hlen;
-    while (tmp.ntracks < ntrks) {
+    while (s->ntracks < ntrks) {
         if (size - pos < 8u) {
             return DOOM_MIDI_ETRUNC;
         }
@@ -228,7 +235,7 @@ static int open_smf(const uint8_t *d, uint32_t size, doom_midi_song_t *s)
             return DOOM_MIDI_ETRUNC;
         }
         if (d[pos] == 'M' && d[pos + 1] == 'T' && d[pos + 2] == 'r' && d[pos + 3] == 'k') {
-            doom_midi_track_t *t = &tmp.tracks[tmp.ntracks++];
+            doom_midi_track_t *t = &s->tracks[s->ntracks++];
             t->start = d + pos + 8u;
             t->end   = t->start + len;
         }
@@ -237,8 +244,8 @@ static int open_smf(const uint8_t *d, uint32_t size, doom_midi_song_t *s)
 
     /* Validate every track end to end on a scratch copy, so that a song which
      * opens can be advanced without meeting a malformed byte later. */
-    for (uint32_t i = 0; i < tmp.ntracks; i++) {
-        doom_midi_track_t t = tmp.tracks[i];
+    for (uint32_t i = 0; i < s->ntracks; i++) {
+        doom_midi_track_t t = s->tracks[i];
         int rc = track_start(&t);
         step_t r;
         while (rc == DOOM_MIDI_OK && !t.done) {
@@ -249,11 +256,6 @@ static int open_smf(const uint8_t *d, uint32_t size, doom_midi_song_t *s)
         }
     }
 
-    s->ntracks  = tmp.ntracks;
-    s->division = tmp.division;
-    for (uint32_t i = 0; i < tmp.ntracks; i++) {
-        s->tracks[i] = tmp.tracks[i];
-    }
     s->looping = 0;
     s->release = NULL;
     s->handle  = NULL;
@@ -264,6 +266,8 @@ static int open_smf(const uint8_t *d, uint32_t size, doom_midi_song_t *s)
 int doom_midi_open(const void *lump, uint32_t lump_size, doom_midi_song_t *out)
 {
     const uint8_t *d = lump;
+    doom_midi_song_t s;     /* copied to *out only on success */
+    int rc;
 
     if (d == NULL || out == NULL || lump_size < 4u) {
         return DOOM_MIDI_EINVAL;
@@ -282,23 +286,20 @@ int doom_midi_open(const void *lump, uint32_t lump_size, doom_midi_song_t *out)
             return DOOM_MIDI_ECONV;
         }
 
-        doom_midi_song_t s;
-        int rc = open_smf(midi, midi_size, &s);
+        rc = open_smf(midi, midi_size, &s);
         if (rc != DOOM_MIDI_OK) {
             g_release(handle);
             return rc;
         }
         s.release = g_release;
         s.handle  = handle;
-        *out = s;
-        return DOOM_MIDI_OK;
+    } else {
+        rc = open_smf(d, lump_size, &s);
+        if (rc != DOOM_MIDI_OK) {
+            return rc;
+        }
     }
 
-    doom_midi_song_t s;
-    int rc = open_smf(d, lump_size, &s);
-    if (rc != DOOM_MIDI_OK) {
-        return rc;
-    }
     *out = s;
     return DOOM_MIDI_OK;
 }

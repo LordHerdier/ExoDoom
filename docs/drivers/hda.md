@@ -771,8 +771,12 @@ also globbed into the kernel so the `doom_midi` suite can run it from ring 0.
   `channelvelocities`) on entry. Upstream converts once per song change and
   relies on the initialisers, so a failed conversion's queued delay and every
   song's last channel volumes would otherwise leak into the next song.
-- **Not supported, rejected as `EFORMAT`:** SMF format 2, SMPTE division, and a
-  zero tempo. More than `DOOM_MIDI_MAX_TRACKS` (32) tracks is `ETOOMANY`.
+- **Not supported, rejected as `EFORMAT`:** SMF format 2, SMPTE division, a
+  format-0 header declaring other than one track, and a zero tempo.
+- **Running status survives a meta event, not a sysex.** The spec says both
+  cancel it, but files that carry on with running status after a track name or
+  marker are common and players accept them, so rejecting the song would only
+  silence a PWAD. More than `DOOM_MIDI_MAX_TRACKS` (32) tracks is `ETOOMANY`.
 
 `tests/kernel/test_doom_midi_k.c` is the suite: synthetic songs for exact
 times and for every rejection (including that every proper prefix of a valid

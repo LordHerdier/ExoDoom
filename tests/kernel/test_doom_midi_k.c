@@ -114,6 +114,8 @@ static void test_open_rejects_bad_magic_and_header(void)
 
     buf[11] = 0;  /* zero tracks */
     CU_ASSERT_EQUAL(doom_midi_open(buf, n, &s), DOOM_MIDI_EFORMAT);
+    buf[11] = 2;  /* format 0 with two tracks: rejected before they are read */
+    CU_ASSERT_EQUAL(doom_midi_open(buf, n, &s), DOOM_MIDI_EFORMAT);
     buf[11] = 1;
 
     buf[12] = 0x80; /* SMPTE division */
@@ -146,7 +148,9 @@ static void test_open_rejects_track_past_lump(void)
     CU_ASSERT_EQUAL(doom_midi_open(buf, blen, &s), DOOM_MIDI_ETRUNC);
     buf[t + 3] -= 1;
 
-    /* The header promises two tracks and the lump has one. */
+    /* The header promises two tracks and the lump has one (format 1, since
+     * format 0 with two is refused before any track is read). */
+    buf[9]  = 1;
     buf[11] = 2;
     CU_ASSERT_EQUAL(doom_midi_open(buf, blen, &s), DOOM_MIDI_ETRUNC);
 }
@@ -336,10 +340,27 @@ static void test_running_status_sysex_and_meta_are_handled(void)
     EOT(0);
     trk_end(t);
 
-    /* A meta cancels running status, so the last note above is malformed. */
+    /* The spec says a meta cancels running status; real files ignore that
+     * and so does the reader, so the last note is still note-on ch1. */
+    CU_ASSERT_EQUAL(doom_midi_open(buf, blen, &s), DOOM_MIDI_OK);
+    CU_ASSERT_EQUAL(run(&s, 0), 4);
+    CU_ASSERT_EQUAL(ev[3].status, 0x91);
+    CU_ASSERT_EQUAL(ev[3].data1, 68);
+    CU_ASSERT_EQUAL(ev[3].data2, 92);
+    doom_midi_close(&s);
+
+    /* A sysex still cancels it: running status straight after one is
+     * malformed. */
+    smf_begin(0, 1, 96);
+    t = trk_begin();
+    EMIT(0x00, 0x91, 64, 90);
+    EMIT(0x00, 0xF0, 0x01, 0xF7);
+    EMIT(0x00, 66, 91);
+    EOT(0);
+    trk_end(t);
     CU_ASSERT_EQUAL(doom_midi_open(buf, blen, &s), DOOM_MIDI_EFORMAT);
 
-    /* Same song with the status restated. */
+    /* The first song with the status restated. */
     smf_begin(0, 1, 96);
     t = trk_begin();
     EMIT(0x00, 0xFF, 0x03, 0x04, 'n', 'a', 'm', 'e');
@@ -873,7 +894,7 @@ void suite_doom_midi_tests(CU_pSuite s)
 {
     CU_add_test(s, "open rejects NULL and sub-header lumps",
                 test_open_rejects_null_and_short);
-    CU_add_test(s, "open rejects bad magic, format 2, SMPTE, zero tracks",
+    CU_add_test(s, "open rejects bad magic, format 2, SMPTE, bad track counts",
                 test_open_rejects_bad_magic_and_header);
     CU_add_test(s, "open rejects more tracks than the reader holds",
                 test_open_rejects_too_many_tracks);
