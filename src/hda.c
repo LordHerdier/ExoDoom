@@ -487,7 +487,7 @@ static int codec_setup(void)
  *
  * Integer throughout -- every kernel C file compiles -mno-sse and so cannot
  * use a double
- * (see CLAUDE.md); a square wave needs no trigonometry anyway.
+ * (see docs/syscall_spec.md §2.4); a square wave needs no trigonometry anyway.
  */
 static uint32_t fill_tone(uint32_t freq_hz)
 {

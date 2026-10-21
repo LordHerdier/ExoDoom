@@ -196,7 +196,7 @@ static void profile_report(uint32_t dt_ms)
  * offsets Doom itself reports at startup: red 16, green 8, blue 0, alpha 24.
  * Little-endian, that is B,G,R,X byte order in memory -- which is exactly
  * the framebuffer's own BGRX8888 layout (empirically confirmed on QEMU; see
- * CLAUDE.md). So no channel swizzle is needed and each pixel moves as one
+ * docs/drivers/framebuffer.md). So no channel swizzle is needed and each pixel moves as one
  * 32-bit word. The ticket title calls the source "ARGB", which is true of
  * the *word* on a little-endian machine and would be misleading as a byte
  * order.

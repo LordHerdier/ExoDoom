@@ -35,7 +35,7 @@
  *
  * Everything the controller touches by DMA (CORB, RIRB, BDL, samples) comes
  * from alloc_pages_contig_owned(), never kmalloc(): the bump allocator is
- * finished once page_alloc_init() has run (see CLAUDE.md), and the pages
+ * finished once page_alloc_init() has run (see docs/memory.md §5), and the pages
  * must be physically contiguous because the BDL names physical addresses.
  * The kernel map is an identity map, so the pointer we write through *is*
  * the address the controller is given.
