@@ -255,6 +255,32 @@ Options:
 | `sin`    | 1     | Called once in `R_InitTables`. Builds `finesine` table.                                                                                                      |
 | `fabs`   | 1     | Floating-point absolute value. Used once in mouse acceleration check. Trivial.                                                                               |
 
+**Resolution (SCRUM-41): fixed-point, because `-mno-sse` forces it.**
+`src/fixed_math.c/h` is the whole of what the board calls "math.h":
+`exo_fixed_sin`/`_cos`/`_tan` (Maclaurin series over a Q30 core) and
+`exo_fixed_atan` (CORDIC, vectoring mode), all in 16.16 over binary angle
+measure, plus `EXO_FIXED_FLOOR`/`_CEIL`. There is **no `double` libm and there
+cannot be one in `src/`**: the kernel compiles `-mno-sse -mno-sse2` and the
+SysV ABI returns floating point in `xmm0`, so a `double sin(double)` in any
+globbed `src/*.c` is rejected outright — the same wall `m_config.c`'s
+`M_GetFloatVariable()` hit in SCRUM-64, and the reason no kernel test TU can
+call such an API either. Nothing under `src/doom/` loses by it: the engine is
+fixed-point throughout and its only live `<math.h>` call is `fabs()`.
+
+`tests/kernel/test_fixed_math_k.c` is the acceptance test and it is not a spot
+check: it regenerates `finesine`, `finecosine`, `finetangent` and `tantoangle`
+through this API and compares **all 24,577 entries** against the vendored
+chocolate-doom data. Where the two disagree, **this code is the accurate
+one** — `exo_fixed_sin` is correctly rounded (≤ 0.5 LSB from true), while
+Doom's shipped table was generated in single-precision `float` with a
+truncating cast and is off by up to 1.01 LSB, which is also why `finesine`'s
+peak is 65535 and ours is 65536. To make the comparison possible `build.sh`
+compiles **`src/doom/tables.c`** (pure const integer arrays, zero undefined
+references) into the test kernel. It is one of only four files under
+`src/doom/` the kernel image ever links, and only under `TESTING=1`; the
+others are `sounds.c` (SCRUM-211, §6), and `d_loop.c`/`d_net.c`
+(SCRUM-97, `docs/architecture.md` §7).
+
 ### 2.5 `ctype.h`, `stdarg.h`, `assert.h`, `errno.h`, `limits.h`
 
 **`ctype.h`:** `isspace` (12), `toupper` (11), `tolower` (7), `isprint` (1),
