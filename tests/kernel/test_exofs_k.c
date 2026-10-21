@@ -493,6 +493,39 @@ static void test_format_rejects_tiny_volume(void)
                                  EXOFS_MIN_SECTORS - 1u), -EXO_EINVAL);
 }
 
+/*
+ * exofs_region_sectors() (SCRUM-203) -- pure arithmetic, no drive needed:
+ * how many sectors a volume at base_lba may claim before the next fixed
+ * region (region_end_lba) or the disk's own reported capacity, whichever
+ * comes first.
+ */
+static void test_region_sectors_disk_bigger_than_region(void)
+{
+    /* Disk runs well past the region boundary -- the boundary wins. */
+    CU_ASSERT_EQUAL(exofs_region_sectors(8192u, 16384u, 1000000u), 8192u);
+}
+
+static void test_region_sectors_disk_ends_inside_region(void)
+{
+    /* Disk is smaller than the fixed boundary -- the disk's own capacity
+     * wins, same shape mkfs would see on an undersized drive. */
+    CU_ASSERT_EQUAL(exofs_region_sectors(8192u, 16384u, 10000u), 1808u);
+}
+
+static void test_region_sectors_disk_smaller_than_base(void)
+{
+    /* Disk doesn't even reach this volume's base LBA -- no room at all,
+     * reported as 0 rather than underflowing. */
+    CU_ASSERT_EQUAL(exofs_region_sectors(8192u, 16384u, 4096u), 0u);
+}
+
+static void test_region_sectors_no_gap_before_next_region(void)
+{
+    /* The next region starts exactly at this volume's base -- zero room,
+     * same answer regardless of how big the disk is. */
+    CU_ASSERT_EQUAL(exofs_region_sectors(8192u, 8192u, 1000000u), 0u);
+}
+
 static void test_unmounted_calls_rejected(void)
 {
     exofs_unmount();
@@ -3530,6 +3563,14 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "double mount rejected", test_double_mount_rejected);
     CU_add_test(s, "format rejects a tiny volume",
                 test_format_rejects_tiny_volume);
+    CU_add_test(s, "region_sectors: disk bigger than region",
+                test_region_sectors_disk_bigger_than_region);
+    CU_add_test(s, "region_sectors: disk ends inside region",
+                test_region_sectors_disk_ends_inside_region);
+    CU_add_test(s, "region_sectors: disk smaller than base",
+                test_region_sectors_disk_smaller_than_base);
+    CU_add_test(s, "region_sectors: no gap before next region",
+                test_region_sectors_no_gap_before_next_region);
     CU_add_test(s, "calls without a mount rejected",
                 test_unmounted_calls_rejected);
     CU_add_test(s, "FAT writeback survives remount",
