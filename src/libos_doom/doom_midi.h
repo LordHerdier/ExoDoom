@@ -20,17 +20,15 @@
  * at the first four bytes: `MThd` is parsed in place, `MUS\x1a` is converted
  * first.
  *
- * ── Why MUS conversion is a hook, not a call ───────────────────────────
+ * ── Ring 3 only ────────────────────────────────────────────────────────
  *
- * The converter is the vendored src/doom/mus2mid.c, which allocates through
- * Doom's zone allocator.  This file is picked up by build.sh's `src/` C-file glob
- * in *every* kernel build, where nothing from src/doom/ links (the same
- * constraint src/doom_dmx.h spells out for S_sfx[]), so it cannot name
- * mus2mid().  src/libos_doom/doom_midi_mus.c is the one file that does; it exists only
- * in the libos_doom link and the TESTING kernel (a subdirectory, so the glob
- * never sees it), and installs itself here via
- * doom_midi_set_mus_converter().  A MUS lump with no converter installed is
- * DOOM_MIDI_ENOCONV, not silence.
+ * MUS goes through the vendored src/doom/mus2mid.c, which writes through
+ * memio.c onto Doom's zone allocator, and nothing from src/doom/ links into a
+ * shipped kernel.  So this lives in src/libos_doom/, which the kernel's
+ * top-level `src/` glob does not descend into: it is built into the libos_doom
+ * link, and into the TESTING kernel by an explicit step in build.sh (with
+ * tests/kernel/z_zone_shim.c standing in for the zone allocator), and calls
+ * mus2mid() directly.
  *
  * ── Zero copy, no allocation ───────────────────────────────────────────
  *
@@ -69,8 +67,7 @@
 #define DOOM_MIDI_EFORMAT   -2  /* bad magic / header / event, or SMPTE division */
 #define DOOM_MIDI_ETRUNC    -3  /* a chunk, event or track ran past its end */
 #define DOOM_MIDI_ETOOMANY  -4  /* more tracks than DOOM_MIDI_MAX_TRACKS */
-#define DOOM_MIDI_ENOCONV   -5  /* MUS lump, but no converter installed */
-#define DOOM_MIDI_ECONV     -6  /* the MUS converter refused the lump */
+#define DOOM_MIDI_ECONV     -5  /* mus2mid() refused the MUS lump */
 
 /* One channel-voice event.  `status` keeps the channel in its low nibble
  * (0x90 | ch for note-on), exactly as it appeared on the wire; `data2` is 0
@@ -108,28 +105,10 @@ typedef struct {
     int               finished;     /* every track ended and not looping */
     uint32_t          loops;        /* completed passes, when looping */
 
-    /* Set only for a converted MUS lump. */
-    void            (*release)(void *handle);
-    void             *handle;
+    /* A converted MUS lump's memio stream (a MEMFILE *), which owns the SMF
+     * the tracks point into; NULL for a lump parsed in place. */
+    void             *mus;
 } doom_midi_song_t;
-
-/*
- * MUS converter hook.  On success `convert` points *midi and *midi_size at a
- * complete SMF and sets *handle to whatever `release` needs to free it; the
- * buffer must stay valid until release(handle).  Returns 0 or non-zero.
- */
-typedef int  (*doom_midi_mus_convert_fn)(const void *mus, uint32_t mus_size,
-                                         const uint8_t **midi, uint32_t *midi_size,
-                                         void **handle);
-typedef void (*doom_midi_mus_release_fn)(void *handle);
-
-void doom_midi_set_mus_converter(doom_midi_mus_convert_fn convert,
-                                 doom_midi_mus_release_fn release);
-
-/* Installs the mus2mid-backed converter.  Defined by
- * src/libos_doom/doom_midi_mus.c, so it exists only in the libos_doom link and
- * the TESTING kernel; a shipped kernel must not call it. */
-void doom_midi_mus_install(void);
 
 /*
  * Open [lump, lump + lump_size) as a MUS or MIDI music lump.

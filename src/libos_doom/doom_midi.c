@@ -1,24 +1,17 @@
 /*
  * doom_midi.c — the MUS/MIDI song reader and sequencer (SCRUM-215).
  *
- * See src/doom_midi.h for the two input formats, why MUS conversion arrives
- * through a hook, and why every read is bounds-checked against the lump.
+ * See doom_midi.h for the two input formats, why this is ring-3 only, and why
+ * every read is bounds-checked against the lump.
  */
+
+#include <stddef.h>   /* before doom/memio.h, which uses size_t without including it */
+#include <stdint.h>
 
 #include "doom_midi.h"
 
-#include <stddef.h>
-#include <stdint.h>
-
-static doom_midi_mus_convert_fn g_convert;
-static doom_midi_mus_release_fn g_release;
-
-void doom_midi_set_mus_converter(doom_midi_mus_convert_fn convert,
-                                 doom_midi_mus_release_fn release)
-{
-    g_convert = convert;
-    g_release = release;
-}
+#include "doom/memio.h"
+#include "doom/mus2mid.h"
 
 /* SMF is big-endian; byte-wise reads for the alignment reason doom_dmx.c
  * gives (a lump starts at an arbitrary byte offset in the WAD). */
@@ -257,8 +250,7 @@ static int open_smf(const uint8_t *d, uint32_t size, doom_midi_song_t *s)
     }
 
     s->looping = 0;
-    s->release = NULL;
-    s->handle  = NULL;
+    s->mus     = NULL;
     doom_midi_rewind(s);
     return DOOM_MIDI_OK;
 }
@@ -274,25 +266,30 @@ int doom_midi_open(const void *lump, uint32_t lump_size, doom_midi_song_t *out)
     }
 
     if (d[0] == 'M' && d[1] == 'U' && d[2] == 'S' && d[3] == 0x1Au) {
-        if (g_convert == NULL || g_release == NULL) {
-            return DOOM_MIDI_ENOCONV;
-        }
+        /* mus2mid() writes the SMF into a memio stream on Doom's zone
+         * allocator; mem_fclose() frees the buffer along with the stream, so
+         * the stream is what the song holds until doom_midi_close().
+         * mem_fopen_read() takes a non-const buffer but only reads it. */
+        MEMFILE *in  = mem_fopen_read((void *)(uintptr_t)lump, lump_size);
+        MEMFILE *out = mem_fopen_write();
 
-        const uint8_t *midi = NULL;
-        uint32_t       midi_size = 0;
-        void          *handle = NULL;
-
-        if (g_convert(lump, lump_size, &midi, &midi_size, &handle) != 0) {
+        boolean failed = mus2mid(in, out);
+        mem_fclose(in);     /* a read stream does not own the lump */
+        if (failed) {
+            mem_fclose(out);
             return DOOM_MIDI_ECONV;
         }
 
-        rc = open_smf(midi, midi_size, &s);
+        void  *midi = NULL;
+        size_t midi_size = 0;
+        mem_get_buf(out, &midi, &midi_size);
+
+        rc = open_smf(midi, (uint32_t)midi_size, &s);
         if (rc != DOOM_MIDI_OK) {
-            g_release(handle);
+            mem_fclose(out);
             return rc;
         }
-        s.release = g_release;
-        s.handle  = handle;
+        s.mus = out;
     } else {
         rc = open_smf(d, lump_size, &s);
         if (rc != DOOM_MIDI_OK) {
@@ -309,11 +306,10 @@ void doom_midi_close(doom_midi_song_t *song)
     if (song == NULL) {
         return;
     }
-    if (song->release != NULL) {
-        song->release(song->handle);
+    if (song->mus != NULL) {
+        mem_fclose(song->mus);
     }
-    song->release = NULL;
-    song->handle  = NULL;
+    song->mus     = NULL;
     song->ntracks = 0;
 }
 
@@ -459,10 +455,8 @@ const char *doom_midi_strerror(int rc)
         return "chunk, event or track runs past its end";
     case DOOM_MIDI_ETOOMANY:
         return "more tracks than the reader supports";
-    case DOOM_MIDI_ENOCONV:
-        return "MUS lump but no MUS converter installed";
     case DOOM_MIDI_ECONV:
-        return "MUS converter rejected the lump";
+        return "mus2mid rejected the MUS lump";
     default:
         return "unknown error";
     }

@@ -14,7 +14,7 @@
 
 #include "kunit.h"
 
-#include "doom_midi.h"
+#include "libos_doom/doom_midi.h"
 #include "doom_wad.h"
 #include "doom_wad_disk.h"
 #include "string.h"
@@ -654,15 +654,6 @@ static const uint8_t mus_cut_lump[] = {
     0x90, 0xBC, 0x64, 0x0A,   /* volume 100, delay 10 -- then nothing */
 };
 
-static void test_mus_without_converter_is_enoconv(void)
-{
-    doom_midi_song_t s;
-
-    doom_midi_set_mus_converter(NULL, NULL);
-    CU_ASSERT_EQUAL(doom_midi_open(mus_lump, sizeof(mus_lump), &s), DOOM_MIDI_ENOCONV);
-    doom_midi_mus_install();
-}
-
 static void test_mus_converts_to_its_midi_equivalent(void)
 {
     doom_midi_song_t mus, mid;
@@ -756,14 +747,12 @@ int suite_doom_midi_init(void)
     if (doom_wad_disk_get(&paddr, &size) == 0) {
         (void)doom_wad_mount((const void *)(uintptr_t)paddr, (uint32_t)size);
     }
-    doom_midi_mus_install();
     return 0;
 }
 
 int suite_doom_midi_cleanup(void)
 {
     doom_wad_unmount();
-    doom_midi_set_mus_converter(NULL, NULL);
     return 0;
 }
 
@@ -883,7 +872,7 @@ static void test_strerror_covers_every_code(void)
 {
     CU_ASSERT_STRING_EQUAL(doom_midi_strerror(DOOM_MIDI_OK), "ok");
     int codes[] = { DOOM_MIDI_EINVAL, DOOM_MIDI_EFORMAT, DOOM_MIDI_ETRUNC,
-                    DOOM_MIDI_ETOOMANY, DOOM_MIDI_ENOCONV, DOOM_MIDI_ECONV };
+                    DOOM_MIDI_ETOOMANY, DOOM_MIDI_ECONV };
     for (unsigned i = 0; i < sizeof(codes) / sizeof(codes[0]); i++) {
         CU_ASSERT_STRING_NOT_EQUAL(doom_midi_strerror(codes[i]), "unknown error");
     }
@@ -932,8 +921,6 @@ void suite_doom_midi_tests(CU_pSuite s)
                 test_rewind_replays_from_the_start);
     CU_add_test(s, "advance rejects bad arguments",
                 test_advance_rejects_bad_arguments);
-    CU_add_test(s, "MUS with no converter is ENOCONV",
-                test_mus_without_converter_is_enoconv);
     CU_add_test(s, "MUS converts to the events of its MIDI equivalent",
                 test_mus_converts_to_its_midi_equivalent);
     CU_add_test(s, "MUS conversions do not share state",

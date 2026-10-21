@@ -720,24 +720,25 @@ position rather than something that would have to be heard.
 
 ### 12.8 Where the music comes from: the song reader (SCRUM-215)
 
-§12.7 is the mixer end of the music path. The other end is `src/doom_midi.c/h`:
+§12.7 is the mixer end of the music path. The other end is
+`src/libos_doom/doom_midi.c/h`:
 the counterpart of `doom_dmx.c` (§11.1) that turns a `D_*` lump into a timed
 stream of MIDI events. It decides what note happens when and nothing about how
 it sounds; the GENMIDI decoder (SCRUM-216) and OPL3 synth (SCRUM-217) sit
-behind it. It runs in ring 3 and is built into the `libos_doom` link, and it is
-also globbed into the kernel so the `doom_midi` suite can run it from ring 0.
+behind it. It runs in ring 3 and is built into the `libos_doom` link; a
+`TESTING` kernel also compiles it explicitly so the `doom_midi` suite can run
+it from ring 0. A shipped kernel does not carry it.
 
 - **Two input formats, sniffed.** Commercial IWADs store DMX MUS; the pinned
   freedoom2 v0.13.0 stores raw SMF (all 35 `D_*` lumps, 1,258,992 bytes, begin
   `MThd`). `doom_midi_open()` reads the first four bytes: `MThd` is parsed in
   place, `MUS\x1a` is converted first.
-- **MUS conversion is a hook, not a call.** The converter is the vendored
+- **Why it lives in `src/libos_doom/`.** MUS goes through the vendored
   `src/doom/mus2mid.c`, which allocates through Doom's zone allocator, and
-  nothing under `src/doom/` links into a shipped kernel. So `doom_midi.c`
-  cannot name it; `src/libos_doom/doom_midi_mus.c` (a subdirectory, so the
-  `src/*.c` glob never sees it) does, and installs itself with
-  `doom_midi_mus_install()`. A MUS lump with no converter is `ENOCONV`. Under
-  `TESTING` the converter and `memio.c` are compiled into the kernel image
+  nothing under `src/doom/` links into a shipped kernel. A subdirectory is out
+  of reach of the kernel's `src/` glob, so the reader can call `mus2mid()`
+  directly instead of through an installable hook. Under `TESTING` the reader,
+  the converter and `memio.c` are compiled into the kernel image
   (`build.sh` step 3b3) with `tests/kernel/z_zone_shim.c` backing
   `Z_Malloc`/`Z_Free` by `kmalloc`/`kfree`. The shim halts on an exhausted
   heap rather than return NULL, matching the real allocator's contract
