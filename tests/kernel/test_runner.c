@@ -90,6 +90,7 @@ void suite_launch_multi_tests(CU_pSuite s);
 void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
 void suite_doom_dmx_tests(CU_pSuite s);
+void suite_doom_midi_tests(CU_pSuite s);
 void suite_pcm_mixer_tests(CU_pSuite s);
 void suite_pcm_mixer_music_tests(CU_pSuite s);
 void suite_hda_pcm_tests(CU_pSuite s);
@@ -109,6 +110,12 @@ int suite_hda_cleanup(void);
  * process-global state shared with the dg_init suite (SCRUM-211). */
 int suite_doom_dmx_init(void);
 int suite_doom_dmx_cleanup(void);
+
+/* Mounts the freedoom2 module for the real-lump tests and installs the
+ * mus2mid-backed MUS converter; cleanup unmounts and uninstalls it, since both
+ * are process-global (SCRUM-215). */
+int suite_doom_midi_init(void);
+int suite_doom_midi_cleanup(void);
 
 /* Voices are process-global state; a voice left sounding by one test would
  * mix into the next one's assertions (SCRUM-212). */
@@ -580,6 +587,11 @@ int run_tests(void)
      * for its reference data, hence the mount/unmount pair (SCRUM-211). */
     s = CU_add_suite("doom_dmx", suite_doom_dmx_init, suite_doom_dmx_cleanup);
     suite_doom_dmx_tests(s);
+
+    /* The music side of the same WAD: MUS/MIDI lumps to a timed event stream,
+     * the front end the OPL3 synthesizer will consume (SCRUM-215). */
+    s = CU_add_suite("doom_midi", suite_doom_midi_init, suite_doom_midi_cleanup);
+    suite_doom_midi_tests(s);
 
     /* What joins those two ends: N voices resampled, summed and clipped into
      * one stereo stream.  Hardware-free by construction -- src/pcm_mixer.c

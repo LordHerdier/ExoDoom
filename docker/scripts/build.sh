@@ -560,6 +560,7 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/doom_wad.c src/wad.c src/doom_panic.c src/doom_keymap.c \
   src/doom_sound.c src/doom_sfx_tone.c \
   src/doom_sound_pcm.c src/doom_dmx.c \
+  src/doom_midi.c src/libos_doom/doom_midi_mus.c \
   src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c \
   src/doom/*.c
 
@@ -756,6 +757,23 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   x86_64-elf-gcc -c src/doom/sounds.c -o build/doom_sounds.o \
     "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL
   objs+=("build/doom_sounds.o")
+
+  # memio.c + mus2mid.c + the MUS wrapper are the third application of that
+  # exception (SCRUM-215).  tests/kernel/test_doom_midi_k.c has to prove a MUS
+  # lump converts to the same events as its hand-written MIDI twin, and the
+  # converter is the vendored mus2mid(), not something a test can stand in
+  # for.  src/doom_midi.c itself does NOT reference it (it takes a hook, see
+  # src/doom_midi.h), so a shipped kernel still links nothing from src/doom/.
+  #
+  # memio.c allocates through Z_Malloc/Z_Free, which is the zone allocator the
+  # kernel cannot link; tests/kernel/z_zone_shim.c backs those two symbols
+  # with kmalloc/kfree for this build only.
+  for f in src/doom/memio.c src/doom/mus2mid.c src/libos_doom/doom_midi_mus.c; do
+    echo "    CC $(basename "$f") (music conversion)"
+    x86_64-elf-gcc -c "$f" -o "build/doom_mus_$(basename "${f%.c}").o" \
+      "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL
+    objs+=("build/doom_mus_$(basename "${f%.c}").o")
+  done
 
   echo "[3b5/7] Gate: ExoFS still builds as a ring-3 target (SCRUM-189)"
   # Step [3a/7] above (now unconditional, SCRUM-190) compiles ExoFS one way
