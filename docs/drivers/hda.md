@@ -739,7 +739,9 @@ also globbed into the kernel so the `doom_midi` suite can run it from ring 0.
   `doom_midi_mus_install()`. A MUS lump with no converter is `ENOCONV`. Under
   `TESTING` the converter and `memio.c` are compiled into the kernel image
   (`build.sh` step 3b3) with `tests/kernel/z_zone_shim.c` backing
-  `Z_Malloc`/`Z_Free` by `kmalloc`/`kfree`.
+  `Z_Malloc`/`Z_Free` by `kmalloc`/`kfree`. The shim halts on an exhausted
+  heap rather than return NULL, matching the real allocator's contract
+  (`I_Error`, never NULL), which `memio.c` depends on.
 - **`mus2mid` output relies on the default tempo.** It writes division 70 and
   no tempo meta, so the SMF spec's 120 BPM default is what makes a MUS tick
   exactly 1/140 s. It also emits an all-notes-off controller (`B0 7B 00`) the
@@ -757,10 +759,18 @@ also globbed into the kernel so the `doom_midi` suite can run it from ring 0.
   Format-1 tracks merge lazily — the unfinished track with the earliest next
   tick wins, ties to the lower index, which keeps a conductor track ahead of
   the notes it shares a tick with.
-- **Looping restarts at the longest track's end-of-track**, resets the tempo to
-  the default, and carries the clock overshoot into the next pass. A song of
-  zero length finishes instead of looping, since it would otherwise spin
-  inside one `doom_midi_advance()` call.
+- **Looping restarts at the longest track's end-of-track** and resets the tempo
+  to the default. Event times stay on one song clock that does not reset at a
+  loop, so they never run backwards, even when one `doom_midi_advance()` call
+  spans a wrap. Since every pass is identical, any pass the clock has wholly
+  overtaken (a long stall, or a loop shorter than the call's interval) is
+  skipped arithmetically rather than replayed: no burst of stale notes, and no
+  call whose cost scales with interval / loop length. A song of zero length
+  finishes instead of looping, as it has nothing to repeat.
+- **`mus2mid` is patched to reset its file-scope state** (`queuedtime`,
+  `channelvelocities`) on entry. Upstream converts once per song change and
+  relies on the initialisers, so a failed conversion's queued delay and every
+  song's last channel volumes would otherwise leak into the next song.
 - **Not supported, rejected as `EFORMAT`:** SMF format 2, SMPTE division, and a
   zero tempo. More than `DOOM_MIDI_MAX_TRACKS` (32) tracks is `ETOOMANY`.
 

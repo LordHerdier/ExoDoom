@@ -465,10 +465,15 @@ static void test_looping_restarts_at_end_of_track(void)
     CU_ASSERT_EQUAL(doom_midi_open(buf, blen, &s), DOOM_MIDI_OK);
     doom_midi_set_looping(&s, 1);
 
-    CU_ASSERT_EQUAL(run(&s, 1100), 3);   /* passes start at 0, 500, 1000 ms */
-    for (int i = 0; i < 3; i++) {
-        CU_ASSERT_EQUAL(ev[i].time_us, 0u);   /* relative to its own pass */
-    }
+    /* Passes start at 0, 500 and 1000 ms, and the times say so: one clock
+     * for the whole song, not one per pass. */
+    CU_ASSERT_EQUAL(run(&s, 0), 1);
+    CU_ASSERT_EQUAL(ev[0].time_us, 0u);
+    CU_ASSERT_EQUAL(run(&s, 500), 1);
+    CU_ASSERT_EQUAL(ev[0].time_us, 500000u);
+    CU_ASSERT_EQUAL(run(&s, 500), 1);
+    CU_ASSERT_EQUAL(ev[0].time_us, 1000000u);
+    CU_ASSERT_EQUAL(run(&s, 100), 0);
     CU_ASSERT_EQUAL(s.loops, 2u);
     CU_ASSERT_FALSE(doom_midi_finished(&s));
     doom_midi_close(&s);
@@ -499,9 +504,49 @@ static void test_loop_restores_the_default_tempo(void)
     CU_ASSERT_EQUAL(run(&s, 749), 0);        /* a leaked tempo would show B here */
     CU_ASSERT_EQUAL(run(&s, 1), 2);          /* B, then the third pass's A */
     CU_ASSERT_EQUAL(ev[0].data1, 62);
-    CU_ASSERT_EQUAL(ev[0].time_us, 750000u);
+    CU_ASSERT_EQUAL(ev[0].time_us, 1500000u);
     CU_ASSERT_EQUAL(ev[1].data1, 60);
-    CU_ASSERT_EQUAL(ev[1].time_us, 0u);
+    CU_ASSERT_EQUAL(ev[1].time_us, 1500000u);
+    doom_midi_close(&s);
+}
+
+static void test_overtaken_passes_are_skipped(void)
+{
+    doom_midi_song_t s;
+    uint32_t t;
+
+    /* The 500 ms one-note loop again, advanced 1100 ms in one call.  The pass
+     * at 500 ms is wholly in the past by the time the first one ends, so it is
+     * stepped over: the note at 0, then the pass at 1000 ms, and no replay of
+     * the one in between. */
+    smf_begin(0, 1, 96);
+    t = trk_begin(); EMIT(0x00, 0x90, 60, 100); EOT(0x60); trk_end(t);
+    CU_ASSERT_EQUAL(doom_midi_open(buf, blen, &s), DOOM_MIDI_OK);
+    doom_midi_set_looping(&s, 1);
+
+    CU_ASSERT_EQUAL(run(&s, 1100), 2);
+    CU_ASSERT_EQUAL(ev[0].time_us, 0u);
+    CU_ASSERT_EQUAL(ev[1].time_us, 1000000u);
+    CU_ASSERT_EQUAL(s.loops, 2u);
+
+    CU_ASSERT_EQUAL(run(&s, 400), 1);        /* and it carries on from there */
+    CU_ASSERT_EQUAL(ev[0].time_us, 1500000u);
+    CU_ASSERT_EQUAL(s.loops, 3u);
+    doom_midi_close(&s);
+
+    /* A 1 us loop with no channel events, handed ~49 days at once.  Replaying
+     * pass by pass would never fill `max` and spin ~4e15 times; skipping
+     * makes it one step. */
+    smf_begin(0, 1, 1);
+    t = trk_begin();
+    EMIT(0x00, 0xFF, 0x51, 0x03, 0x00, 0x00, 0x01);
+    EOT(0x01);
+    trk_end(t);
+    CU_ASSERT_EQUAL(doom_midi_open(buf, blen, &s), DOOM_MIDI_OK);
+    doom_midi_set_looping(&s, 1);
+
+    CU_ASSERT_EQUAL(run(&s, 0xFFFFFFFFu), 0);
+    CU_ASSERT_FALSE(doom_midi_finished(&s));
     doom_midi_close(&s);
 }
 
@@ -573,6 +618,21 @@ static const uint8_t mus_lump[] = {
     0x60,                     /* score end */
 };
 
+/* A note with no volume byte (so the channel's last volume, 127 when fresh),
+ * then score end; and a lump cut off right after a note's delay, which fails
+ * with that delay still queued inside mus2mid. */
+static const uint8_t mus_novol_lump[] = {
+    'M', 'U', 'S', 0x1A, 0x04, 0x00, 0x0E, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x90, 0x3C, 0x00,         /* last|play, ch0; key 60, no volume; delay 0 */
+    0x60,
+};
+static const uint8_t mus_cut_lump[] = {
+    'M', 'U', 'S', 0x1A, 0x04, 0x00, 0x0E, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x90, 0xBC, 0x64, 0x0A,   /* volume 100, delay 10 -- then nothing */
+};
+
 static void test_mus_without_converter_is_enoconv(void)
 {
     doom_midi_song_t s;
@@ -617,6 +677,33 @@ static void test_mus_converts_to_its_midi_equivalent(void)
     CU_ASSERT_EQUAL(b[2].time_us, 10u * DOOM_MIDI_DEFAULT_TEMPO_US / 70u);
     doom_midi_close(&mus);
     doom_midi_close(&mid);
+}
+
+static void test_mus_conversions_do_not_share_state(void)
+{
+    doom_midi_song_t s;
+    doom_midi_event_t e[8];
+
+    /* Leave volume 100 on channel 0, then a failed conversion with 10 ticks
+     * queued.  Neither may reach the next song. */
+    CU_ASSERT_EQUAL(doom_midi_open(mus_lump, sizeof(mus_lump), &s), DOOM_MIDI_OK);
+    doom_midi_close(&s);
+    CU_ASSERT_EQUAL(doom_midi_open(mus_cut_lump, sizeof(mus_cut_lump), &s),
+                    DOOM_MIDI_ECONV);
+
+    CU_ASSERT_EQUAL(doom_midi_open(mus_novol_lump, sizeof(mus_novol_lump), &s),
+                    DOOM_MIDI_OK);
+    int n = doom_midi_advance(&s, 1000, e, 8);
+    int seen = 0;
+    for (int i = 0; i < n; i++) {
+        if ((e[i].status & 0xF0) == 0x90) {
+            CU_ASSERT_EQUAL(e[i].data2, 127);    /* not the previous song's 100 */
+            CU_ASSERT_EQUAL(e[i].time_us, 0u);   /* not 10 ticks late */
+            seen++;
+        }
+    }
+    CU_ASSERT_EQUAL(seen, 1);
+    doom_midi_close(&s);
 }
 
 static void test_garbage_mus_is_rejected(void)
@@ -816,6 +903,8 @@ void suite_doom_midi_tests(CU_pSuite s)
                 test_looping_restarts_at_end_of_track);
     CU_add_test(s, "a loop restores the default tempo",
                 test_loop_restores_the_default_tempo);
+    CU_add_test(s, "passes the clock overtakes are skipped, not replayed",
+                test_overtaken_passes_are_skipped);
     CU_add_test(s, "an empty song does not spin when looping",
                 test_empty_song_does_not_spin_when_looping);
     CU_add_test(s, "rewind replays from the start",
@@ -826,6 +915,8 @@ void suite_doom_midi_tests(CU_pSuite s)
                 test_mus_without_converter_is_enoconv);
     CU_add_test(s, "MUS converts to the events of its MIDI equivalent",
                 test_mus_converts_to_its_midi_equivalent);
+    CU_add_test(s, "MUS conversions do not share state",
+                test_mus_conversions_do_not_share_state);
     CU_add_test(s, "garbage MUS is rejected",
                 test_garbage_mus_is_rejected);
     CU_add_test(s, "strerror names every result code",

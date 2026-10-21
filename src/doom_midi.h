@@ -76,7 +76,7 @@
  * (0x90 | ch for note-on), exactly as it appeared on the wire; `data2` is 0
  * for the two-byte events (program change, channel pressure). */
 typedef struct {
-    uint64_t time_us;   /* from the start of the current pass through the song */
+    uint64_t time_us;   /* on the song clock: since open/rewind, across loops */
     uint8_t  status;
     uint8_t  data1;
     uint8_t  data2;
@@ -100,7 +100,8 @@ typedef struct {
     uint32_t          tempo_us;     /* us per quarter note, now */
     uint32_t          frac;         /* tick*tempo remainder, in 1/division us */
     uint32_t          last_tick;    /* tick of the last event processed */
-    uint64_t          us;           /* time of the last event processed */
+    uint64_t          us;           /* last event processed, from the pass start */
+    uint64_t          pass_us;      /* the current pass's start, on the song clock */
     uint64_t          clock_us;     /* time handed to advance() so far */
 
     int               looping;
@@ -155,6 +156,12 @@ void doom_midi_rewind(doom_midi_song_t *song);
  * Tempo, end-of-track, sysex and the other meta events are consumed here and
  * never surfaced.  When looping, the song restarts at the end of its longest
  * track; otherwise doom_midi_finished() turns true.
+ *
+ * Event times are on one clock that does not reset at a loop, so they never go
+ * backwards within or across calls.  A pass that `elapsed_ms` overtakes
+ * entirely -- after a long stall, say -- is skipped rather than replayed: the
+ * song lands where it would have been, without a burst of stale notes, and a
+ * short loop costs the same as a long one.
  */
 int  doom_midi_advance(doom_midi_song_t *song, uint32_t elapsed_ms,
                        doom_midi_event_t *out, uint32_t max);

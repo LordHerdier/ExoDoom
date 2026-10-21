@@ -336,6 +336,7 @@ void doom_midi_rewind(doom_midi_song_t *s)
         return;
     }
     restart_pass(s);
+    s->pass_us  = 0;
     s->clock_us = 0;
     s->finished = 0;
     s->loops    = 0;
@@ -390,13 +391,22 @@ int doom_midi_advance(doom_midi_song_t *s, uint32_t elapsed_ms,
             /* Every track has played its end-of-track.  A song whose whole
              * length is zero would loop forever inside this call, so it ends
              * instead -- it has nothing to repeat. */
-            if (!s->looping || s->us == 0) {
+            uint64_t len = s->us;
+            if (!s->looping || len == 0) {
                 s->finished = 1;
                 break;
             }
-            s->clock_us -= s->us;
-            restart_pass(s);
+            s->pass_us += len;
             s->loops++;
+
+            /* Every pass is identical (restart_pass() resets the tempo), so
+             * the ones the clock has already run past can be stepped over in
+             * one go instead of replayed event by event. */
+            uint64_t skip = (s->clock_us - s->pass_us) / len;
+            s->pass_us += skip * len;
+            s->loops   += (uint32_t)skip;
+
+            restart_pass(s);
             continue;
         }
 
@@ -407,7 +417,7 @@ int doom_midi_advance(doom_midi_song_t *s, uint32_t elapsed_ms,
         uint64_t acc = (uint64_t)(t->next_tick - s->last_tick) * s->tempo_us + s->frac;
         uint64_t at  = s->us + acc / s->division;
 
-        if (at > s->clock_us) {
+        if (s->pass_us + at > s->clock_us) {
             break;
         }
 
@@ -422,7 +432,7 @@ int doom_midi_advance(doom_midi_song_t *s, uint32_t elapsed_ms,
         }
 
         if (r.kind == EV_CHANNEL) {
-            out[n].time_us = s->us;
+            out[n].time_us = s->pass_us + s->us;
             out[n].status  = r.status;
             out[n].data1   = r.data1;
             out[n].data2   = r.data2;
