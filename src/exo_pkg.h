@@ -65,6 +65,11 @@
 #define EXO_PKG_ESHORT   (-4) /* buf_len is too small to hold even the
                                 * header, or less than header + the lengths
                                 * the header itself declares */
+#define EXO_PKG_EINVAL   (-5) /* a manifest field is malformed: non-zero
+                                * reserved[], min_pages > recommended_pages,
+                                * stack_pages == 0, sound_voices over
+                                * EXO_PKG_MAX_SOUND_VOICES, or an unknown
+                                * want_flags bit */
 
 /* Mirrors src/libos_launch.h's LIBOS_LAUNCH_MAX_CODE_PAGES/
  * LIBOS_LAUNCH_MAX_DATA_PAGES/LIBOS_LAUNCH_STACK_PAGES -- this format
@@ -72,14 +77,24 @@
  * than inventing its own. Restated here as plain integers (not by
  * #including libos_launch.h) because that header pulls in exo_syscall.h,
  * which is kernel/LibOS-only; keeping exo_pkg.h host-includable matters
- * more than deduplicating three constants, and a _Static_assert in
- * src/libos_launch.h itself (see its own comment) is what would catch the
- * two drifting apart.
+ * more than deduplicating three constants. src/libos_launch.h includes
+ * this header and _Static_asserts the two sets equal, which is what catches
+ * them drifting apart.
  */
 #define EXO_PKG_MAX_CODE_PAGES  192u
 #define EXO_PKG_MAX_DATA_PAGES  192u
 #define EXO_PKG_MAX_STACK_PAGES 16u
 #define EXO_PKG_PAGE_SIZE       0x1000u
+
+/* Restates src/pcm_mixer.h's PCM_MIXER_VOICES for the same reason as the
+ * page caps above; tests/kernel/test_exo_pkg_k.c, which sees both headers,
+ * asserts they agree. */
+#define EXO_PKG_MAX_SOUND_VOICES 8u
+
+/* Every want_flags bit this version defines; anything else is rejected so a
+ * v1 parser never silently accepts a request it does not understand. */
+#define EXO_PKG_WANT_ALL (EXO_PKG_WANT_FRAMEBUFFER | EXO_PKG_WANT_DISK | \
+                          EXO_PKG_WANT_KEYBOARD)
 
 typedef struct {
     uint32_t magic;   /* EXO_PKG_MAGIC */
@@ -103,8 +118,50 @@ typedef struct {
     uint32_t want_flags;   /* EXO_PKG_WANT_* bitmask */
 
     uint32_t reserved[4]; /* must be zero; keeps the header growable without
-                            * bumping EXO_PKG_VERSION for every new field */
+                            * bumping EXO_PKG_VERSION for every new field --
+                            * which only holds because v1 pack/parse reject
+                            * a non-zero value (EXO_PKG_EINVAL), so a future
+                            * package that uses one cannot be mistaken for v1 */
 } exo_pkg_header_t;
+
+/* On-disk layout: 15 u32 fields (11 named + reserved[4]), no padding. Changing this is a format
+ * change and needs an EXO_PKG_VERSION bump. */
+_Static_assert(sizeof(exo_pkg_header_t) == 60,
+               "exo_pkg_header_t is an on-disk layout");
+
+/* Everything pack and parse both check about a header, in one place so the
+ * two cannot disagree on what a valid package is. Returns 0 or an
+ * EXO_PKG_E* code; says nothing about buffer lengths. */
+static inline int exo_pkg_check_header(const exo_pkg_header_t *hdr) {
+    if (hdr->magic != EXO_PKG_MAGIC)
+        return EXO_PKG_EMAGIC;
+    if (hdr->version != EXO_PKG_VERSION)
+        return EXO_PKG_EVERSION;
+
+    if (hdr->code_len > EXO_PKG_MAX_CODE_PAGES * EXO_PKG_PAGE_SIZE)
+        return EXO_PKG_ETOOBIG;
+    if ((uint64_t)hdr->data_len + (uint64_t)hdr->bss_len >
+        (uint64_t)EXO_PKG_MAX_DATA_PAGES * EXO_PKG_PAGE_SIZE)
+        return EXO_PKG_ETOOBIG;
+    if (hdr->stack_pages > EXO_PKG_MAX_STACK_PAGES)
+        return EXO_PKG_ETOOBIG;
+    if (hdr->params_len > hdr->data_len)
+        return EXO_PKG_ETOOBIG;
+
+    for (int i = 0; i < 4; i++)
+        if (hdr->reserved[i] != 0)
+            return EXO_PKG_EINVAL;
+    if (hdr->stack_pages < 1)
+        return EXO_PKG_EINVAL;
+    if (hdr->min_pages > hdr->recommended_pages)
+        return EXO_PKG_EINVAL;
+    if (hdr->sound_voices > EXO_PKG_MAX_SOUND_VOICES)
+        return EXO_PKG_EINVAL;
+    if (hdr->want_flags & ~EXO_PKG_WANT_ALL)
+        return EXO_PKG_EINVAL;
+
+    return 0;
+}
 
 /*
  * Validate `*hdr` and write header + `code_len` bytes of `code` +
@@ -112,6 +169,7 @@ typedef struct {
  * between sections.
  *
  * Rejects (before writing anything):
+ *   - EXO_PKG_EINVAL for a malformed manifest (see exo_pkg_check_header()).
  *   - EXO_PKG_EMAGIC / EXO_PKG_EVERSION if hdr->magic/version aren't what
  *     this header defines -- callers fill those two fields in themselves
  *     (same struct, not an implicit side effect of calling pack), so this
@@ -132,28 +190,19 @@ static inline int exo_pkg_pack(void *buf, size_t buf_cap,
                                const exo_pkg_header_t *hdr,
                                const void *code, const void *data,
                                size_t *out_len) {
-    if (hdr->magic != EXO_PKG_MAGIC)
-        return EXO_PKG_EMAGIC;
-    if (hdr->version != EXO_PKG_VERSION)
-        return EXO_PKG_EVERSION;
-
-    if (hdr->code_len > EXO_PKG_MAX_CODE_PAGES * EXO_PKG_PAGE_SIZE)
-        return EXO_PKG_ETOOBIG;
-    if ((uint64_t)hdr->data_len + (uint64_t)hdr->bss_len >
-        (uint64_t)EXO_PKG_MAX_DATA_PAGES * EXO_PKG_PAGE_SIZE)
-        return EXO_PKG_ETOOBIG;
-    if (hdr->stack_pages > EXO_PKG_MAX_STACK_PAGES)
-        return EXO_PKG_ETOOBIG;
-    if (hdr->params_len > hdr->data_len)
-        return EXO_PKG_ETOOBIG;
+    int rc = exo_pkg_check_header(hdr);
+    if (rc != 0)
+        return rc;
 
     size_t total = sizeof(*hdr) + (size_t)hdr->code_len + (size_t)hdr->data_len;
     if (buf_cap < total)
         return EXO_PKG_ESHORT;
 
     unsigned char *out = (unsigned char *)buf;
-    exo_pkg_header_t *out_hdr = (exo_pkg_header_t *)out;
-    *out_hdr = *hdr;
+    /* Byte copy, not a cast: buf may be an unaligned view of a disk read. */
+    const unsigned char *hsrc = (const unsigned char *)hdr;
+    for (size_t i = 0; i < sizeof(*hdr); i++)
+        out[i] = hsrc[i];
     out += sizeof(*hdr);
 
     if (hdr->code_len > 0) {
@@ -200,20 +249,9 @@ static inline int exo_pkg_parse(const void *buf, size_t buf_len,
     for (size_t i = 0; i < sizeof(hdr); i++)
         ((unsigned char *)&hdr)[i] = in[i];
 
-    if (hdr.magic != EXO_PKG_MAGIC)
-        return EXO_PKG_EMAGIC;
-    if (hdr.version != EXO_PKG_VERSION)
-        return EXO_PKG_EVERSION;
-
-    if (hdr.code_len > EXO_PKG_MAX_CODE_PAGES * EXO_PKG_PAGE_SIZE)
-        return EXO_PKG_ETOOBIG;
-    if ((uint64_t)hdr.data_len + (uint64_t)hdr.bss_len >
-        (uint64_t)EXO_PKG_MAX_DATA_PAGES * EXO_PKG_PAGE_SIZE)
-        return EXO_PKG_ETOOBIG;
-    if (hdr.stack_pages > EXO_PKG_MAX_STACK_PAGES)
-        return EXO_PKG_ETOOBIG;
-    if (hdr.params_len > hdr.data_len)
-        return EXO_PKG_ETOOBIG;
+    int rc = exo_pkg_check_header(&hdr);
+    if (rc != 0)
+        return rc;
 
     size_t total = sizeof(hdr) + (size_t)hdr.code_len + (size_t)hdr.data_len;
     if (buf_len < total)

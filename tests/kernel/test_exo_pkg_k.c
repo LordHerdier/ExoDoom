@@ -12,6 +12,7 @@
 #include "kunit.h"
 
 #include "exo_pkg.h"
+#include "pcm_mixer.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -288,6 +289,113 @@ static void test_parse_rejects_bad_version(void)
     CU_ASSERT_EQUAL(rc, EXO_PKG_EVERSION);
 }
 
+/* ---- manifest validation (pack and parse share exo_pkg_check_header) ---- */
+
+_Static_assert(EXO_PKG_MAX_SOUND_VOICES == PCM_MIXER_VOICES,
+               "exo_pkg.h voice cap out of sync with the mixer");
+
+/* Pack a good fixture, then let `corrupt` damage the header bytes in place,
+ * and return what parse says -- parse is the side a hostile or truncated
+ * disk image reaches, so each rejection is proven there. */
+static int parse_after(void (*corrupt)(exo_pkg_header_t *))
+{
+    exo_pkg_header_t hdr;
+    fill_fixture_header(&hdr);
+
+    unsigned char buf[sizeof(exo_pkg_header_t) + sizeof(fixture_code) +
+                       sizeof(fixture_data)];
+    size_t out_len = 0;
+    int rc = exo_pkg_pack(buf, sizeof(buf), &hdr, fixture_code, fixture_data,
+                          &out_len);
+    CU_ASSERT_EQUAL(rc, 0);
+
+    exo_pkg_header_t h;
+    for (size_t i = 0; i < sizeof(h); i++)
+        ((unsigned char *)&h)[i] = buf[i];
+    corrupt(&h);
+    for (size_t i = 0; i < sizeof(h); i++)
+        buf[i] = ((unsigned char *)&h)[i];
+
+    exo_pkg_header_t parsed;
+    const void *c = NULL, *d = NULL;
+    return exo_pkg_parse(buf, out_len, &parsed, &c, &d);
+}
+
+static void c_code_len(exo_pkg_header_t *h)
+{ h->code_len = EXO_PKG_MAX_CODE_PAGES * EXO_PKG_PAGE_SIZE + 1; }
+static void c_data_bss(exo_pkg_header_t *h)
+{ h->data_len = EXO_PKG_MAX_DATA_PAGES * EXO_PKG_PAGE_SIZE; h->bss_len = 1; }
+static void c_stack_over(exo_pkg_header_t *h)
+{ h->stack_pages = EXO_PKG_MAX_STACK_PAGES + 1; }
+static void c_params(exo_pkg_header_t *h)
+{ h->params_len = h->data_len + 1; }
+static void c_reserved(exo_pkg_header_t *h)
+{ h->reserved[3] = 1; }
+static void c_stack_zero(exo_pkg_header_t *h)
+{ h->stack_pages = 0; }
+static void c_min_over_rec(exo_pkg_header_t *h)
+{ h->min_pages = h->recommended_pages + 1; }
+static void c_voices(exo_pkg_header_t *h)
+{ h->sound_voices = EXO_PKG_MAX_SOUND_VOICES + 1; }
+static void c_flags(exo_pkg_header_t *h)
+{ h->want_flags |= 1u << 3; }
+static void c_noop(exo_pkg_header_t *h)
+{ (void)h; }
+
+static void test_parse_rejects_caps(void)
+{
+    CU_ASSERT_EQUAL(parse_after(c_code_len), EXO_PKG_ETOOBIG);
+    CU_ASSERT_EQUAL(parse_after(c_data_bss), EXO_PKG_ETOOBIG);
+    CU_ASSERT_EQUAL(parse_after(c_stack_over), EXO_PKG_ETOOBIG);
+    CU_ASSERT_EQUAL(parse_after(c_params), EXO_PKG_ETOOBIG);
+}
+
+static void test_parse_rejects_bad_manifest(void)
+{
+    CU_ASSERT_EQUAL(parse_after(c_noop), 0);
+    CU_ASSERT_EQUAL(parse_after(c_reserved), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_stack_zero), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_min_over_rec), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_voices), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_flags), EXO_PKG_EINVAL);
+}
+
+static void test_pack_rejects_bad_manifest(void)
+{
+    void (*bad[])(exo_pkg_header_t *) = {
+        c_reserved, c_stack_zero, c_min_over_rec, c_voices, c_flags,
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        exo_pkg_header_t hdr;
+        fill_fixture_header(&hdr);
+        bad[i](&hdr);
+        unsigned char buf[sizeof(exo_pkg_header_t) + sizeof(fixture_code) +
+                           sizeof(fixture_data)];
+        size_t out_len = 0;
+        CU_ASSERT_EQUAL(exo_pkg_pack(buf, sizeof(buf), &hdr, fixture_code,
+                                     fixture_data, &out_len),
+                        EXO_PKG_EINVAL);
+    }
+}
+
+static void test_pack_parse_unaligned_buffer(void)
+{
+    exo_pkg_header_t hdr;
+    fill_fixture_header(&hdr);
+
+    /* Odd offset: pack and parse must both work on an unaligned view. */
+    unsigned char raw[1 + sizeof(exo_pkg_header_t) + sizeof(fixture_code) +
+                       sizeof(fixture_data)];
+    size_t out_len = 0;
+    CU_ASSERT_EQUAL(exo_pkg_pack(raw + 1, sizeof(raw) - 1, &hdr, fixture_code,
+                                 fixture_data, &out_len), 0);
+
+    exo_pkg_header_t parsed;
+    const void *c = NULL, *d = NULL;
+    CU_ASSERT_EQUAL(exo_pkg_parse(raw + 1, out_len, &parsed, &c, &d), 0);
+    CU_ASSERT_EQUAL(parsed.recommended_pages, hdr.recommended_pages);
+}
+
 /* ---- registration -------------------------------------------------------
  */
 
@@ -322,4 +430,12 @@ void suite_exo_pkg_tests(CU_pSuite s)
                 test_parse_rejects_bad_magic);
     CU_add_test(s, "parse rejects a corrupted version",
                 test_parse_rejects_bad_version);
+    CU_add_test(s, "parse rejects code/data/stack/params over the caps",
+                test_parse_rejects_caps);
+    CU_add_test(s, "parse rejects a malformed manifest",
+                test_parse_rejects_bad_manifest);
+    CU_add_test(s, "pack rejects a malformed manifest",
+                test_pack_rejects_bad_manifest);
+    CU_add_test(s, "pack and parse work on an unaligned buffer",
+                test_pack_parse_unaligned_buffer);
 }
