@@ -61,14 +61,17 @@ static void test_numbers_match_spec(void)
     CU_ASSERT_EQUAL(EXO_SYS_SOUND_PCM_STOP, 29);
     CU_ASSERT_EQUAL(EXO_SYS_SOUND_PCM_PARAMS, 30);
     CU_ASSERT_EQUAL(EXO_SYS_DISK_STAT,     31);
+    CU_ASSERT_EQUAL(EXO_SYS_SOUND_STREAM_WRITE,  32);
+    CU_ASSERT_EQUAL(EXO_SYS_SOUND_STREAM_STOP,   33);
+    CU_ASSERT_EQUAL(EXO_SYS_SOUND_STREAM_VOLUME, 34);
 }
 
 /* The dispatcher will range-check against EXO_SYS_COUNT, so it has to stay one
- * past the last number — 32 as of exo_diskstat (SCRUM-202). */
+ * past the last number — 35 as of the sound stream (SCRUM-219). */
 static void test_count_is_one_past_last(void)
 {
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_DISK_STAT + 1);
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 32);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_SOUND_STREAM_VOLUME + 1);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 35);
 }
 
 /* Two syscalls sharing a number would route silently to the wrong handler. */
@@ -86,6 +89,8 @@ static void test_numbers_are_unique(void)
         EXO_SYS_DISK_READ,    EXO_SYS_DISK_WRITE,  EXO_SYS_DISK_ACQUIRE,
         EXO_SYS_DISK_RELEASE, EXO_SYS_SOUND_PCM,   EXO_SYS_SOUND_PCM_STOP,
         EXO_SYS_SOUND_PCM_PARAMS, EXO_SYS_DISK_STAT,
+        EXO_SYS_SOUND_STREAM_WRITE, EXO_SYS_SOUND_STREAM_STOP,
+        EXO_SYS_SOUND_STREAM_VOLUME,
     };
     /* 64-bit so the mask keeps working as the table grows; the assert makes
      * the ceiling explicit rather than letting the shift go undefined. */
@@ -272,6 +277,8 @@ static void *const volatile stub_addresses[] = {
     (void *)exo_disk_release,      (void *)exo_sound_pcm,
     (void *)exo_sound_pcm_stop,    (void *)exo_sound_pcm_params,
     (void *)exo_diskstat,
+    (void *)exo_sound_stream_write, (void *)exo_sound_stream_stop,
+    (void *)exo_sound_stream_volume,
 };
 
 static void test_every_syscall_has_a_stub(void)

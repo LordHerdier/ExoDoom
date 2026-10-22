@@ -47,6 +47,9 @@ int syscall_sound_suite_cleanup(void);
 void suite_syscall_sound_pcm_tests(CU_pSuite s);
 int syscall_sound_pcm_suite_init(void);
 int syscall_sound_pcm_suite_cleanup(void);
+void suite_syscall_sound_stream_tests(CU_pSuite s);
+int syscall_sound_stream_suite_init(void);
+int syscall_sound_stream_suite_cleanup(void);
 void suite_syscall_pit_tests(CU_pSuite s);
 void suite_doomgeneric_timer_tests(CU_pSuite s);
 void suite_libos_main_tests(CU_pSuite s);
@@ -644,6 +647,12 @@ int run_tests(void)
     s = CU_add_suite("syscall_sound_pcm", syscall_sound_pcm_suite_init,
                      syscall_sound_pcm_suite_cleanup);
     suite_syscall_sound_pcm_tests(s);
+
+    /* exo_sound_stream_* (SCRUM-219): the bound music stream, over the
+     * mixer's music voice (SCRUM-218). */
+    s = CU_add_suite("syscall_sound_stream", syscall_sound_stream_suite_init,
+                     syscall_sound_stream_suite_cleanup);
+    suite_syscall_sound_stream_tests(s);
 
     /* And what Doom itself plays through all of that: the sound module's PCM
      * leg, decoding DSSHOTGN out of the mounted WAD and checking the samples

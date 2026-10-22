@@ -404,8 +404,11 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 29 | `exo_sound_pcm_stop(handle)` | Sound | ✅ | Stop the voice `handle` names. Returns `0`, including for a handle whose sound has already finished or been taken over by a more important one — there is then nothing left to stop and no error to report — `-EXO_EPERM` if that voice is playing another context's sound, or `-EXO_EINVAL` for a negative handle, which #28 never issues. Also frees that voice's staging pages. `exo_exit` stops the exiting context's voices the same way (`syscall_sound_release()`). Implemented in SCRUM-213. |
 | 30 | `exo_sound_pcm_params(handle, vol, sep)` | Sound | ✅ | Re-place the voice `handle` names: recompute its gains from `vol` (0–127) and `sep` (0–255, 128 centred) through the same panning law #28 applies, and change nothing else — not its priority, not how far through its sample it is. It exists because Doom retunes *live* sounds: `I_UpdateSoundParams` runs once a tic for every active channel (`s_sound.c`'s `S_UpdateSounds`), so a sound fired to the player's left has to follow them as they turn, and a mixer that could only place a voice at the moment it started would freeze every effect at the geometry it was fired in. Returns `0`, **including for a handle whose sound has already finished or been taken over** — Doom retunes channels a tic before it notices one has ended, so that is the ordinary case rather than a caller error, and it is the same reason #29 answers `0` there — `-EXO_EPERM` if that voice is playing another context's sound (left untouched, §3.5b), or `-EXO_EINVAL` for a negative handle, which #28 never issues. `vol`/`sep` are deliberately **not** range-checked: `pcm_mixer_set_params()` clamps both to Doom's ranges exactly as `pcm_mixer_start()` does, so a retune cannot answer `-EXO_EINVAL` for numbers #28 accepted. Implemented in SCRUM-214 (`src/syscall_sound.c`, `pcm_mixer_set_params()` in `src/pcm_mixer.c`). |
 | 31 | `exo_diskstat(out)` | Storage | ✅ | Unscoped introspection, same family as #22/#23: whether the one ATA drive this kernel ever speaks to (`src/ata.c`) answered at boot, and its total 28-bit LBA sector count. No ownership check (no `exo_disk_acquire` needed first) and no hardware touch — both fields are state `ata_init()` already latched at boot, exposed through `disk_binding_present()` and the new `ata_get_sector_count()` accessor. `*out` is `{uint8_t present; uint8_t reserved[3]; uint32_t total_sectors;}` (8 bytes); `total_sectors` is `0` when `!present`. Returns `0`, or `-EXO_EFAULT` if `[out, out + sizeof(exo_diskstat_t))` is not entirely inside the LibOS window and mapped writable (same check #22/#23 use). Invoked by the shell's `disk` command, and (via `exofs_region_sectors()`, `src/libos_fs/exofs.h`, SCRUM-203) by `mkfs` to size the shell's scratch ExoFS volume from the drive's real capacity instead of a hardcoded constant. Implemented in SCRUM-202 (`src/syscall_disk.c`, `src/ata.c`). |
+| 32 | `exo_sound_stream_write(buf, frames)` | Sound | ✅ | Queue up to `frames` interleaved **16-bit stereo** frames (4 bytes each, already at the mixer's 48 kHz) from `buf` onto the music stream, and return at once. The first successful call **binds** the stream to the caller (§3.5b): it takes `PCM_MIXER_MUSIC_PAGES` (12) contiguous kernel pages for the ring and attaches them to the mixer's music voice (`pcm_mixer_music_open()`, SCRUM-218). The frames are copied into that ring inside the syscall. It **never blocks** — a syscall body runs with IF clear — so a ring short of room takes fewer frames than offered and a full one takes none; that is a result, not an error. The non-negative result packs two counts: the **low 32 bits are the frames accepted** (0..`frames`), the **high 32 bits the frames of room left after this write**, so a refill costs one ring transition rather than two (`exo_sound_stream_accepted()`/`_space()` in `src/exo_syscall.h` decode it). Errors are negative: `-EXO_EINVAL` (`frames` 0 or over `SOUND_STREAM_MAX_FRAMES` = 12288, the ring size, `src/syscall_sound.h`), `-EXO_ENODEV` (no HDA controller, or the output stream refused to start), `-EXO_EFAULT` (`[buf, buf+frames*4)` not entirely inside the LibOS window **and mapped**), `-EXO_EBUSY` (another context holds the stream), `-EXO_ENOMEM` (no contiguous run for the ring; binding call only). Validation order is shape → device → buffer → holder. Implemented in SCRUM-219 (`src/syscall_sound.c`). |
+| 33 | `exo_sound_stream_stop()` | Sound | ✅ | Drop everything buffered, detach the ring from the mixer **then** free its pages, and release the binding so another context may bind. Returns `0`, also when nothing is held; `-EXO_EPERM` if another context holds the stream (left playing). `exo_exit` does this implicitly through `syscall_sound_release()`. Implemented in SCRUM-219. |
+| 34 | `exo_sound_stream_volume(vol)` | Sound | ✅ | Set the music voice's level, `vol` 0–127 (clamped by `pcm_mixer_music_set_volume()`; the sfx voices are unaffected). **Unowned:** any context may call it, with or without the stream bound, and the level persists across bind/release — Doom's `I_SetMusicVolume` runs before the first song exists, so requiring the stream would make the slider unusable until music started. Always returns `0`. Implemented in SCRUM-219. |
 
-**Total: 31 syscalls.** This is the complete interface needed to run Doom with
+**Total: 35 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking, plus the single
 argument-based LibOS-launch syscall (#21) that backs the shell's interactive
 demo commands, the two introspection syscalls (#22/#23) that back its
@@ -1314,6 +1317,26 @@ A page belonging to the kernel or to another context is still refused.
   Terminating a faulting LibOS and reclaiming its resources instead still
   needs building, now that SCRUM-47/48 supply the address space and launch
   mechanism it would act on.
+
+### 3.5c Music stream: bound, not shared (SCRUM-219)
+
+§3.5b made sound *shared* because the sfx mixer already carries an admission
+policy over eight voices. The music voice (SCRUM-218) has no such policy and
+there is exactly one of it, so #32–#34 take the other branch: **the stream is
+bound to its first writer**, `-EXO_EBUSY` to everyone else, like the
+framebuffer — but with no separate `acquire` call, since the first
+`exo_sound_stream_write` is the bind. A Doom instance that dies mid-song must
+not leave the soundtrack playing over whatever runs next (SCRUM-196 made a
+second instance reachable), so `exo_exit` → `syscall_sound_release()` closes
+the voice and frees the ring.
+
+Ring pages are the syscall layer's, not the mixer's (`src/pcm_mixer.h`: the
+mixer allocates nothing): taken with `alloc_pages_contig_owned()` at bind,
+returned at stop/exit — always **after** `pcm_mixer_music_close()`, because
+the ring is read from `hda_irq_handler()`. Frames are copied in the syscall
+for the reasons §3.5b gives; the per-call cap (the ring size, 48 KiB) keeps
+the memcpy under IF-clear far below one PIT tick. Volume is deliberately the
+one unowned leg (#34).
 
 ### 3.8 Syscall round-trip benchmarks (SCRUM-60)
 
