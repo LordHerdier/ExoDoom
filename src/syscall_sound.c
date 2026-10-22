@@ -5,6 +5,7 @@
 #include "pcm_mixer.h"
 #include "doom_dmx.h"
 #include "hda.h"
+#include "pit.h"
 #include "page_alloc.h"
 #include "vmm.h"
 #include "string.h"
@@ -427,6 +428,8 @@ static int64_t sys_sound_stream_write(uint64_t buf, uint64_t frames,
 
     if (!hda_present())
         return -EXO_ENODEV;
+
+    hda_pcm_prof_report(kernel_get_ticks_ms());
 
     uint64_t bytes = frames * PCM_MIXER_CHANNELS * sizeof(int16_t);
     if (!exo_range_in_user_window(buf, bytes) ||

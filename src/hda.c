@@ -664,6 +664,161 @@ static int irq_init(void)
  * Runs inside hda_irq_handler() with IF clear, so pcm_mixer_render() sees a
  * stable voice table without taking a lock of its own.
  */
+/* ── Refill cadence profile ─────────────────────────────────────────────
+ *
+ * The music song clock counts frames rendered, so the tempo the listener hears
+ * is exactly the rate the controller consumes the stream.  This records, per
+ * window, the TSC interval between refill interrupts (nominal 21.3 ms), how
+ * many entries one interrupt had to catch up, and the effective frame rate
+ * against the PIT millisecond clock.  Written with IF clear in the IRQ,
+ * printed from hda_pcm_prof_report() in syscall context -- never from the
+ * handler, where a serial write would itself delay the next refill. */
+#define PCM_PROF_SAMPLES 512u
+#define PCM_PROF_WINDOW_MS 10000u
+
+static struct {
+    uint32_t dt[PCM_PROF_SAMPLES];   /* TSC cycles between refill IRQs */
+    uint32_t n;                      /* samples recorded (<= PCM_PROF_SAMPLES) */
+    uint32_t irqs;
+    uint32_t catchup_max;            /* most entries one IRQ refilled */
+    uint32_t multi;                  /* IRQs that refilled more than one */
+    uint32_t start_ms, start_refills;
+    uint64_t start_tsc, last_tsc;
+    uint32_t start_underruns;
+    int      have_last;
+    int      open;
+} g_prof;
+
+static inline uint64_t prof_tsc(void)
+{
+    uint32_t lo, hi;
+
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/* Start a window at `now_ms` with every baseline taken at the same instant
+ * (call with IF clear), so the rate is not skewed by their skew.  A stream
+ * start has no clock to hand: open=0 defers the baseline to the first report
+ * call. */
+static void pcm_prof_reset(uint32_t now_ms, int open)
+{
+    g_prof.n = g_prof.irqs = g_prof.catchup_max = g_prof.multi = 0;
+    g_prof.start_refills   = g_pcm_refills;
+    g_prof.start_underruns = g_pcm_underruns;
+    g_prof.start_tsc       = prof_tsc();
+    g_prof.start_ms        = now_ms;
+    g_prof.open            = open;
+}
+
+static void pcm_prof_irq(uint32_t refilled)
+{
+    uint64_t now = prof_tsc();
+
+    if (g_prof.have_last && g_prof.n < PCM_PROF_SAMPLES)
+        g_prof.dt[g_prof.n++] = (uint32_t)(now - g_prof.last_tsc);
+    g_prof.last_tsc  = now;
+    g_prof.have_last = 1;
+    g_prof.irqs++;
+    if (refilled > g_prof.catchup_max)
+        g_prof.catchup_max = refilled;
+    if (refilled > 1)
+        g_prof.multi++;
+}
+
+static uint32_t isqrt64(uint64_t v)
+{
+    uint64_t r = 0, bit = 1ull << 62;
+
+    while (bit > v)
+        bit >>= 2;
+    while (bit) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (uint32_t)r;
+}
+
+void hda_pcm_prof_report(uint32_t now_ms)
+{
+    if (!g_streaming)
+        return;
+    if (!g_prof.open) {
+        uint64_t f = irq_save();
+
+        pcm_prof_reset(now_ms, 1);
+        irq_restore(f);
+        return;
+    }
+    uint32_t span_ms = now_ms - g_prof.start_ms;
+
+    if (span_ms < PCM_PROF_WINDOW_MS)
+        return;
+
+    uint64_t flags = irq_save();
+    uint64_t span_cyc = prof_tsc() - g_prof.start_tsc;
+    uint32_t n = g_prof.n, irqs = g_prof.irqs, catchup = g_prof.catchup_max;
+    uint32_t multi = g_prof.multi;
+    uint32_t refills = g_pcm_refills - g_prof.start_refills;
+    uint32_t under = g_pcm_underruns - g_prof.start_underruns;
+    uint32_t dt_min = 0xFFFFFFFFu, dt_max = 0;
+    uint64_t sum = 0, sq = 0;
+
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t d = g_prof.dt[i];
+
+        sum += d;
+        if (d < dt_min) dt_min = d;
+        if (d > dt_max) dt_max = d;
+    }
+    uint32_t mean = n ? (uint32_t)(sum / n) : 0;
+
+    for (uint32_t i = 0; i < n; i++) {
+        int64_t e = (int64_t)g_prof.dt[i] - (int64_t)mean;
+
+        sq += (uint64_t)(e * e);
+    }
+    pcm_prof_reset(now_ms, 1);
+    irq_restore(flags);
+
+    if (n == 0 || span_cyc == 0)
+        return;
+
+    /* cycles -> us, from the same window's PIT time. */
+    uint64_t cyc_per_ms = span_cyc / span_ms;
+    uint32_t us = (uint32_t)(cyc_per_ms ? cyc_per_ms : 1);   /* cycles per ms; x1000/us -> us */
+    uint32_t sd = isqrt64(sq / n);
+
+    serial_print("HDAPROF irq: n=");
+    serial_print_dec(irqs);
+    serial_print(" dt min/avg/max=");
+    serial_print_dec((uint32_t)((uint64_t)dt_min * 1000 / us));
+    serial_print("/");
+    serial_print_dec((uint32_t)((uint64_t)mean * 1000 / us));
+    serial_print("/");
+    serial_print_dec((uint32_t)((uint64_t)dt_max * 1000 / us));
+    serial_print(" us  sd=");
+    serial_print_dec((uint32_t)((uint64_t)sd * 1000 / us));
+    serial_print(" us  catchup max=");
+    serial_print_dec(catchup);
+    serial_print(" multi=");
+    serial_print_dec(multi);
+    serial_print(" fifoe=");
+    serial_print_dec(under);
+    serial_print("\nHDAPROF rate: ");
+    serial_print_dec((uint32_t)((uint64_t)refills * HDA_PCM_ENTRY_FRAMES * 1000 / span_ms));
+    serial_print(" Hz over ");
+    serial_print_dec(span_ms);
+    serial_print(" ms (nominal 48000)  tsc=");
+    serial_print_dec((uint32_t)(cyc_per_ms));
+    serial_print(" cyc/ms\n");
+}
+
 static void pcm_refill(void)
 {
     uint32_t lpib    = mmio_r32(sd(HDA_SD_LPIB));
@@ -716,7 +871,10 @@ void hda_irq_handler(void)
                      */
                     g_pcm_underruns++;
                 }
+                uint32_t before = g_pcm_refills;
+
                 pcm_refill();
+                pcm_prof_irq(g_pcm_refills - before);
             }
         }
         /* A call with our bit clear is somebody else's shared interrupt.
@@ -908,6 +1066,8 @@ int hda_pcm_start(void)
      * written even on the first loop.
      */
     g_pcm_write = 0;
+    g_prof.have_last = 0;
+    pcm_prof_reset(0, 0);
 
     mmio_w32(sd(HDA_SD_CTL),
              ((uint32_t)HDA_STREAM_TAG << HDA_SDCTL_TAG_SHIFT)
