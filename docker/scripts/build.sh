@@ -561,6 +561,7 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/doom_sound.c src/doom_sfx_tone.c \
   src/doom_sound_pcm.c src/doom_dmx.c \
   src/libos_doom/doom_midi.c src/libos_doom/doom_genmidi.c \
+  src/libos_doom/doom_opl.c src/nuked_opl3/opl3.c \
   src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c \
   src/doom/*.c
 
@@ -774,8 +775,15 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # for the same reason (its only consumer is the OPL3 synth in libos_doom),
   # and tests/kernel/test_doom_genmidi_k.c runs it from ring 0.  It needs no
   # shim -- it allocates nothing.
+  #
+  # So does the synth that consumes both (SCRUM-217): the MIDI-to-OPL driver
+  # and the vendored Nuked-OPL3 core it drives, for
+  # tests/kernel/test_doom_opl_k.c.  Both are integer-only, which is why the
+  # ticket chose Nuked over DOSBox's double-based OPL, and both compile clean
+  # under these -mno-sse CFLAGS with -Wextra; neither allocates.
   for f in src/doom/memio.c src/doom/mus2mid.c src/libos_doom/doom_midi.c \
-           src/libos_doom/doom_genmidi.c; do
+           src/libos_doom/doom_genmidi.c src/libos_doom/doom_opl.c \
+           src/nuked_opl3/opl3.c; do
     echo "    CC $(basename "$f") (music conversion)"
     x86_64-elf-gcc -c "$f" -o "build/doom_mus_$(basename "${f%.c}").o" \
       "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL

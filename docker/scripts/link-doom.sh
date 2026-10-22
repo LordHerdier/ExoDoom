@@ -89,6 +89,9 @@ SHIM_SOURCES=(
   src/libos_doom/doom_midi.c
   # SCRUM-216's GENMIDI instrument decoder, for the OPL3 synth.
   src/libos_doom/doom_genmidi.c
+  # SCRUM-217's OPL3 synth: the MIDI-to-OPL driver and vendored Nuked-OPL3.
+  src/libos_doom/doom_opl.c
+  src/nuked_opl3/opl3.c
   src/libos_heap.c
   src/libos_page_alloc.c
   src/libos_fb.c

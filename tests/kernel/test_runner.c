@@ -92,6 +92,7 @@ void suite_hda_tests(CU_pSuite s);
 void suite_doom_dmx_tests(CU_pSuite s);
 void suite_doom_midi_tests(CU_pSuite s);
 void suite_doom_genmidi_tests(CU_pSuite s);
+void suite_doom_opl_tests(CU_pSuite s);
 void suite_pcm_mixer_tests(CU_pSuite s);
 void suite_pcm_mixer_music_tests(CU_pSuite s);
 void suite_hda_pcm_tests(CU_pSuite s);
@@ -122,6 +123,8 @@ int suite_doom_midi_cleanup(void);
 /* Mounts the freedoom2 module for the real GENMIDI tests (SCRUM-216). */
 int suite_doom_genmidi_init(void);
 int suite_doom_genmidi_cleanup(void);
+int suite_doom_opl_init(void);
+int suite_doom_opl_cleanup(void);
 
 /* Voices are process-global state; a voice left sounding by one test would
  * mix into the next one's assertions (SCRUM-212). */
@@ -603,6 +606,13 @@ int run_tests(void)
      * which the OPL3 synthesizer will program voices from (SCRUM-216). */
     s = CU_add_suite("doom_genmidi", suite_doom_genmidi_init, suite_doom_genmidi_cleanup);
     suite_doom_genmidi_tests(s);
+
+    /* Where those events and instruments meet: the MIDI-to-OPL voice
+     * allocator over the vendored Nuked-OPL3 core, rendering 48 kHz stereo
+     * for the mixer's music voice, plus the epic's render-cost number on
+     * serial (SCRUM-217). */
+    s = CU_add_suite("doom_opl", suite_doom_opl_init, suite_doom_opl_cleanup);
+    suite_doom_opl_tests(s);
 
     /* What joins those two ends: N voices resampled, summed and clipped into
      * one stereo stream.  Hardware-free by construction -- src/pcm_mixer.c
