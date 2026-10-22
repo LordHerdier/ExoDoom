@@ -38,6 +38,7 @@ static uint32_t g_pend_n;
 static int      g_playing;
 static int      g_paused;
 static int      g_dead;           /* a stream error latched music off */
+static int      g_failed;         /* the song reader errored: this song is over */
 static int      g_bound;          /* a write has bound the stream */
 static int      g_synth_ok;       /* g_opl has been initialised   */
 static uint64_t g_frames;         /* frames rendered since PlaySong */
@@ -109,7 +110,7 @@ static void render_step(int16_t *dst, uint32_t n)
 {
     doom_midi_event_t ev[EVENT_BATCH];
 
-    if (g_playing && !doom_midi_finished(&g_song)) {
+    if (g_playing && !g_failed && !doom_midi_finished(&g_song)) {
         uint64_t target = g_frames * 1000u / OUT_HZ;
         uint32_t elapsed = (uint32_t)(target - g_song_ms);
         int k;
@@ -122,7 +123,9 @@ static void render_step(int16_t *dst, uint32_t n)
                 doom_opl_event(&g_opl, &ev[i]);
         } while (k == (int)EVENT_BATCH);
 
-        if (k < 0 || doom_midi_finished(&g_song))
+        if (k < 0)
+            g_failed = 1;   /* a song that opened should not get here; end it */
+        if (g_failed || doom_midi_finished(&g_song))
             doom_opl_all_notes_off(&g_opl);   /* let the releases ring out */
     }
 
@@ -136,8 +139,12 @@ static int submit(uint32_t now_ms)
     int64_t rc = hw_write(g_buf + g_pend_off * 2, g_pend_n);
 
     if (rc < 0) {
+        /* Latched off for the run, and this song with it: MusicIsPlaying() must
+         * not keep answering yes for audio that can never come out. */
         g_dead = 1;
         g_pend_n = 0;
+        g_playing = 0;
+        doom_opl_all_notes_off(&g_opl);
         return 0;
     }
     uint32_t taken = (uint32_t)((uint64_t)rc & 0xFFFFFFFFu);
@@ -200,6 +207,7 @@ void doom_music_play(void *handle, int looping, uint32_t now_ms)
     doom_midi_set_looping(&g_song, looping);
     g_frames   = 0;
     g_song_ms  = 0;
+    g_failed   = 0;
     g_pend_off = g_pend_n = 0;
     g_space    = DOOM_MUSIC_RING_FRAMES;
     g_space_ms = now_ms;
@@ -290,7 +298,7 @@ void doom_music_poll(uint32_t now_ms)
         want -= n;
 
         /* Song over and not looping: the tail is queued, so we are done. */
-        if (doom_midi_finished(&g_song))
+        if (g_failed || doom_midi_finished(&g_song))
             g_playing = 0;
     }
 }
