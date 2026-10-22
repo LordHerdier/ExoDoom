@@ -62,12 +62,24 @@ const struct acpi_rsdp *acpi_rsdp_validate(const void *p, size_t avail)
     return r;
 }
 
+/* Can a table header at physical address `a` be read at all? Only the boot
+ * identity map (the first 4 GiB) is live while acpi_init() runs, so the whole
+ * header, not just its first byte, has to fit below 4 GiB. */
+static bool header_in_reach(uint64_t a)
+{
+    return a != 0 && a + sizeof(struct acpi_sdt_header) <= ACPI_4GIB;
+}
+
 /* Header sanity shared by the root table and every table it lists: length in
- * bounds and checksum good. Does not look at the signature. */
+ * bounds, the whole table below 4 GiB, and checksum good. Does not look at the
+ * signature. The caller has already established header_in_reach(). */
 static bool sdt_sane(const struct acpi_sdt_header *h)
 {
     uint32_t len = h->length;
     if (len < sizeof(struct acpi_sdt_header) || len > ACPI_MAX_TABLE_LEN) {
+        return false;
+    }
+    if ((uint64_t)(uintptr_t)h + len > ACPI_4GIB) {
         return false;
     }
     return acpi_checksum_ok(h, len);
@@ -114,7 +126,7 @@ int acpi_root_entries(const struct acpi_sdt_header *root, bool is_xsdt,
     int written = 0;
     for (int i = 0; i < n && written < max; i++) {
         uint64_t a = root_entry(root, is_xsdt, i);
-        if (a == 0 || a >= ACPI_4GIB) {
+        if (!header_in_reach(a)) {
             continue;
         }
         out[written++] = a;
@@ -128,7 +140,7 @@ const struct acpi_sdt_header *acpi_root_find(const struct acpi_sdt_header *root,
     int n = root_count(root, is_xsdt);
     for (int i = 0; i < n; i++) {
         uint64_t a = root_entry(root, is_xsdt, i);
-        if (a == 0 || a >= ACPI_4GIB) {
+        if (!header_in_reach(a)) {
             continue;
         }
         const struct acpi_sdt_header *h =
@@ -166,7 +178,9 @@ int acpi_fadt_extract(const struct acpi_sdt_header *fadt,
         out->century_reg = acpi_century_reg_plausible(c) ? c : 0;
     }
     out->iapc_boot_arch = 0;
-    if (len >= ACPI_FADT_IAPC_OFF + 2u) {
+    /* IAPC_BOOT_ARCH exists from FADT revision 3 (ACPI 2.0); before that the
+     * bytes are reserved and may not be zero. */
+    if (fadt->revision >= 3 && len >= ACPI_FADT_IAPC_OFF + 2u) {
         uint16_t v;
         memcpy(&v, b + ACPI_FADT_IAPC_OFF, 2);
         out->iapc_boot_arch = v;
@@ -215,11 +229,13 @@ static const struct acpi_rsdp *find_rsdp(const struct mb2_info *mb)
     return NULL;
 }
 
-/* Try one root table: it must validate and contain a usable FADT. On success
- * fills the directory and the FADT copy. */
+/* Try one root table: it must validate and contain a usable FADT. Everything
+ * is built in locals and committed to the statics only once every step has
+ * succeeded, so a failed attempt (and the XSDT-then-RSDT fallback) never leaves
+ * half-built state behind. */
 static int try_root(uint64_t addr, bool is_xsdt)
 {
-    if (addr == 0 || addr >= ACPI_4GIB) {
+    if (!header_in_reach(addr)) {
         return -EINVAL;
     }
     const struct acpi_sdt_header *root =
@@ -237,21 +253,31 @@ static int try_root(uint64_t addr, bool is_xsdt)
         return -EINVAL;
     }
 
-    memcpy(g_fadt_copy, fadt, fadt->length);
-    g_info = info;
-    g_have_fadt = true;
-
     uint64_t addrs[ACPI_DIR_MAX];
+    char dir[ACPI_DIR_MAX][ACPI_SIG_LEN];
+    int dir_n = 0;
     int n = acpi_root_entries(root, is_xsdt, addrs, ACPI_DIR_MAX);
-    g_dir_n = 0;
     for (int i = 0; i < n; i++) {
         const struct acpi_sdt_header *h =
             (const struct acpi_sdt_header *)(uintptr_t)addrs[i];
         if (!sdt_sane(h)) {
+            /* Not silent: a table dropped here is indistinguishable from an
+             * absent one to acpi_table_listed(). */
+            serial_print("ACPI: skipping table '");
+            for (int c = 0; c < ACPI_SIG_LEN; c++) {
+                serial_putc(h->signature[c]);
+            }
+            serial_print("' (bad length or checksum)\n");
             continue;
         }
-        memcpy(g_dir[g_dir_n++], h->signature, ACPI_SIG_LEN);
+        memcpy(dir[dir_n++], h->signature, ACPI_SIG_LEN);
     }
+
+    memcpy(g_fadt_copy, fadt, fadt->length);
+    g_info = info;
+    memcpy(g_dir, dir, sizeof(dir));
+    g_dir_n = dir_n;
+    g_have_fadt = true;
     return 0;
 }
 

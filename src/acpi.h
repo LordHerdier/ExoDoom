@@ -49,7 +49,7 @@ struct acpi_rsdp {
 
 #define ACPI_RSDP_V1_SIZE   20
 #define ACPI_FADT_CENTURY_OFF    108   /* 1 byte                             */
-#define ACPI_FADT_IAPC_OFF       109   /* 2 bytes (ACPI 2.0+)                */
+#define ACPI_FADT_IAPC_OFF       109   /* 2 bytes (FADT revision >= 3)       */
 #define ACPI_IAPC_NO_CMOS_RTC    (1u << 5)
 
 struct acpi_fadt_info {
@@ -79,6 +79,7 @@ const struct acpi_sdt_header *acpi_root_find(const struct acpi_sdt_header *root,
                                              bool is_xsdt, const char sig[4]);
 
 /* Reads Century and IAPC_BOOT_ARCH out of a FADT, honouring header.length.
+ * IAPC_BOOT_ARCH is only read from FADT revision >= 3 (reserved before that).
  * Returns 0, or -EINVAL when `fadt` is not a valid-looking "FACP". */
 int acpi_fadt_extract(const struct acpi_sdt_header *fadt,
                       struct acpi_fadt_info *out);

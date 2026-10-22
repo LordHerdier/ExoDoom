@@ -42,18 +42,22 @@ tables.
    FADT; otherwise the RSDT. A broken XSDT falls back rather than failing.
    Entry count is `(length − 36) / 8` (XSDT) or `/ 4` (RSDT); length is bounded
    to `[36, 1 MiB]`. XSDT entries are read with `memcpy` (4-byte aligned only).
-   Entries at or above 4 GiB are skipped.
+   An entry is skipped unless its whole header fits below 4 GiB, and a table is
+   rejected unless its whole `length` does. A skipped table is logged on serial.
+   State is built in locals and committed only on success.
 4. **FADT** (`"FACP"`): Century at offset 108, `IAPC_BOOT_ARCH` (16-bit) at 109.
-   `header.length` is checked before each read (Century needs ≥ 109, IAPC ≥ 111);
-   an absent field reads 0. A Century outside `[0x0E, 0x80)` is reported as 0.
+   `header.length` is checked before each read (Century needs ≥ 109, IAPC ≥ 111),
+   and IAPC is only read from FADT revision ≥ 3 (reserved before that); an
+   absent field reads 0. A Century outside `[0x0E, 0x80)` is reported as 0.
 
 ## 4. Ordering: before `vmm_init`
 
 `vmm_init` replaces the boot map's 4 GB identity map with tables that cover only
 low memory, the kernel image, usable RAM and the framebuffer. Firmware tables
 live in ACPI-reclaimable/reserved memory, which is **not** mapped afterwards, so
-reading one after `vmm_init` page-faults. `acpi_init()` runs right after
-`memory_init()` — it needs only serial — and copies the FADT (≤ 320 bytes) and a
+reading one after `vmm_init` page-faults. `acpi_init()` runs after `idt_init()`/`tss_init()` (so a fault while walking
+firmware pointers gets a serial diagnostic) and before `page_alloc_init` — it
+needs only serial — and copies the FADT (≤ 320 bytes) and a
 directory of up to 32 table signatures into statics. No function here touches
 firmware memory after `acpi_init` returns. It sits ahead of the `TESTING`
 branch so the live tests can read the cached state. `page_alloc` hands out only

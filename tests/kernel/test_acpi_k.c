@@ -57,6 +57,7 @@ static void set_len(uint8_t *b, uint32_t len)
 static void mk_fadt(uint32_t len, uint8_t century, uint16_t iapc)
 {
     mk_sdt(fadt_buf, "FACP", len);
+    fadt_buf[8] = 5;                    /* IAPC_BOOT_ARCH needs revision >= 3 */
     if (len > ACPI_FADT_CENTURY_OFF) {
         fadt_buf[ACPI_FADT_CENTURY_OFF] = century;
     }
@@ -200,6 +201,15 @@ static void test_xsdt_entry_above_4gib_skipped(void)
     CU_ASSERT_EQUAL(n, 2);
 }
 
+/* The header must fit below 4 GiB, not merely start there. */
+static void test_xsdt_entry_straddling_4gib_skipped(void)
+{
+    uint64_t out[8];
+    mk_xsdt(0xFFFFFFF0ULL);
+    int n = acpi_root_entries((const struct acpi_sdt_header *)xsdt_buf, true, out, 8);
+    CU_ASSERT_EQUAL(n, 2);
+}
+
 static void test_root_max_caps_output(void)
 {
     uint64_t out[1];
@@ -236,7 +246,11 @@ static void test_root_oversize_length_rejected(void)
 {
     uint64_t out[8];
     mk_rsdt();
-    set_len(rsdt_buf, ACPI_MAX_TABLE_LEN + 1);   /* checksum over <len> would overrun; the cap must stop it first */
+    /* Poke the length field only: set_len() would run fix_csum over ~1 MiB of
+     * this 48-byte buffer. The parser's own cap must reject it before it ever
+     * sums that many bytes. */
+    uint32_t huge = ACPI_MAX_TABLE_LEN + 1;
+    memcpy(rsdt_buf + 4, &huge, 4);
     CU_ASSERT_EQUAL(
         acpi_root_entries((const struct acpi_sdt_header *)rsdt_buf, false, out, 8),
         -EINVAL);
@@ -271,6 +285,16 @@ static void test_fadt_full_length(void)
     CU_ASSERT_EQUAL(acpi_fadt_extract((const struct acpi_sdt_header *)fadt_buf, &info), 0);
     CU_ASSERT_EQUAL(info.century_reg, 0x32);
     CU_ASSERT_EQUAL(info.iapc_boot_arch, ACPI_IAPC_NO_CMOS_RTC);
+}
+
+static void test_fadt_old_revision_ignores_iapc(void)
+{
+    struct acpi_fadt_info info;
+    mk_fadt(FADT_LEN, 0x32, ACPI_IAPC_NO_CMOS_RTC);
+    fadt_buf[8] = 1;                     /* revision 1: bytes 109-110 reserved */
+    CU_ASSERT_EQUAL(acpi_fadt_extract((const struct acpi_sdt_header *)fadt_buf, &info), 0);
+    CU_ASSERT_EQUAL(info.century_reg, 0x32);
+    CU_ASSERT_EQUAL(info.iapc_boot_arch, 0);
 }
 
 static void test_fadt_truncated_before_iapc(void)
@@ -365,6 +389,7 @@ void suite_acpi_tests(CU_pSuite s)
     CU_add_test(s, "rsdt entries and find", test_rsdt_entries_and_find);
     CU_add_test(s, "xsdt entries and find", test_xsdt_entries_and_find);
     CU_add_test(s, "xsdt entry above 4GiB skipped", test_xsdt_entry_above_4gib_skipped);
+    CU_add_test(s, "xsdt entry straddling 4GiB skipped", test_xsdt_entry_straddling_4gib_skipped);
     CU_add_test(s, "root max caps output", test_root_max_caps_output);
     CU_add_test(s, "root wrong signature for kind", test_root_wrong_signature_for_kind);
     CU_add_test(s, "xsdt bad checksum rejected, rsdt still good",
@@ -374,6 +399,7 @@ void suite_acpi_tests(CU_pSuite s)
     CU_add_test(s, "listed table with bad checksum not found",
                 test_listed_table_with_bad_checksum_not_found);
     CU_add_test(s, "fadt full length", test_fadt_full_length);
+    CU_add_test(s, "fadt old revision ignores iapc", test_fadt_old_revision_ignores_iapc);
     CU_add_test(s, "fadt truncated before iapc", test_fadt_truncated_before_iapc);
     CU_add_test(s, "fadt truncated before century", test_fadt_truncated_before_century);
     CU_add_test(s, "fadt wrong signature", test_fadt_wrong_signature);

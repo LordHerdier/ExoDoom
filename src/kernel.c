@@ -211,16 +211,6 @@ void kernel_main(void *mb2_info_ptr) {
     // ── Memory subsystem ────────────────────────────────────────────────
     memory_init();
 
-    // ── ACPI tables (SCRUM-250) ─────────────────────────────────────────
-    // Must precede vmm_init(): the kernel map below does not map the
-    // ACPI-reclaimable/reserved memory the firmware tables sit in, so they are
-    // only readable on the boot map. acpi_init() copies what later callers
-    // (rtc_init(), SCRUM-249) need into statics and needs nothing but serial.
-    // Failure is non-fatal -- the accessors then report "unknown".
-    if (acpi_init(mb) != 0) {
-        serial_print("WARN: acpi_init failed; ACPI-derived values unavailable\n");
-    }
-
     // ── IDT (SCRUM-17) ──────────────────────────────────────────────────
     // As early as serial allows, and well ahead of the TESTING branch.  The
     // point is the vector-14 handler: everything below this line -- the PMM,
@@ -248,6 +238,17 @@ void kernel_main(void *mb2_info_ptr) {
     // ahead of the TESTING branch: the ring-3 fault tests need it, and nothing
     // reaches ring 3 to exercise it before that (SCRUM-47) on a normal boot.
     tss_init();
+
+    // ── ACPI tables (SCRUM-250) ─────────────────────────────────────────
+    // After idt_init()/tss_init() so a fault while walking firmware-supplied
+    // pointers gets a serial diagnostic, and before vmm_init(): the kernel map
+    // does not map the ACPI-reclaimable/reserved memory the firmware tables
+    // sit in, so they are only readable on the boot map. acpi_init() copies what later callers
+    // (rtc_init(), SCRUM-249) need into statics and needs nothing but serial.
+    // Failure is non-fatal -- the accessors then report "unknown".
+    if (acpi_init(mb) != 0) {
+        serial_print("WARN: acpi_init failed; ACPI-derived values unavailable\n");
+    }
 
     // ── Page allocator (SCRUM-7) ───────────────────────────────────────
     page_alloc_init(mb);
