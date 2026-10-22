@@ -13,7 +13,9 @@
  */
 
 #include "kunit.h"
+#include "exo_syscall.h"
 #include "libos_page_alloc.h"
+#include "syscall.h"
 #include "page_alloc.h"
 #include "vmm.h"
 
@@ -99,6 +101,56 @@ static void test_freed_slot_is_reused(void)
 /* Static, not stack-local: LIBOS_PAGE_ALLOC_MAX_PAGES * sizeof(void*) would
  * blow the 16 KiB kernel stack (docs/memory.md, src/stdlib.c's qsort note
  * has the same constraint for the same reason). */
+/* Regression: this (EXO_KERNEL) allocator maps into the *calling* LibOS's
+ * address space -- doom_wad_disk_get() runs it inside exo_launch with the
+ * shell current. It used to share the ring-3 heap base, so once the shell's
+ * own heap held pages (after `mkfs`) every kernel-side page_map hit EEXIST
+ * and the launch failed with "libos_heap: out of pages". Occupy the ring-3
+ * heap window the way the shell's heap does and check this one still
+ * allocates. */
+#define RING3_HEAP_BASE (EXO_USER_VA_BASE + 0x1000000ULL)
+#define RING3_HEAP_PAGES 4
+
+static void test_independent_of_ring3_heap_window(void)
+{
+    uint64_t paddrs[RING3_HEAP_PAGES];
+    int mapped = 0;
+
+    for (int i = 0; i < RING3_HEAP_PAGES; i++) {
+        int64_t pa = exo_syscall_dispatch(EXO_SYS_PAGE_ALLOC, 0, 0, 0, 0, 0, 0);
+        CU_ASSERT_TRUE(pa > 0);
+        if (pa <= 0) break;
+        paddrs[i] = (uint64_t)pa;
+        int64_t rc = exo_syscall_dispatch(EXO_SYS_PAGE_MAP,
+                                          RING3_HEAP_BASE + (uint64_t)i * PAGE_SIZE,
+                                          paddrs[i],
+                                          EXO_PAGE_WRITE | EXO_PAGE_USER,
+                                          0, 0, 0);
+        CU_ASSERT_EQUAL(rc, 0);
+        if (rc != 0) {
+            exo_syscall_dispatch(EXO_SYS_PAGE_FREE, paddrs[i], 0, 0, 0, 0, 0);
+            break;
+        }
+        mapped++;
+    }
+
+    void *p = libos_page_alloc();
+    CU_ASSERT_PTR_NOT_NULL(p);
+    if (p != NULL) {
+        CU_ASSERT_TRUE((uint64_t)(uintptr_t)p >= RING3_HEAP_BASE +
+                       (uint64_t)RING3_HEAP_PAGES * PAGE_SIZE ||
+                       (uint64_t)(uintptr_t)p < RING3_HEAP_BASE);
+        libos_page_free(p);
+    }
+
+    for (int i = 0; i < mapped; i++) {
+        exo_syscall_dispatch(EXO_SYS_PAGE_UNMAP,
+                             RING3_HEAP_BASE + (uint64_t)i * PAGE_SIZE,
+                             0, 0, 0, 0, 0);
+        exo_syscall_dispatch(EXO_SYS_PAGE_FREE, paddrs[i], 0, 0, 0, 0, 0);
+    }
+}
+
 static void *exhaustion_vaddrs[LIBOS_PAGE_ALLOC_MAX_PAGES];
 
 static void test_slot_table_exhaustion(void)
@@ -130,5 +182,7 @@ void suite_libos_page_alloc_tests(CU_pSuite s)
     CU_add_test(s, "double free rejected", test_double_free_rejected);
     CU_add_test(s, "bogus vaddr rejected", test_bogus_vaddr_rejected);
     CU_add_test(s, "freed slot is reused", test_freed_slot_is_reused);
+    CU_add_test(s, "independent of ring-3 heap window",
+                test_independent_of_ring3_heap_window);
     CU_add_test(s, "slot table exhaustion", test_slot_table_exhaustion);
 }
