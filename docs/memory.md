@@ -752,6 +752,14 @@ multiboot info and the framebuffer all translate correctly **before** writing
 missing mapping surfaces as a serial diagnostic rather than a triple fault with
 nothing on the wire.
 
+### ACPI tables are not mapped (SCRUM-250)
+
+`vmm_init` maps only low memory, the kernel image, usable RAM and the
+framebuffer. ACPI-reclaimable and reserved memory — where the firmware tables
+live — is **not** in the kernel map, so dereferencing a table pointer after
+`vmm_init` page-faults. `acpi_init()` therefore runs before `vmm_init`, on the
+boot map, and copies what later callers need (`docs/drivers/acpi.md`).
+
 ### Still to come (SCRUM-16, SCRUM-48)
 
 1. Per-section kernel permissions: `.text` read-execute, `.rodata` read-only,

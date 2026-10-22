@@ -22,6 +22,16 @@ enum {
     MB2_TAG_BASIC_MEM   = 4,
     MB2_TAG_MMAP        = 6,
     MB2_TAG_FRAMEBUFFER = 8,
+    MB2_TAG_ACPI_OLD    = 14,   /* copy of the ACPI 1.0 RSDP (20 bytes)   */
+    MB2_TAG_ACPI_NEW    = 15,   /* copy of the ACPI 2.0+ RSDP (36 bytes)  */
+};
+
+/* ACPI RSDP tags (types 14 and 15): the tag header is followed directly by a
+ * verbatim copy of the firmware's RSDP. */
+struct mb2_tag_acpi {
+    uint32_t type;
+    uint32_t size;
+    uint8_t  rsdp[];
 };
 
 /* ── Memory map (type 6) ────────────────────────────────────────────────── */
