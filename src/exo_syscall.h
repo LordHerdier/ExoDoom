@@ -130,6 +130,12 @@
  * appended above: the numbers below are ABI for as long as this kernel image
  * is the only thing that speaks it. */
 #define EXO_SYS_DISK_STAT     31
+/* Streaming music (SCRUM-219).  Appended for the reason #28-30 were.  Unlike
+ * the sfx calls these ARE bound: the music voice is one resource with one
+ * holder, first writer wins, docs/syscall_spec.md §3.5b. */
+#define EXO_SYS_SOUND_STREAM_WRITE  32
+#define EXO_SYS_SOUND_STREAM_STOP   33
+#define EXO_SYS_SOUND_STREAM_VOLUME 34
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -139,7 +145,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        32
+#define EXO_SYS_COUNT        35
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -779,6 +785,54 @@ static inline int64_t exo_sound_pcm_params(int handle, int vol, int sep)
 {
     return exo_syscall3(EXO_SYS_SOUND_PCM_PARAMS, (uint64_t)(int64_t)handle,
                         (uint64_t)(int64_t)vol, (uint64_t)(int64_t)sep);
+}
+
+/* #32 -- queue up to `frames` interleaved 16-bit stereo frames (4 bytes each,
+ * already at the mixer's rate) onto the music stream, binding it to the caller
+ * on the first call.  Never blocks: a ring short of room takes fewer frames
+ * than offered, and a full one takes none.
+ *
+ * On success the result packs two counts: the low 32 bits are the frames
+ * accepted (0..frames), the high 32 the frames of room left AFTER this write,
+ * so a refill costs one ring transition.  Use the exo_sound_stream_accepted()
+ * and exo_sound_stream_space() helpers below.  Errors are negative:
+ *   -EXO_EINVAL   frames 0 or over SOUND_STREAM_MAX_FRAMES
+ *   -EXO_ENODEV   no audio controller, or the output stream refused to start
+ *   -EXO_EFAULT   [buf, buf + frames * 4) not entirely inside the LibOS window
+ *                 and mapped
+ *   -EXO_EBUSY    another context holds the stream
+ *   -EXO_ENOMEM   no contiguous kernel pages for the ring (first call only)
+ * docs/syscall_spec.md §3.2 #32 and §3.5b. */
+static inline int64_t exo_sound_stream_write(const void *buf, uint32_t frames)
+{
+    return exo_syscall2(EXO_SYS_SOUND_STREAM_WRITE, (uint64_t)(uintptr_t)buf,
+                        (uint64_t)frames);
+}
+
+/* Decode a non-negative exo_sound_stream_write result. */
+static inline uint32_t exo_sound_stream_accepted(int64_t r)
+{
+    return (uint32_t)((uint64_t)r & 0xFFFFFFFFu);
+}
+static inline uint32_t exo_sound_stream_space(int64_t r)
+{
+    return (uint32_t)((uint64_t)r >> 32);
+}
+
+/* #33 -- drop whatever is buffered, stop the stream and release it (and its
+ * kernel pages) so another context may bind.  0, also when nothing is held;
+ * -EXO_EPERM if another context holds it.  exo_exit does this implicitly. */
+static inline int64_t exo_sound_stream_stop(void)
+{
+    return exo_syscall0(EXO_SYS_SOUND_STREAM_STOP);
+}
+
+/* #34 -- set the music level, 0..127 (clamped).  Unowned: any context may
+ * call it, with or without the stream bound, and the level persists across
+ * bind/release -- Doom sets it before the first song exists.  Always 0. */
+static inline int64_t exo_sound_stream_volume(int vol)
+{
+    return exo_syscall1(EXO_SYS_SOUND_STREAM_VOLUME, (uint64_t)(int64_t)vol);
 }
 
 #endif /* !EXO_KERNEL */

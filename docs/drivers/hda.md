@@ -643,8 +643,8 @@ Still open on this line: revocation (`src/revoke.c`) has no sound leg — an
 exiting LibOS loses its voices via `syscall_sound_release()`, a revoked one does
 not — and Doom's music is still silent, since `DG_music_module` is MUS/MIDI
 rather than PCM. Both ends of the music path now exist, the mixer's voice
-(§12.7) and a synth rendering into its format (§12.8–§12.10); joining them is
-SCRUM-219/220.
+(§12.7) and a synth rendering into its format (§12.8–§12.10); the stream syscalls join them
+(SCRUM-219, `docs/syscall_spec.md` §3.5c) and SCRUM-220 wires Doom to them.
 
 ### 12.7 The music voice (SCRUM-218)
 
@@ -896,6 +896,6 @@ percussion rules, and the volume controllers. A real freedoom2 piano note is
 asserted against a recorded FNV-1a checksum (`0xe9c13c5b`): a regression
 guard, not a proof. The suite then prints the render cost above.
 
-Still open: nothing feeds the music voice yet. Getting the rendered frames
-into ring 0 is the stream syscalls (SCRUM-219), and calling all this from
-`DG_music_module` is the Doom wiring (SCRUM-220).
+The stream syscalls (SCRUM-219, #32–#34) now carry rendered frames into ring 0
+and own the ring's pages. Still open: calling all this from `DG_music_module`
+is the Doom wiring (SCRUM-220).

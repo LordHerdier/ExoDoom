@@ -88,6 +88,22 @@ typedef struct {
 
 static pcm_slot_t pcm_slots[PCM_MIXER_VOICES];
 
+/*
+ * The music stream (SCRUM-219) is the opposite call from the sfx voices
+ * above: BOUND, not shared.  There is one music voice and no admission
+ * policy to lean on -- pcm_mixer_music_open() refuses a second ring outright
+ * -- so the first writer holds it, anyone else gets -EXO_EBUSY, and
+ * syscall_sound_release() lets go when the holder exits (a Doom that dies
+ * mid-song must not leave the soundtrack playing over the next program;
+ * SCRUM-196 made a second instance reachable).  The ring lives in kernel
+ * pages for the reasons the sfx staging does, and the mixer does not own it
+ * (src/pcm_mixer.h), so it is allocated at bind and freed at release,
+ * always AFTER pcm_mixer_music_close() -- render reads it from IRQ context.
+ */
+static page_owner_t stream_owner = PAGE_OWNER_FREE;
+static int16_t     *stream_ring  = NULL;
+static uint32_t     stream_pages = 0;
+
 static uint32_t pages_for(uint32_t bytes)
 {
     return (uint32_t)(((uint64_t)bytes + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE);
@@ -373,6 +389,125 @@ static int64_t sys_sound_pcm_params(uint64_t handle, uint64_t vol, uint64_t sep,
     return 0;
 }
 
+/* Detach the ring from the mixer, then give its pages back. */
+static void stream_release(void)
+{
+    if (stream_ring == NULL)
+        return;
+
+    pcm_mixer_music_flush();
+    pcm_mixer_music_close();
+    staging_free((uint8_t *)stream_ring, stream_pages);
+
+    stream_ring  = NULL;
+    stream_pages = 0;
+    stream_owner = PAGE_OWNER_FREE;
+}
+
+/* #32 -- queue stereo frames onto the music stream.
+ *   >= 0           low 32 bits: frames accepted (possibly 0); high 32 bits:
+ *                  frames of room left after this write
+ *   -EXO_EINVAL    frames 0 or over SOUND_STREAM_MAX_FRAMES
+ *   -EXO_ENODEV    no audio controller, or the output stream refused to start
+ *   -EXO_EFAULT    [buf, buf + frames * 4) not entirely inside the LibOS
+ *                  window and mapped
+ *   -EXO_EBUSY     another context holds the stream
+ *   -EXO_ENOMEM    no contiguous pages for the ring (binding call only)
+ * A full ring is not an error: it is the producer's cue to come back next
+ * frame, and a blocking write here would run with IF clear.
+ * Order is shape, device, buffer, then holder, as #28. */
+static int64_t sys_sound_stream_write(uint64_t buf, uint64_t frames,
+                                      uint64_t a3, uint64_t a4, uint64_t a5,
+                                      uint64_t a6)
+{
+    (void)a3; (void)a4; (void)a5; (void)a6;
+
+    if (frames == 0 || frames > SOUND_STREAM_MAX_FRAMES)
+        return -EXO_EINVAL;
+
+    if (!hda_present())
+        return -EXO_ENODEV;
+
+    uint64_t bytes = frames * PCM_MIXER_CHANNELS * sizeof(int16_t);
+    if (!exo_range_in_user_window(buf, bytes) ||
+        !exo_user_range_mapped(buf, bytes, 0))
+        return -EXO_EFAULT;
+
+    page_owner_t me = syscall_current_context();
+
+    if (stream_ring != NULL && stream_owner != me)
+        return -EXO_EBUSY;
+
+    if (stream_ring == NULL) {
+        int16_t *ring = (int16_t *)alloc_pages_contig_owned(
+            PAGE_OWNER_KERNEL, PCM_MIXER_MUSIC_PAGES);
+        if (ring == NULL)
+            return -EXO_ENOMEM;
+
+        int rc = pcm_mixer_music_open(ring, PCM_MIXER_MUSIC_FRAMES);
+        if (rc != PCM_MIXER_OK) {
+            staging_free((uint8_t *)ring, PCM_MIXER_MUSIC_PAGES);
+            /* Only the mixer's own EBUSY (a ring someone else attached) is
+             * contention; anything else is not the caller's to retry. */
+            return rc == PCM_MIXER_EBUSY ? -EXO_EBUSY : -EXO_EINVAL;
+        }
+
+        /* Lazy, as #28: a running stream costs ~47 IRQs/s forever. */
+        if (!hda_pcm_is_streaming() && hda_pcm_start() != HDA_OK) {
+            pcm_mixer_music_close();
+            staging_free((uint8_t *)ring, PCM_MIXER_MUSIC_PAGES);
+            return -EXO_ENODEV;
+        }
+
+        stream_ring  = ring;
+        stream_pages = PCM_MIXER_MUSIC_PAGES;
+        stream_owner = me;
+    }
+
+    uint32_t taken = pcm_mixer_music_write(
+        (const int16_t *)(uintptr_t)buf, (uint32_t)frames);
+
+    return (int64_t)(((uint64_t)pcm_mixer_music_space() << 32) | taken);
+}
+
+/* #33 -- stop and release the stream.
+ *   0              released, or nothing was held
+ *   -EXO_EPERM     another context holds it; left playing */
+static int64_t sys_sound_stream_stop(uint64_t a1, uint64_t a2, uint64_t a3,
+                                     uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+
+    if (stream_ring == NULL)
+        return 0;
+    if (stream_owner != syscall_current_context())
+        return -EXO_EPERM;
+
+    stream_release();
+    return 0;
+}
+
+/* #34 -- set the music level.  Unowned (Doom sets it before any song
+ * exists); the mixer clamps to 0..PCM_MIXER_VOL_MAX. */
+static int64_t sys_sound_stream_volume(uint64_t vol, uint64_t a2, uint64_t a3,
+                                       uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+
+    pcm_mixer_music_set_volume((int)(int64_t)vol);
+    return 0;
+}
+
+page_owner_t syscall_sound_stream_holder(void)
+{
+    return stream_ring != NULL ? stream_owner : PAGE_OWNER_FREE;
+}
+
+uint32_t syscall_sound_stream_pages_used(void)
+{
+    return stream_pages;
+}
+
 uint32_t syscall_sound_pcm_slots_used(void)
 {
     uint32_t used = 0;
@@ -411,6 +546,9 @@ void syscall_sound_release(page_owner_t owner)
             slot_release(slot);
         }
     }
+
+    if (stream_ring != NULL && stream_owner == owner)
+        stream_release();
 }
 
 void syscall_sound_init(void)
@@ -429,4 +567,10 @@ void syscall_sound_init(void)
     exo_syscall_register(EXO_SYS_SOUND_PCM, sys_sound_pcm);
     exo_syscall_register(EXO_SYS_SOUND_PCM_STOP, sys_sound_pcm_stop);
     exo_syscall_register(EXO_SYS_SOUND_PCM_PARAMS, sys_sound_pcm_params);
+
+    /* A re-init (the tests call it) must not strand a ring. */
+    stream_release();
+    exo_syscall_register(EXO_SYS_SOUND_STREAM_WRITE, sys_sound_stream_write);
+    exo_syscall_register(EXO_SYS_SOUND_STREAM_STOP, sys_sound_stream_stop);
+    exo_syscall_register(EXO_SYS_SOUND_STREAM_VOLUME, sys_sound_stream_volume);
 }
