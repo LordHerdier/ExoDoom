@@ -79,7 +79,7 @@ Full guide: `docs/testing.md`. Debugging with GDB: `docs/debugging.md`.
 `kernel_main` in `src/kernel.c`:
 
 ```
-serial_init -> idt_init -> tss_init -> mmap_init/memory_init -> page_alloc_init
+serial_init -> idt_init -> tss_init -> mmap_init/memory_init -> acpi_init -> page_alloc_init
   -> vmm_init -> syscall_init + every syscall_*_init
   -> pic_remap -> IRQ0 + spurious IRQ7/15 gates -> pit_init
   -> pci_init -> hda_init -> ata_init
@@ -107,6 +107,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | Interrupts (IDT/PIC/ISR, TSS, page-fault diagnostics) | `src/idt.c/h`, `src/pic.c/h`, `src/isr.s`, `src/io.h`, `src/tss.c/h`, `src/fault.c/h` |
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | PCI bus | `src/pci.c/h` |
+| ACPI table parser (RSDP/RSDT/XSDT/FADT; runs before `vmm_init`) | `src/acpi.c/h` |
 | Intel HDA audio | `src/hda.c/h` |
 | PC speaker | `src/speaker.c/h` |
 | Doom sound (tone table, speaker sequencer, PCM path) | `src/doom_sfx_tone.c/h`, `src/doom_sound.c/h`, `src/doom_sound_pcm.c/h` |
@@ -163,6 +164,8 @@ area.
 - `exo_page_map` restricts the *virtual* address to `[EXO_USER_VA_BASE,
   EXO_USER_VA_END)`, which must stay above all identity-mapped RAM.
   → `docs/syscall_spec.md` §3.7.
+- `acpi_init()` must run before `vmm_init()`: the kernel map does not map
+  firmware tables. → `docs/drivers/acpi.md` §4.
 - The GDT layout in `boot.s` is forced by `sysret` — do not reorder it.
   → `docs/syscall_spec.md` §3.4.
 

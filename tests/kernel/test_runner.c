@@ -102,6 +102,7 @@ void suite_hda_pcm_tests(CU_pSuite s);
 void suite_doom_sound_pcm_tests(CU_pSuite s);
 void suite_doom_sound_music_tests(CU_pSuite s);
 void suite_exo_pkg_tests(CU_pSuite s);
+void suite_acpi_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -680,6 +681,9 @@ int run_tests(void)
      * comment on running last. */
     s = CU_add_suite("exo_pkg", NULL, NULL);
     suite_exo_pkg_tests(s);
+
+    s = CU_add_suite("acpi", NULL, NULL);
+    suite_acpi_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not

@@ -3,6 +3,7 @@
 #include "serial.h"
 #include "memory.h"
 #include "mmap.h"
+#include "acpi.h"
 #include "page_alloc.h"
 #include "syscall_exit.h"
 
@@ -209,6 +210,16 @@ void kernel_main(void *mb2_info_ptr) {
 
     // ── Memory subsystem ────────────────────────────────────────────────
     memory_init();
+
+    // ── ACPI tables (SCRUM-250) ─────────────────────────────────────────
+    // Must precede vmm_init(): the kernel map below does not map the
+    // ACPI-reclaimable/reserved memory the firmware tables sit in, so they are
+    // only readable on the boot map. acpi_init() copies what later callers
+    // (rtc_init(), SCRUM-249) need into statics and needs nothing but serial.
+    // Failure is non-fatal -- the accessors then report "unknown".
+    if (acpi_init(mb) != 0) {
+        serial_print("WARN: acpi_init failed; ACPI-derived values unavailable\n");
+    }
 
     // ── IDT (SCRUM-17) ──────────────────────────────────────────────────
     // As early as serial allows, and well ahead of the TESTING branch.  The
