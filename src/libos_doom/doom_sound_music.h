@@ -66,8 +66,10 @@ void doom_music_play(void *handle, int looping, uint32_t now_ms);
 void doom_music_stop(void);
 
 /* PauseMusic/ResumeMusic.  Pause silences held notes AND drops the queued
- * audio, so it is immediate rather than up to 170 ms late. */
-void doom_music_pause(void);
+ * audio, so it is immediate rather than up to 170 ms late, and puts the song
+ * back to where the listener had got to -- not where rendering had got to --
+ * so resuming does not skip the dropped stretch. */
+void doom_music_pause(uint32_t now_ms);
 void doom_music_resume(uint32_t now_ms);
 
 /* 0..127 (Doom's S_SetMusicVolume range).  Reaches the stream level at once,

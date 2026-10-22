@@ -928,10 +928,16 @@ from `I_UpdateSound`, once per rendered frame via `S_UpdateSounds`.
   answer correct it. An estimate that is too high costs a short write, whose
   unaccepted frames are kept and sent first on the next poll; one that is too
   low costs nothing.
-- **Pause drops the queue as well as the notes.** Notes-off alone would leave
-  up to 170 ms of the chord in the ring, so `PauseMusic` also releases the
-  stream; `ResumeMusic` restarts the song where it was (the clock is frames, so
-  there is no catch-up burst).
+- **Pause drops the queue as well as the notes, and takes the song back with
+  it.** Notes-off alone would leave up to 170 ms of the chord in the ring, so
+  `PauseMusic` also releases the stream. Those frames were rendered but never
+  heard, so the song is put back to where the *listener* had got to: the synth
+  is reset and the events up to that point replayed into it (programs, volumes
+  and the notes that should be sounding, no samples rendered), rather than
+  resuming from the render position and losing whatever fell in the dropped
+  window. Held notes re-attack on resume. `ResumeMusic` then restarts at that
+  position, with no catch-up burst. Pausing in the release tail of a finished
+  song just ends it.
 - **Volume is passed through, not scaled.** The ticket expected Doom's 0..15
   slider; `S_SetMusicVolume` in fact takes 0..127 (`m_menu.c` multiplies the
   slider by 8), which is exactly the stream's range, so `SetMusicVolume` calls

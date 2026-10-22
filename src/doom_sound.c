@@ -357,7 +357,7 @@ sound_module_t DG_sound_module = {
 static boolean mus_init(void) { return true; }
 static void    mus_shutdown(void) { doom_music_reset(); }
 static void    mus_set_volume(int volume) { doom_music_set_volume(volume); }
-static void    mus_pause(void) { doom_music_pause(); }
+static void    mus_pause(void) { doom_music_pause(DG_GetTicksMs()); }
 static void    mus_resume(void) { doom_music_resume(DG_GetTicksMs()); }
 static void   *mus_register(void *data, int len) { return doom_music_register(data, len); }
 static void    mus_unregister(void *handle) { doom_music_unregister(handle); }

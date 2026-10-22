@@ -41,6 +41,7 @@ static uint32_t g_pend_n;
 static int      g_playing;
 static int      g_paused;
 static int      g_dead;           /* a stream error latched music off */
+static int      g_looping;
 static int      g_ending;         /* last event consumed (or reader error): rendering the tail */
 static uint32_t g_tail;           /* frames rendered since g_ending */
 static int      g_bound;          /* a write has bound the stream */
@@ -141,6 +142,35 @@ static void render_step(int16_t *dst, uint32_t n)
         g_tail += n;
 }
 
+/* Put the synth and the song where the listener is: `frames` into the song.
+ * Used by pause, which throws away audio that was rendered but never heard;
+ * resuming from the render position instead would skip that stretch, and any
+ * note-on inside it would be lost while its note-off still landed.  Replaying
+ * the events up to the target into a fresh synth restores programs, volumes
+ * and the notes that should be sounding, without rendering a sample. */
+static int resync_to(uint64_t frames)
+{
+    doom_midi_event_t ev[EVENT_BATCH];
+    uint32_t elapsed;
+    int k;
+
+    if (doom_opl_init(&g_opl, &g_genmidi) != DOOM_OPL_OK)
+        return -1;
+    doom_midi_rewind(&g_song);
+    doom_midi_set_looping(&g_song, g_looping);
+
+    g_frames  = frames;
+    g_song_ms = frames * 1000u / OUT_HZ;
+    elapsed   = (uint32_t)g_song_ms;
+    do {
+        k = doom_midi_advance(&g_song, elapsed, ev, EVENT_BATCH);
+        elapsed = 0;
+        for (int i = 0; i < k; i++)
+            doom_opl_event(&g_opl, &ev[i]);
+    } while (k == (int)EVENT_BATCH);
+    return k < 0 ? -1 : 0;
+}
+
 static int batch_is_silent(uint32_t frames)
 {
     for (uint32_t i = 0; i < frames * 2; i++)
@@ -221,6 +251,7 @@ void doom_music_play(void *handle, int looping, uint32_t now_ms)
 
     doom_midi_rewind(&g_song);
     doom_midi_set_looping(&g_song, looping);
+    g_looping  = looping;
     g_frames   = 0;
     g_song_ms  = 0;
     g_ending   = 0;
@@ -243,10 +274,17 @@ void doom_music_stop(void)
     g_pend_off = g_pend_n = 0;
 }
 
-void doom_music_pause(void)
+void doom_music_pause(uint32_t now_ms)
 {
     if (!g_playing || g_paused)
         return;
+
+    /* Rendered but not heard: what is in the ring, plus what a short write
+     * left in g_buf.  An estimate in ring 3 (hw_room), exact in ring 0. */
+    uint64_t unheard = (uint64_t)(DOOM_MUSIC_RING_FRAMES - hw_room(now_ms)) +
+                       g_pend_n;
+    uint64_t heard = g_frames > unheard ? g_frames - unheard : 0;
+
     /* Keys off the synth AND drops what is queued: with up to 170 ms in the
      * ring, notes-off alone would leave the chord sounding until it drained. */
     doom_opl_all_notes_off(&g_opl);
@@ -254,6 +292,16 @@ void doom_music_pause(void)
         hw_stop();
     g_bound = 0;
     g_pend_off = g_pend_n = 0;
+
+    /* In the release tail there is nothing left to resume: the song is over. */
+    if (g_ending) {
+        g_playing = 0;
+        return;
+    }
+    if (resync_to(heard) != 0) {
+        g_playing = 0;
+        return;
+    }
     g_paused = 1;
 }
 

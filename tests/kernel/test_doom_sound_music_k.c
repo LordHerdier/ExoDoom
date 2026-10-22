@@ -236,7 +236,12 @@ static void test_pause_silences_and_resume_continues(void)
     doom_music_poll(200);
     CU_ASSERT_TRUE(pcm_mixer_music_fill() > 0);
 
-    doom_music_pause();
+    /* 4000 frames were heard and the rest of the 8192 queued were not:
+     * pausing takes the song back to 4000, not leaves it at the render
+     * position, so resuming does not skip the dropped stretch. */
+    CU_ASSERT_TRUE(doom_music_frames_rendered() > 4000u);
+    doom_music_pause(300);
+    CU_ASSERT_EQUAL(doom_music_frames_rendered(), 4000u);
     CU_ASSERT_EQUAL(pcm_mixer_music_fill(), 0u);       /* queued audio dropped */
     CU_ASSERT_FALSE(drain(2048));                      /* ...and nothing rings */
     doom_music_poll(300);
