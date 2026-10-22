@@ -37,6 +37,7 @@ make docker-ci                 # Same as docker-test; what CI runs
 make docker-build-doom         # Compile-only gate over vendored src/doom/ (79/79; CI runs it)
 make docker-link-doom          # Link gate: every libc symbol Doom needs resolves (CI runs it)
 make docker-build DEBUG=1      # Unoptimized build (-g -O0) for GDB
+make docker-build AUDIO_PROFILE=1  # Compile in MUSPROF/HDAPROF serial timing reports (docs/drivers/hda.md 12.12)
 make docker-run-debug DEBUG=1  # Boot QEMU frozen at start, GDB stub on port 1234
 make clean                     # rm -rf build
 ```

@@ -91,3 +91,35 @@ void doom_music_reset(void);
 
 /* Diagnostics, for tests. */
 uint64_t doom_music_frames_rendered(void);
+
+#ifdef AUDIO_PROFILE
+/* ── Timing profile (AUDIO_PROFILE=1 only) ─────────────────────────────
+ *
+ * Where music pacing goes wrong, measured per song (reset by PlaySong):
+ *
+ *   dt_*     wall ms between polls.  The ring holds 12288 frames (256 ms) and
+ *            is topped up to 170 ms, so a gap past ~170 ms starves it.
+ *   fill_*   frames queued at the start of a poll; `starved` counts polls that
+ *            found it empty.  Exact in ring 0, an estimate in ring 3.
+ *   late_*   microseconds a note-on is applied after its song time.  Events
+ *            are applied at their own output frame, so this is only the
+ *            sub-sample rounding (< ~21 us); it was 0..6 ms when events were
+ *            applied at the start of each 256-frame render step.
+ *   cost_*   wall ms one poll took (caller-measured, 1 ms resolution).
+ *   underruns  frames the mixer had to fill with silence (ring 0 only).
+ */
+typedef struct {
+    uint32_t polls, dt_min, dt_max, dt_sum;
+    uint32_t dt_hist[5];       /* <=20, <=40, <=80, <=170, >170 ms */
+    uint32_t fills, fill_min, fill_max, fill_sum, starved;
+    uint32_t notes, late_min, late_max, late_sum;
+    uint32_t late_hist[4];     /* <1, <2, <4, >=4 ms */
+    uint32_t costs, cost_max, cost_sum;
+    uint32_t underruns;
+} doom_music_prof_t;
+
+void doom_music_prof_reset(void);
+void doom_music_prof_get(doom_music_prof_t *out);
+/* The caller times doom_music_poll() and reports it here. */
+void doom_music_prof_note_cost(uint32_t ms);
+#endif /* AUDIO_PROFILE */

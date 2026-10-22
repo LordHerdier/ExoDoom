@@ -195,6 +195,46 @@ static void test_pacing_follows_ring_room(void)
     quiesce();
 }
 
+#ifdef AUDIO_PROFILE
+static void test_timing_profile(void)
+{
+    if (!hda_present())
+        return;
+    quiesce();
+
+    void *h = register_bytes(LONG_SONG, sizeof(LONG_SONG));
+    doom_music_play(h, 1, 0);
+    for (int i = 0; i < 40; i++) {
+        doom_music_poll(i * 29);
+        (void)drain(1400);
+    }
+
+    doom_music_prof_t p;
+    doom_music_prof_get(&p);
+
+    CU_ASSERT_EQUAL(p.polls, 39u);            /* 40 polls, 39 gaps */
+    CU_ASSERT_EQUAL(p.dt_min, 29u);
+    CU_ASSERT_EQUAL(p.dt_max, 29u);
+    CU_ASSERT_EQUAL(p.dt_hist[1], 39u);       /* all in the <=40 ms bucket */
+    CU_ASSERT_EQUAL(p.starved, 0u);
+    CU_ASSERT_TRUE(p.fill_max <= DOOM_MUSIC_RING_FRAMES);
+    /* One note-on per pass of the 2 s song, applied at its own output frame:
+     * under one sample (21 us) late, not a render step (5.3 ms). */
+    CU_ASSERT_TRUE(p.notes >= 1u);
+    CU_ASSERT_TRUE(p.late_max < 22u);
+
+    doom_music_play(h, 1, 0);                 /* a new song starts clean */
+    doom_music_prof_get(&p);
+    CU_ASSERT_EQUAL(p.polls, 0u);
+    CU_ASSERT_EQUAL(p.notes, 0u);
+
+    doom_music_stop();
+    doom_music_unregister(h);
+    quiesce();
+}
+
+#endif /* AUDIO_PROFILE */
+
 static void test_loop_and_end(void)
 {
     if (!hda_present())
@@ -318,6 +358,10 @@ void suite_doom_sound_music_tests(CU_pSuite s)
                 test_register_play_poll_stop);
     CU_add_test(s, "poll renders only what the ring has room for",
                 test_pacing_follows_ring_room);
+#ifdef AUDIO_PROFILE
+    CU_add_test(s, "timing profile counts polls, fill and note lateness",
+                test_timing_profile);
+#endif
     CU_add_test(s, "loops, and ends on its own when not looping", test_loop_and_end);
     CU_add_test(s, "pause silences held notes; resume continues",
                 test_pause_silences_and_resume_continues);

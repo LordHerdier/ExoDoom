@@ -19,6 +19,7 @@
 10. [Design decisions and gotchas](#10-design-decisions-and-gotchas)
 11. [Where the samples come from](#11-where-the-samples-come-from)
 12. [Streaming mode: the software mixer](#12-streaming-mode-the-software-mixer)
+    (12.12: [audio timing profile](#1212-audio-timing-profile-audio_profile1))
 
 ---
 
@@ -342,9 +343,13 @@ Two ways to go further, both worth knowing:
 - **Listen to it.** `kernel_main` plays a 440 Hz / 600 ms tone on a normal
   boot once `hda_init()` has succeeded and interrupts are on
   (`HDA_BOOT_TONE_HZ`/`_MS`). Use `make run` (host QEMU) with a real backend
-  in place of `-audiodev none,id=snd0` — `pipewire`, `pa`, `alsa` or `sdl`,
+  in place of `-audiodev none,id=snd0` — `pipewire`, `pa` or `alsa`,
   whichever the host runs; `qemu-system-x86_64 -audiodev help` lists what the
-  binary supports.
+  binary supports. **Avoid `sdl` for anything timing-sensitive:** measured
+  with the §12.12 profiler it drains the stream at ~52 kHz (about 8% fast,
+  wandering ±0.6% window to window) where `pipewire`, `pa` and `alsa` hold
+  48.0 kHz — the music's tempo is the DAC's consumption rate, so SDL makes
+  it fast and uneven.
 - **Capture it, which is reproducible and needs no speaker.**
   `-audiodev wav,id=snd0,path=out.wav` writes what the codec received to a
   WAV file on exit. That is how the amp-gain bug in §10 was found and fixed:
@@ -919,10 +924,16 @@ from `I_UpdateSound`, once per rendered frame via `S_UpdateSounds`.
   170 ms of the 256 ms ring) and at most `DOOM_MUSIC_MAX_POLL_FRAMES` (4096,
   85 ms) per call, so a stalled frame is caught up over the next few rather
   than in one hitch, and a poll that finds the ring full does no work at all.
-  **The song clock is frames rendered**, converted to milliseconds for
-  `doom_midi_advance` in 256-frame steps (5.3 ms, finer than DMX's 140 Hz), so
-  the music cannot drift against the DAC; the wall clock is never the song's
-  time. Ring 3 cannot ask how much room there is — the only answer is a write's
+  **The song clock is frames rendered**, so the music cannot drift against
+  the DAC; the wall clock is never the song's time. Events are applied
+  **sample-accurately**: `render_step` fetches the events due by the end of the
+  step (rounded up to a whole ms for `doom_midi_advance`), then splits the
+  render at each event's own output frame (`ceil(time_us * 48000 / 1e6)`) and
+  applies it there. Events fetched past the step's end stay queued for the step
+  they belong to, and the release tail starts only once that queue is empty.
+  (Applying every due event at the start of a 256-frame step, from a
+  whole-ms clock, put notes 0–6 ms late by a different amount each time — an
+  audibly uneven pulse that looked like a pacing bug.) Ring 3 cannot ask how much room there is — the only answer is a write's
   result (`space` in the high word, `docs/syscall_spec.md` §3.5c) — so it
   estimates the drain since its last write from wall time and lets each write's
   answer correct it. An estimate that is too high costs a short write, whose
@@ -962,3 +973,63 @@ counting: a full ring does zero work, draining *n* frames makes the next poll
 render exactly *n*, and frames rendered equals frames consumed plus frames
 queued. Pause, loop/ending, volume, and bad input are covered; the
 `-EXO_ENODEV` latch is not reachable while the suite requires the controller.
+
+### 12.12 Audio timing profile (`AUDIO_PROFILE=1`)
+
+Two serial reports, compiled in only with `make docker-build AUDIO_PROFILE=1`
+(`docker-run-kernel`, `docker-test` and `run` take it the same way; `build.sh`
+adds `-DAUDIO_PROFILE` to `CFLAGS`, which reaches the kernel and the ring-3
+`libos_doom` target). Off by default: the strings are absent from the default
+binaries and nothing in the hot path changes. With it on, each report prints
+every 10 s of play and the music one also at `StopSong`; grep `MUSPROF` /
+`HDAPROF`.
+
+**`MUSPROF`** (ring 3, `src/libos_doom/doom_sound_music.c`; reset by
+`PlaySong`) measures the producer:
+
+```
+MUSPROF poll: n dt min/avg/max ms  hist(<=20,40,80,170,>)  cost max/avg ms
+MUSPROF ring: fill min/avg/max frames  starved  underruns
+MUSPROF notes: n late min/avg/max us  hist(<1,2,4,>=4ms)
+```
+
+- `dt` is wall time between polls. The ring is topped up to 170 ms, so a gap
+  past that starves it (`starved` = polls that found it empty; an estimate in
+  ring 3, exact in ring 0). `underruns` is the mixer's own count, ring 0 only.
+- `late` is how long after its song time a note-on is applied. With sample-
+  accurate delivery (§12.11) it is the sub-sample rounding, under 21 µs; it was
+  0–6 ms before. It cannot see anything downstream of the stream write.
+- `cost` is one poll's wall time at 1 ms resolution.
+
+**`HDAPROF`** (kernel, `src/hda.c`) measures the consumer, which `MUSPROF`
+cannot:
+
+```
+HDAPROF irq: n dt min/avg/max us  sd us  catchup max  multi  fifoe
+HDAPROF rate: Hz over ms (nominal 48000)  tsc=cyc/ms
+HDAPROF clocks: since first report pit=ms  rtc=s (+-1)
+```
+
+- `dt` is the TSC interval between refill interrupts (nominal 21,333 µs),
+  converted with the window's own cycles-per-ms; `catchup`/`multi` count
+  interrupts that refilled more than one entry.
+- **`rate` is the number that matters for tempo.** The song clock counts frames
+  rendered, so the tempo the listener hears is exactly the rate the controller
+  consumes the stream: refills × `HDA_PCM_ENTRY_FRAMES` per PIT second. Its
+  resolution is one entry per window (±100 Hz over 10 s), so 47.9–48.2 kHz is
+  nominal.
+- `clocks` cross-checks the PIT against the CMOS RTC (host-driven), to tell a
+  fast DAC from a PIT that lost ticks under KVM. They agreed to the second over
+  70 s.
+- It is **printed from the stream-write syscall, never from the IRQ** (a
+  serial write there would itself delay the next refill). The syscall runs with
+  IF clear, so each report (a few short lines per 10 s) can delay one refill
+  slightly; the 16-entry ring has ~340 ms of headroom.
+
+**What it found** (the reason this exists): the music was "90% right but
+jittery" with every producer-side number clean. `MUSPROF` showed note delivery
+snapped to a 5.3 ms grid (fixed by §12.11's sample-accurate delivery);
+`HDAPROF` then showed QEMU's `sdl` audio backend draining at ~52 kHz, ±0.6%,
+with 8–29 ms refill-interrupt spread, against 48.0 kHz and a tight interrupt
+interval on `pipewire`, `pa` and `alsa`. That one is the host's, not the
+guest's — nothing in the guest can see or fix it, only the backend choice.

@@ -146,6 +146,13 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   CFLAGS+=(-DTESTING)
 fi
 
+# AUDIO_PROFILE=1: the MUSPROF/HDAPROF serial reports (docs/drivers/hda.md
+# §12.12).  In CFLAGS, so it reaches the kernel and the ring-3 libos_doom
+# target (probe_cflags below is derived from this array) alike.
+if [[ "${AUDIO_PROFILE:-0}" == "1" ]]; then
+  CFLAGS+=(-DAUDIO_PROFILE)
+fi
+
 LDFLAGS=(-T src/linker.ld -ffreestanding -O2 -nostdlib -z max-page-size=0x1000)
 
 echo "[2/7] Assemble boot.s"
