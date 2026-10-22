@@ -34,8 +34,10 @@ tables.
 
 1. **RSDP.** Multiboot2 tag 15 (ACPI 2.0+ copy), then tag 14 (1.0 copy); GRUB
    embeds a verbatim RSDP in each and needs no request. Otherwise scan
-   `0xE0000–0xFFFFF` on 16-byte boundaries for `"RSD PTR "`. The EBDA is **not**
-   scanned: its segment pointer is at `0x40E`, in page 0, the unmapped NULL guard.
+   the first KiB of the EBDA (segment word at `0x40E`, accepted only if it points
+   into `0x80000–0x9FFFF`) and then `0xE0000–0xFFFFF`, on 16-byte boundaries, for
+   `"RSD PTR "`. Page 0 is readable here: `acpi_init()` runs on the boot identity
+   map, before the kernel map's NULL guard exists.
 2. **Validate** signature, the 20-byte checksum and, for revision ≥ 2, the
    extended checksum over `length`.
 3. **Root table.** XSDT when revision ≥ 2 and it validates and holds a usable
@@ -45,7 +47,7 @@ tables.
    An entry is skipped unless its whole header fits below 4 GiB, and a table is
    rejected unless its whole `length` does. A skipped table is logged on serial.
    State is built in locals and committed only on success.
-4. **FADT** (`"FACP"`): Century at offset 108, `IAPC_BOOT_ARCH` (16-bit) at 109.
+4. **FADT** (`"FACP"`, checksum verified): Century at offset 108 (revision ≥ 2), `IAPC_BOOT_ARCH` (16-bit) at 109.
    `header.length` is checked before each read (Century needs ≥ 109, IAPC ≥ 111),
    and IAPC is only read from FADT revision ≥ 3 (reserved before that); an
    absent field reads 0. A Century outside `[0x0E, 0x80)` is reported as 0.
@@ -58,7 +60,9 @@ live in ACPI-reclaimable/reserved memory, which is **not** mapped afterwards, so
 reading one after `vmm_init` page-faults. `acpi_init()` runs after `idt_init()`/`tss_init()` (so a fault while walking
 firmware pointers gets a serial diagnostic) and before `page_alloc_init` — it
 needs only serial — and copies the FADT (≤ 320 bytes) and a
-directory of up to 32 table signatures into statics. No function here touches
+directory of up to 32 table signatures into statics (one validation pass finds the
+FADT among the first 128 root entries and builds the directory; overflow past 32 is
+reported on serial). No function here touches
 firmware memory after `acpi_init` returns. It sits ahead of the `TESTING`
 branch so the live tests can read the cached state. `page_alloc` hands out only
 `MULTIBOOT_MMAP_AVAILABLE` regions, so reclaimable memory is never allocated.

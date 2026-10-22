@@ -291,10 +291,29 @@ static void test_fadt_old_revision_ignores_iapc(void)
 {
     struct acpi_fadt_info info;
     mk_fadt(FADT_LEN, 0x32, ACPI_IAPC_NO_CMOS_RTC);
-    fadt_buf[8] = 1;                     /* revision 1: bytes 109-110 reserved */
+    fadt_buf[8] = 2;                     /* revision 2: bytes 109-110 reserved */
+    fix_csum(fadt_buf, FADT_LEN, 9);
     CU_ASSERT_EQUAL(acpi_fadt_extract((const struct acpi_sdt_header *)fadt_buf, &info), 0);
     CU_ASSERT_EQUAL(info.century_reg, 0x32);
     CU_ASSERT_EQUAL(info.iapc_boot_arch, 0);
+}
+
+static void test_fadt_revision1_has_no_century(void)
+{
+    struct acpi_fadt_info info;
+    mk_fadt(FADT_LEN, 0x32, 0);
+    fadt_buf[8] = 1;                     /* offset 108 is not Century in rev 1 */
+    fix_csum(fadt_buf, FADT_LEN, 9);
+    CU_ASSERT_EQUAL(acpi_fadt_extract((const struct acpi_sdt_header *)fadt_buf, &info), 0);
+    CU_ASSERT_EQUAL(info.century_reg, 0);
+}
+
+static void test_fadt_bad_checksum_rejected(void)
+{
+    struct acpi_fadt_info info;
+    mk_fadt(FADT_LEN, 0x32, 0);
+    fadt_buf[20]++;
+    CU_ASSERT_EQUAL(acpi_fadt_extract((const struct acpi_sdt_header *)fadt_buf, &info), -EINVAL);
 }
 
 static void test_fadt_truncated_before_iapc(void)
@@ -372,7 +391,13 @@ static void test_live_directory(void)
 static void test_live_century_register(void)
 {
     uint8_t reg = acpi_rtc_century_reg();
-    CU_ASSERT_TRUE(acpi_century_reg_plausible(reg));
+    /* Century exists from FADT revision 2; QEMU's boot FADT is revision 1, so
+     * the register is (correctly) reported absent there. */
+    if (acpi_fadt()->revision >= 2) {
+        CU_ASSERT_TRUE(acpi_century_reg_plausible(reg));
+    } else {
+        CU_ASSERT_EQUAL(reg, 0);
+    }
     CU_ASSERT_FALSE(acpi_cmos_rtc_absent());      /* QEMU has a CMOS RTC */
 }
 
@@ -400,6 +425,8 @@ void suite_acpi_tests(CU_pSuite s)
                 test_listed_table_with_bad_checksum_not_found);
     CU_add_test(s, "fadt full length", test_fadt_full_length);
     CU_add_test(s, "fadt old revision ignores iapc", test_fadt_old_revision_ignores_iapc);
+    CU_add_test(s, "fadt revision 1 has no century", test_fadt_revision1_has_no_century);
+    CU_add_test(s, "fadt bad checksum rejected", test_fadt_bad_checksum_rejected);
     CU_add_test(s, "fadt truncated before iapc", test_fadt_truncated_before_iapc);
     CU_add_test(s, "fadt truncated before century", test_fadt_truncated_before_century);
     CU_add_test(s, "fadt wrong signature", test_fadt_wrong_signature);

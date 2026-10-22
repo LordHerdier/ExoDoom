@@ -14,11 +14,20 @@
 
 #define ACPI_4GIB   0x100000000ULL
 
-/* Legacy BIOS area searched for the RSDP when the bootloader gave us no tag.
- * The EBDA is deliberately not searched: its segment pointer is at 0x40E, in
- * page 0, which is the unmapped NULL guard. */
+/* Legacy BIOS areas searched for the RSDP when the bootloader gave us no tag:
+ * the first KiB of the EBDA (its real-mode segment is the word at 0x40E) and
+ * the BIOS ROM area. acpi_init() runs on the boot identity map, where page 0 is
+ * still mapped and readable; the kernel map's NULL guard is not live yet. */
 #define BIOS_AREA_START  0xE0000u
 #define BIOS_AREA_END    0x100000u
+#define EBDA_SEG_PTR     0x40Eu
+#define EBDA_SCAN_LEN    1024u
+#define EBDA_MIN         0x80000u   /* the EBDA lives in the top of base memory */
+#define EBDA_MAX         0xA0000u
+
+/* Root entries examined in try_root(). Only the first ACPI_DIR_MAX signatures
+ * are remembered, but the FADT is looked for in all of these. */
+#define ACPI_SCAN_MAX    128
 
 /* ── Pure functions ─────────────────────────────────────────────────────── */
 
@@ -170,10 +179,15 @@ int acpi_fadt_extract(const struct acpi_sdt_header *fadt,
     if (len < sizeof(struct acpi_sdt_header) || len > ACPI_MAX_TABLE_LEN) {
         return -EINVAL;
     }
+    if (!acpi_checksum_ok(fadt, len)) {
+        return -EINVAL;
+    }
     const uint8_t *b = (const uint8_t *)fadt;
 
     out->century_reg = 0;
-    if (len > ACPI_FADT_CENTURY_OFF) {
+    /* Century exists from FADT revision 2 (ACPI 1.0b is 116 bytes and offset
+     * 108 is something else there). */
+    if (fadt->revision >= 2 && len > ACPI_FADT_CENTURY_OFF) {
         uint8_t c = b[ACPI_FADT_CENTURY_OFF];
         out->century_reg = acpi_century_reg_plausible(c) ? c : 0;
     }
@@ -198,8 +212,23 @@ static struct acpi_fadt_info g_info;
 static char    g_dir[ACPI_DIR_MAX][ACPI_SIG_LEN];
 static int     g_dir_n;
 
-/* Locate a validated RSDP: Multiboot2 tag first (new, then old), then the BIOS
- * area scan. */
+/* Scan [start, end) on 16-byte boundaries for a validated RSDP. */
+static const struct acpi_rsdp *scan_for_rsdp(uintptr_t start, uintptr_t end)
+{
+    for (uintptr_t a = start; a + 16 <= end; a += 16) {
+        if (memcmp((const void *)a, "RSD PTR ", 8) != 0) {
+            continue;
+        }
+        const struct acpi_rsdp *r = acpi_rsdp_validate((const void *)a, end - a);
+        if (r) {
+            return r;
+        }
+    }
+    return NULL;
+}
+
+/* Locate a validated RSDP: Multiboot2 tag first (new, then old), then the EBDA
+ * and BIOS area scans. */
 static const struct acpi_rsdp *find_rsdp(const struct mb2_info *mb)
 {
     if (mb) {
@@ -216,17 +245,16 @@ static const struct acpi_rsdp *find_rsdp(const struct mb2_info *mb)
             }
         }
     }
-    for (uintptr_t a = BIOS_AREA_START; a + 16 <= BIOS_AREA_END; a += 16) {
-        if (memcmp((const void *)a, "RSD PTR ", 8) != 0) {
-            continue;
-        }
-        size_t avail = BIOS_AREA_END - a;
-        const struct acpi_rsdp *r = acpi_rsdp_validate((const void *)a, avail);
+    uint16_t seg;
+    memcpy(&seg, (const void *)(uintptr_t)EBDA_SEG_PTR, sizeof(seg));
+    uintptr_t ebda = (uintptr_t)seg << 4;
+    if (ebda >= EBDA_MIN && ebda + EBDA_SCAN_LEN <= EBDA_MAX) {
+        const struct acpi_rsdp *r = scan_for_rsdp(ebda, ebda + EBDA_SCAN_LEN);
         if (r) {
             return r;
         }
     }
-    return NULL;
+    return scan_for_rsdp(BIOS_AREA_START, BIOS_AREA_END);
 }
 
 /* Try one root table: it must validate and contain a usable FADT. Everything
@@ -241,22 +269,13 @@ static int try_root(uint64_t addr, bool is_xsdt)
     const struct acpi_sdt_header *root =
         (const struct acpi_sdt_header *)(uintptr_t)addr;
 
-    const struct acpi_sdt_header *fadt = acpi_root_find(root, is_xsdt, "FACP");
-    if (!fadt) {
-        return -ENOENT;
-    }
-    if (fadt->length > ACPI_FADT_COPY_MAX) {
-        return -ERANGE;
-    }
-    struct acpi_fadt_info info;
-    if (acpi_fadt_extract(fadt, &info) != 0) {
-        return -EINVAL;
-    }
-
-    uint64_t addrs[ACPI_DIR_MAX];
-    char dir[ACPI_DIR_MAX][ACPI_SIG_LEN];
+    /* One validation pass over the root's tables finds the FADT and builds the
+     * signature directory together. */
+    uint64_t addrs[ACPI_SCAN_MAX];
+    char dir[ACPI_DIR_MAX][ACPI_SIG_LEN] = {{0}};
     int dir_n = 0;
-    int n = acpi_root_entries(root, is_xsdt, addrs, ACPI_DIR_MAX);
+    const struct acpi_sdt_header *fadt = NULL;
+    int n = acpi_root_entries(root, is_xsdt, addrs, ACPI_SCAN_MAX);
     for (int i = 0; i < n; i++) {
         const struct acpi_sdt_header *h =
             (const struct acpi_sdt_header *)(uintptr_t)addrs[i];
@@ -270,12 +289,29 @@ static int try_root(uint64_t addr, bool is_xsdt)
             serial_print("' (bad length or checksum)\n");
             continue;
         }
-        memcpy(dir[dir_n++], h->signature, ACPI_SIG_LEN);
+        if (!fadt && memcmp(h->signature, "FACP", ACPI_SIG_LEN) == 0) {
+            fadt = h;
+        }
+        if (dir_n < ACPI_DIR_MAX) {
+            memcpy(dir[dir_n++], h->signature, ACPI_SIG_LEN);
+        } else {
+            serial_print("ACPI: directory full, table not listed\n");
+        }
+    }
+    if (!fadt) {
+        return -ENOENT;
+    }
+    if (fadt->length > ACPI_FADT_COPY_MAX) {
+        return -ERANGE;
+    }
+    struct acpi_fadt_info info;
+    if (acpi_fadt_extract(fadt, &info) != 0) {
+        return -EINVAL;
     }
 
     memcpy(g_fadt_copy, fadt, fadt->length);
     g_info = info;
-    memcpy(g_dir, dir, sizeof(dir));
+    memcpy(g_dir, dir, (size_t)dir_n * ACPI_SIG_LEN);
     g_dir_n = dir_n;
     g_have_fadt = true;
     return 0;

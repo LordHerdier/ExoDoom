@@ -243,9 +243,11 @@ void kernel_main(void *mb2_info_ptr) {
     // After idt_init()/tss_init() so a fault while walking firmware-supplied
     // pointers gets a serial diagnostic, and before vmm_init(): the kernel map
     // does not map the ACPI-reclaimable/reserved memory the firmware tables
-    // sit in, so they are only readable on the boot map. acpi_init() copies what later callers
-    // (rtc_init(), SCRUM-249) need into statics and needs nothing but serial.
-    // Failure is non-fatal -- the accessors then report "unknown".
+    // sit in, so they are only readable on the boot map. acpi_init() copies
+    // what later callers (rtc_init(), SCRUM-249) need into statics and needs
+    // nothing but serial. If it ever becomes lazy or re-runs, the
+    // ACPI-reclaimable region must stay out of the page allocator until it has
+    // run. Failure is non-fatal -- the accessors then report "unknown".
     if (acpi_init(mb) != 0) {
         serial_print("WARN: acpi_init failed; ACPI-derived values unavailable\n");
     }
