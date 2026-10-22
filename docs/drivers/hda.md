@@ -783,3 +783,44 @@ it from ring 0. A shipped kernel does not carry it.
 times and for every rejection (including that every proper prefix of a valid
 song is refused), a hand-written MIDI twin for a MUS lump, and all 35 real
 lumps opened and played to the end with the count asserted.
+
+### 12.9 What the notes sound like: the GENMIDI instrument table (SCRUM-216)
+
+A §12.8 event says "program 48, note 60"; the OPL3 synth (SCRUM-217) needs to
+know what program 48 *is*. Doom answers that from the IWAD's `GENMIDI` lump,
+decoded by `src/libos_doom/doom_genmidi.c/h`. The header carries the full byte
+map, including which OPL register each operator byte is written to.
+
+- **Layout.** 8-byte `#OPL_II#` magic, 175 × 36-byte records (128 GM programs,
+  then 47 percussion instruments for GM notes 35..81), then 175 × 32-byte names:
+  11,908 bytes, exactly freedoom2 v0.13.0's lump. A record is a flags word
+  (`0x1` fixed pitch, `0x4` two-voice; `0x2` is unused by Doom), a fine-tune
+  byte for the second voice's detune, a fixed-note byte, and two 16-byte voices,
+  each a modulator and carrier operator, a feedback/connection byte and a signed
+  base-note offset.
+- **Same contract as the DMX decoder (§11.1).** The table stays in the mounted
+  IWAD and must not outlive the mount; a failure leaves `*out` untouched; result
+  codes are distinct. Records are returned *decoded by value*, not overlaid,
+  because a lump's offset is arbitrary and the `int16` offset need not be
+  aligned.
+- **The length check is exact.** The lump has no count field, so anything but
+  11,908 bytes is `EINVAL`, checked before the magic so a short lump is never
+  read. chocolate-doom accepts a larger lump and ignores the tail; a PWAD that
+  ships one would be refused here.
+- **No `GENMIDI` is `ENOENT`, not an error.** A PWAD-only mount has no
+  instruments; what to do about that is the synth's decision.
+- **Ring 3 only**, for the reason the reader is: its only consumer is the synth
+  in `libos_doom`. A `TESTING` kernel compiles it in `build.sh` step 3b3; a
+  shipped kernel carries none of it.
+- **What freedoom's table holds**, asserted by the suite: flags `0x4` × 94,
+  `0x0` × 32, `0x1` × 25, `0x5` × 24; 46 of the 47 percussion records are fixed
+  pitch. The 47th, record 162 (note 69), is a "Null Instrument" with both voices
+  at the silent filler (output level `0x3f`, no envelope), so a synth must
+  tolerate an instrument that sounds nothing. Single-voice records fill
+  voice 1 with the same filler.
+
+`tests/kernel/test_doom_genmidi_k.c` is the suite: a synthetic lump at an odd
+address for byte-exact decoding and every rejection (bad magic at each byte,
+six wrong sizes, NULLs, out-of-range lookups, a 32-character name, a hand-built
+PWAD with no `GENMIDI`), then the real lump with five records asserted field by
+field.

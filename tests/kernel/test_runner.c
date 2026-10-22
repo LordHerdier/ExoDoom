@@ -91,6 +91,7 @@ void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
 void suite_doom_dmx_tests(CU_pSuite s);
 void suite_doom_midi_tests(CU_pSuite s);
+void suite_doom_genmidi_tests(CU_pSuite s);
 void suite_pcm_mixer_tests(CU_pSuite s);
 void suite_pcm_mixer_music_tests(CU_pSuite s);
 void suite_hda_pcm_tests(CU_pSuite s);
@@ -117,6 +118,10 @@ int suite_doom_dmx_cleanup(void);
  * are process-global (SCRUM-215). */
 int suite_doom_midi_init(void);
 int suite_doom_midi_cleanup(void);
+
+/* Mounts the freedoom2 module for the real GENMIDI tests (SCRUM-216). */
+int suite_doom_genmidi_init(void);
+int suite_doom_genmidi_cleanup(void);
 
 /* Voices are process-global state; a voice left sounding by one test would
  * mix into the next one's assertions (SCRUM-212). */
@@ -593,6 +598,11 @@ int run_tests(void)
      * the front end the OPL3 synthesizer will consume (SCRUM-215). */
     s = CU_add_suite("doom_midi", suite_doom_midi_init, suite_doom_midi_cleanup);
     suite_doom_midi_tests(s);
+
+    /* The instruments those events name: the IWAD's GENMIDI OPL patch table,
+     * which the OPL3 synthesizer will program voices from (SCRUM-216). */
+    s = CU_add_suite("doom_genmidi", suite_doom_genmidi_init, suite_doom_genmidi_cleanup);
+    suite_doom_genmidi_tests(s);
 
     /* What joins those two ends: N voices resampled, summed and clipped into
      * one stereo stream.  Hardware-free by construction -- src/pcm_mixer.c
