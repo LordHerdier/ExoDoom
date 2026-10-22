@@ -244,6 +244,9 @@ void doom_music_play(void *handle, int looping, uint32_t now_ms)
 
     if (w == NULL || doom_genmidi_find(&w->wad, &g_genmidi) != DOOM_GENMIDI_OK)
         return;
+    /* Cleared first: a failed init leaves g_opl half-built, and stop/pause
+     * must not key off a chip that was never brought up. */
+    g_synth_ok = 0;
     if (doom_opl_init(&g_opl, &g_genmidi) != DOOM_OPL_OK)
         return;
     g_synth_ok = 1;
