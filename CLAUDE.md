@@ -113,6 +113,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | WAD DMX sound lump decoder | `src/doom_dmx.c/h` |
 | MUS/MIDI song reader + sequencer (ring 3 only) | `src/libos_doom/doom_midi.c/h` |
 | GENMIDI OPL instrument decoder (ring 3 only) | `src/libos_doom/doom_genmidi.c/h` |
+| OPL3 synth + MIDI→OPL voice allocator (ring 3 only) | `src/libos_doom/doom_opl.c/h`, vendored `src/nuked_opl3/` |
 | Software PCM mixer (8 sfx voices + 1 music voice) | `src/pcm_mixer.c/h` (+ `hda_pcm_*` in `src/hda.c/h`) |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |

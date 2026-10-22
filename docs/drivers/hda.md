@@ -642,8 +642,9 @@ driver playing that lump rather than a voice having been started.
 Still open on this line: revocation (`src/revoke.c`) has no sound leg — an
 exiting LibOS loses its voices via `syscall_sound_release()`, a revoked one does
 not — and Doom's music is still silent, since `DG_music_module` is MUS/MIDI
-rather than PCM. The mixer end of the music path now exists (§12.7); what
-feeds it does not yet.
+rather than PCM. Both ends of the music path now exist, the mixer's voice
+(§12.7) and a synth rendering into its format (§12.8–§12.10); joining them is
+SCRUM-219/220.
 
 ### 12.7 The music voice (SCRUM-218)
 
@@ -824,3 +825,77 @@ address for byte-exact decoding and every rejection (bad magic at each byte,
 six wrong sizes, NULLs, out-of-range lookups, a 32-character name, a hand-built
 PWAD with no `GENMIDI`), then the real lump with five records asserted field by
 field.
+
+### 12.10 What the notes sound like, audibly: the OPL3 synth (SCRUM-217)
+
+§12.8 says *when*, §12.9 says *with what*. `src/libos_doom/doom_opl.c/h`
+plays those events on an emulated YMF262 and renders 48 kHz stereo, ready for
+the §12.7 music voice. Like its two producers it is ring-3 code: built into
+`libos_doom`, and compiled into a `TESTING` kernel (`build.sh` step 3b3) so the
+`doom_opl` suite can drive it from ring 0.
+
+- **The emulator is vendored Nuked-OPL3** (`src/nuked_opl3/`, LGPL-2.1+,
+  unmodified, pinned in its `README.md`). It is what chocolate-doom uses, and
+  it was chosen because it is integer-only. The test kernel compiles it with
+  `-mno-sse`, so DOSBox's `double`-based OPL would not build there. The driver
+  calls only `OPL3_Reset`, `OPL3_WriteReg` and `OPL3_Generate` at the native
+  49716 Hz.
+- **The driver is DMX's behaviour, from chocolate-doom's `i_oplmusic.c`.** That
+  includes its frequency curve, which sits an octave high and is why GENMIDI
+  records carry `base_note_offset = -12`. It also includes its volume curve,
+  the MSB-only pitch bend at 32 steps a semitone, the fine-tune detune of a
+  two-voice record's second half, channel 9 as percussion (GM notes 35..81, the
+  rest dropped), and its reversed OPL3 stereo pan. It departs from DMX in two
+  places. Channel volume (CC7), expression (CC11) and the master volume
+  *multiply*, where DMX clamps channel volume to the master and has no
+  expression at all. And a key already sounding on its channel is retriggered,
+  not doubled.
+- **Voice allocation: 18 OPL3 channels, one per note**, two for a
+  `FLAG_2VOICE` record. When all 18 are busy, a note-on steals the oldest
+  *second* voice if any is sounding, those being the non-essential half,
+  otherwise the oldest note. A second voice never steals, it is skipped. A
+  stolen note's later note-off finds nothing to release, so it cannot key off
+  its successor.
+- **Resampling is an exact rational step**, not 16.16. Each output frame adds
+  49716 to an accumulator in units of 1/48000 of a native sample, so 48,000
+  frames consume exactly 49,716 native samples. A truncated 16.16 step (67875)
+  would run 0.006% flat and drift three samples a second. Interpolation between
+  adjacent native samples is linear, with a 16-bit weight taken by multiply.
+  The mixer does no resampling of its own for this voice (§12.7).
+- **Silence is exact zero.** A fully attenuated operator does not output 0.
+  The chip's sine is one's complement, so it reads −1 on the negative half of
+  its phase. A released channel's phase keeps running, which leaves a 1–2 LSB
+  square wave, and Nuked reproduces that faithfully. Freezing the phase would
+  park it at 0 or −1 at random, which is a DC offset. So whenever no operator
+  is keyed and every envelope is at full attenuation, the renderer writes true
+  zeros. A master volume of 0 is also rendered as zeros, while the chip keeps
+  running, so turning the volume up again resumes mid-note.
+- **No GENMIDI means no music.** On a PWAD-only mount `doom_genmidi_find()`
+  returns `ENOENT` (§12.9). The caller then has no table to give
+  `doom_opl_init()` and keeps music off.
+- **Memory.** `doom_opl_t` is caller-allocated and allocation-free, like the
+  mixer. It is ~20 KB, mostly Nuked's unused 1024-entry write buffer, so it
+  belongs in static storage or a heap, never on the 16 KiB kernel stack.
+
+**What it costs: the epic's risk, measured.** The suite plays one second of
+`D_OPENIN` the way Doom will: per 35 Hz tic, advance the song, apply the
+events, render that tic's frames. Under the CI configuration (QEMU TCG, no
+KVM, `-O2 -mno-sse` kernel build) that is **169 ms per second of music: 4.8 ms
+of every 28.57 ms tic, ~17%**. That covers 336 events with a peak of 16
+voices. The same loop natively on a desktop host is ~21 ms (~2%). It fits the
+budget without amortising across frames. The number is printed, not asserted,
+because a timing assertion would fail on a slow CI host rather than on a slow
+synth. One lever is unused if it is ever needed: Nuked emulates all 36
+operators every sample whether or not they are sounding.
+
+`tests/kernel/test_doom_opl_k.c` is the suite. A synthetic GENMIDI holds a pure
+sine with instant attack and release. Against it the suite asserts 440 rising
+zero crossings a second for A4, exact silence after a release, 49,716 native
+samples per 48,000 frames, 18-then-steal-the-oldest, the two-voice and
+percussion rules, and the volume controllers. A real freedoom2 piano note is
+asserted against a recorded FNV-1a checksum (`0xe9c13c5b`): a regression
+guard, not a proof. The suite then prints the render cost above.
+
+Still open: nothing feeds the music voice yet. Getting the rendered frames
+into ring 0 is the stream syscalls (SCRUM-219), and calling all this from
+`DG_music_module` is the Doom wiring (SCRUM-220).
