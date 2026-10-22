@@ -5,7 +5,9 @@
 #include "pit.h"
 #include "io.h"
 #include "serial.h"
+#ifdef AUDIO_PROFILE
 #include "rtc.h"
+#endif
 #include "page_alloc.h"
 #include "vmm.h"
 #include "pcm_mixer.h"
@@ -665,6 +667,7 @@ static int irq_init(void)
  * Runs inside hda_irq_handler() with IF clear, so pcm_mixer_render() sees a
  * stable voice table without taking a lock of its own.
  */
+#ifdef AUDIO_PROFILE
 /* ── Refill cadence profile ─────────────────────────────────────────────
  *
  * The music song clock counts frames rendered, so the tempo the listener hears
@@ -845,6 +848,10 @@ void hda_pcm_prof_report(uint32_t now_ms)
     }
     serial_print(" s (+-1)\n");
 }
+#else
+#define pcm_prof_irq(n)         ((void)0)
+#define pcm_prof_reset(ms, op)  ((void)0)
+#endif
 
 static void pcm_refill(void)
 {
@@ -1093,8 +1100,10 @@ int hda_pcm_start(void)
      * written even on the first loop.
      */
     g_pcm_write = 0;
+#ifdef AUDIO_PROFILE
     g_prof.have_last = 0;
     g_prof.origin_set = 0;
+#endif
     pcm_prof_reset(0, 0);
 
     mmio_w32(sd(HDA_SD_CTL),

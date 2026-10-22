@@ -352,12 +352,14 @@ uint32_t hda_pcm_refills(void);
  */
 uint32_t hda_pcm_underruns(void);
 
+#ifdef AUDIO_PROFILE
 /* Refill-cadence profile (see pcm_prof in hda.c): prints a "HDAPROF" report to
  * serial once per 10 s window while streaming -- refill IRQ interval (TSC,
  * shown in us), catch-up, and the effective frame rate against the PIT clock.
  * Call from syscall context with the current ms; a no-op until the window is
  * up.  Never from the IRQ. */
 void hda_pcm_prof_report(uint32_t now_ms);
+#endif
 
 /* Called from irq0_handler() with kernel_get_ticks_ms(): ends a timed tone
  * once its deadline passes. Wrap-safe, exactly like speaker_tick(). */

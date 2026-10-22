@@ -92,7 +92,8 @@ void doom_music_reset(void);
 /* Diagnostics, for tests. */
 uint64_t doom_music_frames_rendered(void);
 
-/* ── Timing profile ─────────────────────────────────────────────────────
+#ifdef AUDIO_PROFILE
+/* ── Timing profile (AUDIO_PROFILE=1 only) ─────────────────────────────
  *
  * Where music pacing goes wrong, measured per song (reset by PlaySong):
  *
@@ -121,3 +122,4 @@ void doom_music_prof_reset(void);
 void doom_music_prof_get(doom_music_prof_t *out);
 /* The caller times doom_music_poll() and reports it here. */
 void doom_music_prof_note_cost(uint32_t ms);
+#endif /* AUDIO_PROFILE */

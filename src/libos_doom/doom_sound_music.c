@@ -51,11 +51,12 @@ static doom_midi_event_t g_ev[EVENT_BATCH];   /* fetched, not yet applied */
 static uint32_t g_ev_i, g_ev_n;
 static int      g_ev_err;         /* the reader failed: the song ends */
 
-/* Timing profile (see doom_sound_music.h).  Plain counters, a few adds per
- * poll or per note: cheap enough to leave on. */
+#ifdef AUDIO_PROFILE
+/* Timing profile (AUDIO_PROFILE=1; see doom_sound_music.h). */
 static doom_music_prof_t g_prof;
 static uint32_t          g_prof_last_poll;
 static int               g_prof_have_last;
+#endif
 
 /* Ring 3's room estimate: the last write's answer, plus the drain since. */
 static uint32_t g_space;
@@ -118,6 +119,7 @@ static uint32_t hw_room(uint32_t now_ms)
 
 /* ── Song clock and rendering ──────────────────────────────────────────── */
 
+#ifdef AUDIO_PROFILE
 /* How late a note-on is applied against where the song says it belongs, at
  * output frame `at`.  Events are applied at their own frame (render_step), so
  * this is the sub-sample rounding; it is here to keep that claim measured. */
@@ -166,6 +168,10 @@ static void prof_poll(uint32_t now_ms, uint32_t fill)
     if (fill == 0 && g_frames > 0)
         g_prof.starved++;
 }
+#else
+#define prof_note(ev, at)    ((void)0)
+#define prof_poll(now, fill) ((void)0)
+#endif
 
 /* Render `n` frames into `dst`, counting them. */
 static void render_span(int16_t *dst, uint32_t n)
@@ -365,7 +371,9 @@ void doom_music_play(void *handle, int looping, uint32_t now_ms)
     g_space_ms = now_ms;
     g_paused   = 0;
     g_playing  = 1;
+#ifdef AUDIO_PROFILE
     doom_music_prof_reset();
+#endif
 }
 
 void doom_music_stop(void)
@@ -417,7 +425,9 @@ void doom_music_resume(uint32_t now_ms)
     g_paused   = 0;
     g_space    = DOOM_MUSIC_RING_FRAMES;   /* the stream was emptied */
     g_space_ms = now_ms;
+#ifdef AUDIO_PROFILE
     g_prof_have_last = 0;                  /* a pause is not a slow poll */
+#endif
 }
 
 void doom_music_set_volume(int volume)
@@ -501,6 +511,7 @@ uint64_t doom_music_frames_rendered(void)
     return g_frames;
 }
 
+#ifdef AUDIO_PROFILE
 /* ── Timing profile ────────────────────────────────────────────────────── */
 
 void doom_music_prof_reset(void)
@@ -524,3 +535,4 @@ void doom_music_prof_get(doom_music_prof_t *out)
     out->underruns = pcm_mixer_music_underruns();
 #endif
 }
+#endif /* AUDIO_PROFILE */

@@ -195,6 +195,7 @@ static void test_pacing_follows_ring_room(void)
     quiesce();
 }
 
+#ifdef AUDIO_PROFILE
 static void test_timing_profile(void)
 {
     if (!hda_present())
@@ -231,6 +232,8 @@ static void test_timing_profile(void)
     doom_music_unregister(h);
     quiesce();
 }
+
+#endif /* AUDIO_PROFILE */
 
 static void test_loop_and_end(void)
 {
@@ -355,8 +358,10 @@ void suite_doom_sound_music_tests(CU_pSuite s)
                 test_register_play_poll_stop);
     CU_add_test(s, "poll renders only what the ring has room for",
                 test_pacing_follows_ring_room);
+#ifdef AUDIO_PROFILE
     CU_add_test(s, "timing profile counts polls, fill and note lateness",
                 test_timing_profile);
+#endif
     CU_add_test(s, "loops, and ends on its own when not looping", test_loop_and_end);
     CU_add_test(s, "pause silences held notes; resume continues",
                 test_pause_silences_and_resume_continues);

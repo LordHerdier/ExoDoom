@@ -355,6 +355,7 @@ sound_module_t DG_sound_module = {
  * and Poll, the one that may be, is now the per-frame hook that feeds the
  * stream.  A machine or WAD that cannot play music makes each of them a quiet
  * no-op (RegisterSong returning NULL costs that level only). */
+#ifdef AUDIO_PROFILE
 /* Music timing profile -> serial, every MUS_PROF_PERIOD_MS of play and when
  * the song stops.  Greppable: "MUSPROF".  See doom_sound_music.h. */
 #define MUS_PROF_PERIOD_MS 10000u
@@ -384,6 +385,10 @@ static void mus_prof_report(void)
                p.late_hist[3]);
 }
 
+#else
+#define mus_prof_report() ((void)0)
+#endif
+
 static boolean mus_init(void) { return true; }
 static void    mus_shutdown(void) { doom_music_reset(); }
 static void    mus_set_volume(int volume) { doom_music_set_volume(volume); }
@@ -397,6 +402,7 @@ static void    mus_play(void *handle, boolean looping)
 }
 static void    mus_stop(void) { mus_prof_report(); doom_music_stop(); }
 static boolean mus_is_playing(void) { return doom_music_is_playing() ? true : false; }
+#ifdef AUDIO_PROFILE
 static void    mus_poll(void)
 {
     uint32_t t0 = DG_GetTicksMs();
@@ -413,6 +419,9 @@ static void    mus_poll(void)
         mus_prof_report();
     }
 }
+#else
+static void    mus_poll(void) { doom_music_poll(DG_GetTicksMs()); }
+#endif
 
 music_module_t DG_music_module = {
     .sound_devices     = NULL,
