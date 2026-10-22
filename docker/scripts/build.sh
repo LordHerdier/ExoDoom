@@ -562,6 +562,7 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/doom_sound_pcm.c src/doom_dmx.c \
   src/libos_doom/doom_midi.c src/libos_doom/doom_genmidi.c \
   src/libos_doom/doom_opl.c src/nuked_opl3/opl3.c \
+  src/libos_doom/doom_sound_music.c \
   src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c \
   src/doom/*.c
 
@@ -783,6 +784,7 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # under these -mno-sse CFLAGS with -Wextra; neither allocates.
   for f in src/doom/memio.c src/doom/mus2mid.c src/libos_doom/doom_midi.c \
            src/libos_doom/doom_genmidi.c src/libos_doom/doom_opl.c \
+           src/libos_doom/doom_sound_music.c \
            src/nuked_opl3/opl3.c; do
     echo "    CC $(basename "$f") (music conversion)"
     x86_64-elf-gcc -c "$f" -o "build/doom_mus_$(basename "${f%.c}").o" \

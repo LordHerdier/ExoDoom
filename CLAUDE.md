@@ -114,6 +114,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | MUS/MIDI song reader + sequencer (ring 3 only) | `src/libos_doom/doom_midi.c/h` |
 | GENMIDI OPL instrument decoder (ring 3 only) | `src/libos_doom/doom_genmidi.c/h` |
 | OPL3 synth + MIDI→OPL voice allocator (ring 3 only) | `src/libos_doom/doom_opl.c/h`, vendored `src/nuked_opl3/` |
+| Doom `music_module_t` logic (register/play/poll/pause over the OPL3 synth and the stream; ring 3, TESTING-kernel suite) | `src/libos_doom/doom_sound_music.c/h` (glue table in `src/doom_sound.c`) |
 | Software PCM mixer (8 sfx voices + 1 music voice) | `src/pcm_mixer.c/h` (+ `hda_pcm_*` in `src/hda.c/h`) |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
 | Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |

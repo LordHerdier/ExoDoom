@@ -92,6 +92,8 @@ SHIM_SOURCES=(
   # SCRUM-217's OPL3 synth: the MIDI-to-OPL driver and vendored Nuked-OPL3.
   src/libos_doom/doom_opl.c
   src/nuked_opl3/opl3.c
+  # SCRUM-220: Doom music_module_t logic over doom_midi + doom_opl + the stream.
+  src/libos_doom/doom_sound_music.c
   src/libos_heap.c
   src/libos_page_alloc.c
   src/libos_fb.c

@@ -170,6 +170,7 @@ int doom_sound_current_step(void)
 #include "doom/i_sound.h"
 #include "doom/sounds.h"
 #include "doom_sound_pcm.h"
+#include "libos_doom/doom_sound_music.h"
 
 uint32_t DG_GetTicksMs(void);
 
@@ -346,19 +347,27 @@ sound_module_t DG_sound_module = {
     .CacheSounds       = NULL,   /* nothing to cache */
 };
 
-/* Music: the one voice belongs to sound effects. FEATURE_SOUND makes
- * i_sound.c install this module unconditionally and call every pointer
- * except Poll without a NULL check, so each is a real no-op. */
+/* Music (SCRUM-220): the logic is src/libos_doom/doom_sound_music.c, where a
+ * ring-0 suite can drive it; this is only the table i_sound.c wants.
+ * FEATURE_SOUND makes i_sound.c install it unconditionally and call every
+ * pointer except Poll without a NULL check, so none of these may be NULL --
+ * and Poll, the one that may be, is now the per-frame hook that feeds the
+ * stream.  A machine or WAD that cannot play music makes each of them a quiet
+ * no-op (RegisterSong returning NULL costs that level only). */
 static boolean mus_init(void) { return true; }
-static void    mus_shutdown(void) { }
-static void    mus_set_volume(int volume) { (void)volume; }
-static void    mus_pause(void) { }
-static void    mus_resume(void) { }
-static void   *mus_register(void *data, int len) { (void)data; (void)len; return NULL; }
-static void    mus_unregister(void *handle) { (void)handle; }
-static void    mus_play(void *handle, boolean looping) { (void)handle; (void)looping; }
-static void    mus_stop(void) { }
-static boolean mus_is_playing(void) { return false; }
+static void    mus_shutdown(void) { doom_music_reset(); }
+static void    mus_set_volume(int volume) { doom_music_set_volume(volume); }
+static void    mus_pause(void) { doom_music_pause(DG_GetTicksMs()); }
+static void    mus_resume(void) { doom_music_resume(DG_GetTicksMs()); }
+static void   *mus_register(void *data, int len) { return doom_music_register(data, len); }
+static void    mus_unregister(void *handle) { doom_music_unregister(handle); }
+static void    mus_play(void *handle, boolean looping)
+{
+    doom_music_play(handle, looping ? 1 : 0, DG_GetTicksMs());
+}
+static void    mus_stop(void) { doom_music_stop(); }
+static boolean mus_is_playing(void) { return doom_music_is_playing() ? true : false; }
+static void    mus_poll(void) { doom_music_poll(DG_GetTicksMs()); }
 
 music_module_t DG_music_module = {
     .sound_devices     = NULL,
@@ -373,7 +382,7 @@ music_module_t DG_music_module = {
     .PlaySong          = mus_play,
     .StopSong          = mus_stop,
     .MusicIsPlaying    = mus_is_playing,
-    .Poll              = NULL,
+    .Poll              = mus_poll,
 };
 
 #endif /* !EXO_KERNEL */
