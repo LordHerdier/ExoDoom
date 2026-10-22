@@ -166,9 +166,8 @@
  * an index rather than a syscall number wearing a disguise.
  */
 #define EXO_LAUNCH_APP_WAD_VIEWER 0
-#define EXO_LAUNCH_APP_CLOCK      1
-#define EXO_LAUNCH_APP_DOOM       2
-#define EXO_LAUNCH_APP_COUNT      3
+#define EXO_LAUNCH_APP_DOOM       1
+#define EXO_LAUNCH_APP_COUNT      2
 
 /* Largest package exo_launch_pkg() will look at: the format's own worst case
  * (header + 192 code pages + 192 data pages; bss is not stored), so nothing

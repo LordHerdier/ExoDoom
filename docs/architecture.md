@@ -1010,23 +1010,32 @@ and enters it through the same `context_prime_irq`/`context_switch_request`
 tail as #21 (both syscalls share those helpers in `src/syscall_launch.c`).
 Details and error codes: `docs/syscall_spec.md` §3.2 #36.
 
-- **Where packages come from.** `docker/scripts/build.sh` step [2e2/7] packs
-  Snake's `build/libos_snake_{code,data}.bin` with the host tool
+- **Where packages come from.** `docker/scripts/build.sh` step [2g/7] runs
+  `package_ring3_target` for every ring-3 target (snake, clock, wadview, doom),
+  reading the `build/<name>_{code,data}.bin` blobs and `<NAME>_BSS_LEN` that
+  `build_ring3_link_target()` already leaves behind, through the host tool
   `tools/exopkg/` (which calls `exo_pkg_pack()`, not a second copy of the
-  format) and `tools/mkexofsimg` writes `snake.exo` onto the same volume as the
-  IWAD (extra `<host-file> <name>` argument pairs). The disk image is therefore
-  written *after* the ring-3 targets, not at step [1b/7]. SCRUM-231 generalises
-  the packer to every target; SCRUM-233/234/237 give programs a volume of their
-  own.
-- **Snake is no longer in the kernel image.** Its `launch_apps[]` row and
-  `EXO_LAUNCH_APP_SNAKE` are gone (Doom is now app id 2); `build.sh` builds
-  Snake's blobs but does not link them (`ring3_embed=0`), and the shell's
-  `snake` command is `run snake.exo`. The kernel half is asserted by the
+  format). Output is `build/packages/*.exo`; `exopkg --check` re-parses each
+  one so a bad manifest fails the build. `tools/mkexofsimg` then writes every
+  package onto the program volume next to the IWAD (extra `<host-file> <name>`
+  argument pairs), so the disk image is written *after* the ring-3 targets, not
+  at step [1b/7]. Page counts are derived from the blobs; `--params-len`,
+  `--sound-voices`, `--min-pages`, `--recommended-pages` and `--stack-pages`
+  override them. A new target (Tetris, a calculator) is one more
+  `package_ring3_target` line. SCRUM-233/234/237 give programs a volume of
+  their own.
+- **Snake and the clock are no longer in the kernel image.** Their
+  `launch_apps[]` rows and `EXO_LAUNCH_APP_SNAKE`/`_CLOCK` are gone (WAD viewer
+  is app id 0, Doom 1); `build.sh` builds their blobs but does not link them
+  (`ring3_embed=0`), and the shell's `snake`/`clock` commands are `run
+  snake.exo`/`run clock.exo`. The kernel half is asserted by the
   `launch_pkg` suite; the boot half is a manual `make docker-run-kernel` check.
 - **Limits worth knowing.** The header's `stack_pages` is advisory (the builder
   always maps `LIBOS_LAUNCH_STACK_PAGES`); a package cannot request the WAD
   mapping or a params patch, so Doom and the WAD viewer still launch through
-  #21 until SCRUM-232 gives the manifest a way to say so.
+  #21 until SCRUM-232 gives the manifest a way to say so (their packages are
+  built and checked, with `params_len` set, but #36 refuses a non-zero
+  `params_len`).
 
 ### Multi-application (Sprint 12)
 

@@ -146,7 +146,6 @@ static char shell_commands_text[] =
 static char shell_about_text[] = "ExoDoom shell LibOS -- SCRUM-110\n";
 static char shell_unknown_prefix[] = "unknown command: ";
 static char shell_wadview_fail_text[] = "wadview: launch failed\n";
-static char shell_clock_fail_text[] = "clock: launch failed\n";
 static char shell_doom_fail_text[] = "doom: launch failed\n";
 static char shell_run_usage_text[] = "usage: run <package>   (a .exo file on the program volume)\n";
 static char shell_run_fail_text[] = "run: launch failed: err=";
@@ -399,17 +398,11 @@ static void shell_run_command(fb_console_t *con, const char *line) {
             fbcon_write(con, shell_wadview_fail_text);
         }
     } else if (str_eq(line, "clock")) {
-        /* Same calling convention as wadview above: does not return until
-         * something switches back to this context (Ctrl+Tab, SCRUM-111,
-         * since the clock never yields on its own -- src/libos_clock/
-         * libos_clock.c's own comment on why). A negative return means the
-         * launch failed before switching away. */
-        int64_t rc = exo_launch(EXO_LAUNCH_APP_CLOCK);
-        if (rc == 0) {
-            fbcon_clear(con);
-        } else {
-            fbcon_write(con, shell_clock_fail_text);
-        }
+        /* Like snake below, the clock is no longer in the kernel image
+         * (SCRUM-231): this is `run clock.exo`. It never yields on its own
+         * (src/libos_clock/libos_clock.c's own comment on why), so control
+         * comes back via Ctrl+Tab (SCRUM-111). */
+        shell_run_run(con, "clock.exo");
     } else if (str_eq(line, "snake")) {
         /* Same round-trip convention as "wadview" above, but Snake is no
          * longer in the kernel image (SCRUM-230): this is `run snake.exo`,

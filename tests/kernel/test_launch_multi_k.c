@@ -8,11 +8,12 @@
  * already uses for the app-id bounds-check cases, extended here to real
  * successful launches.
  *
- * EXO_LAUNCH_APP_CLOCK is used throughout rather than _DOOM: both flow
- * through the exact same generic sys_launch() handler, but Clock's blob is
- * far smaller and LAUNCH_NEEDS_WAD is unset for it, so this suite has no
- * multiboot WAD module dependency. (Snake was the fixture until SCRUM-230
- * took its blob out of the kernel image.)
+ * Launches go through #36 (a tiny launch-probe package) rather than #21: no
+ * #21 app left in the kernel image is free of LAUNCH_NEEDS_WAD, and this
+ * suite must have no multiboot WAD module dependency. The concurrency and
+ * reclaim logic under test is shared by both syscalls (src/syscall_launch.c).
+ * (Clock was the #21 fixture until SCRUM-231 took its blob out of the kernel
+ * image; Snake before it, SCRUM-230.)
  *
  * Every test here first needs a real, live "foreground" context of its own
  * -- context_switch_request() inside sys_launch() refuses to arm a switch
@@ -33,6 +34,8 @@
 #include "libos_launch.h"
 #include "exo_syscall.h"
 #include "syscall.h"
+#include "exo_pkg.h"
+#include "string.h"
 
 #include <stdint.h>
 
@@ -43,6 +46,46 @@ extern void libos_launch_probe_end(void);
  * syscall_yield_suite_cleanup(): a failed assertion mid-test must not leak a
  * context (and its code/data/stack pages) into a later suite. */
 #define LAUNCH_MULTI_CLEANUP_SCAN_IDS 4096
+
+/* The package every launch below hands to #36: mapped into the LibOS window
+ * through the real #1/#2 syscalls because the handler refuses a kernel
+ * pointer. Apart from the other suites' scratch ranges
+ * (test_launch_pkg_k.c uses +0x2F000000). */
+#define MULTI_PKG_VADDR (EXO_USER_VA_BASE + 0x2F100000ULL)
+
+static uint64_t multi_pkg_paddr;
+static size_t multi_pkg_len;
+
+static int64_t multi_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c)
+{
+    return exo_syscall_dispatch(nr, a, b, c, 0, 0, 0);
+}
+
+/* Runs as PAGE_OWNER_LIBOS (the context a suite starts as). */
+int launch_multi_suite_init(void)
+{
+    int64_t paddr = multi_syscall(EXO_SYS_PAGE_ALLOC, 0, 0, 0);
+    if (paddr <= 0)
+        return 1;
+    multi_pkg_paddr = (uint64_t)paddr;
+    if (multi_syscall(EXO_SYS_PAGE_MAP, MULTI_PKG_VADDR, multi_pkg_paddr,
+                      EXO_PAGE_READ | EXO_PAGE_WRITE | EXO_PAGE_USER) != 0)
+        return 1;
+    memset((void *)(uintptr_t)MULTI_PKG_VADDR, 0, VMM_PAGE_SIZE);
+
+    exo_pkg_header_t h;
+    memset(&h, 0, sizeof(h));
+    h.magic             = EXO_PKG_MAGIC;
+    h.version           = EXO_PKG_VERSION;
+    h.code_len          = (uint32_t)((uintptr_t)&libos_launch_probe_end -
+                                     (uintptr_t)&libos_launch_probe);
+    h.stack_pages       = EXO_PKG_MAX_STACK_PAGES;
+    h.min_pages         = 20;
+    h.recommended_pages = 36;
+    return exo_pkg_pack((void *)(uintptr_t)MULTI_PKG_VADDR, VMM_PAGE_SIZE, &h,
+                        (const void *)&libos_launch_probe, NULL,
+                        &multi_pkg_len) != 0;
+}
 
 int launch_multi_suite_cleanup(void)
 {
@@ -61,6 +104,12 @@ int launch_multi_suite_cleanup(void)
      * these now-destroyed contexts' dangling regs pointers. */
     context_switch_pending = 0;
     context_set_current(PAGE_OWNER_LIBOS);
+
+    if (multi_pkg_paddr != 0) {
+        multi_syscall(EXO_SYS_PAGE_UNMAP, MULTI_PKG_VADDR, 0, 0);
+        multi_syscall(EXO_SYS_PAGE_FREE, multi_pkg_paddr, 0, 0);
+        multi_pkg_paddr = 0;
+    }
     return 0;
 }
 
@@ -97,10 +146,9 @@ static void settle_switch(page_owner_t fg)
     context_set_current(fg);
 }
 
-static int64_t launch_clock(void)
+static int64_t launch_probe_pkg(void)
 {
-    return exo_syscall_dispatch(EXO_SYS_LAUNCH, EXO_LAUNCH_APP_CLOCK,
-                                0, 0, 0, 0, 0);
+    return multi_syscall(EXO_SYS_LAUNCH_PKG, MULTI_PKG_VADDR, multi_pkg_len, 0);
 }
 
 /* Finds the one live id in `list[0..n)` that isn't any of the (up to three)
@@ -124,7 +172,7 @@ static void test_two_launches_of_same_app_yield_two_live_contexts(void)
 {
     page_owner_t fg = make_foreground();
 
-    CU_ASSERT_EQUAL(launch_clock(), 0);
+    CU_ASSERT_EQUAL(launch_probe_pkg(), 0);
 
     context_info_t live[CONTEXT_MAX];
     uint32_t n = context_list(live, CONTEXT_MAX);
@@ -134,7 +182,7 @@ static void test_two_launches_of_same_app_yield_two_live_contexts(void)
     CU_ASSERT_PTR_NOT_NULL(context_lookup(first_id));
 
     settle_switch(fg);
-    CU_ASSERT_EQUAL(launch_clock(), 0);
+    CU_ASSERT_EQUAL(launch_probe_pkg(), 0);
 
     n = context_list(live, CONTEXT_MAX);
     page_owner_t second_id = find_new_id(live, n, fg, first_id,
@@ -160,7 +208,7 @@ static void test_blocked_context_reclaimed_but_live_one_survives(void)
 {
     page_owner_t fg = make_foreground();
 
-    CU_ASSERT_EQUAL(launch_clock(), 0);
+    CU_ASSERT_EQUAL(launch_probe_pkg(), 0);
     context_info_t live[CONTEXT_MAX];
     uint32_t n = context_list(live, CONTEXT_MAX);
     page_owner_t exited_id = find_new_id(live, n, fg, PAGE_OWNER_FREE,
@@ -173,7 +221,7 @@ static void test_blocked_context_reclaimed_but_live_one_survives(void)
                    CONTEXT_OK);
 
     /* A second, unrelated live instance that must survive the sweep below. */
-    CU_ASSERT_EQUAL(launch_clock(), 0);
+    CU_ASSERT_EQUAL(launch_probe_pkg(), 0);
     n = context_list(live, CONTEXT_MAX);
     page_owner_t still_ready_id = find_new_id(live, n, fg, exited_id,
                                               PAGE_OWNER_FREE);
@@ -182,7 +230,7 @@ static void test_blocked_context_reclaimed_but_live_one_survives(void)
 
     /* Third launch's sweep must reclaim the BLOCKED row from the first
      * launch, while leaving the still-READY row from the second alone. */
-    CU_ASSERT_EQUAL(launch_clock(), 0);
+    CU_ASSERT_EQUAL(launch_probe_pkg(), 0);
 
     CU_ASSERT_PTR_NULL(context_lookup(exited_id));
     CU_ASSERT_PTR_NOT_NULL(context_lookup(still_ready_id));
@@ -200,7 +248,7 @@ static void test_launch_past_capacity_fails_gracefully(void)
     uint32_t launched = 0;
     int64_t rc = 0;
     for (uint32_t i = 0; i < CONTEXT_MAX; i++) {
-        rc = launch_clock();
+        rc = launch_probe_pkg();
         settle_switch(fg);
         if (rc != 0) {
             break;
@@ -219,7 +267,7 @@ static void test_launch_past_capacity_fails_gracefully(void)
      * resolves, and a further call keeps failing the same way rather than
      * doing something worse. */
     CU_ASSERT_PTR_NOT_NULL(context_lookup(fg));
-    CU_ASSERT_EQUAL(launch_clock(), -EXO_ENOMEM);
+    CU_ASSERT_EQUAL(launch_probe_pkg(), -EXO_ENOMEM);
     settle_switch(fg);
 }
 
