@@ -19,6 +19,7 @@
 #include "doom_wad_disk.h"
 #include "hda.h"
 #include "pcm_mixer.h"
+#include "syscall_sound.h"
 #include "wad.h"
 
 #include <stddef.h>
@@ -107,6 +108,11 @@ static void test_preconditions(void)
     if (w != NULL)
         CU_ASSERT_PTR_NOT_NULL(wad_find_lump(&w->wad, "D_OPENIN", &size));
     CU_ASSERT_TRUE(DOOM_MUSIC_TARGET_FRAMES <= DOOM_MUSIC_RING_FRAMES);
+    /* The ring-3 build restates the ring size (it cannot include a driver
+     * header) and sizes its pacing from it; pin it to both kernel constants so
+     * a change to the ring cannot silently skew every fill calculation. */
+    CU_ASSERT_EQUAL(DOOM_MUSIC_RING_FRAMES, PCM_MIXER_MUSIC_FRAMES);
+    CU_ASSERT_EQUAL(DOOM_MUSIC_RING_FRAMES, SOUND_STREAM_MAX_FRAMES);
 }
 
 static void test_register_play_poll_stop(void)
