@@ -913,7 +913,11 @@ The page-granularity layer above is done: `libos_page_alloc()` calls
 `EXO_SYS_PAGE_ALLOC` then `EXO_SYS_PAGE_MAP` to place the new page at a fresh
 virtual address in `[LIBOS_HEAP_VADDR_BASE, LIBOS_HEAP_VADDR_BASE +
 LIBOS_PAGE_ALLOC_MAX_PAGES * 0x1000)` — 16 MiB of window starting 16 MiB into
-the LibOS window, clear of the fixed `libos_launch` region — and
+the LibOS window, clear of the fixed `libos_launch` region (the
+`EXO_KERNEL` build uses a disjoint window 32 MiB in: it maps into the *calling*
+LibOS's address space when `doom_wad_disk_get()` mounts the IWAD volume during
+`exo_launch`, and sharing the base collided with the shell's own heap, failing
+`doom`/`wadview` after `mkfs` with `libos_heap: out of pages`) — and
 `libos_page_free()` reverses it (`EXO_SYS_PAGE_UNMAP` then
 `EXO_SYS_PAGE_FREE`). A small parallel array tracks each slot's physical
 page (mirroring `page_alloc.c`'s own bitmap-PMM shape, one entry per page
