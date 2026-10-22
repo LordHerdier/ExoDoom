@@ -40,6 +40,9 @@
  * consumer, over a scratch volume at SHELL_FS_BASE_LBA -- NOT the volume at
  * LIBOS_WAD_DISK_BASE_LBA (src/doom_wad_disk.h) that holds freedoom2.wad,
  * which `mkfs` must never touch or `doom` breaks for the rest of the boot.
+ * The one exception is `run` (SCRUM-230): it mounts the program volume at
+ * LIBOS_WAD_DISK_BASE_LBA to read a package, and only stats/opens/reads
+ * before unmounting -- every other command still mounts SHELL_FS_BASE_LBA.
  * `dd read` may read any LBA, the IWAD volume included; `dd write` is
  * confined to [0, SHELL_FS_BASE_LBA) so it can reach neither volume -- see
  * shell_run_dd_write()'s own comment.
@@ -771,13 +774,24 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         fbcon_write(con, shell_run_usage_text);
         return;
     }
-    path[0] = '/';
+    /* Deliberately not shell_resolve_path(): shell_cwd names a directory on
+     * the shell's scratch volume, and this is a different volume. A name is
+     * relative to the program volume's root; a leading '/' is accepted and
+     * means the same thing, not "//name". */
     size_t n = 0;
-    while (name[n] != '\0' && n + 2 < sizeof(path)) {
-        path[n + 1] = name[n];
-        n++;
+    if (name[0] != '/') {
+        path[n++] = '/';
     }
-    path[n + 1] = '\0';
+    size_t k = 0;
+    while (name[k] != '\0' && n + 1 < sizeof(path)) {
+        path[n++] = name[k++];
+    }
+    path[n] = '\0';
+    if (name[k] != '\0') {
+        /* Cut off: a truncated name is a different file. */
+        fbcon_write(con, shell_fs_toolong_text);
+        return;
+    }
 
     if (!shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
         return;
@@ -803,6 +817,10 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         return;
     }
 
+    /* From the LibOS heap, which never returns pages to the system: the
+     * buffer is reused by the next `run` (freed blocks coalesce), so a
+     * repeated run does not keep growing the shell, but the high-water mark
+     * of the largest package stays with it for the shell's lifetime. */
     uint8_t *pkg = libos_heap_alloc(st.size);
     if (pkg == NULL) {
         shell_fs_release();

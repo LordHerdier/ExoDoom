@@ -28,6 +28,7 @@
 #include "exo_syscall.h"
 #include "syscall.h"
 #include "string.h"
+#include "fb_binding.h"
 
 #include <stdint.h>
 
@@ -351,6 +352,152 @@ static void test_launched_package_is_fully_reclaimable(void)
     unmap_scratch(paddr);
 }
 
+/* ---- params_len: no patch exists for packages, so it is refused ------- */
+
+static void test_package_declaring_a_params_struct_is_refused(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+
+    /* A valid package with 8 bytes of .data whose first 4 are a params
+     * struct. exo_pkg_check_header() accepts this; the launcher must not,
+     * because nothing would fill the struct in. */
+    exo_pkg_header_t h = good_header(probe_len());
+    h.data_len   = 8;
+    h.params_len = 4;
+    static const uint8_t data[8] = {0};
+    size_t total = 0;
+    CU_ASSERT_EQUAL(exo_pkg_pack((void *)(uintptr_t)PKG_SCRATCH, VMM_PAGE_SIZE,
+                                 &h, (const void *)&libos_launch_probe, data,
+                                 &total), 0);
+
+    uint32_t free_before = free_pages_now();
+    uint32_t ctx_before  = context_count();
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(free_pages_now(), free_before);
+    CU_ASSERT_EQUAL(context_count(), ctx_before);
+    CU_ASSERT_EQUAL(context_switch_pending, 0);
+
+    /* Same package with no params struct launches: the refusal is about
+     * params_len, not about the data section. */
+    h.params_len = 0;
+    CU_ASSERT_EQUAL(exo_pkg_pack((void *)(uintptr_t)PKG_SCRATCH, VMM_PAGE_SIZE,
+                                 &h, (const void *)&libos_launch_probe, data,
+                                 &total), 0);
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), 0);
+
+    context_info_t live[CONTEXT_MAX];
+    uint32_t n = context_list(live, CONTEXT_MAX);
+    for (uint32_t i = 0; i < n; i++) {
+        if (live[i].id != fg) {
+            page_reclaim_all(live[i].id);
+            context_destroy(live[i].id);
+        }
+    }
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+/* ---- Framebuffer: the manifest decides, and only a launch that happens -- */
+
+#define FB_TEST_HOLDER (PAGE_OWNER_LIBOS + 40)
+
+static void destroy_all_but(page_owner_t keep)
+{
+    context_info_t live[CONTEXT_MAX];
+    uint32_t n = context_list(live, CONTEXT_MAX);
+    for (uint32_t i = 0; i < n; i++) {
+        if (live[i].id != keep) {
+            page_reclaim_all(live[i].id);
+            context_destroy(live[i].id);
+        }
+    }
+}
+
+static void test_framebuffer_release_follows_the_manifest(void)
+{
+    const fb_geometry_t *boot = fb_binding_geometry();
+    fb_geometry_t saved;
+    int had_fb = (boot != NULL);
+    if (had_fb)
+        saved = *boot;
+
+    fb_geometry_t g = {
+        .phys_addr = 0x40000000ULL, .width = 64, .height = 64,
+        .pitch = 256, .bpp = 32,
+    };
+    CU_ASSERT_EQUAL(fb_binding_init(&g), FB_BIND_OK);
+
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    size_t total;
+
+    /* Without the bit, the holder keeps the binding. */
+    CU_ASSERT_EQUAL(fb_binding_acquire(FB_TEST_HOLDER), FB_BIND_OK);
+    total = write_probe_package(&h);
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), 0);
+    CU_ASSERT_EQUAL(fb_binding_owner(), FB_TEST_HOLDER);
+    destroy_all_but(fg);
+    context_switch_pending = 0;
+    context_set_current(fg);
+
+    /* A refused launch with the bit set must not touch the binding either:
+     * it is released only once the switch is armed. */
+    h.want_flags = EXO_PKG_WANT_FRAMEBUFFER;
+    total = write_probe_package(&h);
+    ((exo_pkg_header_t *)(uintptr_t)PKG_SCRATCH)->magic ^= 1u;
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(fb_binding_owner(), FB_TEST_HOLDER);
+
+    /* With the bit, a launch that goes through takes it from the holder. */
+    total = write_probe_package(&h);
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), 0);
+    CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
+
+    destroy_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+    fb_binding_init(had_fb ? &saved : (const fb_geometry_t *)0);
+}
+
+/* ---- Exhaustion: past CONTEXT_MAX rows the launch fails cleanly -------- */
+
+static void test_launch_past_capacity_fails_gracefully(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    size_t total = write_probe_package(&h);
+
+    uint32_t launched = 0;
+    int64_t rc = 0;
+    for (uint32_t i = 0; i < CONTEXT_MAX; i++) {
+        rc = do_launch_pkg(PKG_SCRATCH, total);
+        context_switch_pending = 0;
+        context_set_current(fg);
+        if (rc != 0)
+            break;
+        launched++;
+    }
+    CU_ASSERT_TRUE(launched > 0);
+    CU_ASSERT_TRUE(launched < CONTEXT_MAX);
+    CU_ASSERT_EQUAL(rc, -EXO_ENOMEM);
+
+    /* Clean failure: the caller's row is intact and the next call fails the
+     * same way rather than doing something worse. */
+    CU_ASSERT_PTR_NOT_NULL(context_lookup(fg));
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), -EXO_ENOMEM);
+    CU_ASSERT_EQUAL(context_switch_pending, 0);
+
+    destroy_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
 void suite_launch_pkg_tests(CU_pSuite s)
 {
     CU_add_test(s, "lengths that cannot be a package are refused first",
@@ -365,4 +512,10 @@ void suite_launch_pkg_tests(CU_pSuite s)
                 test_good_package_builds_an_image_from_the_callers_bytes);
     CU_add_test(s, "a launched package is fully reclaimable",
                 test_launched_package_is_fully_reclaimable);
+    CU_add_test(s, "a package declaring a params struct is refused",
+                test_package_declaring_a_params_struct_is_refused);
+    CU_add_test(s, "the framebuffer is released only by a launch that happens",
+                test_framebuffer_release_follows_the_manifest);
+    CU_add_test(s, "launching past the context table fails cleanly",
+                test_launch_past_capacity_fails_gracefully);
 }

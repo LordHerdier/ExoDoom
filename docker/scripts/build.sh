@@ -510,6 +510,8 @@ build_ring3_link_target libos_snake src/libos_snake "" "" \
 ring3_embed=1
 
 echo "[2e2/7] Package Snake and write the disk image (SCRUM-230)"
+# Ordering: this step must stay AFTER every target whose package it writes --
+# the image is no longer produced early (step [1b/7] only builds the tool).
 # Snake is the first program that runs from a file rather than a linked blob:
 # `run snake.exo` at the shell reads this package off the program volume and
 # hands it to exo_launch_pkg() (#36, src/syscall_launch.c). Its embedded blob
@@ -530,6 +532,10 @@ fi
 build/exopkg build/snake.exo build/libos_snake_code.bin \
   build/libos_snake_data.bin "$snake_bss_len" fb,kbd
 
+if [[ ! -s build/snake.exo ]]; then
+  echo "    ERROR: build/snake.exo is missing or empty"
+  exit 1
+fi
 build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba" \
   build/snake.exo snake.exo
 
@@ -666,7 +672,7 @@ echo "[3a/7] Compile ExoFS into the kernel (SCRUM-189, SCRUM-190)"
 # never descends into.
 #
 # Unconditional as of SCRUM-190, not TESTING-only: src/syscall_launch.c's
-# LAUNCH_NEEDS_WAD path now mounts the ExoFS volume built by step [1b/7] and
+# LAUNCH_NEEDS_WAD path now mounts the ExoFS volume written by step [2e2/7] and
 # reads /freedoom2.wad off it at ring 0, on every normal boot, not just
 # under the KUnit harness. -DEXO_KERNEL picks the in-process
 # exo_syscall_dispatch() form of src/libos_fs/exofs_blockdev.c's disk I/O

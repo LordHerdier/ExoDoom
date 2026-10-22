@@ -582,7 +582,7 @@ int run_tests(void)
     s = CU_add_suite("launch_multi", NULL, launch_multi_suite_cleanup);
     suite_launch_multi_tests(s);
 
-    /* After "launch_multi", whose foreground-context setup it reuses: #35
+    /* After "launch_multi", whose foreground-context setup it reuses: #36
      * launches from a package in the caller's memory rather than from a
      * linked blob (SCRUM-230). */
     s = CU_add_suite("launch_pkg", NULL, launch_pkg_suite_cleanup);

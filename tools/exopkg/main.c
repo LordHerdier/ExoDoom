@@ -70,6 +70,11 @@ static int parse_want(const char *s, uint32_t *out)
 {
     uint32_t want = 0;
     char tmp[64];
+    /* An empty list or an empty element ("", "fb,,kbd", "fb,") is a typo or
+     * an empty shell variable, not "no resources": say "none" for that. */
+    if (s[0] == '\0' || s[0] == ',' || s[strlen(s) - 1] == ',' ||
+        strstr(s, ",,") != NULL)
+        return -1;
     if (strlen(s) >= sizeof(tmp))
         return -1;
     strcpy(tmp, s);
