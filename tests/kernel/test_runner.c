@@ -51,6 +51,7 @@ void suite_syscall_sound_stream_tests(CU_pSuite s);
 int syscall_sound_stream_suite_init(void);
 int syscall_sound_stream_suite_cleanup(void);
 void suite_syscall_pit_tests(CU_pSuite s);
+void suite_rtc_tests(CU_pSuite s);
 void suite_doomgeneric_timer_tests(CU_pSuite s);
 void suite_libos_main_tests(CU_pSuite s);
 void suite_libos_c_probe_tests(CU_pSuite s);
@@ -453,6 +454,10 @@ int run_tests(void)
      * exo_get_ticks, and if that one is failing its failures explain these. */
     s = CU_add_suite("doomgeneric_timer", NULL, NULL);
     suite_doomgeneric_timer_tests(s);
+
+    /* The RTC driver and exo_rtc_read (SCRUM-249). */
+    s = CU_add_suite("rtc", NULL, NULL);
+    suite_rtc_tests(s);
 
     s = CU_add_suite("libos_main", NULL, libos_main_suite_cleanup);
     suite_libos_main_tests(s);

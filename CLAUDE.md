@@ -82,7 +82,7 @@ Full guide: `docs/testing.md`. Debugging with GDB: `docs/debugging.md`.
 serial_init -> idt_init -> tss_init -> mmap_init/memory_init -> acpi_init -> page_alloc_init
   -> vmm_init -> syscall_init + every syscall_*_init
   -> pic_remap -> IRQ0 + spurious IRQ7/15 gates -> pit_init
-  -> pci_init -> hda_init -> ata_init
+  -> pci_init -> hda_init -> ata_init -> rtc_init + syscall_rtc_init
   [-DTESTING]    serial_flush -> qemu_exit(run_tests())
   [normal boot]  fb + fbcon -> kbd_init -> sti -> launch the shell LibOS (ring 3)
 ```
@@ -108,6 +108,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | PCI bus | `src/pci.c/h` |
 | ACPI table parser (RSDP/RSDT/XSDT/FADT; runs before `vmm_init`) | `src/acpi.c/h` |
+| CMOS real-time clock (polled; `exo_rtc_read` #35) | `src/rtc.c/h`, `src/syscall_rtc.c/h` |
 | Intel HDA audio | `src/hda.c/h` |
 | PC speaker | `src/speaker.c/h` |
 | Doom sound (tone table, speaker sequencer, PCM path) | `src/doom_sfx_tone.c/h`, `src/doom_sound.c/h`, `src/doom_sound_pcm.c/h` |
@@ -202,7 +203,7 @@ area.
 | GDB and bare-metal debugging | `docs/debugging.md` |
 | Branches, commits, style, CI checks | `docs/contributing.md` |
 | libc per-function audit | `docs/libc_audit.md` |
-| Drivers (IDT, PIC, PIT, serial, keyboard, framebuffer, ATA, PCI, HDA, speaker) | `docs/drivers/*.md` |
+| Drivers (IDT, PIC, PIT, serial, keyboard, framebuffer, ATA, PCI, ACPI, RTC, HDA, speaker) | `docs/drivers/*.md` |
 
 **New architectural facts go into the doc that owns the subsystem, integrated
 into its existing section — not appended here.** If you find yourself writing
