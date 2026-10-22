@@ -30,7 +30,6 @@ _Static_assert(DOOM_MUSIC_RING_FRAMES == PCM_MIXER_MUSIC_FRAMES,
 
 static doom_opl_t        g_opl;
 static doom_genmidi_t    g_genmidi;
-static int               g_genmidi_ok;
 static doom_midi_song_t  g_song;
 static int               g_song_open;
 
@@ -238,13 +237,13 @@ void doom_music_play(void *handle, int looping, uint32_t now_ms)
     if (handle != &g_song || !g_song_open || g_dead)
         return;
 
-    if (!g_genmidi_ok) {
-        const doom_wad_t *w = doom_wad_mounted();
+    /* Looked up per song, not cached: g_genmidi points into the mounted WAD's
+     * lump, and a cache would outlive an unmount or a remount.  It is a
+     * directory lookup and a header check, once per level. */
+    const doom_wad_t *w = doom_wad_mounted();
 
-        if (w == NULL || doom_genmidi_find(&w->wad, &g_genmidi) != DOOM_GENMIDI_OK)
-            return;
-        g_genmidi_ok = 1;
-    }
+    if (w == NULL || doom_genmidi_find(&w->wad, &g_genmidi) != DOOM_GENMIDI_OK)
+        return;
     if (doom_opl_init(&g_opl, &g_genmidi) != DOOM_OPL_OK)
         return;
     g_synth_ok = 1;
@@ -385,7 +384,6 @@ void doom_music_reset(void)
     }
     g_dead = 0;
     g_synth_ok = 0;
-    g_genmidi_ok = 0;
     g_frames = g_song_ms = 0;
 }
 
