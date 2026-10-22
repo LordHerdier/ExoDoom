@@ -18,8 +18,18 @@
  * the explicit path on its own include line, and that header depends on
  * nothing but <stddef.h>/<stdint.h>.
  *
- * usage: exopkg <out.exo> <code.bin> <data.bin> <bss-len> <want>
+ * usage: exopkg <out.exo> <code.bin> <data.bin> <bss-len> <want> [options]
+ *        exopkg --check <package.exo>
  *   <want> is a comma-separated list of: fb, disk, kbd, or "none".
+ *   options (SCRUM-231; each defaults to the derived value described above):
+ *     --params-len N          size of the first-global launch params struct
+ *     --sound-voices N        PCM mixer voices wanted
+ *     --min-pages N           admission minimum (default: image + stack)
+ *     --recommended-pages N   admission recommendation (default: min + slack)
+ *     --stack-pages N         stack pages (default: EXO_PKG_MAX_STACK_PAGES)
+ *   --check parses a finished package with exo_pkg_parse() and prints its
+ *   header; build.sh runs it over every emitted package so a bad manifest
+ *   fails the build rather than the boot.
  */
 
 #include "../../src/exo_pkg.h"
@@ -97,13 +107,76 @@ static uint32_t pages(uint64_t bytes)
     return (uint32_t)((bytes + EXO_PKG_PAGE_SIZE - 1) / EXO_PKG_PAGE_SIZE);
 }
 
+static int parse_u32(const char *s, uint32_t *out)
+{
+    errno = 0;
+    char *end;
+    unsigned long v = strtoul(s, &end, 10);
+    if (*s == '\0' || *end != '\0' || errno == ERANGE || v > UINT32_MAX)
+        return -1;
+    *out = (uint32_t)v;
+    return 0;
+}
+
+static int check_package(const char *path)
+{
+    size_t len;
+    unsigned char *buf = read_file(path, &len);
+    if (!buf)
+        return 1;
+    exo_pkg_header_t h;
+    const void *code, *data;
+    int rc = exo_pkg_parse(buf, len, &h, &code, &data);
+    if (rc != 0) {
+        fprintf(stderr, "exopkg: %s: exo_pkg_parse failed: %d\n", path, rc);
+        return 1;
+    }
+    printf("    exopkg: %s ok: code %u data %u bss %u stack %u params %u "
+           "pages %u/%u voices %u want 0x%x\n",
+           path, h.code_len, h.data_len, h.bss_len, h.stack_pages,
+           h.params_len, h.min_pages, h.recommended_pages, h.sound_voices,
+           h.want_flags);
+    free(buf);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 6) {
+    if (argc == 3 && strcmp(argv[1], "--check") == 0)
+        return check_package(argv[2]);
+
+    if (argc < 6 || (argc - 6) % 2 != 0) {
         fprintf(stderr,
-                "usage: %s <out.exo> <code.bin> <data.bin> <bss-len> <want>\n",
-                argv[0]);
+                "usage: %s <out.exo> <code.bin> <data.bin> <bss-len> <want>"
+                " [--params-len N] [--sound-voices N] [--min-pages N]"
+                " [--recommended-pages N] [--stack-pages N]\n"
+                "       %s --check <package.exo>\n",
+                argv[0], argv[0]);
         return 1;
+    }
+
+    uint32_t params_len = 0, sound_voices = 0, stack_pages = EXO_PKG_MAX_STACK_PAGES;
+    uint32_t min_pages = 0, rec_pages = 0;
+    int have_min = 0, have_rec = 0;
+    for (int i = 6; i < argc; i += 2) {
+        uint32_t *dst = NULL;
+        if (strcmp(argv[i], "--params-len") == 0)
+            dst = &params_len;
+        else if (strcmp(argv[i], "--sound-voices") == 0)
+            dst = &sound_voices;
+        else if (strcmp(argv[i], "--stack-pages") == 0)
+            dst = &stack_pages;
+        else if (strcmp(argv[i], "--min-pages") == 0) {
+            dst = &min_pages;
+            have_min = 1;
+        } else if (strcmp(argv[i], "--recommended-pages") == 0) {
+            dst = &rec_pages;
+            have_rec = 1;
+        }
+        if (!dst || parse_u32(argv[i + 1], dst) != 0) {
+            fprintf(stderr, "exopkg: bad option '%s %s'\n", argv[i], argv[i + 1]);
+            return 1;
+        }
     }
 
     errno = 0;
@@ -135,14 +208,15 @@ int main(int argc, char **argv)
     hdr.code_len    = (uint32_t)code_len;
     hdr.data_len    = (uint32_t)data_len;
     hdr.bss_len     = (uint32_t)bss_len;
-    hdr.stack_pages = EXO_PKG_MAX_STACK_PAGES;
-    /* The params struct convention (first global in .data) is the launcher's
-     * to fill; a package from this tool declares none. */
-    hdr.params_len  = 0;
-    hdr.min_pages   = pages(code_len) + pages((uint64_t)data_len + bss_len) +
-                      hdr.stack_pages;
-    hdr.recommended_pages = hdr.min_pages + HEAP_SLACK_PAGES;
-    hdr.sound_voices = 0;
+    hdr.stack_pages = stack_pages;
+    hdr.params_len  = params_len;
+    hdr.min_pages   = have_min ? min_pages
+                               : pages(code_len) +
+                                 pages((uint64_t)data_len + bss_len) +
+                                 hdr.stack_pages;
+    hdr.recommended_pages = have_rec ? rec_pages
+                                     : hdr.min_pages + HEAP_SLACK_PAGES;
+    hdr.sound_voices = sound_voices;
     hdr.want_flags   = want;
 
     size_t cap = sizeof(hdr) + code_len + data_len;

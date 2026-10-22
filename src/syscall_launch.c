@@ -59,7 +59,6 @@
 #include "libos_wad_map.h"
 #include "libos_wad_params.h"
 #include "libos_wad_viewer/libos_wad_viewer_layout.h"
-#include "libos_clock/libos_clock_layout.h"
 #include "libos_doom/libos_doom_layout.h"
 #include "doom_wad_disk.h"
 #include "page_alloc.h"
@@ -78,10 +77,6 @@ extern const uint8_t _binary_libos_wad_viewer_code_bin_end[];
 extern const uint8_t _binary_libos_wad_viewer_data_bin_start[];
 extern const uint8_t _binary_libos_wad_viewer_data_bin_end[];
 
-extern const uint8_t _binary_libos_clock_code_bin_start[];
-extern const uint8_t _binary_libos_clock_code_bin_end[];
-extern const uint8_t _binary_libos_clock_data_bin_start[];
-extern const uint8_t _binary_libos_clock_data_bin_end[];
 
 /* Doom's blobs (SCRUM-66), same mechanism. Much the largest of the four:
  * ~390 KiB of code+rodata and ~80 KiB of .data against a ~314 KiB .bss,
@@ -117,14 +112,6 @@ static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
         _binary_libos_wad_viewer_data_bin_end,
         LIBOS_WAD_VIEWER_BSS_LEN,
         LAUNCH_NEEDS_WAD | LAUNCH_RELEASES_FB,
-    },
-    [EXO_LAUNCH_APP_CLOCK] = {
-        _binary_libos_clock_code_bin_start,
-        _binary_libos_clock_code_bin_end,
-        _binary_libos_clock_data_bin_start,
-        _binary_libos_clock_data_bin_end,
-        LIBOS_CLOCK_BSS_LEN,
-        0u,
     },
     [EXO_LAUNCH_APP_DOOM] = {
         _binary_libos_doom_code_bin_start,

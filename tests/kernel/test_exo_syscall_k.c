@@ -314,11 +314,10 @@ static void test_every_syscall_has_a_stub(void)
 static void test_launch_app_ids_are_dense_and_ordered(void)
 {
     CU_ASSERT_EQUAL(EXO_LAUNCH_APP_WAD_VIEWER, 0);
-    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_CLOCK,      1);
-    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_DOOM,       2);
+    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_DOOM,       1);
 
     CU_ASSERT_EQUAL(EXO_LAUNCH_APP_COUNT, EXO_LAUNCH_APP_DOOM + 1);
-    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_COUNT, 3);
+    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_COUNT, 2);
 }
 
 /*

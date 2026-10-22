@@ -68,7 +68,6 @@ void suite_context_switch_tests(CU_pSuite s);
 void suite_sse_tests(CU_pSuite s);
 void suite_syscall_yield_tests(CU_pSuite s);
 void suite_shell_libos_tests(CU_pSuite s);
-void suite_clock_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
 void suite_fb_shadow_tests(CU_pSuite s);
 void suite_fixed_math_tests(CU_pSuite s);
@@ -175,6 +174,7 @@ int exofs_suite_cleanup(void);
  * here launches real contexts (with real code/data/stack pages) via the
  * live EXO_SYS_LAUNCH handler and must not leak one into a later suite if an
  * assertion fails mid-test. */
+int launch_multi_suite_init(void);
 int launch_multi_suite_cleanup(void);
 int launch_pkg_suite_cleanup(void);
 
@@ -296,12 +296,6 @@ int syscall_yield_suite_cleanup(void);
  * reasoning as libc_shim_probe_suite_init/_cleanup above. */
 int shell_libos_suite_init(void);
 int shell_libos_suite_cleanup(void);
-
-/* Same idea for the clock_libos suite (SCRUM-168): builds the real clock
- * blob under PAGE_OWNER_LIBOS and must restore its boot-time binding, same
- * reasoning as shell_libos_suite_init/_cleanup above. */
-int clock_libos_suite_init(void);
-int clock_libos_suite_cleanup(void);
 
 /* Same idea again for libos_doom (SCRUM-66): builds the real Doom image
  * from the embedded blobs, so it needs the same save/restore of
@@ -505,10 +499,6 @@ int run_tests(void)
                      shell_libos_suite_cleanup);
     suite_shell_libos_tests(s);
 
-    s = CU_add_suite("clock_libos", clock_libos_suite_init,
-                     clock_libos_suite_cleanup);
-    suite_clock_libos_tests(s);
-
     s = CU_add_suite("context_launch_rebind", NULL,
                      context_launch_rebind_suite_cleanup);
     suite_context_launch_rebind_tests(s);
@@ -579,7 +569,8 @@ int run_tests(void)
     s = CU_add_suite("doom_wad_disk", NULL, NULL);
     suite_doom_wad_disk_tests(s);
 
-    s = CU_add_suite("launch_multi", NULL, launch_multi_suite_cleanup);
+    s = CU_add_suite("launch_multi", launch_multi_suite_init,
+                     launch_multi_suite_cleanup);
     suite_launch_multi_tests(s);
 
     /* After "launch_multi", whose foreground-context setup it reuses: #36

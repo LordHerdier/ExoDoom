@@ -482,8 +482,14 @@ echo "[2e/7] Build clock demo LibOS (SCRUM-168)"
 # entry_vaddr (this target also carries the
 # __attribute__((section(".text.entry"))) belt-and-suspenders fix, for the
 # same reason the WAD-viewer target's own comment gives).
+#
+# Like Snake below, the clock ships as a package (SCRUM-231): its blobs and
+# layout header are built for the packager but not linked into the kernel, and
+# the shell's `clock` command is `run clock.exo`.
+ring3_embed=0
 build_ring3_link_target libos_clock src/libos_clock "" "" \
   src/libos_clock/libos_clock.c src/fb.c src/fb_console.c src/libos_fb.c
+ring3_embed=1
 
 echo "[2f/7] Build Snake LibOS (SCRUM-182)"
 # Same reasoning and same mechanism as the WAD viewer step just above: built
@@ -508,36 +514,6 @@ ring3_embed=0
 build_ring3_link_target libos_snake src/libos_snake "" "" \
   src/libos_snake/libos_snake.c src/fb.c src/fb_console.c src/libos_fb.c
 ring3_embed=1
-
-echo "[2e2/7] Package Snake and write the disk image (SCRUM-230)"
-# Ordering: this step must stay AFTER every target whose package it writes --
-# the image is no longer produced early (step [1b/7] only builds the tool).
-# Snake is the first program that runs from a file rather than a linked blob:
-# `run snake.exo` at the shell reads this package off the program volume and
-# hands it to exo_launch_pkg() (#36, src/syscall_launch.c). Its embedded blob
-# is no longer linked into the kernel (ring3_embed=0 above): the shell's
-# `snake` command is `run snake.exo`, so the disk path is the only path.
-# tests/kernel/test_launch_pkg_k.c proves the kernel half.
-#
-# Same native-gcc, no "-I src" rule as tools/mkexofsimg above.
-gcc -std=c99 -O2 -Wall -Wextra -Werror \
-  tools/exopkg/main.c -o build/exopkg
-
-snake_bss_len="$(sed -n 's/^#define LIBOS_SNAKE_BSS_LEN \([0-9]*\)$/\1/p' \
-                 src/libos_snake/libos_snake_layout.h)"
-if [[ -z "$snake_bss_len" ]]; then
-  echo "    ERROR: could not read LIBOS_SNAKE_BSS_LEN from libos_snake_layout.h"
-  exit 1
-fi
-build/exopkg build/snake.exo build/libos_snake_code.bin \
-  build/libos_snake_data.bin "$snake_bss_len" fb,kbd
-
-if [[ ! -s build/snake.exo ]]; then
-  echo "    ERROR: build/snake.exo is missing or empty"
-  exit 1
-fi
-build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba" \
-  build/snake.exo snake.exo
 
 echo "[2f/7] Build Doom LibOS (SCRUM-66)"
 # The convergence point: the vendored engine (src/doom/, SCRUM-63/-64), the
@@ -603,6 +579,63 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/libos_doom/doom_sound_music.c \
   src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c \
   src/doom/*.c
+
+echo "[2g/7] Package ring-3 targets and write the disk image (SCRUM-230, SCRUM-231)"
+# Ordering: this step must stay AFTER every target it packages (the disk image
+# is no longer produced early -- step [1b/7] only builds the tool), which is
+# why it sits below the Doom build rather than next to Snake's.
+#
+# Every package is built from what build_ring3_link_target() already left in
+# build/ (<name>_code.bin, <name>_data.bin, and <NAME>_BSS_LEN in the generated
+# layout header), so there is no second extraction path. Page counts in the
+# manifest are derived from those blobs by tools/exopkg (image pages + stack,
+# plus heap slack) -- measured, not guessed; SCRUM-232 owns real admission
+# policy. Same native-gcc, no "-I src" rule as tools/mkexofsimg above.
+gcc -std=c99 -O2 -Wall -Wextra -Werror \
+  tools/exopkg/main.c -o build/exopkg
+mkdir -p build/packages
+rm -f build/packages/*.exo
+
+# package_ring3_target <target> <layout dir> <package name> <want> [exopkg opts]
+#   <target> is the build_ring3_link_target name (libos_snake, ...).
+package_ring3_target() {
+  local name="$1" dir="$2" pkg="$3" want="$4"
+  shift 4
+  local macro bss_len
+  macro="$(echo "$name" | tr '[:lower:]' '[:upper:]')_BSS_LEN"
+  bss_len="$(sed -n "s/^#define $macro \([0-9]*\)$/\1/p" "$dir/${name}_layout.h")"
+  if [[ -z "$bss_len" ]]; then
+    echo "    ERROR: could not read $macro from $dir/${name}_layout.h"
+    exit 1
+  fi
+  build/exopkg "build/packages/$pkg" "build/${name}_code.bin" \
+    "build/${name}_data.bin" "$bss_len" "$want" "$@"
+  if [[ ! -s "build/packages/$pkg" ]]; then
+    echo "    ERROR: build/packages/$pkg is missing or empty"
+    exit 1
+  fi
+  build/exopkg --check "build/packages/$pkg"
+}
+
+# Launch params struct = libos_wad_params_t (src/libos_wad_params.h): two u64.
+# Doom and the WAD viewer still launch through #21 (they need the WAD mapping
+# a package cannot yet request, see docs/architecture.md), so their packages
+# are produced and checked here but not yet launchable via `run`.
+# Add Tetris (SCRUM-183) / the calculator here when their targets exist.
+package_ring3_target libos_snake      src/libos_snake      snake.exo   fb,kbd
+package_ring3_target libos_clock      src/libos_clock      clock.exo   fb,kbd
+package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,kbd \
+  --params-len 16
+package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd \
+  --params-len 16 --sound-voices 8
+
+# Every package goes on the program volume under its own file name.
+pkg_args=()
+for f in build/packages/*.exo; do
+  pkg_args+=("$f" "$(basename "$f")")
+done
+build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba" \
+  "${pkg_args[@]}"
 
 echo "[3/7] Compile C sources"
 
