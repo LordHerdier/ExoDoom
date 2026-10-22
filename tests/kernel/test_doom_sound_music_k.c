@@ -41,13 +41,16 @@ static const uint8_t LONG_SONG[] = {
     0x00,0xC0,0x00,  0x00,0x90,0x3C,0x64,  0x83,0x00,0x80,0x3C,0x00,  0x00,0xFF,0x2F,0x00,
 };
 
-static void mount_real_wad(void)
+/* 0 if the IWAD is mounted afterwards.  Reported rather than swallowed: a test
+ * that unmounts the WAD and fails to put it back would otherwise leave every
+ * later test in the suite without a GENMIDI, failing for the wrong reason. */
+static int mount_real_wad(void)
 {
     uint64_t paddr = 0, size = 0;
 
     if (doom_wad_disk_get(&paddr, &size) != 0)
-        return;
-    (void)doom_wad_mount((const void *)(uintptr_t)paddr, (uint32_t)size);
+        return -1;
+    return doom_wad_mount((const void *)(uintptr_t)paddr, (uint32_t)size);
 }
 
 static void quiesce(void)
@@ -59,7 +62,7 @@ static void quiesce(void)
 
 int suite_doom_sound_music_init(void)
 {
-    mount_real_wad();
+    (void)mount_real_wad();   /* test_preconditions reports a failure by name */
     quiesce();
     return 0;
 }
@@ -293,7 +296,8 @@ static void test_bad_input_costs_only_that_song(void)
     CU_ASSERT_FALSE(doom_music_is_playing());
     CU_ASSERT_TRUE(doom_music_available());
 
-    mount_real_wad();
+    CU_ASSERT_EQUAL(mount_real_wad(), 0);
+    CU_ASSERT_PTR_NOT_NULL(doom_wad_mounted());
     if (hda_present()) {
         doom_music_play(h, 0, 0);
         CU_ASSERT_TRUE(doom_music_is_playing());
