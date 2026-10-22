@@ -1368,7 +1368,7 @@ The entire toolchain runs inside Docker. No host cross-compiler is required.
 | ------------------------------- | ----------------------------------------------------- |
 | `make docker-build`             | Build kernel + ISO                                    |
 | `make docker-run`               | Boot ISO in QEMU (GRUB menu)                          |
-| `make docker-run-kernel`        | Boot kernel directly (no GRUB menu, faster iteration) |
+| `make docker-run-kernel`        | Boot the ISO with the GRUB menu skipped (`qemu -kernel` can't load Multiboot 2) |
 | `make docker-test`              | Build with `TESTING=1`, boot, stream serial output    |
 | `make docker-ci`                | As `docker-test`; used by GitHub Actions              |
 | `make docker-build DEBUG=1`     | Debug build (`-g -O0`) for GDB sessions               |

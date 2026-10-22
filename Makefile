@@ -14,17 +14,21 @@ docker-run: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm -it -v "$(PWD):/work" exodoom-qemu
 
-# Optional: boot the kernel directly (no GRUB menu)
+# Dev-loop boot target: skips the GRUB menu, not GRUB itself.
+#
+# `qemu -kernel` cannot be used here: it only loads Multiboot 1 or PVH
+# kernels, and ExoDoom is Multiboot 2 (the kernel needs the MB2 memory map
+# and framebuffer tags), so it fails with "Error loading uncompressed kernel
+# without PVH ELF Note" (issue #84). We boot the ISO instead; src/grub.cfg
+# sets timeout=0 so GRUB goes straight to the only entry with no menu.
 #
 # -drive ...build/exodoom_disk.img: the ExoFS volume holding freedoom2.wad
-# (SCRUM-190, docker/scripts/build.sh step [2e2/7]), replacing the old GRUB
-# multiboot2 module -- see src/syscall_launch.c. `-kernel` bypasses GRUB
-# entirely, but the drive is attached the same way as every other
-# normal-boot target below.
+# (SCRUM-190, docker/scripts/build.sh step [1b/7]), replacing the old GRUB
+# multiboot2 module -- see src/syscall_launch.c.
 docker-run-kernel: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm -it -v "$(PWD):/work" exodoom-qemu \
-	  'qemu-system-x86_64 -kernel build/exodoom -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -display curses -serial mon:stdio'
+	  'qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -display curses -serial mon:stdio'
 
 # build/exodoom_disk.img (written by docker/scripts/build.sh step [2e2/7],
 # SCRUM-190) replaces build/ata_scratch.img here too: its low LBAs keep that

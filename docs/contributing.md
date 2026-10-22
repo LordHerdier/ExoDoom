@@ -15,7 +15,7 @@ rundown of what the Docker images provide.
 
 ```bash
 make docker-build          # build kernel + ISO
-make docker-run-kernel     # build, then boot directly in QEMU (no GRUB) -- fastest dev loop
+make docker-run-kernel     # build, then boot the ISO with the GRUB menu skipped (timeout=0) -- fastest dev loop
 make docker-test           # build with TESTING=1, boot, stream serial test output
 ```
 
