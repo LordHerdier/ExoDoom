@@ -48,6 +48,12 @@ static int      g_synth_ok;       /* g_opl has been initialised   */
 static uint64_t g_frames;         /* frames rendered since PlaySong */
 static uint64_t g_song_ms;        /* song clock handed to doom_midi_advance */
 
+/* Timing profile (see doom_sound_music.h).  Plain counters, a few adds per
+ * poll or per note: cheap enough to leave on. */
+static doom_music_prof_t g_prof;
+static uint32_t          g_prof_last_poll;
+static int               g_prof_have_last;
+
 /* Ring 3's room estimate: the last write's answer, plus the drain since. */
 static uint32_t g_space;
 static uint32_t g_space_ms;
@@ -109,6 +115,56 @@ static uint32_t hw_room(uint32_t now_ms)
 
 /* ── Song clock and rendering ──────────────────────────────────────────── */
 
+/* How late a note-on is applied against where the song says it belongs.  The
+ * synth hears it at the start of the render step (g_frames), so the error is
+ * the step quantization plus the whole-ms song clock -- the part of the
+ * pacing that no amount of ring depth can hide. */
+static void prof_note(const doom_midi_event_t *ev)
+{
+    if ((ev->status & 0xF0u) != 0x90u || ev->data2 == 0)
+        return;
+
+    uint64_t at_us = g_frames * 1000000u / OUT_HZ;
+    uint32_t late  = at_us > ev->time_us ? (uint32_t)(at_us - ev->time_us) : 0;
+    uint32_t b     = late < 1000u ? 0 : late < 2000u ? 1 : late < 4000u ? 2 : 3;
+
+    if (g_prof.notes == 0 || late < g_prof.late_min)
+        g_prof.late_min = late;
+    if (late > g_prof.late_max)
+        g_prof.late_max = late;
+    g_prof.late_sum += late;
+    g_prof.late_hist[b]++;
+    g_prof.notes++;
+}
+
+static void prof_poll(uint32_t now_ms, uint32_t fill)
+{
+    if (g_prof_have_last) {
+        uint32_t dt = now_ms - g_prof_last_poll;
+        uint32_t b  = dt <= 20 ? 0 : dt <= 40 ? 1 : dt <= 80 ? 2 :
+                      dt <= 170 ? 3 : 4;
+
+        if (g_prof.polls == 0 || dt < g_prof.dt_min)
+            g_prof.dt_min = dt;
+        if (dt > g_prof.dt_max)
+            g_prof.dt_max = dt;
+        g_prof.dt_sum += dt;
+        g_prof.dt_hist[b]++;
+        g_prof.polls++;
+    }
+    g_prof_last_poll = now_ms;
+    g_prof_have_last = 1;
+
+    if (g_prof.fills == 0 || fill < g_prof.fill_min)
+        g_prof.fill_min = fill;
+    if (fill > g_prof.fill_max)
+        g_prof.fill_max = fill;
+    g_prof.fill_sum += fill;
+    g_prof.fills++;
+    if (fill == 0 && g_frames > 0)
+        g_prof.starved++;
+}
+
 /* Bring the song up to the audio rendered so far, then render `n` frames. */
 static void render_step(int16_t *dst, uint32_t n)
 {
@@ -123,8 +179,10 @@ static void render_step(int16_t *dst, uint32_t n)
         do {
             k = doom_midi_advance(&g_song, elapsed, ev, EVENT_BATCH);
             elapsed = 0;
-            for (int i = 0; i < k; i++)
+            for (int i = 0; i < k; i++) {
+                prof_note(&ev[i]);
                 doom_opl_event(&g_opl, &ev[i]);
+            }
         } while (k == (int)EVENT_BATCH);
 
         /* A song that opened should not fail to advance; if it does, it ends. */
@@ -263,6 +321,7 @@ void doom_music_play(void *handle, int looping, uint32_t now_ms)
     g_space_ms = now_ms;
     g_paused   = 0;
     g_playing  = 1;
+    doom_music_prof_reset();
 }
 
 void doom_music_stop(void)
@@ -314,6 +373,7 @@ void doom_music_resume(uint32_t now_ms)
     g_paused   = 0;
     g_space    = DOOM_MUSIC_RING_FRAMES;   /* the stream was emptied */
     g_space_ms = now_ms;
+    g_prof_have_last = 0;                  /* a pause is not a slow poll */
 }
 
 void doom_music_set_volume(int volume)
@@ -343,6 +403,8 @@ void doom_music_poll(uint32_t now_ms)
 
     uint32_t room = hw_room(now_ms);
     uint32_t fill = DOOM_MUSIC_RING_FRAMES - room;
+
+    prof_poll(now_ms, fill);
 
     if (fill >= DOOM_MUSIC_TARGET_FRAMES)
         return;
@@ -393,4 +455,28 @@ void doom_music_reset(void)
 uint64_t doom_music_frames_rendered(void)
 {
     return g_frames;
+}
+
+/* ── Timing profile ────────────────────────────────────────────────────── */
+
+void doom_music_prof_reset(void)
+{
+    g_prof = (doom_music_prof_t){ 0 };
+    g_prof_have_last = 0;
+}
+
+void doom_music_prof_note_cost(uint32_t ms)
+{
+    if (ms > g_prof.cost_max)
+        g_prof.cost_max = ms;
+    g_prof.cost_sum += ms;
+    g_prof.costs++;
+}
+
+void doom_music_prof_get(doom_music_prof_t *out)
+{
+    *out = g_prof;
+#ifdef EXO_KERNEL
+    out->underruns = pcm_mixer_music_underruns();
+#endif
 }
