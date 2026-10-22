@@ -55,11 +55,11 @@
 #include "exo_syscall.h"
 #include "context.h"
 #include "libos_launch.h"
+#include "exo_pkg.h"
 #include "libos_wad_map.h"
 #include "libos_wad_params.h"
 #include "libos_wad_viewer/libos_wad_viewer_layout.h"
 #include "libos_clock/libos_clock_layout.h"
-#include "libos_snake/libos_snake_layout.h"
 #include "libos_doom/libos_doom_layout.h"
 #include "doom_wad_disk.h"
 #include "page_alloc.h"
@@ -82,11 +82,6 @@ extern const uint8_t _binary_libos_clock_code_bin_start[];
 extern const uint8_t _binary_libos_clock_code_bin_end[];
 extern const uint8_t _binary_libos_clock_data_bin_start[];
 extern const uint8_t _binary_libos_clock_data_bin_end[];
-
-extern const uint8_t _binary_libos_snake_code_bin_start[];
-extern const uint8_t _binary_libos_snake_code_bin_end[];
-extern const uint8_t _binary_libos_snake_data_bin_start[];
-extern const uint8_t _binary_libos_snake_data_bin_end[];
 
 /* Doom's blobs (SCRUM-66), same mechanism. Much the largest of the four:
  * ~390 KiB of code+rodata and ~80 KiB of .data against a ~314 KiB .bss,
@@ -131,14 +126,6 @@ static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
         LIBOS_CLOCK_BSS_LEN,
         0u,
     },
-    [EXO_LAUNCH_APP_SNAKE] = {
-        _binary_libos_snake_code_bin_start,
-        _binary_libos_snake_code_bin_end,
-        _binary_libos_snake_data_bin_start,
-        _binary_libos_snake_data_bin_end,
-        LIBOS_SNAKE_BSS_LEN,
-        LAUNCH_RELEASES_FB,
-    },
     [EXO_LAUNCH_APP_DOOM] = {
         _binary_libos_doom_code_bin_start,
         _binary_libos_doom_code_bin_end,
@@ -150,32 +137,11 @@ static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
 };
 
 /*
- * #21 -- build and switch to the ring-3 LibOS app named by `app_id`,
- * invoked from the shell's per-app commands (src/shell/shell_main.c).
- *
- * Returns a negative EXO_E* on any failure before the switch is armed, in
- * which case the caller (the shell) keeps running and can report the error.
- * On success, context_switch_request() has armed context_switch_pending and
- * this returns 0 -- but the caller never observes that 0 as an ordinary
- * syscall return: src/syscall_entry.s's epilogue sees the pending switch
- * immediately after this handler returns and takes the context_switch_tail
- * exit into the new app instead of sysret-ing back to the shell.
+ * Shared by #21 and #36: both create a context row, and both would exhaust
+ * CONTEXT_MAX if an exited app's row were never reclaimed.
  */
-static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
-                          uint64_t a4, uint64_t a5, uint64_t a6)
+static void launch_reclaim_exited(void)
 {
-    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-
-    /* The one new failure mode this ticket introduces. An unknown app id is
-     * a caller error rather than a resource problem, and is rejected before
-     * anything has been created. The argument is unsigned, so a "negative"
-     * id arrives as a huge value and is caught by the same comparison. */
-    if (app_id >= EXO_LAUNCH_APP_COUNT) {
-        return -EXO_EINVAL;
-    }
-
-    launch_app_t *app = &launch_apps[app_id];
-
     /*
      * Reclaim any exited-but-not-yet-destroyed context row before creating
      * another one. exo_exit() (src/syscall_exit.c, SCRUM-155/178) already
@@ -205,6 +171,104 @@ static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
             context_destroy(live[i].id);
         }
     }
+}
+
+/* static, not a local: libos_image_t carries one uint64_t per mappable
+ * page, so at 192/192/16 pages it is a little over 3 KiB -- a fifth of
+ * src/syscall_entry.s's 16 KiB syscall stack to spend on one local.
+ * Safe because a launch cannot overlap another: `syscall` masks IF
+ * (FMASK, src/syscall.c) so no interrupt can re-enter the dispatcher
+ * here, and a handler runs to completion before the switch it arms
+ * ever takes effect. Introduced by SCRUM-66 for Doom; shared by #21 and #36
+ * (SCRUM-230), which is safe for the same reason. */
+static libos_image_t launch_img;
+
+/*
+ * The part of a launch that does not care where the image's bytes came from
+ * (shared by #21 and #36, so the two cannot drift): prime the context,
+ * optionally release the framebuffer binding, arm the switch. On failure
+ * tears down the image and the context row, so the caller only has to
+ * return the error.
+ */
+static int64_t launch_enter(page_owner_t id, const libos_image_t *img,
+                            int release_fb)
+{
+    /* _irq: this is the app's very first entry, reached through
+     * context_switch_tail rather than a direct libos_enter_irq() call --
+     * without it the app would launch with RFLAGS.IF clear (context_prime()'s
+     * default, correct for SCRUM-108/109's cooperative-only ping-pong
+     * probes) and its exo_get_ticks()/exo_kbd_poll()-driven loops would never
+     * see a PIT or keyboard IRQ land. */
+    context_prime_irq(id, img->entry_vaddr, img->stack_top_vaddr);
+
+    /* Succeeds because the caller (the shell) has a real context_t row of
+     * its own -- see src/kernel.c's SCRUM-178 refactor of the shell launch.
+     * Arms context_switch_pending; src/syscall_entry.s does the actual
+     * switch once this handler returns. This is the last step that can
+     * fail, so it runs BEFORE the framebuffer release below: a refused
+     * launch must leave whoever holds the binding untouched (SCRUM-230). */
+    if (context_switch_request(id) != CONTEXT_OK) {
+        libos_destroy_image(id, img);
+        context_destroy(id);
+        return -EXO_EINVAL;
+    }
+
+    if (release_fb) {
+        /* Whoever currently holds the framebuffer binding -- the shell, from
+         * its own libos_fb_map() call at startup (src/shell/shell_main.c),
+         * on a first launch; some other still-live app, once more than one
+         * instance can be running at once (SCRUM-196) -- must give it up
+         * before this one can exo_fb_acquire() it (exclusive,
+         * src/fb_binding.c, SCRUM-154). fb_binding_owner()
+         * rather than assuming the caller: the caller is always the shell,
+         * but the *holder* is not, once a second launch runs. Only the
+         * binding is released, not the holder's own already-established page
+         * table mapping (fb_binding_release() never touches page tables), so
+         * the shell keeps rendering to its existing framebuffer pointer
+         * uninterrupted once it is switched back to. Done last, after the
+         * switch is armed: every failure path above leaves whoever holds the
+         * binding untouched.
+         *
+         * KNOWN GAP (SCRUM-232): this displaces the holder whoever the
+         * caller is -- the shell displacing a still-running Snake is the
+         * designed case (SCRUM-196), so "caller must be the holder" is not
+         * available. #21 always had this reach; #36 only adds that the
+         * package, not a kernel table, supplies the flag. Telling a
+         * launcher from an arbitrary LibOS needs the admission check. */
+        fb_binding_release(fb_binding_owner());
+    }
+
+    return 0;
+}
+
+/*
+ * #21 -- build and switch to the ring-3 LibOS app named by `app_id`,
+ * invoked from the shell's per-app commands (src/shell/shell_main.c).
+ *
+ * Returns a negative EXO_E* on any failure before the switch is armed, in
+ * which case the caller (the shell) keeps running and can report the error.
+ * On success, context_switch_request() has armed context_switch_pending and
+ * this returns 0 -- but the caller never observes that 0 as an ordinary
+ * syscall return: src/syscall_entry.s's epilogue sees the pending switch
+ * immediately after this handler returns and takes the context_switch_tail
+ * exit into the new app instead of sysret-ing back to the shell.
+ */
+static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
+                          uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+
+    /* The one new failure mode this ticket introduces. An unknown app id is
+     * a caller error rather than a resource problem, and is rejected before
+     * anything has been created. The argument is unsigned, so a "negative"
+     * id arrives as a huge value and is caught by the same comparison. */
+    if (app_id >= EXO_LAUNCH_APP_COUNT) {
+        return -EXO_EINVAL;
+    }
+
+    launch_app_t *app = &launch_apps[app_id];
+
+    launch_reclaim_exited();
 
     /* Looked up before context_create() so a missing/unreadable WAD fails
      * without having allocated anything -- the ordering the old WAD-viewer
@@ -227,18 +291,9 @@ static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
     size_t code_len = (size_t)(app->code_end - app->code_start);
     size_t data_len = (size_t)(app->data_end - app->data_start);
 
-    /* static, not a local: libos_image_t carries one uint64_t per mappable
-     * page, so at 192/192/16 pages it is a little over 3 KiB -- a fifth of
-     * src/syscall_entry.s's 16 KiB syscall stack to spend on one local.
-     * Safe because a launch cannot overlap another: `syscall` masks IF
-     * (FMASK, src/syscall.c) so no interrupt can re-enter the dispatcher
-     * here, and this handler runs to completion before the switch it arms
-     * ever takes effect. Introduced by SCRUM-66 for Doom, and now shared by
-     * every app, since there is only one handler. */
-    static libos_image_t img;
     if (libos_build_image(id, app->code_start, code_len,
                           app->data_start, data_len,
-                          app->bss_len, &img) != VMM_OK) {
+                          app->bss_len, &launch_img) != VMM_OK) {
         context_destroy(id);
         return -EXO_ENOMEM;
     }
@@ -249,9 +304,9 @@ static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
          * or below tears down this app's own image/context but must not
          * free those pages; some other still-live app (or a future launch)
          * may be mapping the same buffer. */
-        if (libos_map_wad((uint64_t *)(uintptr_t)img.pml4_phys,
+        if (libos_map_wad((uint64_t *)(uintptr_t)launch_img.pml4_phys,
                           wad_paddr, wad_size) != VMM_OK) {
-            libos_destroy_image(id, &img);
+            libos_destroy_image(id, &launch_img);
             context_destroy(id);
             return -EXO_EINVAL;
         }
@@ -273,53 +328,102 @@ static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
             .wad_vaddr = LIBOS_WAD_VADDR,
             .wad_size  = wad_size,
         };
-        if (libos_launch_patch_params(&img, &params, sizeof(params)) != VMM_OK) {
-            libos_destroy_image(id, &img);
+        if (libos_launch_patch_params(&launch_img, &params, sizeof(params)) != VMM_OK) {
+            libos_destroy_image(id, &launch_img);
             context_destroy(id);
             return -EXO_EINVAL;
         }
     }
 
-    /* _irq: this is the app's very first entry, reached through
-     * context_switch_tail rather than a direct libos_enter_irq() call --
-     * without it the app would launch with RFLAGS.IF clear (context_prime()'s
-     * default, correct for SCRUM-108/109's cooperative-only ping-pong
-     * probes) and its exo_get_ticks()/exo_kbd_poll()-driven loops would never
-     * see a PIT or keyboard IRQ land. */
-    context_prime_irq(id, img.entry_vaddr, img.stack_top_vaddr);
+    return launch_enter(id, &launch_img, app->flags & LAUNCH_RELEASES_FB);
+}
 
-    if (app->flags & LAUNCH_RELEASES_FB) {
-        /* Whoever currently holds the framebuffer binding -- the shell, from
-         * its own libos_fb_map() call at startup (src/shell/shell_main.c),
-         * on a first launch; some other still-live app, once more than one
-         * instance can be running at once (SCRUM-196) -- must give it up
-         * before this one can exo_fb_acquire() it (exclusive,
-         * src/fb_binding.c, SCRUM-154). fb_binding_owner()
-         * rather than assuming the caller: the caller is always the shell,
-         * but the *holder* is not, once a second launch runs. Only the
-         * binding is released, not the holder's own already-established page
-         * table mapping (fb_binding_release() never touches page tables), so
-         * the shell keeps rendering to its existing framebuffer pointer
-         * uninterrupted once it is switched back to. Done last, right before
-         * the point of no return: every earlier failure path above leaves
-         * whoever holds the binding untouched. */
-        fb_binding_release(fb_binding_owner());
+/* EXO_LAUNCH_PKG_MAX_LEN (src/exo_syscall.h) restates the format's worst case
+ * as plain integers because that header cannot include exo_pkg.h; this is
+ * what keeps the two from drifting. */
+_Static_assert(EXO_LAUNCH_PKG_MAX_LEN ==
+               sizeof(exo_pkg_header_t) +
+               (EXO_PKG_MAX_CODE_PAGES + EXO_PKG_MAX_DATA_PAGES) *
+               EXO_PKG_PAGE_SIZE,
+               "EXO_LAUNCH_PKG_MAX_LEN out of sync with src/exo_pkg.h");
+
+/*
+ * #36 -- build and switch to the LibOS packaged at [pkg, pkg + len)
+ * (SCRUM-230). The package is the on-disk format of src/exo_pkg.h; the
+ * caller -- a ring-3 launcher, today the shell -- read it off an ExoFS volume
+ * itself, because the kernel knows sectors and nothing above them
+ * (docs/syscall_spec.md §3.2 #24). Everything past "where did the bytes come
+ * from" is #21's path, unchanged: libos_build_image() copies the sections
+ * into pages the new context owns, and launch_enter() arms the switch.
+ *
+ * Validation order is shape -> buffer -> contents, the precedence §3.5a
+ * settled on: a length that cannot be a package is rejected before the
+ * pointer is walked, and the pointer is checked before any byte behind it is
+ * read (SCRUM-186: an in-window but unmapped read faults the kernel).
+ *
+ * The package is untrusted: exo_pkg_parse() bounds every length against the
+ * loader's caps and copies the header out by value, so nothing below re-reads
+ * a header field from caller memory. Only code/data bytes are read from the
+ * buffer again, and libos_build_image() copies them exactly once.
+ */
+static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t a3,
+                              uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a3; (void)a4; (void)a5; (void)a6;
+
+    if (len < sizeof(exo_pkg_header_t) || len > EXO_LAUNCH_PKG_MAX_LEN) {
+        return -EXO_EINVAL;
+    }
+    if (!exo_range_in_user_window(pkg, len) ||
+        !exo_user_range_mapped(pkg, len, 0)) {
+        return -EXO_EFAULT;
     }
 
-    /* Succeeds because the caller (the shell) has a real context_t row of
-     * its own -- see src/kernel.c's SCRUM-178 refactor of the shell launch.
-     * Arms context_switch_pending; src/syscall_entry.s does the actual
-     * switch once this handler returns. */
-    if (context_switch_request(id) != CONTEXT_OK) {
-        libos_destroy_image(id, &img);
-        context_destroy(id);
+    exo_pkg_header_t hdr;
+    const void *code, *data;
+    if (exo_pkg_parse((const void *)(uintptr_t)pkg, (size_t)len,
+                      &hdr, &code, &data) != 0) {
+        return -EXO_EINVAL;
+    }
+    /* The header can declare a params struct (first global in .data) for the
+     * launcher to patch, but no patch is wired for packages yet -- Doom and
+     * the WAD viewer still launch through #21. Launching such a package
+     * would start it with a zero-filled params struct and let it misbehave
+     * later, so refuse it now rather than run it half-configured. */
+    if (hdr.params_len != 0) {
+        return -EXO_EINVAL;
+    }
+    /* A package with no code has nothing for entry_vaddr to point at;
+     * libos_build_image() would refuse it, but refuse it before a context
+     * row exists rather than after. */
+    if (hdr.code_len == 0) {
         return -EXO_EINVAL;
     }
 
-    return 0;
+    launch_reclaim_exited();
+
+    page_owner_t id;
+    int create_rc = context_create(vmm_kernel_pml4(), &id);
+    if (create_rc != CONTEXT_OK) {
+        return create_rc == CONTEXT_ENOMEM ? -EXO_ENOMEM : -EXO_EINVAL;
+    }
+
+    if (libos_build_image(id, code, hdr.code_len, data, hdr.data_len,
+                          hdr.bss_len, &launch_img) != VMM_OK) {
+        context_destroy(id);
+        return -EXO_ENOMEM;
+    }
+
+    /* libos_build_image() maps LIBOS_LAUNCH_STACK_PAGES regardless, so the
+     * header's stack_pages is advisory until the builder takes a count. */
+
+    /* The manifest, not a table flag, says whether this program wants the
+     * framebuffer: the same release #21 does for Snake/Doom/the viewer. */
+    return launch_enter(id, &launch_img, (hdr.want_flags & EXO_PKG_WANT_FRAMEBUFFER) != 0);
 }
 
 void syscall_launch_init(void)
 {
     exo_syscall_register(EXO_SYS_LAUNCH, sys_launch);
+    exo_syscall_register(EXO_SYS_LAUNCH_PKG, sys_launch_pkg);
 }

@@ -6,12 +6,12 @@
  * exo_page_map via src/libos_fb.c's libos_fb_map() for the screen,
  * exo_kbd_poll for input, exo_get_ticks for timing, exo_serial_write for
  * diagnostics), launched from the shell's "snake" command
- * (src/shell/shell_main.c) via exo_launch(EXO_LAUNCH_APP_SNAKE) (#21, src/syscall_launch.c)
+ * (src/shell/shell_main.c) as `run snake.exo` via exo_launch_pkg() (#36, SCRUM-230)
  * rather than kernel_main hardcoding it as the boot-time LibOS.
  *
  * Simpler than the WAD viewer in two ways: there is no external resource to
  * stage before launch (no WAD mapping step), and no launch-time parameters
- * at all, so src/syscall_launch.c's sys_launch_snake() has no
+ * at all, so the package's manifest carries no
  * libos_launch_patch_params() call and this file has no params struct.
  *
  * Like the WAD viewer's automap loop, this LibOS's main loop never returns

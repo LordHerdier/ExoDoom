@@ -6,7 +6,7 @@
  * doom_wad_disk — the IWAD's ExoFS volume on the shared disk image
  * (SCRUM-190).
  *
- * build/exodoom_disk.img (docker/scripts/build.sh step [1b/7]) is the one
+ * build/exodoom_disk.img (docker/scripts/build.sh step [2e2/7]) is the one
  * disk image every QEMU invocation attaches now, test and normal boot
  * alike -- src/ata.c only ever speaks to one drive, so there is exactly
  * one image to share. Its low LBAs keep the exact layout

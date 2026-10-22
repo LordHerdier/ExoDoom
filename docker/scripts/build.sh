@@ -132,7 +132,9 @@ for f in exofs_volume exofs_fat exofs_dir exofs_dirent exofs_name exofs_path \
 done
 gcc -o build/mkexofsimg build/mkexofsimg_obj/*.o
 
-build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba"
+# The image itself is written by step [2e2/7], after the ring-3 targets exist:
+# it now carries program packages (SCRUM-230) alongside the IWAD, and a package
+# is built from a target's code/data blobs.
 
 if [[ "${DEBUG:-0}" == "1" ]]; then
   CFLAGS=(-std=gnu99 -ffreestanding -g -O0 -Wall -Wextra -mno-red-zone -mcmodel=small -mno-sse -mno-sse2 -mno-mmx)
@@ -379,7 +381,12 @@ build_ring3_link_target() {
       "${name}_code.bin" "${name}_code_blob.o" )
   ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
       "${name}_data.bin" "${name}_data_blob.o" )
-  objs+=("build/${name}_code_blob.o" "build/${name}_data_blob.o")
+  # A target whose program ships as a package on the disk image (SCRUM-230)
+  # still gets its blobs and layout header built -- the packager reads them --
+  # but is not linked into the kernel.
+  if [[ "${ring3_embed:-1}" == "1" ]]; then
+    objs+=("build/${name}_code_blob.o" "build/${name}_data_blob.o")
+  fi
 }
 
 echo "[2c/7] Build shell LibOS (SCRUM-110)"
@@ -480,10 +487,9 @@ build_ring3_link_target libos_clock src/libos_clock "" "" \
 
 echo "[2f/7] Build Snake LibOS (SCRUM-182)"
 # Same reasoning and same mechanism as the WAD viewer step just above: built
-# UNCONDITIONALLY and ahead of step 3's C compile loop, because
-# src/syscall_launch.c (the kernel-side #22 handler that launches this LibOS
-# from the shell's "snake" command) #includes the generated
-# src/libos_snake/libos_snake_layout.h this call produces. src/libos_snake/
+# UNCONDITIONALLY, with its blobs built but NOT linked into the kernel
+# (SCRUM-230): the packager below reads them and the generated
+# src/libos_snake/libos_snake_layout.h. src/libos_snake/
 # is its own subdirectory for the same reason src/libos_wad_viewer/ is: step
 # 3's plain `src/*.c` glob below must never compile libos_snake.c with
 # -DEXO_KERNEL.
@@ -498,8 +504,40 @@ echo "[2f/7] Build Snake LibOS (SCRUM-182)"
 # src/fb.c/src/fb_console.c/src/libos_fb.c are the same framebuffer/text-
 # console/mapping code the shell and WAD viewer targets above already link
 # in unmodified.
+ring3_embed=0
 build_ring3_link_target libos_snake src/libos_snake "" "" \
   src/libos_snake/libos_snake.c src/fb.c src/fb_console.c src/libos_fb.c
+ring3_embed=1
+
+echo "[2e2/7] Package Snake and write the disk image (SCRUM-230)"
+# Ordering: this step must stay AFTER every target whose package it writes --
+# the image is no longer produced early (step [1b/7] only builds the tool).
+# Snake is the first program that runs from a file rather than a linked blob:
+# `run snake.exo` at the shell reads this package off the program volume and
+# hands it to exo_launch_pkg() (#36, src/syscall_launch.c). Its embedded blob
+# is no longer linked into the kernel (ring3_embed=0 above): the shell's
+# `snake` command is `run snake.exo`, so the disk path is the only path.
+# tests/kernel/test_launch_pkg_k.c proves the kernel half.
+#
+# Same native-gcc, no "-I src" rule as tools/mkexofsimg above.
+gcc -std=c99 -O2 -Wall -Wextra -Werror \
+  tools/exopkg/main.c -o build/exopkg
+
+snake_bss_len="$(sed -n 's/^#define LIBOS_SNAKE_BSS_LEN \([0-9]*\)$/\1/p' \
+                 src/libos_snake/libos_snake_layout.h)"
+if [[ -z "$snake_bss_len" ]]; then
+  echo "    ERROR: could not read LIBOS_SNAKE_BSS_LEN from libos_snake_layout.h"
+  exit 1
+fi
+build/exopkg build/snake.exo build/libos_snake_code.bin \
+  build/libos_snake_data.bin "$snake_bss_len" fb,kbd
+
+if [[ ! -s build/snake.exo ]]; then
+  echo "    ERROR: build/snake.exo is missing or empty"
+  exit 1
+fi
+build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba" \
+  build/snake.exo snake.exo
 
 echo "[2f/7] Build Doom LibOS (SCRUM-66)"
 # The convergence point: the vendored engine (src/doom/, SCRUM-63/-64), the
@@ -634,7 +672,7 @@ echo "[3a/7] Compile ExoFS into the kernel (SCRUM-189, SCRUM-190)"
 # never descends into.
 #
 # Unconditional as of SCRUM-190, not TESTING-only: src/syscall_launch.c's
-# LAUNCH_NEEDS_WAD path now mounts the ExoFS volume built by step [1b/7] and
+# LAUNCH_NEEDS_WAD path now mounts the ExoFS volume written by step [2e2/7] and
 # reads /freedoom2.wad off it at ring 0, on every normal boot, not just
 # under the KUnit harness. -DEXO_KERNEL picks the in-process
 # exo_syscall_dispatch() form of src/libos_fs/exofs_blockdev.c's disk I/O
@@ -941,7 +979,7 @@ fi
 
 echo "[6/7] Build ISO staging tree"
 # No more freedoom2.wad module here (SCRUM-190): the WAD now lives in
-# build/exodoom_disk.img, built by step [1b/7] and attached as a separate
+# build/exodoom_disk.img, written by step [2e2/7] (formatted tool built in [1b/7]) and attached as a separate
 # QEMU -drive (see Makefile), not staged into the ISO at all.
 mkdir -p build/isodir/boot
 cp build/exodoom build/isodir/boot/exodoom

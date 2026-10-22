@@ -30,7 +30,7 @@ docker-run-kernel: docker-build
 	docker run --rm -it -v "$(PWD):/work" exodoom-qemu \
 	  'qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -display curses -serial mon:stdio'
 
-# build/exodoom_disk.img (built by docker/scripts/build.sh step [1b/7],
+# build/exodoom_disk.img (written by docker/scripts/build.sh step [2e2/7],
 # SCRUM-190) replaces build/ata_scratch.img here too: its low LBAs keep that
 # scratch image's exact layout (see src/doom_wad_disk.h's own comment for
 # the reserved ranges), so test_ata_k.c/test_syscall_disk_k.c/test_exofs_k.c

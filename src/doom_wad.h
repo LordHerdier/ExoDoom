@@ -8,7 +8,7 @@
  * doom_wad — the mounted IWAD, as DG_Init leaves it (SCRUM-73).
  *
  * freedoom2.wad lives on ExoFS, at base LBA 0 of build/exodoom_disk.img
- * (SCRUM-190, docker/scripts/build.sh step [1b/7]). src/syscall_launch.c
+ * (SCRUM-190, docker/scripts/build.sh step [2e2/7]). src/syscall_launch.c
  * mounts that volume, reads the file into a freshly allocated contiguous
  * buffer (cached after the first launch -- see get_wad_buffer() there) and
  * page_alloc_init() has already reserved those pages as PAGE_OWNER_KERNEL,

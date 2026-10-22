@@ -78,7 +78,6 @@ void suite_fpconv_tests(CU_pSuite s);
 void suite_libc_gaps_tests(CU_pSuite s);
 void suite_syscall_fuzz_tests(CU_pSuite s);
 void suite_syscall_bench_tests(CU_pSuite s);
-void suite_libos_snake_tests(CU_pSuite s);
 void suite_doom_keymap_tests(CU_pSuite s);
 void suite_doom_sfx_tone_tests(CU_pSuite s);
 void suite_doom_sound_tests(CU_pSuite s);
@@ -91,6 +90,7 @@ void suite_disk_binding_tests(CU_pSuite s);
 void suite_exofs_tests(CU_pSuite s);
 void suite_doom_wad_disk_tests(CU_pSuite s);
 void suite_launch_multi_tests(CU_pSuite s);
+void suite_launch_pkg_tests(CU_pSuite s);
 void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
 void suite_doom_dmx_tests(CU_pSuite s);
@@ -176,6 +176,7 @@ int exofs_suite_cleanup(void);
  * live EXO_SYS_LAUNCH handler and must not leak one into a later suite if an
  * assertion fails mid-test. */
 int launch_multi_suite_cleanup(void);
+int launch_pkg_suite_cleanup(void);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -301,12 +302,6 @@ int shell_libos_suite_cleanup(void);
  * reasoning as shell_libos_suite_init/_cleanup above. */
 int clock_libos_suite_init(void);
 int clock_libos_suite_cleanup(void);
-
-/* Same idea for the libos_snake suite (SCRUM-182): builds the real Snake
- * blob under PAGE_OWNER_LIBOS and must restore its boot-time binding, same
- * reasoning as shell_libos_suite_init/_cleanup above. */
-int libos_snake_suite_init(void);
-int libos_snake_suite_cleanup(void);
 
 /* Same idea again for libos_doom (SCRUM-66): builds the real Doom image
  * from the embedded blobs, so it needs the same save/restore of
@@ -535,10 +530,6 @@ int run_tests(void)
                      syscall_bench_suite_cleanup);
     suite_syscall_bench_tests(s);
 
-    s = CU_add_suite("libos_snake", libos_snake_suite_init,
-                     libos_snake_suite_cleanup);
-    suite_libos_snake_tests(s);
-
     /* Pure function over one key -- no hardware, no state, so no suite
      * init/cleanup (SCRUM-40). */
     s = CU_add_suite("doom_keymap", NULL, NULL);
@@ -590,6 +581,12 @@ int run_tests(void)
 
     s = CU_add_suite("launch_multi", NULL, launch_multi_suite_cleanup);
     suite_launch_multi_tests(s);
+
+    /* After "launch_multi", whose foreground-context setup it reuses: #36
+     * launches from a package in the caller's memory rather than from a
+     * linked blob (SCRUM-230). */
+    s = CU_add_suite("launch_pkg", NULL, launch_pkg_suite_cleanup);
+    suite_launch_pkg_tests(s);
 
     /* Next to "ata" above: the other driver that talks to real emulated
      * hardware rather than to a model of it (SCRUM-209). */

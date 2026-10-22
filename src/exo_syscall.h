@@ -139,6 +139,11 @@
 /* Wall-clock time (SCRUM-249).  Unscoped like #5: time is not a resource
  * anyone acquires.  Appended for the reason #28-30 were. */
 #define EXO_SYS_RTC_READ            35
+/* Launch from a package in the caller's memory (SCRUM-230).  Appended for the
+ * reason #28-30 were.  #21 names a program the kernel image already contains;
+ * this one takes the bytes of an exo_pkg.h package a ring-3 launcher read off
+ * disk, so the set of runnable programs is no longer a link-time constant. */
+#define EXO_SYS_LAUNCH_PKG          36
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -148,7 +153,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        36
+#define EXO_SYS_COUNT        37
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -162,9 +167,13 @@
  */
 #define EXO_LAUNCH_APP_WAD_VIEWER 0
 #define EXO_LAUNCH_APP_CLOCK      1
-#define EXO_LAUNCH_APP_SNAKE      2
-#define EXO_LAUNCH_APP_DOOM       3
-#define EXO_LAUNCH_APP_COUNT      4
+#define EXO_LAUNCH_APP_DOOM       2
+#define EXO_LAUNCH_APP_COUNT      3
+
+/* Largest package exo_launch_pkg() will look at: the format's own worst case
+ * (header + 192 code pages + 192 data pages; bss is not stored), so nothing
+ * the loader could build is refused here. */
+#define EXO_LAUNCH_PKG_MAX_LEN    (60u + 2u * 192u * 0x1000u)
 
 /* ---- Error codes -------------------------------------------------------- */
 /*
@@ -860,6 +869,27 @@ static inline int64_t exo_sound_stream_volume(int vol)
 static inline int64_t exo_rtc_read(exo_rtc_time_t *out)
 {
     return exo_syscall1(EXO_SYS_RTC_READ, (uint64_t)(uintptr_t)out);
+}
+
+/* #36 -- build and switch to the LibOS packaged at [pkg, pkg + len)
+ * (src/exo_pkg.h, SCRUM-229).  The buffer is the whole package -- header, code
+ * bytes, data bytes -- exactly as it sits in a file; the kernel validates it,
+ * copies the sections into pages the new context owns, and the buffer is the
+ * caller's again as soon as this returns.  Same calling convention as
+ * exo_launch(): on success control does not come back until something
+ * switches back to the caller.
+ *
+ *   -EXO_EINVAL  len is 0 or over EXO_LAUNCH_PKG_MAX_LEN, or the package is
+ *                malformed (bad magic/version, a length over the loader's
+ *                caps, a bad manifest field, or shorter than its header
+ *                claims)
+ *   -EXO_EFAULT  [pkg, pkg + len) is not entirely inside the LibOS window and
+ *                mapped
+ *   -EXO_ENOMEM  no room for the image or no free context row
+ */
+static inline int64_t exo_launch_pkg(const void *pkg, uint64_t len)
+{
+    return exo_syscall2(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len);
 }
 
 #endif /* !EXO_KERNEL */
