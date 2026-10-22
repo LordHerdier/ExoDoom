@@ -100,6 +100,7 @@ void suite_pcm_mixer_tests(CU_pSuite s);
 void suite_pcm_mixer_music_tests(CU_pSuite s);
 void suite_hda_pcm_tests(CU_pSuite s);
 void suite_doom_sound_pcm_tests(CU_pSuite s);
+void suite_doom_sound_music_tests(CU_pSuite s);
 void suite_exo_pkg_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
@@ -151,6 +152,8 @@ int suite_hda_pcm_cleanup(void);
  * table as it found them (SCRUM-214). */
 int suite_doom_sound_pcm_init(void);
 int suite_doom_sound_pcm_cleanup(void);
+int suite_doom_sound_music_init(void);
+int suite_doom_sound_music_cleanup(void);
 
 /* Acquires the disk binding for the suite's own context before the round-
  * trip/hardware tests run and releases it afterward (SCRUM-188). */
@@ -662,6 +665,14 @@ int run_tests(void)
     s = CU_add_suite("doom_sound_pcm", suite_doom_sound_pcm_init,
                      suite_doom_sound_pcm_cleanup);
     suite_doom_sound_pcm_tests(s);
+
+    /* And its music counterpart (SCRUM-220): RegisterSong -> PlaySong ->
+     * Poll x N -> StopSong against the real mixer and the mounted WAD's
+     * D_* and GENMIDI lumps. After doom_sound_pcm for the same reason
+     * (shared controller, mixer and mount). */
+    s = CU_add_suite("doom_sound_music", suite_doom_sound_music_init,
+                     suite_doom_sound_music_cleanup);
+    suite_doom_sound_music_tests(s);
 
     /* The ExoDoom program package format (SCRUM-229): pure buffer logic, no
      * device or syscall dependency, so (NULL, NULL) the same way "pci" is.

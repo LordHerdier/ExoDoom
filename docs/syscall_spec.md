@@ -1597,6 +1597,12 @@ software mixer and the HDA controller, via `exo_sound_pcm` (#28) /
 >   not-playing and `s_sound.c` retires it, the same convention SCRUM-101 uses
 >   for a tone that lost the speaker.
 >
+> **Music follows the same rule (SCRUM-220)**, on the stream syscalls #32–#34
+> rather than #28: no WAD, no `GENMIDI`, or an unparseable lump silences that
+> song only, and any error from #32 — `-EXO_ENODEV` on a machine with no audio
+> controller above all — latches music off for the run. Pacing and the module's
+> shape: `docs/drivers/hda.md` §12.11.
+>
 > Which back end owns a channel is therefore per-channel state
 > (`chan_path[]` in `src/doom_sound.c`), and `StopSound`/`SoundIsPlaying`/
 > `UpdateSoundParams` route on it. It is recorded at start rather than read back

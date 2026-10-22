@@ -897,5 +897,62 @@ asserted against a recorded FNV-1a checksum (`0xe9c13c5b`): a regression
 guard, not a proof. The suite then prints the render cost above.
 
 The stream syscalls (SCRUM-219, #32–#34) now carry rendered frames into ring 0
-and own the ring's pages. Still open: calling all this from `DG_music_module`
-is the Doom wiring (SCRUM-220).
+and own the ring's pages.
+
+### 12.11 Doom plays it: the music module (SCRUM-220)
+
+`DG_music_module` (`src/doom_sound.c`) is now eleven one-line calls into
+`src/libos_doom/doom_sound_music.c/h`, which is where the logic lives so a
+ring-0 suite can drive it — the same split SCRUM-214 made for effects, and for
+the same reason it sits in `src/libos_doom/` beside its producers (the kernel
+glob must not see `doom_opl`). `Poll` is no longer `NULL`: `i_sound.c` calls it
+from `I_UpdateSound`, once per rendered frame via `S_UpdateSounds`.
+
+- **`RegisterSong`** opens the lump with `doom_midi_open` (MUS or MIDI is
+  sniffed there) into one static song slot — Doom holds one song at a time — and
+  returns NULL for anything unparseable, which costs that level its music and
+  nothing else. **`PlaySong`** finds `GENMIDI` once in the mounted WAD, resets
+  the synth, rewinds and sets looping. **`StopSong`** keys everything off and
+  releases the stream (`exo_sound_stream_stop`), so a level change starts clean.
+- **Pacing is the ring, not the frame rate.** A poll renders only what the
+  stream has room for, up to a fill target of `DOOM_MUSIC_TARGET_FRAMES` (8192,
+  170 ms of the 256 ms ring) and at most `DOOM_MUSIC_MAX_POLL_FRAMES` (4096,
+  85 ms) per call, so a stalled frame is caught up over the next few rather
+  than in one hitch, and a poll that finds the ring full does no work at all.
+  **The song clock is frames rendered**, converted to milliseconds for
+  `doom_midi_advance` in 256-frame steps (5.3 ms, finer than DMX's 140 Hz), so
+  the music cannot drift against the DAC; the wall clock is never the song's
+  time. Ring 3 cannot ask how much room there is — the only answer is a write's
+  result (`space` in the high word, `docs/syscall_spec.md` §3.5c) — so it
+  estimates the drain since its last write from wall time and lets each write's
+  answer correct it. An estimate that is too high costs a short write, whose
+  unaccepted frames are kept and sent first on the next poll; one that is too
+  low costs nothing.
+- **Pause drops the queue as well as the notes.** Notes-off alone would leave
+  up to 170 ms of the chord in the ring, so `PauseMusic` also releases the
+  stream; `ResumeMusic` restarts the song where it was (the clock is frames, so
+  there is no catch-up burst).
+- **Volume is passed through, not scaled.** The ticket expected Doom's 0..15
+  slider; `S_SetMusicVolume` in fact takes 0..127 (`m_menu.c` multiplies the
+  slider by 8), which is exactly the stream's range, so `SetMusicVolume` calls
+  `exo_sound_stream_volume` directly and the synth's own master stays at 127
+  rather than attenuating twice.
+- **Degradation is a runtime rule, as for effects** (`docs/syscall_spec.md`
+  §6 Option C): no WAD, no `GENMIDI`, or a bad lump silences that song only;
+  *any* error from the stream — `-EXO_ENODEV` on a machine with no HDA
+  controller above all — latches music off for the run, so the game never pays
+  a failed syscall per frame.
+- **Budget.** `libos_doom` is now 106 code pages and 112 data+bss pages against
+  the 192/192 caps (`LIBOS_LAUNCH_MAX_*_PAGES`), so no raise was needed. Cost of
+  a poll is the synth's cost per second of audio it renders — SCRUM-217's
+  169 ms per second under QEMU TCG, 4.8 ms per 35 Hz tic — because a poll
+  renders exactly the audio that has drained since the last one.
+
+`tests/kernel/test_doom_sound_music_k.c` drives
+`Register→Play→Poll×N→Stop` from ring 0 against the real mixer and the mounted
+freedoom2 `D_OPENIN`/`GENMIDI` lumps, with a hand-advanced clock and the test
+itself as the DAC (`pcm_mixer_render`). It asserts the pacing claims by
+counting: a full ring does zero work, draining *n* frames makes the next poll
+render exactly *n*, and frames rendered equals frames consumed plus frames
+queued. Pause, loop/ending, volume, and bad input are covered; the
+`-EXO_ENODEV` latch is not reachable while the suite requires the controller.
