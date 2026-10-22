@@ -560,7 +560,7 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/doom_wad.c src/wad.c src/doom_panic.c src/doom_keymap.c \
   src/doom_sound.c src/doom_sfx_tone.c \
   src/doom_sound_pcm.c src/doom_dmx.c \
-  src/libos_doom/doom_midi.c \
+  src/libos_doom/doom_midi.c src/libos_doom/doom_genmidi.c \
   src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c \
   src/doom/*.c
 
@@ -769,7 +769,13 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # memio.c allocates through Z_Malloc/Z_Free, which is the zone allocator the
   # kernel cannot link; tests/kernel/z_zone_shim.c backs those two symbols
   # with kmalloc/kfree for this build only.
-  for f in src/doom/memio.c src/doom/mus2mid.c src/libos_doom/doom_midi.c; do
+  #
+  # The GENMIDI instrument decoder (SCRUM-216) rides along: it is ring-3 code
+  # for the same reason (its only consumer is the OPL3 synth in libos_doom),
+  # and tests/kernel/test_doom_genmidi_k.c runs it from ring 0.  It needs no
+  # shim -- it allocates nothing.
+  for f in src/doom/memio.c src/doom/mus2mid.c src/libos_doom/doom_midi.c \
+           src/libos_doom/doom_genmidi.c; do
     echo "    CC $(basename "$f") (music conversion)"
     x86_64-elf-gcc -c "$f" -o "build/doom_mus_$(basename "${f%.c}").o" \
       "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL

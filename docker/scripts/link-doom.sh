@@ -87,6 +87,8 @@ SHIM_SOURCES=(
   src/doom_dmx.c
   # SCRUM-215's music reader, the only caller of mus2mid().
   src/libos_doom/doom_midi.c
+  # SCRUM-216's GENMIDI instrument decoder, for the OPL3 synth.
+  src/libos_doom/doom_genmidi.c
   src/libos_heap.c
   src/libos_page_alloc.c
   src/libos_fb.c
