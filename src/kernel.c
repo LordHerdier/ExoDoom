@@ -11,6 +11,7 @@
 #include "tss.h"
 #include "pic.h"
 #include "pit.h"
+#include "rtc.h"
 #include "speaker.h"
 #include "ps2.h"
 #include "ps2_mouse.h"
@@ -29,6 +30,7 @@
 #include "syscall_kbd.h"
 #include "syscall_mouse.h"
 #include "syscall_pit.h"
+#include "syscall_rtc.h"
 #include "syscall_sound.h"
 #include "syscall_yield.h"
 #include "syscall_launch.h"
@@ -446,6 +448,14 @@ void kernel_main(void *mb2_info_ptr) {
     // kernel_get_ticks_ms(), which stays at 0 without it -- and, like the
     // other syscall *_init()s, ahead of the TESTING branch.
     syscall_pit_init();
+
+    // ── Wall-clock time (SCRUM-249) ──────────────────────────────────────
+    // Polled CMOS RTC; the century register comes from the FADT, so this
+    // sits after acpi_init() (which ran before vmm_init()). Binds
+    // exo_rtc_read (#35); ahead of the TESTING branch like every other
+    // syscall *_init().
+    rtc_init();
+    syscall_rtc_init();
 
     // ── Sound syscalls (SCRUM-100) ───────────────────────────────────────
     // Binds exo_sound_tone/exo_sound_stop (#17/#18) in front of the PC

@@ -136,6 +136,9 @@
 #define EXO_SYS_SOUND_STREAM_WRITE  32
 #define EXO_SYS_SOUND_STREAM_STOP   33
 #define EXO_SYS_SOUND_STREAM_VOLUME 34
+/* Wall-clock time (SCRUM-249).  Unscoped like #5: time is not a resource
+ * anyone acquires.  Appended for the reason #28-30 were. */
+#define EXO_SYS_RTC_READ            35
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -145,7 +148,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        35
+#define EXO_SYS_COUNT        36
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -298,6 +301,20 @@ typedef struct {
     uint32_t reserved;      /* zeroed by the kernel                         */
 } exo_memstat_t;
 
+/* exo_rtc_read(out) — #35.  Calendar date and time from the CMOS RTC, which
+ * the kernel treats as UTC (no time zones).  unix_secs is seconds since
+ * 1970-01-01 00:00:00 and is derived from the other fields. */
+typedef struct {
+    uint16_t year;          /* full year, e.g. 2026                         */
+    uint8_t  month;         /* 1..12                                        */
+    uint8_t  day;           /* 1..31                                        */
+    uint8_t  hour;          /* 0..23                                        */
+    uint8_t  minute;        /* 0..59                                        */
+    uint8_t  second;        /* 0..59                                        */
+    uint8_t  reserved;      /* zeroed by the kernel                         */
+    uint64_t unix_secs;
+} exo_rtc_time_t;
+
 /* exo_pslist(out, max) — #23.  One entry per live LibOS context (the shell
  * included — it is context_create()'d like any other, SCRUM-178).
  * `state` mirrors context_state_t (src/context.h): 1=READY, 2=RUNNING,
@@ -349,6 +366,7 @@ _Static_assert(sizeof(exo_mouse_state_t) ==  6, "exo_mouse_state_t layout is ABI
 _Static_assert(sizeof(exo_memstat_t)     == 24, "exo_memstat_t layout is ABI");
 _Static_assert(sizeof(exo_ps_info_t)     ==  8, "exo_ps_info_t layout is ABI");
 _Static_assert(sizeof(exo_diskstat_t)    ==  8, "exo_diskstat_t layout is ABI");
+_Static_assert(sizeof(exo_rtc_time_t)    == 16, "exo_rtc_time_t layout is ABI");
 #endif /* __ASSEMBLER__ */
 
 #ifndef EXO_KERNEL
@@ -833,6 +851,15 @@ static inline int64_t exo_sound_stream_stop(void)
 static inline int64_t exo_sound_stream_volume(int vol)
 {
     return exo_syscall1(EXO_SYS_SOUND_STREAM_VOLUME, (uint64_t)(int64_t)vol);
+}
+
+/* #35 -- read the wall clock into *out.  0 on success; -EXO_EFAULT if
+ * [out, out + sizeof(exo_rtc_time_t)) is not entirely inside the LibOS window
+ * and mapped writable; -EXO_ENODEV if the machine has no CMOS RTC; -EXO_EIO
+ * if the RTC returned values that are not a valid date. */
+static inline int64_t exo_rtc_read(exo_rtc_time_t *out)
+{
+    return exo_syscall1(EXO_SYS_RTC_READ, (uint64_t)(uintptr_t)out);
 }
 
 #endif /* !EXO_KERNEL */

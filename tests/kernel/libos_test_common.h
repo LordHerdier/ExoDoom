@@ -42,6 +42,7 @@
 #define TEST_OWNER_SOUND         ((page_owner_t)(PAGE_OWNER_LIBOS + 15))
 #define TEST_OWNER_SOUND_PCM     ((page_owner_t)(PAGE_OWNER_LIBOS + 16))
 #define TEST_OWNER_SOUND_STREAM  ((page_owner_t)(PAGE_OWNER_LIBOS + 17))
+#define TEST_OWNER_RTC           ((page_owner_t)(PAGE_OWNER_LIBOS + 18))
 
 /*
  * test_libc_shim_probe_k.c (SCRUM-51) deliberately does NOT get its own
