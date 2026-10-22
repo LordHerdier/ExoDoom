@@ -31,7 +31,7 @@ and GNU Make).
 ```bash
 make docker-build              # Build kernel + ISO -> build/exodoom, build/exodoom.iso
 make docker-run                # Build, then boot the ISO in QEMU (GRUB menu)
-make docker-run-kernel         # Build, then boot the kernel directly (no GRUB) -- preferred for dev iteration
+make docker-run-kernel         # Build, then boot the ISO with the GRUB menu skipped -- preferred for dev iteration
 make docker-test               # Build with TESTING=1, boot, stream serial test output
 make docker-ci                 # Same as docker-test; what CI runs
 make docker-build-doom         # Compile-only gate over vendored src/doom/ (79/79; CI runs it)
@@ -43,7 +43,7 @@ make clean                     # rm -rf build
 
 - QEMU shortcuts: `Ctrl+A` then `X` to exit; `Ctrl+A` then `C` for the monitor.
 - Pressing Enter at the GRUB menu is currently broken — use
-  `docker-run-kernel` to boot directly.
+  `docker-run-kernel` (the kernel is Multiboot 2, so `qemu -kernel` cannot load it).
 - CI (`.github/workflows/ci.yml`) runs `make docker-ci` and greps serial output
   for `ALL TESTS PASSED` / `TESTS FAILED`.
 - Adding a `src/*.c` or `src/*.s` needs **no build-script change** — both are

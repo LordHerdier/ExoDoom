@@ -92,7 +92,7 @@ make docker-build
 make docker-run
 ```
 
-### Build, then boot the kernel directly (no GRUB menu) <--- Recommended for development iteration
+### Build, then boot with the GRUB menu skipped <--- Recommended for development iteration
 
 ```bash
 make docker-run-kernel
