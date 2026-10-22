@@ -85,7 +85,8 @@ COPY --from=builder /opt/cross /opt/cross
 ENV PATH="/opt/cross/bin:$PATH"
 
 WORKDIR /work
-COPY scripts/build.sh scripts/parallel.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/build.sh
+COPY scripts/build.sh scripts/parallel.sh scripts/entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/build.sh /usr/local/bin/entrypoint.sh
 
-ENTRYPOINT ["/usr/local/bin/build.sh"]
+# entrypoint.sh wraps build.sh and chowns build/ to the host user afterwards.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
