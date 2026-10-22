@@ -100,9 +100,10 @@ uint64_t doom_music_frames_rendered(void);
  *            is topped up to 170 ms, so a gap past ~170 ms starves it.
  *   fill_*   frames queued at the start of a poll; `starved` counts polls that
  *            found it empty.  Exact in ring 0, an estimate in ring 3.
- *   late_*   microseconds a note-on is applied after its song time.  This is
- *            the render-step (5.3 ms) and whole-ms clock quantization, and is
- *            independent of how well the ring is kept fed.
+ *   late_*   microseconds a note-on is applied after its song time.  Events
+ *            are applied at their own output frame, so this is only the
+ *            sub-sample rounding (< ~21 us); it was 0..6 ms when events were
+ *            applied at the start of each 256-frame render step.
  *   cost_*   wall ms one poll took (caller-measured, 1 ms resolution).
  *   underruns  frames the mixer had to fill with silence (ring 0 only).
  */

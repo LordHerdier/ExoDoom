@@ -47,6 +47,9 @@ static int      g_bound;          /* a write has bound the stream */
 static int      g_synth_ok;       /* g_opl has been initialised   */
 static uint64_t g_frames;         /* frames rendered since PlaySong */
 static uint64_t g_song_ms;        /* song clock handed to doom_midi_advance */
+static doom_midi_event_t g_ev[EVENT_BATCH];   /* fetched, not yet applied */
+static uint32_t g_ev_i, g_ev_n;
+static int      g_ev_err;         /* the reader failed: the song ends */
 
 /* Timing profile (see doom_sound_music.h).  Plain counters, a few adds per
  * poll or per note: cheap enough to leave on. */
@@ -115,16 +118,15 @@ static uint32_t hw_room(uint32_t now_ms)
 
 /* ── Song clock and rendering ──────────────────────────────────────────── */
 
-/* How late a note-on is applied against where the song says it belongs.  The
- * synth hears it at the start of the render step (g_frames), so the error is
- * the step quantization plus the whole-ms song clock -- the part of the
- * pacing that no amount of ring depth can hide. */
-static void prof_note(const doom_midi_event_t *ev)
+/* How late a note-on is applied against where the song says it belongs, at
+ * output frame `at`.  Events are applied at their own frame (render_step), so
+ * this is the sub-sample rounding; it is here to keep that claim measured. */
+static void prof_note(const doom_midi_event_t *ev, uint64_t at)
 {
     if ((ev->status & 0xF0u) != 0x90u || ev->data2 == 0)
         return;
 
-    uint64_t at_us = g_frames * 1000000u / OUT_HZ;
+    uint64_t at_us = at * 1000000u / OUT_HZ;
     uint32_t late  = at_us > ev->time_us ? (uint32_t)(at_us - ev->time_us) : 0;
     uint32_t b     = late < 1000u ? 0 : late < 2000u ? 1 : late < 4000u ? 2 : 3;
 
@@ -165,38 +167,76 @@ static void prof_poll(uint32_t now_ms, uint32_t fill)
         g_prof.starved++;
 }
 
-/* Bring the song up to the audio rendered so far, then render `n` frames. */
+/* Render `n` frames into `dst`, counting them. */
+static void render_span(int16_t *dst, uint32_t n)
+{
+    doom_opl_render(&g_opl, dst, n);
+    g_frames += n;
+    if (g_ending)
+        g_tail += n;
+}
+
+/* Pull the next events off the song: everything due by `target_ms`, which may
+ * run up to a millisecond past the step being rendered.  Those stay queued in
+ * g_ev and are applied at their own frame, in this step or a later one.
+ * Returns 0 with the queue empty when nothing more is due. */
+static int fetch_events(uint32_t target_ms)
+{
+    uint32_t elapsed = target_ms > g_song_ms ? (uint32_t)(target_ms - g_song_ms) : 0;
+    int k;
+
+    g_song_ms += elapsed;
+    k = doom_midi_advance(&g_song, elapsed, g_ev, EVENT_BATCH);
+    g_ev_i = 0;
+    g_ev_n = k > 0 ? (uint32_t)k : 0;
+    if (k < 0)
+        g_ev_err = 1;
+    return g_ev_n != 0;
+}
+
+/* Render `n` frames, applying each song event at the frame it belongs to: the
+ * span is split at the event's sample position instead of handing the synth
+ * every due event at the start of the step.  (Steps of STEP_FRAMES snapped
+ * notes to a 5.3 ms grid under a whole-ms clock, up to ~6 ms late and by a
+ * different amount each time.) */
 static void render_step(int16_t *dst, uint32_t n)
 {
-    doom_midi_event_t ev[EVENT_BATCH];
+    uint32_t pos = 0;
 
     if (g_playing && !g_ending) {
-        uint64_t target = g_frames * 1000u / OUT_HZ;
-        uint32_t elapsed = (uint32_t)(target - g_song_ms);
-        int k;
+        uint64_t end    = g_frames + n;
+        uint64_t end_us = end * 1000000u / OUT_HZ;
 
-        g_song_ms = target;
-        do {
-            k = doom_midi_advance(&g_song, elapsed, ev, EVENT_BATCH);
-            elapsed = 0;
-            for (int i = 0; i < k; i++) {
-                prof_note(&ev[i]);
-                doom_opl_event(&g_opl, &ev[i]);
+        for (;;) {
+            if (g_ev_i == g_ev_n && !fetch_events((uint32_t)((end_us + 999u) / 1000u)))
+                break;
+
+            const doom_midi_event_t *ev = &g_ev[g_ev_i];
+            uint64_t at = (ev->time_us * OUT_HZ + 999999u) / 1000000u;   /* ceil */
+
+            if (at >= end)
+                break;                        /* a later step's */
+            if (at > g_frames) {
+                render_span(dst + pos * 2, (uint32_t)(at - g_frames));
+                pos = (uint32_t)(at - (end - n));
             }
-        } while (k == (int)EVENT_BATCH);
+            prof_note(ev, g_frames);
+            doom_opl_event(&g_opl, ev);
+            g_ev_i++;
+        }
 
-        /* A song that opened should not fail to advance; if it does, it ends. */
-        if (k < 0 || doom_midi_finished(&g_song)) {
+        /* Every event consumed and the song over (or unreadable): the release
+         * tail starts here.  Not while an event is still queued -- the final
+         * note-offs can sit in g_ev past the flag. */
+        if (g_ev_i == g_ev_n && (g_ev_err || doom_midi_finished(&g_song))) {
             g_ending = 1;
             g_tail   = 0;
             doom_opl_all_notes_off(&g_opl);
         }
     }
 
-    doom_opl_render(&g_opl, dst, n);
-    g_frames += n;
-    if (g_ending)
-        g_tail += n;
+    if (pos < n)
+        render_span(dst + pos * 2, n - pos);
 }
 
 /* Put the synth and the song where the listener is: `frames` into the song.
@@ -217,6 +257,8 @@ static int resync_to(uint64_t frames)
     doom_midi_set_looping(&g_song, g_looping);
 
     g_frames  = frames;
+    g_ev_i = g_ev_n = 0;
+    g_ev_err  = 0;
     g_song_ms = frames * 1000u / OUT_HZ;
     elapsed   = (uint32_t)g_song_ms;
     do {
@@ -314,6 +356,8 @@ void doom_music_play(void *handle, int looping, uint32_t now_ms)
     g_looping  = looping;
     g_frames   = 0;
     g_song_ms  = 0;
+    g_ev_i = g_ev_n = 0;
+    g_ev_err   = 0;
     g_ending   = 0;
     g_tail     = 0;
     g_pend_off = g_pend_n = 0;

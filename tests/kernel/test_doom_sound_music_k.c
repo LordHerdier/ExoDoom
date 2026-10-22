@@ -217,10 +217,10 @@ static void test_timing_profile(void)
     CU_ASSERT_EQUAL(p.dt_hist[1], 39u);       /* all in the <=40 ms bucket */
     CU_ASSERT_EQUAL(p.starved, 0u);
     CU_ASSERT_TRUE(p.fill_max <= DOOM_MUSIC_RING_FRAMES);
-    /* One note-on per pass of the 2 s song; applied no later than one
-     * 256-frame step (5.3 ms) plus the whole-ms clock after its song time. */
+    /* One note-on per pass of the 2 s song, applied at its own output frame:
+     * under one sample (21 us) late, not a render step (5.3 ms). */
     CU_ASSERT_TRUE(p.notes >= 1u);
-    CU_ASSERT_TRUE(p.late_max < 6400u);
+    CU_ASSERT_TRUE(p.late_max < 22u);
 
     doom_music_play(h, 1, 0);                 /* a new song starts clean */
     doom_music_prof_get(&p);
