@@ -5,6 +5,7 @@
 #include "pit.h"
 #include "io.h"
 #include "serial.h"
+#include "rtc.h"
 #include "page_alloc.h"
 #include "vmm.h"
 #include "pcm_mixer.h"
@@ -687,7 +688,20 @@ static struct {
     uint32_t start_underruns;
     int      have_last;
     int      open;
+    /* Independent clock: the CMOS RTC (host-driven, 1 s resolution) against
+     * the PIT ms since the stream first reported, to tell a fast DAC from a
+     * PIT that lost ticks. */
+    uint64_t origin_rtc;
+    uint32_t origin_ms;
+    int      origin_set;
 } g_prof;
+
+static uint64_t prof_rtc_s(void)
+{
+    struct rtc_time t;
+
+    return rtc_read(&t) == 0 ? rtc_to_unix(&t) : 0;
+}
 
 static inline uint64_t prof_tsc(void)
 {
@@ -753,6 +767,11 @@ void hda_pcm_prof_report(uint32_t now_ms)
 
         pcm_prof_reset(now_ms, 1);
         irq_restore(f);
+        if (!g_prof.origin_set) {
+            g_prof.origin_rtc = prof_rtc_s();
+            g_prof.origin_ms  = now_ms;
+            g_prof.origin_set = 1;
+        }
         return;
     }
     uint32_t span_ms = now_ms - g_prof.start_ms;
@@ -816,7 +835,15 @@ void hda_pcm_prof_report(uint32_t now_ms)
     serial_print_dec(span_ms);
     serial_print(" ms (nominal 48000)  tsc=");
     serial_print_dec((uint32_t)(cyc_per_ms));
-    serial_print(" cyc/ms\n");
+    serial_print(" cyc/ms\nHDAPROF clocks: since first report pit=");
+    serial_print_dec(now_ms - g_prof.origin_ms);
+    serial_print(" ms  rtc=");
+    {
+        uint64_t r = prof_rtc_s();
+
+        serial_print_dec(r && g_prof.origin_rtc ? (uint32_t)(r - g_prof.origin_rtc) : 0);
+    }
+    serial_print(" s (+-1)\n");
 }
 
 static void pcm_refill(void)
@@ -1067,6 +1094,7 @@ int hda_pcm_start(void)
      */
     g_pcm_write = 0;
     g_prof.have_last = 0;
+    g_prof.origin_set = 0;
     pcm_prof_reset(0, 0);
 
     mmio_w32(sd(HDA_SD_CTL),
