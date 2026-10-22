@@ -62,6 +62,28 @@ static int parse_base_lba(const char *s, uint32_t *out)
     return 0;
 }
 
+/* Size of a host file in bytes, or -1 (after printing why). */
+static long host_file_size(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        perror(path);
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        perror(path);
+        fclose(f);
+        return -1;
+    }
+    long n = ftell(f);
+    fclose(f);
+    if (n <= 0) {
+        fprintf(stderr, "mkexofsimg: %s is empty or unreadable\n", path);
+        return -1;
+    }
+    return n;
+}
+
 static int write_file_into_volume(const char *host_path,
                                    const char *volume_path)
 {
@@ -111,10 +133,14 @@ static int write_file_into_volume(const char *host_path,
 
 int main(int argc, char **argv)
 {
-    if (argc != 5) {
+    /* Optional extra files follow the four fixed arguments as
+     * <host-file> <name-on-volume> pairs (SCRUM-230: program packages live
+     * on the same volume as the IWAD until SCRUM-234/237 give programs
+     * volumes of their own). */
+    if (argc < 5 || ((argc - 5) % 2) != 0) {
         fprintf(stderr,
                 "usage: %s <output.img> <wad-file> <name-on-volume> "
-                "<base-lba>\n",
+                "<base-lba> [<host-file> <name-on-volume>]...\n",
                 argv[0]);
         return 1;
     }
@@ -127,25 +153,24 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    FILE *probe = fopen(wad_path, "rb");
-    if (!probe) {
-        perror(wad_path);
-        return 1;
-    }
-    if (fseek(probe, 0, SEEK_END) != 0) {
-        perror(wad_path);
-        fclose(probe);
-        return 1;
-    }
-    long wad_bytes = ftell(probe);
-    fclose(probe);
-    if (wad_bytes <= 0) {
-        fprintf(stderr, "mkexofsimg: %s is empty or unreadable\n", wad_path);
+    long wad_bytes = host_file_size(wad_path);
+    if (wad_bytes < 0) {
         return 1;
     }
 
+    /* Each file is rounded up to whole sectors; the existing slack absorbs
+     * the FAT and directory blocks as before. */
+    uint64_t extra_sectors = 0;
+    for (int i = 5; i < argc; i += 2) {
+        long n = host_file_size(argv[i]);
+        if (n < 0) {
+            return 1;
+        }
+        extra_sectors += ((uint64_t)n + 511u) / 512u;
+    }
+
     uint32_t wad_sectors = (uint32_t)(((uint64_t)wad_bytes + 511u) / 512u);
-    uint32_t vol_sectors = wad_sectors + SLACK_SECTORS;
+    uint32_t vol_sectors = wad_sectors + (uint32_t)extra_sectors + SLACK_SECTORS;
     if (vol_sectors < EXOFS_MIN_SECTORS) {
         vol_sectors = EXOFS_MIN_SECTORS;
     }
@@ -183,6 +208,25 @@ int main(int argc, char **argv)
         host_blockdev_close();
         remove(img_path);
         return 1;
+    }
+
+    for (int i = 5; i < argc; i += 2) {
+        char extra_path[256];
+        int plen = snprintf(extra_path, sizeof(extra_path), "/%s", argv[i + 1]);
+        if (plen < 0 || (size_t)plen >= sizeof(extra_path)) {
+            fprintf(stderr, "mkexofsimg: name '%s' is too long\n", argv[i + 1]);
+            exofs_unmount();
+            host_blockdev_close();
+            remove(img_path);
+            return 1;
+        }
+        if (write_file_into_volume(argv[i], extra_path) != 0) {
+            exofs_unmount();
+            host_blockdev_close();
+            remove(img_path);
+            return 1;
+        }
+        printf("mkexofsimg: wrote %s as %s\n", argv[i], extra_path);
     }
 
     rc = exofs_sync();

@@ -173,7 +173,11 @@ static uint64_t next_syscall_num(void)
         if (n == EXO_SYS_EXIT)
             continue;
 
-        if (n == EXO_SYS_LAUNCH && !rare_hit())
+        /* EXO_SYS_LAUNCH_PKG (SCRUM-230) gets the same limit: a random
+         * (buf, len) is almost always refused (-EXO_EINVAL on len, else
+         * -EXO_EFAULT on a pointer-shaped buf), but a package that did parse
+         * would be a launch that arms a switch. */
+        if ((n == EXO_SYS_LAUNCH || n == EXO_SYS_LAUNCH_PKG) && !rare_hit())
             continue;
 
         return n;
