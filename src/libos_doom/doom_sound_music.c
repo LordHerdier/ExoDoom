@@ -24,6 +24,9 @@ _Static_assert(DOOM_MUSIC_RING_FRAMES == PCM_MIXER_MUSIC_FRAMES,
 #define BATCH_FRAMES  1024u   /* one stream write */
 #define STEP_FRAMES   256u    /* song-clock granularity: 5.3 ms, finer than DMX's 140 Hz */
 #define EVENT_BATCH   64u
+/* Longest release we will wait out after the last event: OPL pads decay over
+ * a second or two, and a song must not hold the stream open forever. */
+#define TAIL_MAX_FRAMES (2u * OUT_HZ)
 
 static doom_opl_t        g_opl;
 static doom_genmidi_t    g_genmidi;
@@ -38,7 +41,8 @@ static uint32_t g_pend_n;
 static int      g_playing;
 static int      g_paused;
 static int      g_dead;           /* a stream error latched music off */
-static int      g_failed;         /* the song reader errored: this song is over */
+static int      g_ending;         /* last event consumed (or reader error): rendering the tail */
+static uint32_t g_tail;           /* frames rendered since g_ending */
 static int      g_bound;          /* a write has bound the stream */
 static int      g_synth_ok;       /* g_opl has been initialised   */
 static uint64_t g_frames;         /* frames rendered since PlaySong */
@@ -110,7 +114,7 @@ static void render_step(int16_t *dst, uint32_t n)
 {
     doom_midi_event_t ev[EVENT_BATCH];
 
-    if (g_playing && !g_failed && !doom_midi_finished(&g_song)) {
+    if (g_playing && !g_ending) {
         uint64_t target = g_frames * 1000u / OUT_HZ;
         uint32_t elapsed = (uint32_t)(target - g_song_ms);
         int k;
@@ -123,14 +127,26 @@ static void render_step(int16_t *dst, uint32_t n)
                 doom_opl_event(&g_opl, &ev[i]);
         } while (k == (int)EVENT_BATCH);
 
-        if (k < 0)
-            g_failed = 1;   /* a song that opened should not get here; end it */
-        if (g_failed || doom_midi_finished(&g_song))
-            doom_opl_all_notes_off(&g_opl);   /* let the releases ring out */
+        /* A song that opened should not fail to advance; if it does, it ends. */
+        if (k < 0 || doom_midi_finished(&g_song)) {
+            g_ending = 1;
+            g_tail   = 0;
+            doom_opl_all_notes_off(&g_opl);
+        }
     }
 
     doom_opl_render(&g_opl, dst, n);
     g_frames += n;
+    if (g_ending)
+        g_tail += n;
+}
+
+static int batch_is_silent(uint32_t frames)
+{
+    for (uint32_t i = 0; i < frames * 2; i++)
+        if (g_buf[i] != 0)
+            return 0;
+    return 1;
 }
 
 /* Write g_buf[g_pend_off .. +g_pend_n).  Returns 0 if the stream is done for. */
@@ -207,7 +223,8 @@ void doom_music_play(void *handle, int looping, uint32_t now_ms)
     doom_midi_set_looping(&g_song, looping);
     g_frames   = 0;
     g_song_ms  = 0;
-    g_failed   = 0;
+    g_ending   = 0;
+    g_tail     = 0;
     g_pend_off = g_pend_n = 0;
     g_space    = DOOM_MUSIC_RING_FRAMES;
     g_space_ms = now_ms;
@@ -297,8 +314,11 @@ void doom_music_poll(uint32_t now_ms)
             return;
         want -= n;
 
-        /* Song over and not looping: the tail is queued, so we are done. */
-        if (g_failed || doom_midi_finished(&g_song))
+        /* Song over and not looping: keep feeding the stream until the
+         * releases have decayed (a batch of exact digital silence, which the
+         * synth guarantees once they have) or the tail has run its course.
+         * Stopping at the key-off would cut a long release to a click. */
+        if (g_ending && (g_tail >= TAIL_MAX_FRAMES || batch_is_silent(n)))
             g_playing = 0;
     }
 }

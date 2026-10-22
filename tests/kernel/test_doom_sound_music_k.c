@@ -203,12 +203,18 @@ static void test_loop_and_end(void)
 
     doom_music_play(h, 0, 0);
     int loud = 0;
-    for (int i = 0; i < 40; i++) {
+    /* Up to the tail cap (2 s) past the 250 ms song; it ends sooner if the
+     * release decays to digital silence first. */
+    for (int i = 0; i < 120 && doom_music_is_playing(); i++) {
         doom_music_poll(i * 29);
         loud |= drain(1400);
     }
     CU_ASSERT_TRUE(loud);
     CU_ASSERT_FALSE(doom_music_is_playing());  /* ended on its own */
+    /* The note-off is at 250 ms (12000 frames); the release is rendered past
+     * it rather than cut at the key-off, but not for longer than the cap. */
+    CU_ASSERT_TRUE(doom_music_frames_rendered() > 12000u);
+    CU_ASSERT_TRUE(doom_music_frames_rendered() <= 12000u + 2u * 48000u + 4096u);
 
     quiesce();
 }
