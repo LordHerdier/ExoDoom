@@ -90,6 +90,7 @@
 #include "fb.h"
 #include "fb_console.h"
 #include "libos_fb.h"
+#include "libos_heap.h"
 #include "libos_fs/exofs.h"
 #include "ps2.h"
 #include "stdlib.h"
@@ -132,7 +133,8 @@ static char shell_banner[] = "ExoDoom Shell\n";
 static char shell_help_text[] = "type 'help' for a list of commands\n";
 static char shell_prompt[] = "exodoom> ";
 static char shell_commands_text[] =
-    "commands: help, clear, about, wadview, clock, snake, doom, memstat,\n"
+    "commands: help, clear, about, wadview, clock, snake, doom, run <pkg>,\n"
+    "          memstat,\n"
     "          pslist, disk, mkfs, mkdir <path>, ls [path],\n"
     "          cat <path> [text...], rm <path>, cp <src> <dst>,\n"
     "          mv <src> <dst> (copy+delete, not atomic), touch <path>,\n"
@@ -142,8 +144,9 @@ static char shell_about_text[] = "ExoDoom shell LibOS -- SCRUM-110\n";
 static char shell_unknown_prefix[] = "unknown command: ";
 static char shell_wadview_fail_text[] = "wadview: launch failed\n";
 static char shell_clock_fail_text[] = "clock: launch failed\n";
-static char shell_snake_fail_text[] = "snake: launch failed\n";
 static char shell_doom_fail_text[] = "doom: launch failed\n";
+static char shell_run_usage_text[] = "usage: run <package>   (a .exo file on the program volume)\n";
+static char shell_run_fail_text[] = "run: launch failed: err=";
 static char shell_memstat_fail_text[] = "memstat: query failed\n";
 static char shell_pslist_fail_text[] = "pslist: query failed\n";
 static char shell_fs_disk_busy_text[] = "disk busy: err=";
@@ -183,6 +186,8 @@ static void shell_run_memstat(fb_console_t *con);
 static void shell_run_pslist(fb_console_t *con);
 static int shell_cmd_match(const char *line, const char *cmd, const char **rest);
 static int shell_fs_acquire_and_mount(fb_console_t *con);
+static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba);
+static void shell_run_run(fb_console_t *con, const char *arg);
 static void shell_fs_release(void);
 static int shell_resolve_path(const char *in, char *out, size_t out_len);
 static int shell_resolve_arg(fb_console_t *con, const char *in, char *out,
@@ -403,16 +408,12 @@ static void shell_run_command(fb_console_t *con, const char *line) {
             fbcon_write(con, shell_clock_fail_text);
         }
     } else if (str_eq(line, "snake")) {
-        /* Same round-trip convention as "wadview" above: does not return
-         * until Snake exits (src/libos_snake/libos_snake.c's own
-         * EXO_SYS_EXIT + exo_yield() fallback) and control round-robins
-         * back here. */
-        int64_t rc = exo_launch(EXO_LAUNCH_APP_SNAKE);
-        if (rc == 0) {
-            fbcon_clear(con);
-        } else {
-            fbcon_write(con, shell_snake_fail_text);
-        }
+        /* Same round-trip convention as "wadview" above, but Snake is no
+         * longer in the kernel image (SCRUM-230): this is `run snake.exo`,
+         * read off the program volume. Does not return until Snake exits
+         * (src/libos_snake/libos_snake.c's own EXO_SYS_EXIT + exo_yield()
+         * fallback) and control round-robins back here. */
+        shell_run_run(con, "snake.exo");
     } else if (str_eq(line, "doom")) {
         /* Same round-trip convention again (SCRUM-66). Doom's loop does not
          * exit on its own -- D_DoomLoop() runs forever and I_Error halts --
@@ -435,6 +436,8 @@ static void shell_run_command(fb_console_t *con, const char *line) {
         } else {
             fbcon_write(con, shell_doom_fail_text);
         }
+    } else if (shell_cmd_match(line, "run", &rest)) {
+        shell_run_run(con, rest);
     } else if (str_eq(line, "memstat")) {
         shell_run_memstat(con);
     } else if (str_eq(line, "pslist")) {
@@ -715,6 +718,12 @@ static int shell_fs_copy_file(const char *src, const char *dst) {
  * 0 on failure so each caller can just return.
  */
 static int shell_fs_acquire_and_mount(fb_console_t *con) {
+    return shell_fs_acquire_and_mount_at(con, SHELL_FS_BASE_LBA);
+}
+
+/* Same, for a volume other than the shell's scratch one -- `run` reads
+ * program packages off the program volume at LIBOS_WAD_DISK_BASE_LBA. */
+static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba) {
     int64_t rc = exo_disk_acquire();
     if (rc != 0) {
         fbcon_write(con, shell_fs_disk_busy_text);
@@ -723,7 +732,7 @@ static int shell_fs_acquire_and_mount(fb_console_t *con) {
         return 0;
     }
 
-    int mrc = exofs_mount(SHELL_FS_BASE_LBA);
+    int mrc = exofs_mount(base_lba);
     if (mrc != 0) {
         fbcon_write(con, shell_fs_mount_fail_text);
         shell_write_i64(con, mrc);
@@ -738,6 +747,104 @@ static int shell_fs_acquire_and_mount(fb_console_t *con) {
 static void shell_fs_release(void) {
     exofs_unmount();
     exo_disk_release();
+}
+
+/* `run <package>` -- SCRUM-230. Reads `/<package>` off the program volume
+ * (LIBOS_WAD_DISK_BASE_LBA, where build.sh's mkexofsimg step puts packaged
+ * programs next to the IWAD) into a heap buffer and hands the bytes to the
+ * kernel with exo_launch_pkg(). The kernel never sees a filesystem: this
+ * shell is the launcher, which is the whole point of the syscall's shape.
+ *
+ * The volume is unmounted and the disk released BEFORE the launch, not
+ * after: a successful exo_launch_pkg() does not come back until something
+ * switches back to the shell, and holding the disk binding for the lifetime
+ * of the launched program would lock every other context out of it. The
+ * package buffer is freed after the call returns for the same reason it is
+ * safe to: the kernel copies the sections into the new context's own pages
+ * during the call. */
+static void shell_run_run(fb_console_t *con, const char *arg) {
+    char name[SHELL_FS_PATH_BUF_LEN];
+    char path[SHELL_FS_PATH_BUF_LEN + 1];
+    const char *p = arg;
+
+    if (shell_next_token(&p, name, sizeof(name)) <= 0) {
+        fbcon_write(con, shell_run_usage_text);
+        return;
+    }
+    path[0] = '/';
+    size_t n = 0;
+    while (name[n] != '\0' && n + 2 < sizeof(path)) {
+        path[n + 1] = name[n];
+        n++;
+    }
+    path[n + 1] = '\0';
+
+    if (!shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
+        return;
+    }
+
+    exofs_stat_t st;
+    int rc = exofs_stat(path, &st);
+    if (rc != 0) {
+        shell_fs_release();
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, rc);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    /* Refuse a file the kernel could never accept before spending heap and
+     * disk reads on it: a wrong-sized file is a bad argument, not ENOMEM. */
+    if (st.size == 0 || st.size > EXO_LAUNCH_PKG_MAX_LEN) {
+        shell_fs_release();
+        fbcon_write(con, shell_run_fail_text);
+        shell_write_i64(con, -EXO_EINVAL);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    uint8_t *pkg = libos_heap_alloc(st.size);
+    if (pkg == NULL) {
+        shell_fs_release();
+        fbcon_write(con, shell_run_fail_text);
+        shell_write_i64(con, -EXO_ENOMEM);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    exofs_file_t f;
+    rc = exofs_open(path, EXOFS_O_READ, &f);
+    uint32_t have = 0;
+    if (rc == 0) {
+        while (have < st.size) {
+            int64_t got = exofs_read(&f, pkg + have, st.size - have);
+            if (got <= 0) {
+                rc = got < 0 ? (int)got : -EXO_EIO;
+                break;
+            }
+            have += (uint32_t)got;
+        }
+        exofs_close(&f);
+    }
+    shell_fs_release();
+
+    if (rc != 0 || have != st.size) {
+        libos_heap_free(pkg);
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, rc != 0 ? rc : -EXO_EIO);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    int64_t lrc = exo_launch_pkg(pkg, st.size);
+    libos_heap_free(pkg);
+    if (lrc == 0) {
+        fbcon_clear(con);
+    } else {
+        fbcon_write(con, shell_run_fail_text);
+        shell_write_i64(con, lrc);
+        fbcon_write(con, "\n");
+    }
 }
 
 /* `mkfs` -- exofs_format() on the shell's own scratch volume (decision #1,

@@ -185,7 +185,6 @@ static void test_live_reads_are_monotonic(void)
 static void test_handler_is_bound(void)
 {
     CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_RTC_READ));
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_RTC_READ + 1);
 }
 
 static void test_syscall_null_rejected(void)
