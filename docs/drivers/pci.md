@@ -242,6 +242,9 @@ which always has a host bridge, an ISA bridge and an IDE controller.
   INTx only — the I/O APIC (which needs MP or ACPI table parsing) and MSI are
   both still unbuilt, and see `docs/drivers/hda.md` §7 for why one vector per
   driver means a device routed onto IRQ 0/1/2 is refused rather than wired.
+  The USB controllers deliberately use no line at all: they are polled from
+  IRQ0, because QEMU routes one of them onto HDA's line
+  (`docs/drivers/usb.md` §3).
 - **No capability-list walk.** MSI/MSI-X live in the capabilities linked
   list at offset `0x34`; a driver that wants them can walk it through
   `pci_config_read8()` without this file growing an opinion. Nothing does yet

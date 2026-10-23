@@ -271,6 +271,13 @@ kernel — one vector, one handler — so a controller routed onto one of those
 would have this driver's stub replace the timer's or the keyboard's. A silent
 tone is recoverable; a dead timer is not.
 
+The same rule is why the USB host controllers never wire their INTx line,
+even though QEMU can route one of them onto this controller's line (it does
+with today's device list). They run with `USBINTR = 0` and are polled from
+`irq0_handler()`, so this stub stays the only one on the line
+(`docs/drivers/usb.md` §3). With today's list, QEMU's default e1000 shares
+the line too, but nothing drives it, so it never raises the line.
+
 Timed tones follow `src/speaker.c` exactly: `hda_play_tone()` records a
 deadline and returns, and `hda_tick()` — called from `irq0_handler()` right
 after `speaker_tick()` — clears `SDnCTL.RUN` once it passes. That is the

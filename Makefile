@@ -9,13 +9,36 @@ AUDIO_PROFILE ?= 0
 # "--cache-from type=gha --cache-to type=gha,mode=max" in CI. Empty locally.
 BUILDX_CACHE_ARGS ?=
 
+# USB topology shared by every QEMU line below (SCRUM-245; the reasoning and
+# measurements are in docs/drivers/usb.md). Three UHCI controllers = 6 root
+# ports. Every device names its port= -- without it QEMU slips an automatic
+# usb-hub onto the last free port, and the kernel has no hub driver. Each
+# usb-kbd is bound to its own secondary-vga console with display=, or QEMU
+# would send every host keystroke to it instead of the PS/2 keyboard.
+QEMU_USB_ARGS = \
+  -device ich9-usb-uhci1,id=uhci1 \
+  -device ich9-usb-uhci2,id=uhci2 \
+  -device ich9-usb-uhci3,id=uhci3 \
+  -device secondary-vga,id=vga2 \
+  -device secondary-vga,id=vga3 \
+  -device usb-kbd,bus=uhci1.0,port=1,display=vga2 \
+  -device usb-kbd,bus=uhci1.0,port=2,display=vga3 \
+  -drive if=none,id=usbstick,file=build/usb.img,format=raw \
+  -device usb-storage,bus=uhci3.0,port=1,drive=usbstick
+
+# usb-mouse has no display= property, so in a GUI display it would take the
+# host mouse away from PS/2. Test boots only until SCRUM-246 drives it.
+QEMU_USB_TEST_ARGS = $(QEMU_USB_ARGS) \
+  -device usb-mouse,bus=uhci2.0,port=1
+
 docker-build:
 	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
 	docker run --rm -e DEBUG=$(DEBUG) -e AUDIO_PROFILE=$(AUDIO_PROFILE) -v "$(PWD):/work" exodoom-build
 
 docker-run: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
-	docker run --rm -it -v "$(PWD):/work" exodoom-qemu
+	docker run --rm -it -v "$(PWD):/work" exodoom-qemu \
+	  'qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 $(QEMU_USB_ARGS) -no-reboot -display curses -serial mon:stdio'
 
 # Dev-loop boot target: skips the GRUB menu, not GRUB itself.
 #
@@ -31,7 +54,7 @@ docker-run: docker-build
 docker-run-kernel: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm -it -v "$(PWD):/work" exodoom-qemu \
-	  'qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -display curses -serial mon:stdio'
+	  'qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 $(QEMU_USB_ARGS) -no-reboot -display curses -serial mon:stdio'
 
 # build/exodoom_disk.img (written by docker/scripts/build.sh step [2e2/7],
 # SCRUM-190) replaces build/ata_scratch.img here too: its low LBAs keep that
@@ -55,6 +78,7 @@ docker-test:
 	  -device intel-hda \
 	  -device hda-output,audiodev=snd0 \
 	  -audiodev none,id=snd0 \
+	  $(QEMU_USB_TEST_ARGS) \
 	  -m 256M \
 	  -no-reboot \
 	  -display none \
@@ -78,6 +102,7 @@ docker-ci:
 	  -device intel-hda \
 	  -device hda-output,audiodev=snd0 \
 	  -audiodev none,id=snd0 \
+	  $(QEMU_USB_TEST_ARGS) \
 	  -m 256M \
 	  -no-reboot \
 	  -display none \
@@ -106,7 +131,7 @@ docker-link-doom:
 docker-run-debug: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm -it -p 1234:1234 -v "$(PWD):/work" exodoom-qemu \
-	'qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -serial mon:stdio -s -S'
+	'qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 $(QEMU_USB_ARGS) -no-reboot -serial mon:stdio -s -S'
 
 # Boots on the HOST's qemu rather than in the container, which is the only
 # place a speaker exists -- swap `-audiodev none,id=snd0` below for
@@ -116,7 +141,7 @@ docker-run-debug: docker-build
 # the full BDL DMA and completion-interrupt path, which is what the KUnit
 # suite asserts on, and headless Docker has no audio backend to hand.
 run: docker-build
-	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -serial stdio
+	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 $(QEMU_USB_ARGS) -no-reboot -serial stdio
 
 clean:
 	rm -rf build
