@@ -80,6 +80,11 @@
 #define PCI_SUBCLASS_AUDIO_DEV   0x03
 #define PCI_CLASS_BRIDGE         0x06
 #define PCI_SUBCLASS_PCI_BRIDGE  0x04
+/* Serial bus controller / USB; the prog-if picks the host controller
+ * interface (src/uhci.c, docs/drivers/usb.md). */
+#define PCI_CLASS_SERIAL_BUS     0x0C
+#define PCI_SUBCLASS_USB         0x03
+#define PCI_PROGIF_UHCI          0x00
 
 /* A non-existent function answers a config read with all ones -- there is no
  * vendor 0xFFFF, which is exactly what makes the probe work. */

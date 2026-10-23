@@ -31,6 +31,14 @@ QEMU_USB_ARGS = \
 QEMU_USB_TEST_ARGS = $(QEMU_USB_ARGS) \
   -device usb-mouse,bus=uhci2.0,port=1
 
+# Test boots also open QMP so docker/scripts/qmp-keys.sh can type into the
+# two USB keyboards separately -- "a" on vga2's, "b" on vga3's -- for
+# tests/kernel/test_usb_k.c's acceptance check (SCRUM-198). The script is
+# started in the background just before QEMU and retries until QMP listens.
+QMP_TEST_PORT = 4444
+QEMU_QMP_TEST_ARGS = -qmp tcp:127.0.0.1:$(QMP_TEST_PORT),server=on,wait=off
+QMP_KEYS = bash /work/docker/scripts/qmp-keys.sh 127.0.0.1 $(QMP_TEST_PORT) &
+
 docker-build:
 	docker buildx build $(BUILDX_CACHE_ARGS) --load -t exodoom-build -f docker/Dockerfile.build docker
 	docker run --rm -e DEBUG=$(DEBUG) -e AUDIO_PROFILE=$(AUDIO_PROFILE) -v "$(PWD):/work" exodoom-build
@@ -72,6 +80,7 @@ docker-test:
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
 	  set -eu; \
 	  rm -f /work/serial.log; \
+	  $(QMP_KEYS) \
 	  timeout 180 qemu-system-x86_64 \
 	  -cdrom build/exodoom.iso \
 	  -drive file=/work/build/exodoom_disk.img,format=raw,if=ide \
@@ -79,6 +88,7 @@ docker-test:
 	  -device hda-output,audiodev=snd0 \
 	  -audiodev none,id=snd0 \
 	  $(QEMU_USB_TEST_ARGS) \
+	  $(QEMU_QMP_TEST_ARGS) \
 	  -m 256M \
 	  -no-reboot \
 	  -display none \
@@ -96,6 +106,7 @@ docker-ci:
 	docker run --rm --entrypoint bash -v "$(PWD):/work" exodoom-qemu -lc '\
 	  set -eu; \
 	  rm -f /work/serial.log; \
+	  $(QMP_KEYS) \
 	  timeout 180 qemu-system-x86_64 \
 	  -cdrom build/exodoom.iso \
 	  -drive file=/work/build/exodoom_disk.img,format=raw,if=ide \
@@ -103,6 +114,7 @@ docker-ci:
 	  -device hda-output,audiodev=snd0 \
 	  -audiodev none,id=snd0 \
 	  $(QEMU_USB_TEST_ARGS) \
+	  $(QEMU_QMP_TEST_ARGS) \
 	  -m 256M \
 	  -no-reboot \
 	  -display none \
