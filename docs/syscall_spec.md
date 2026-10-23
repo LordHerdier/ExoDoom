@@ -368,7 +368,14 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 ### 3.2 Syscall table
 
 > **Implementation status key:** ⬜ Not started · 🔄 Prerequisite in progress ·
-> ✅ Done
+> ✅ Done · 🚫 Reserved, never bound
+>
+> **#9–16 (`EXO_SYS_FILE_*`) are permanently unbound.** File I/O is policy,
+> so it lives in the LibOS: `exo_file_*` is a descriptor-table library over
+> ExoFS (`src/libos_fs/exo_file.h`, SCRUM-44; `docs/filesystem.md` §6d), which
+> reaches the disk only through #24/#25. The numbers stay reserved rather than
+> reused, so a stale caller gets `-EXO_ENOSYS`; `src/exo_syscall.h` no longer
+> has stubs for them. See §4.
 
 | #  | Syscall                             | Category    | Status | Description + Doom usage                                                                                                                                                                                                                                                       |
 | -- | ----------------------------------- | ----------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -381,14 +388,14 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 6  | `exo_kbd_poll(event_out)`           | Input       | ✅     | Dequeue next keyboard event into `event_out` struct `{uint8_t pressed; uint8_t key; uint8_t modifiers; uint8_t reserved}`. `key` is a decoded `ps2_key_t` index (`KEY_A`, `KEY_ESC`, …), not a raw PS/2 scancode — the kernel's scancode decoder runs before the event is queued. `modifiers` is the `EXO_MOD_*` shift/ctrl/alt mask sampled when the event was queued, so a chord decodes correctly even if the modifier is released before the LibOS polls — Doom binds shift (run), ctrl (fire) and alt (strafe). Returns `1` if event available, `0` if empty, `-EXO_EFAULT` if `event_out` isn't entirely inside the LibOS window. No ownership to check — the keyboard isn't acquired/released like the framebuffer. Bound in `src/syscall_kbd.c` (SCRUM-39) on top of the IRQ1 handler + scancode table (SCRUM-13/-14) and ring buffer (SCRUM-18), all now done. |
 | 7  | `exo_mouse_poll(state_out)`         | Input       | ✅     | Write accumulated mouse state `{int16_t dx; int16_t dy; uint8_t buttons; uint8_t reserved}` to `state_out`, then reset the dx/dy accumulators (`buttons` is a level and is left as-is). `reserved` is zeroed by the kernel and keeps the struct a fixed 6 bytes. Returns `0`, or `-EXO_EFAULT` if `state_out` isn't entirely inside the LibOS window (same `exo_range_in_user_window` + `exo_user_range_mapped` pair #6 uses). No ownership to check, same reasoning as #6. Bound in `src/syscall_mouse.c` on top of the IRQ12 handler + 3-byte packet decoder + delta accumulator, all in `src/ps2_mouse.c` (SCRUM-52) — the controller init (`0xA8`/config byte/`0xF4`), IRQ12 wiring and packet decode did not actually exist before this ticket despite SCRUM-19/28/29 being marked done; see that ticket's own note. Dx is right-positive, dy is **up-positive** (raw PS/2 sign convention, not screen-down) — whoever wires this into Doom's `ev_mouse` (SCRUM-80) negates dy the way the dead SDL code in `src/doom/i_input.c` already shows. |
 | 8  | `exo_serial_write(buf, len)`        | Debug       | ✅     | Write `len` bytes from `buf` to COM1. Returns `len` on success (COM1 is a busy-wait UART; there is no partial write), `-EFAULT` if `[buf, buf+len)` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)`, `-EINVAL` if `len` exceeds 4096 (`SERIAL_WRITE_MAX_LEN`) — the whole call runs with interrupts off (`syscall`'s FMASK clears IF), so an uncapped write would stall the machine for as long as COM1 takes to drain it. `len == 0` always succeeds regardless of `buf`. No ownership to check — COM1 is not acquired/released the way the framebuffer is, just a channel every LibOS may write to. Implemented in SCRUM-50 (`src/syscall_serial.c`). `printf` now routes through it for the ring-3 LibOS build (SCRUM-51, `src/stdio.c`, gated on `#ifdef EXO_KERNEL`); `fprintf` is still unimplemented (§2.3).                                    |
-| 9  | `exo_file_open(path, mode)`         | File I/O    | ⬜     | Open a file on the ramdisk/ATA filesystem. `mode`: `0`=read, `1`=write, `2`=read+write. Returns file descriptor (≥ 0) or negative error. Used by `fopen` shim.                                                                                                                 |
-| 10 | `exo_file_close(fd)`                | File I/O    | ⬜     | Close file descriptor. Returns `0` or `-EBADF`. Used by `fclose` shim.                                                                                                                                                                                                         |
-| 11 | `exo_file_read(fd, buf, count)`     | File I/O    | ⬜     | Read up to `count` bytes from `fd` into `buf`. Returns bytes read, `0` at EOF, or negative error. Used by `fread` shim.                                                                                                                                                        |
-| 12 | `exo_file_write(fd, buf, count)`    | File I/O    | ⬜     | Write `count` bytes from `buf` to `fd`. Returns bytes written or negative error. Used by `fwrite` shim.                                                                                                                                                                        |
-| 13 | `exo_file_seek(fd, offset, whence)` | File I/O    | ⬜     | Seek to position. `whence`: `0`=`SEEK_SET`, `1`=`SEEK_CUR`, `2`=`SEEK_END`. Returns new position or negative error. Used by `fseek`/`ftell` shim.                                                                                                                              |
-| 14 | `exo_file_stat(path, size_out)`     | File I/O    | ⬜     | Write file size to `*size_out`. Returns `0` or `-ENOENT`. Used by `M_FileExists` (`fopen` check) and `M_FileLength`.                                                                                                                                                           |
-| 15 | `exo_file_remove(path)`             | File I/O    | ⬜     | Delete a file. Returns `0` or `-ENOENT`. Used by `remove()` for old save games.                                                                                                                                                                                                |
-| 16 | `exo_file_rename(old, new)`         | File I/O    | ⬜     | Rename a file. Returns `0` or negative error. Used by `rename()` for save game rotation.                                                                                                                                                                                       |
+| 9  | `exo_file_open(path, mode)`         | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Open a file. **Never a syscall** — see #9–16 note below; now `exo_file_open(path, flags)` in `src/libos_fs/exo_file.h` (SCRUM-44). |
+| 10 | `exo_file_close(fd)`                | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Close a descriptor. LibOS `exo_file_close` (SCRUM-44). |
+| 11 | `exo_file_read(fd, buf, count)`     | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Read from a descriptor. LibOS `exo_file_read` (SCRUM-44). |
+| 12 | `exo_file_write(fd, buf, count)`    | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Write to a descriptor. LibOS `exo_file_write` (SCRUM-44). |
+| 13 | `exo_file_seek(fd, offset, whence)` | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Seek; returns the new position (also `ftell`). LibOS `exo_file_seek` (SCRUM-44). |
+| 14 | `exo_file_stat(path, size_out)`     | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). File size of `path`. LibOS `exo_file_stat` (SCRUM-44); backs `M_FileExists`/`M_FileLength` once SCRUM-42 lands. |
+| 15 | `exo_file_remove(path)`             | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Delete a file. Will be LibOS-side too, over `exofs_unlink` — SCRUM-106. |
+| 16 | `exo_file_rename(old, new)`         | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Rename a file. Will be LibOS-side too; ExoFS has no rename yet — SCRUM-106. |
 | 17 | `exo_sound_tone(freq, dur_ms)`      | Sound       | ✅     | Play a tone on the PC speaker at `freq` Hz for `dur_ms` milliseconds and return at once; IRQ0 ends it (SCRUM-98/100, `src/syscall_sound.c`). `0`, or `-EXO_EINVAL` for `freq` outside 19–20000 or `dur_ms` outside 1–`SOUND_TONE_MAX_MS` (10000) — `dur_ms = 0` is refused so every tone ring 3 starts ends on its own. Last tone wins. Used by the Doom sound module (SCRUM-101). |
 | 18 | `exo_sound_stop()`                  | Sound       | ✅     | Silence the PC speaker now. `0` (also when nothing is sounding), or `-EXO_EPERM` if the tone sounding was started by another context. `exo_exit` silences the exiting context's tone the same way. Used by the Doom sound module (SCRUM-101). |
 | 19 | `exo_yield()`                       | Scheduling  | ✅     | Cooperatively yield CPU to next runnable LibOS context. Returns when rescheduled. Called once per idle-loop iteration by the real shell LibOS (SCRUM-110, `src/shell/shell_main.c`) and optionally by `DG_SleepMs`. Still a no-op in practice today: nothing yet registers a second context via `context_create()` on a normal boot (Doom is not linked in), so the call always finds nothing else `READY`. Bound in SCRUM-109 (`src/syscall_yield.c`) to `context_switch_request()` (SCRUM-108) via a round-robin scan of the context table, `context_next_ready()` (`src/context.c`) — the minimum policy the acceptance criterion needs, not a real scheduler (priority/fairness/wake-on-event is SCRUM-147's job). No error return: if nothing else is `READY`, including a caller with no row in the table (the boot-time default LibOS), it is a no-op that returns `0`.                                                                                                                                          |
@@ -440,25 +447,25 @@ pass-through rather than a translation table.
 | Code | Value | Meaning | Emitted today by |
 | --- | --- | --- | --- |
 | `EXO_EPERM` | 1 | Operation not permitted for this LibOS | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3), `exo_disk_acquire` (#26, SCRUM-237: the caller has an assigned volume and asked for a different extent) |
-| `EXO_ENOENT` | 2 | No such file | not yet — reserved for `exo_file_*` (#9-16) |
+| `EXO_ENOENT` | 2 | No such file | no syscall — LibOS ExoFS / `exo_file_*` (SCRUM-189/44) |
 | `EXO_EIO` | 5 | Disk I/O fault partway through a sector transfer | `exo_disk_read`/`exo_disk_write` (#24/#25) |
-| `EXO_EBADF` | 9 | Bad file descriptor | not yet — reserved for `exo_file_*` |
+| `EXO_EBADF` | 9 | Bad file descriptor | no syscall — LibOS `exo_file_*` (SCRUM-44), for a descriptor not open |
 | `EXO_ENOMEM` | 12 | Out of physical pages / heap | `exo_page_alloc` (#0), `exo_page_map` (#2, no page for an intermediate table), `exo_page_unmap` (#3, split requires a page), `exo_fb_acquire` (#4, no contiguous run free for the virtual framebuffer, SCRUM-112) |
-| `EXO_EACCES` | 13 | Permission denied | not yet bound to a handler |
+| `EXO_EACCES` | 13 | Permission denied | no syscall — LibOS ExoFS / `exo_file_*` (read on a write-only handle and vice versa) |
 | `EXO_EFAULT` | 14 | Pointer argument outside the caller's address space | `exo_fb_acquire` (#4), `exo_kbd_poll` (#6), `exo_serial_write` (#8), `exo_disk_read`/`exo_disk_write` (#24/#25), `exo_launch_pkg` (#36) |
 | `EXO_EBUSY` | 16 | Resource held by another LibOS | `exo_disk_acquire`/`exo_disk_read`/`exo_disk_write` (#24/#25/#26, SCRUM-188; #26 also for an extent overlapping another's or an assigned volume, SCRUM-237) — `exo_fb_acquire` (#4) returned this too, pre-SCRUM-112, when the framebuffer was a single exclusive binding rather than a private buffer per caller |
-| `EXO_EEXIST` | 17 | File already exists | not yet — reserved for `exo_file_open`/`exo_file_rename` |
+| `EXO_EEXIST` | 17 | File already exists | no syscall — LibOS ExoFS (`exofs_mkdir`) |
 | `EXO_ENODEV` | 19 | The hardware resource does not exist on this machine | `exo_fb_acquire` (#4, no framebuffer), `exo_disk_read`/`exo_disk_write`/`exo_disk_acquire` (#24/#25/#26, no drive detected at boot) |
-| `EXO_ENOTDIR` | 20 | Not a directory | not yet — reserved for `exo_file_*` |
-| `EXO_EISDIR` | 21 | Is a directory | not yet — reserved for `exo_file_*` |
+| `EXO_ENOTDIR` | 20 | Not a directory | no syscall — LibOS ExoFS / `exo_file_*` |
+| `EXO_EISDIR` | 21 | Is a directory | no syscall — LibOS ExoFS / `exo_file_*` |
 | `EXO_EINVAL` | 22 | Malformed or out-of-range argument | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3), `exo_serial_write` (#8, `len` over `SERIAL_WRITE_MAX_LEN`), `exo_launch_pkg` (#36, bad length or malformed package), `exo_disk_read`/`exo_disk_write` (#24/#25, `count` over `EXO_DISK_MAX_SECTORS` or LBA range overflow) |
-| `EXO_ENFILE` | 23 | System-wide open-file table full | not yet — reserved for `exo_file_open` |
-| `EXO_EMFILE` | 24 | Per-context file descriptor table full | not yet — reserved for `exo_file_open` |
+| `EXO_ENFILE` | 23 | System-wide open-file table full | no syscall — LibOS ExoFS's open-entry table (`EXOFS_MAX_OPEN_HANDLES`), passed through by `exo_file_open` |
+| `EXO_EMFILE` | 24 | Per-context file descriptor table full | no syscall — LibOS `exo_file_open` (SCRUM-44, `EXO_FILE_MAX_FDS`) |
 | `EXO_EFBIG` | 27 | File too large | not yet — reserved for `exo_file_write` |
-| `EXO_ENOSPC` | 28 | Ramdisk full | not yet — reserved for `exo_file_write` |
+| `EXO_ENOSPC` | 28 | Volume full | no syscall — LibOS ExoFS / `exo_file_write` |
 | `EXO_ESPIPE` | 29 | Seek on a non-seekable descriptor | not yet — reserved for `exo_file_seek` |
 | `EXO_EROFS` | 30 | Write attempted on a read-only filesystem | not yet — reserved for `exo_file_write` (e.g. a memory-mapped WAD reader, §4.1) |
-| `EXO_ENOSYS` | 38 | Syscall number not implemented, or out of range | `exo_syscall_dispatch` (`src/syscall.c`) for every unbound number — #7, #9-20 today |
+| `EXO_ENOSYS` | 38 | Syscall number not implemented, or out of range | `exo_syscall_dispatch` (`src/syscall.c`) for every unbound number — #9–16, which are reserved and stay unbound (§3.2) |
 
 **"0 on success" is the default, not a universal rule.** Several bound
 syscalls document a positive success value instead of `0`, because the value
@@ -1464,9 +1471,9 @@ anything above this layer starts allocating pages in a hot loop.
 >
 > What still holds: the three *use cases* below (WAD, config, saves) and
 > their differing requirements, which is why they are kept. `exo_file_*`
-> (#9–16) remains the planned syscall surface for SCRUM-44, but it will be
-> implemented on top of the LibOS filesystem rather than on a kernel
-> ramdisk. §4.1's memory-mapped WAD shortcut is what `fopen` does today
+> did not stay a syscall surface: SCRUM-44 shipped it as a LibOS library
+> over ExoFS (`src/libos_fs/exo_file.h`, `docs/filesystem.md` §6d), and
+> #9–16 are permanently reserved and unbound (§3.2). §4.1's memory-mapped WAD shortcut is what `fopen` does today
 > (SCRUM-65) and is itself due to be retired by SCRUM-190, which moves the
 > IWAD onto the disk and drops the multiboot module.
 
@@ -1514,8 +1521,9 @@ interface.
 **What the port actually does instead:** the ATA driver (SCRUM-102) and
 `exo_disk_read`/`exo_disk_write` (SCRUM-103) give the kernel sector access
 and no more; ExoFS (SCRUM-189, `src/libos_fs/`, `docs/filesystem.md`) is a
-FAT-like filesystem linked as LibOS code on top of those syscalls; and
-`exo_file_*` / the `FILE*` shim (SCRUM-44/42) will sit on ExoFS. The libc
+FAT-like filesystem linked as LibOS code on top of those syscalls;
+`exo_file_*` (SCRUM-44) is a descriptor table over ExoFS in the same LibOS
+rather than a syscall; and the `FILE*` shim (SCRUM-42) will sit on that. The libc
 shim still translates `FILE*` to descriptors, exactly as above — only the
 layer underneath it changed sides of the kernel boundary.
 

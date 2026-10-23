@@ -780,9 +780,9 @@ echo "[3a/7] Compile ExoFS into the kernel (SCRUM-189, SCRUM-190)"
 # The shell target (step [2c/7], SCRUM-202) is now a second, independent
 # ring-3 compile of these same sources -- its own object files
 # (build/shell_exofs_*.o via build_ring3_link_target's naming), not these
-# kernel-view ones, so the two coexist with no symbol collision. SCRUM-44
-# (exo_file_*) and SCRUM-237 (per-program volumes) are future ring-3
-# consumers of the same library. Step [3b5/7] below, TESTING-only, keeps
+# kernel-view ones, so the two coexist with no symbol collision. The glob
+# also takes in exo_file.c, the descriptor layer (SCRUM-44), which the
+# exo_file KUnit suite drives through this kernel-view build. Step [3b5/7] below, TESTING-only, keeps
 # proving ExoFS stays portable to a ring-3 target with nothing more than a
 # build_ring3_link_target call -- which is exactly what step [2c/7] now is.
 _compile_exofs_one() {
@@ -943,8 +943,9 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # earns its keep: it catches a kernel-only dependency creeping into
   # src/libos_fs/ at the moment it is introduced, rather than at the next
   # full rebuild of the shell target, which may be a while after whatever
-  # broke it. SCRUM-44 (exo_file_*) and SCRUM-237 (per-program volumes) are
-  # future ring-3 consumers besides the shell.
+  # broke it. exo_file.c (SCRUM-44) is covered here too: no ring-3 target
+  # links it until the FILE* shim (SCRUM-42), so this gate is its only
+  # ring-3 build.
   #
   # So: compile every source a second time with probe_cflags (the ring-3
   # CFLAGS, -mcmodel=large) and WITHOUT -DEXO_KERNEL, which selects the

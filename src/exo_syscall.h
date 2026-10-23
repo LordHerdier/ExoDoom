@@ -77,7 +77,12 @@
 #define EXO_SYS_MOUSE_POLL    7
 /* Debug */
 #define EXO_SYS_SERIAL_WRITE  8
-/* File I/O */
+/* File I/O -- reserved, never bound. Files are LibOS-side policy over
+ * exo_disk_read/exo_disk_write: exo_file_* is a library in
+ * src/libos_fs/exo_file.h (SCRUM-44), not a syscall. The numbers stay
+ * reserved rather than reused so an old caller gets -EXO_ENOSYS, and #9 is
+ * what test_syscall_k.c / test_syscall_bench_k.c use as "an unbound
+ * number". */
 #define EXO_SYS_FILE_OPEN     9
 #define EXO_SYS_FILE_CLOSE   10
 #define EXO_SYS_FILE_READ    11
@@ -222,16 +227,6 @@
  */
 #define EXO_USER_VA_BASE  0x0000400000000000ULL
 #define EXO_USER_VA_END   0x0000800000000000ULL
-
-/* exo_file_open modes (docs/syscall_spec.md §3.2 #9) */
-#define EXO_O_RDONLY    0
-#define EXO_O_WRONLY    1
-#define EXO_O_RDWR      2
-
-/* exo_file_seek whence values, matching stdio's SEEK_* ordering (#13) */
-#define EXO_SEEK_SET    0
-#define EXO_SEEK_CUR    1
-#define EXO_SEEK_END    2
 
 /* ---- Shared argument structs -------------------------------------------- */
 /*
@@ -564,66 +559,9 @@ static inline int64_t exo_serial_write(const void *buf, uint64_t len)
     return exo_syscall2(EXO_SYS_SERIAL_WRITE, (uint64_t)(uintptr_t)buf, len);
 }
 
-/* #9 — open path on the ramdisk.  mode is one of EXO_O_*.  Returns an fd >= 0,
- * or -EXO_ENOENT / -EXO_EMFILE.  Backs fopen. */
-static inline int64_t exo_file_open(const char *path, uint32_t mode)
-{
-    return exo_syscall2(EXO_SYS_FILE_OPEN, (uint64_t)(uintptr_t)path,
-                        (uint64_t)mode);
-}
-
-/* #10 — close fd.  0 or -EXO_EBADF. */
-static inline int64_t exo_file_close(int32_t fd)
-{
-    return exo_syscall1(EXO_SYS_FILE_CLOSE, (uint64_t)(int64_t)fd);
-}
-
-/* #11 — read up to count bytes into buf.  Bytes read, 0 at EOF, or negative
- * error.  Backs fread. */
-static inline int64_t exo_file_read(int32_t fd, void *buf, uint64_t count)
-{
-    return exo_syscall3(EXO_SYS_FILE_READ, (uint64_t)(int64_t)fd,
-                        (uint64_t)(uintptr_t)buf, count);
-}
-
-/* #12 — write count bytes from buf.  Bytes written or negative error.  Backs
- * fwrite. */
-static inline int64_t exo_file_write(int32_t fd, const void *buf,
-                                     uint64_t count)
-{
-    return exo_syscall3(EXO_SYS_FILE_WRITE, (uint64_t)(int64_t)fd,
-                        (uint64_t)(uintptr_t)buf, count);
-}
-
-/* #13 — seek.  whence is one of EXO_SEEK_*.  Returns the new absolute
- * position or negative error.  Backs fseek and ftell. */
-static inline int64_t exo_file_seek(int32_t fd, int64_t offset, uint32_t whence)
-{
-    return exo_syscall3(EXO_SYS_FILE_SEEK, (uint64_t)(int64_t)fd,
-                        (uint64_t)offset, (uint64_t)whence);
-}
-
-/* #14 — write the size of path to *size_out.  0 or -EXO_ENOENT.  Backs
- * M_FileExists and M_FileLength. */
-static inline int64_t exo_file_stat(const char *path, uint64_t *size_out)
-{
-    return exo_syscall2(EXO_SYS_FILE_STAT, (uint64_t)(uintptr_t)path,
-                        (uint64_t)(uintptr_t)size_out);
-}
-
-/* #15 — delete path.  0 or -EXO_ENOENT.  Backs remove(). */
-static inline int64_t exo_file_remove(const char *path)
-{
-    return exo_syscall1(EXO_SYS_FILE_REMOVE, (uint64_t)(uintptr_t)path);
-}
-
-/* #16 — rename oldpath to newpath.  0 or negative error.  Backs rename(),
- * used for save game rotation. */
-static inline int64_t exo_file_rename(const char *oldpath, const char *newpath)
-{
-    return exo_syscall2(EXO_SYS_FILE_RENAME, (uint64_t)(uintptr_t)oldpath,
-                        (uint64_t)(uintptr_t)newpath);
-}
+/* #9-#16 have no stubs: they were reserved for kernel file syscalls that
+ * were never bound. File I/O is LibOS code -- exo_file_* lives in
+ * src/libos_fs/exo_file.h, over ExoFS (SCRUM-44). */
 
 /* #17 — start a PC speaker tone.  Returns immediately; the kernel stops the
  * tone after dur_ms.  0, or -EXO_EINVAL for freq outside 19..20000 Hz or

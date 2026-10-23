@@ -442,6 +442,43 @@ is help nobody asked for.
 
 ---
 
+## 6d. Descriptors (`exo_file_*`)
+
+`exofs.h` hands out caller-allocated `exofs_file_t` handles and has no
+descriptor table on purpose. `exo_file.c` (SCRUM-44) is that table, the layer
+a libc-style caller sits on. It is the API the `FILE*` shim (SCRUM-42) will
+use. Like the rest of this directory it is **LibOS code, not a syscall**:
+dispatcher numbers #9–16 were once reserved for kernel file syscalls and are
+now permanently unbound (`docs/syscall_spec.md` §3.2, §4).
+
+It is deliberately thin. A descriptor is an index into a static array of
+`EXO_FILE_MAX_FDS` (8) handles, and each call is the matching `exofs_*` call
+on that slot. A slot is free exactly when its handle's `open` is 0, so there
+is no second in-use flag to fall out of step. The flag and whence constants
+are aliases of `EXOFS_O_*`/`EXOFS_SEEK_*`, so they pass straight through.
+
+**Two "table full" errors, from two tables.** `-EXO_EMFILE` means this
+program's descriptor table is full. `-EXO_ENFILE` comes from ExoFS's own
+open-entry table (`EXOFS_MAX_OPEN_HANDLES`, also 8) and is passed through
+unchanged. The descriptor table is the same size as ExoFS's, so in practice
+`-EXO_EMFILE` is the one a caller sees. Making it bigger would only move the
+failure to the other table.
+
+**Close before unmount.** Durability is ExoFS's, unchanged (§6c): a size
+reaches the disk on close. The descriptor table outlives a mount, so a caller
+that unmounts with descriptors open loses those files' sizes, and its next
+mount starts with stale slots occupied. `exo_file_close_all()` exists for
+exactly that point. Call it before `exofs_unmount()`.
+
+**No mount policy.** `exo_file_*` uses whatever volume the program mounted.
+With nothing mounted, ExoFS answers `-EXO_EINVAL` and this layer passes that
+through.
+
+`remove`/`rename` are not here yet. They are SCRUM-106, over `exofs_unlink`
+and a rename ExoFS does not have yet.
+
+---
+
 ## 7. Paths
 
 **Absolute only.** A path must start with `/`. There is no working directory
@@ -516,7 +553,9 @@ difference.
 | `exofs_path.c/.h` | Path parsing and resolution (§7). |
 | `exofs_dir.c/.h` | `mkdir`/`rmdir`/`opendir`/`readdir`, and the `.`/`..` bootstrap (§6b). |
 | `exofs_file.c` | `open`/`read`/`write`/`seek`/`stat`/`unlink` (§6c). |
+| `exo_file.c/.h` | The descriptor table over `exofs_file.c`: `exo_file_open`/`close`/`read`/`write`/`seek`/`stat`/`close_all` (§6d, SCRUM-44). |
 | `tests/kernel/test_exofs_k.c` | The whole suite, 66 tests, ending in the ticket's end-to-end acceptance path. |
+| `tests/kernel/test_exo_file_k.c` | The `exo_file` suite: descriptor errors, the access/seek/truncate/append pass-throughs, durability across a remount, and SCRUM-44's acceptance path. |
 
 ### Building it
 
@@ -534,9 +573,11 @@ SCRUM-202 is now the first real ring-3 consumer: the shell LibOS
 (`src/shell/shell_main.c`, step `[2c/7]`) links `src/libos_fs/*.c` plus the
 small slice of the libc shim it needs (`src/string.c`, `src/libos_heap.c`,
 `src/libos_page_alloc.c`) as its `mkfs`/`mkdir`/`ls`/`cat`/`rm` commands,
-over its own scratch volume — not the one holding the IWAD. SCRUM-44
-(`exo_file_*`) is a still-future second consumer, and the sources needed no
-change to support either: the whole point of step `[3b5/7]`'s gate was that
+over its own scratch volume — not the one holding the IWAD.
+`exo_file.c` (SCRUM-44, §6d) is in this directory too, so both compiles pick
+it up through the `src/libos_fs/*.c` glob and the gate below covers it. The
+shell's explicit source list does not include it, because the shell has no
+use for descriptors. The sources needed no change to support any of this: the whole point of step `[3b5/7]`'s gate was that
 porting ExoFS to a ring-3 target would be "a `build_ring3_link_target` call
 and nothing more," and that held.
 
