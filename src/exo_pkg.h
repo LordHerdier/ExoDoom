@@ -44,6 +44,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "exo_volume.h"
+
 #define EXO_PKG_MAGIC   0x4B504F45u /* "EOPK" read as a little-endian u32 */
 #define EXO_PKG_VERSION 1u
 
@@ -69,7 +71,8 @@
                                 * reserved[], min_pages > recommended_pages,
                                 * stack_pages == 0, sound_voices over
                                 * EXO_PKG_MAX_SOUND_VOICES, or an unknown
-                                * want_flags bit */
+                                * want_flags bit, or a volume request that
+                                * is inconsistent (see volume_slot) */
 
 /* Mirrors src/libos_launch.h's LIBOS_LAUNCH_MAX_CODE_PAGES/
  * LIBOS_LAUNCH_MAX_DATA_PAGES/LIBOS_LAUNCH_STACK_PAGES -- this format
@@ -117,14 +120,26 @@ typedef struct {
     uint32_t sound_voices; /* voices wanted, 0 = none */
     uint32_t want_flags;   /* EXO_PKG_WANT_* bitmask */
 
-    uint32_t reserved[4]; /* must be zero; keeps the header growable without
+    /* Filesystem volume request (SCRUM-237, src/exo_volume.h). A program that
+     * wants a private volume of its own sets volume_sectors != 0 and names
+     * the slot of the disk's volume region it owns; the kernel binds exactly
+     * that sector extent for it at launch. volume_sectors == 0 means no
+     * volume, and volume_slot must then be 0. A volume is a disk resource, so
+     * it requires EXO_PKG_WANT_DISK. These two fields were reserved[0..1]; a
+     * v1 parser that predates them rejects a package using them as EINVAL
+     * (non-zero reserved), which is the failure the reserved[] rule exists
+     * to produce, so there is no version bump. */
+    uint32_t volume_slot;    /* < EXO_VOLUME_MAX_SLOTS                      */
+    uint32_t volume_sectors; /* 0 = none, else <= EXO_VOLUME_SLOT_SECTORS   */
+
+    uint32_t reserved[2]; /* must be zero; keeps the header growable without
                             * bumping EXO_PKG_VERSION for every new field --
                             * which only holds because v1 pack/parse reject
                             * a non-zero value (EXO_PKG_EINVAL), so a future
                             * package that uses one cannot be mistaken for v1 */
 } exo_pkg_header_t;
 
-/* On-disk layout: 15 u32 fields (11 named + reserved[4]), no padding. Changing this is a format
+/* On-disk layout: 15 u32 fields (13 named + reserved[2]), no padding. Changing this is a format
  * change and needs an EXO_PKG_VERSION bump. */
 _Static_assert(sizeof(exo_pkg_header_t) == 60,
                "exo_pkg_header_t is an on-disk layout");
@@ -148,7 +163,7 @@ static inline int exo_pkg_check_header(const exo_pkg_header_t *hdr) {
     if (hdr->params_len > hdr->data_len)
         return EXO_PKG_ETOOBIG;
 
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 2; i++)
         if (hdr->reserved[i] != 0)
             return EXO_PKG_EINVAL;
     if (hdr->stack_pages < 1)
@@ -159,6 +174,18 @@ static inline int exo_pkg_check_header(const exo_pkg_header_t *hdr) {
         return EXO_PKG_EINVAL;
     if (hdr->want_flags & ~EXO_PKG_WANT_ALL)
         return EXO_PKG_EINVAL;
+
+    if (hdr->volume_sectors == 0) {
+        if (hdr->volume_slot != 0)
+            return EXO_PKG_EINVAL;
+    } else {
+        if (!(hdr->want_flags & EXO_PKG_WANT_DISK))
+            return EXO_PKG_EINVAL;
+        if (hdr->volume_slot >= EXO_VOLUME_MAX_SLOTS)
+            return EXO_PKG_EINVAL;
+        if (hdr->volume_sectors > EXO_VOLUME_SLOT_SECTORS)
+            return EXO_PKG_EINVAL;
+    }
 
     return 0;
 }

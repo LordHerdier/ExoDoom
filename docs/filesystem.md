@@ -467,10 +467,18 @@ difference.
 
 ## 8. Limits and scope
 
-- **One volume at a time.** The mounted volume is a single static state.
-  This is not a simplification awaiting removal: the disk binding
-  (SCRUM-188) is exclusive, so only one context can reach the disk at all,
-  and that context has one disk.
+- **One volume at a time, per program.** The mounted volume is a single
+  static state *inside one program's copy of ExoFS*. Since SCRUM-237 that is
+  no longer the whole story for the machine: the disk binding is a table of
+  non-overlapping sector extents (`docs/syscall_spec.md` §3.5a), so several
+  programs can each hold their own extent and mount their own volume at once.
+  Each links its own `src/libos_fs/`, so the statics are theirs alone — which
+  is the point. A volume must fit inside the extent its holder acquired
+  (`exo_disk_extent`, #37, says what that is for a program with an assigned
+  volume); every transfer outside it is refused by the kernel, not by ExoFS.
+  The reference consumer is `src/libos_voldemo/`: one program, packaged twice
+  with different slots, that formats on first launch, mounts thereafter, and
+  probes the sectors it must not reach.
 - **Unmount before releasing the binding.** `exofs_bdev_release()`
   (`exo_disk_release`, #27) drops the binding immediately; it cannot know a
   filesystem was mounted on top of it. The FAT is resident and written back

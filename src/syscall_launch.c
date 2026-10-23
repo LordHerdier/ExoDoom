@@ -56,6 +56,8 @@
 #include "context.h"
 #include "libos_launch.h"
 #include "exo_pkg.h"
+#include "exo_volume.h"
+#include "disk_binding.h"
 #include "libos_wad_map.h"
 #include "libos_wad_params.h"
 #include "libos_wad_viewer/libos_wad_viewer_layout.h"
@@ -196,6 +198,9 @@ static int64_t launch_enter(page_owner_t id, const libos_image_t *img,
      * launch must leave whoever holds the binding untouched (SCRUM-230). */
     if (context_switch_request(id) != CONTEXT_OK) {
         libos_destroy_image(id, img);
+        /* Drop a volume assigned by #36 (SCRUM-237): the id is about to be
+         * free for reuse and must not inherit another program's extent. */
+        disk_binding_forget(id);
         context_destroy(id);
         return -EXO_EINVAL;
     }
@@ -399,6 +404,21 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t a3,
                           hdr.bss_len, &launch_img) != VMM_OK) {
         context_destroy(id);
         return -EXO_ENOMEM;
+    }
+
+    /* The manifest's volume request becomes a sector extent the program alone
+     * may bind (SCRUM-237). Done after the image exists but before the
+     * program runs, and undone with the context if it cannot be granted --
+     * another running program already holds that slot, say. */
+    if (hdr.volume_sectors != 0) {
+        int arc = disk_binding_assign(id, exo_volume_slot_base(hdr.volume_slot),
+                                      hdr.volume_sectors);
+        if (arc != DISK_BIND_OK) {
+            revoke_all(id);
+            context_destroy(id);
+            return arc == DISK_BIND_EBUSY ? -EXO_EBUSY
+                 : arc == DISK_BIND_ENODEV ? -EXO_ENODEV : -EXO_EINVAL;
+        }
     }
 
     /* libos_build_image() maps LIBOS_LAUNCH_STACK_PAGES regardless, so the

@@ -144,6 +144,9 @@
  * this one takes the bytes of an exo_pkg.h package a ring-3 launcher read off
  * disk, so the set of runnable programs is no longer a link-time constant. */
 #define EXO_SYS_LAUNCH_PKG          36
+/* Which sectors of the disk are this program's own volume (SCRUM-237).
+ * Appended for the reason #28-30 were. */
+#define EXO_SYS_DISK_EXTENT         37
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -153,7 +156,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        37
+#define EXO_SYS_COUNT        38
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -347,6 +350,12 @@ typedef struct {
     uint32_t total_sectors; /* 0 if !present                                */
 } exo_diskstat_t;
 
+/* #37 result (SCRUM-237): the sector extent assigned to the caller's volume. */
+typedef struct {
+    uint32_t base;    /* first LBA of the volume                        */
+    uint32_t sectors; /* length in sectors, never 0                     */
+} exo_diskextent_t;
+
 /* EXO_PSLIST_MAX *is* CONTEXT_MAX (src/context.h) — included here rather than
  * restated as a separate literal, so the two can never drift the way they
  * did across SCRUM-193: that ticket raised VMM_MAX_ADDRESS_SPACES (and so
@@ -374,6 +383,7 @@ _Static_assert(sizeof(exo_mouse_state_t) ==  6, "exo_mouse_state_t layout is ABI
 _Static_assert(sizeof(exo_memstat_t)     == 24, "exo_memstat_t layout is ABI");
 _Static_assert(sizeof(exo_ps_info_t)     ==  8, "exo_ps_info_t layout is ABI");
 _Static_assert(sizeof(exo_diskstat_t)    ==  8, "exo_diskstat_t layout is ABI");
+_Static_assert(sizeof(exo_diskextent_t)  ==  8, "exo_diskextent_t layout is ABI");
 _Static_assert(sizeof(exo_rtc_time_t)    == 16, "exo_rtc_time_t layout is ABI");
 #endif /* __ASSEMBLER__ */
 
@@ -718,13 +728,18 @@ static inline int64_t exo_disk_write(uint32_t lba, const void *buf,
                         (uint64_t)(uintptr_t)buf, (uint64_t)count);
 }
 
-/* #26 — bind the disk to the caller (SCRUM-188). Must succeed before
- * exo_disk_read/exo_disk_write will do anything for this caller. Returns 0
- * (including a re-acquire by the current owner), -EXO_EBUSY if another
- * context holds it, or -EXO_ENODEV if this machine has no drive. */
-static inline int64_t exo_disk_acquire(void)
+/* #26 — bind sectors [base, base + count) to the caller (SCRUM-188, ranges
+ * SCRUM-237). count == 0 (and base == 0) claims the whole device, which is
+ * what the argument-less call did before ranges existed. Must succeed before
+ * exo_disk_read/exo_disk_write will do anything for this caller, and those
+ * then refuse any sector outside [base, base + count). Returns 0 (including a
+ * re-acquire of the same extent), -EXO_EBUSY if the extent overlaps another
+ * context's or the caller already holds a different one, -EXO_EINVAL for a
+ * malformed extent, -EXO_ENOMEM if the extent table is full, or -EXO_ENODEV
+ * if this machine has no drive. */
+static inline int64_t exo_disk_acquire(uint32_t base, uint32_t count)
 {
-    return exo_syscall0(EXO_SYS_DISK_ACQUIRE);
+    return exo_syscall2(EXO_SYS_DISK_ACQUIRE, (uint64_t)base, (uint64_t)count);
 }
 
 /* #27 — give the disk binding back (SCRUM-189). The voluntary counterpart to
@@ -752,6 +767,17 @@ static inline int64_t exo_disk_release(void)
 static inline int64_t exo_diskstat(exo_diskstat_t *out)
 {
     return exo_syscall1(EXO_SYS_DISK_STAT, (uint64_t)(uintptr_t)out);
+}
+
+/* #37 — the sector extent this program's package asked for and the kernel
+ * assigned at launch (SCRUM-237). Pass exactly this to exo_disk_acquire and
+ * format/mount ExoFS at .base. Returns 0 with *out filled, -EXO_ENOENT if the
+ * caller has no volume (its package did not request one, or it was not
+ * launched from a package), or -EXO_EFAULT if [out, out + 8) is not mapped
+ * writable in the LibOS window. */
+static inline int64_t exo_disk_extent(exo_diskextent_t *out)
+{
+    return exo_syscall1(EXO_SYS_DISK_EXTENT, (uint64_t)(uintptr_t)out);
 }
 
 /* #28 — queue `num_samples` bytes of 8-bit *unsigned* mono PCM at `buf`,

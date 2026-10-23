@@ -59,6 +59,16 @@ static int64_t do_disk_acquire(void)
     return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, 0, 0, 0, 0, 0);
 }
 
+static int64_t do_disk_acquire_extent(uint64_t base, uint64_t count)
+{
+    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, base, count, 0, 0, 0, 0);
+}
+
+static int64_t do_disk_extent(uint64_t out)
+{
+    return exo_syscall_dispatch(EXO_SYS_DISK_EXTENT, out, 0, 0, 0, 0, 0);
+}
+
 static int64_t do_disk_release(void)
 {
     return exo_syscall_dispatch(EXO_SYS_DISK_RELEASE, 0, 0, 0, 0, 0, 0);
@@ -362,8 +372,155 @@ static void test_disk_stat_reports_presence_and_capacity(void)
     CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
 }
 
+/* ---- Sector extents (SCRUM-237) -----------------------------------------
+ *
+ * The isolation guarantee between two LibOS volumes is that a transfer
+ * outside the caller's extent is refused before anything touches the drive.
+ * UNMAPPED stands in for the buffer: an in-extent transfer then gets past the
+ * range check and fails on the pointer (-EXO_EFAULT), while an out-of-extent
+ * one never reaches the pointer (-EXO_EINVAL). So the two codes together say
+ * which check fired. */
+
+#define OTHER_VOLUME_LBA 4096
+
+static void test_extent_confines_transfers(void)
+{
+    if (!drive_present())
+        return;
+
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), 0);
+
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA, UNMAPPED, 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA + 7, UNMAPPED, 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_disk_write(TEST_LBA + 7, UNMAPPED, 1), -EXO_EFAULT);
+
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA - 1, UNMAPPED, 1), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA + 8, UNMAPPED, 1), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA + 7, UNMAPPED, 2), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_write(TEST_LBA - 1, UNMAPPED, 2), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_write(0, UNMAPPED, 1), -EXO_EINVAL);
+
+    /* A caller holding no extent is EBUSY, not out-of-range. */
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA, UNMAPPED, 1), -EXO_EBUSY);
+
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+}
+
+static void test_extent_acquire_arguments(void)
+{
+    if (!drive_present())
+        return;
+
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(1ULL << 32, 8), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(8, 1ULL << 32), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(8, 0), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
+
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), 0);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), 0);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA + 8, 8), -EXO_EBUSY);
+
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+}
+
+/* Two volumes at once, and a write aimed at the other one's sector leaves it
+ * byte-for-byte as it was. Read back through ata_read_sectors() directly --
+ * the one place that does not go through the check being tested. */
+static void test_other_volume_is_untouchable(void)
+{
+    if (!drive_present())
+        return;
+
+    page_owner_t me = syscall_current_context();
+
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), 0);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, OTHER_VOLUME_LBA, 8),
+                    DISK_BIND_OK);
+
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p,
+                          EXO_PAGE_WRITE | EXO_PAGE_USER), 0);
+    uint8_t *page = (uint8_t *)(uintptr_t)SCRATCH;
+
+    static uint8_t before[512], after[512];
+    CU_ASSERT_EQUAL(ata_read_sectors(OTHER_VOLUME_LBA, before, 1), ATA_OK);
+
+    for (int i = 0; i < 512; i++)
+        page[i] = 0xA5;
+    CU_ASSERT_EQUAL(do_disk_write(OTHER_VOLUME_LBA, SCRATCH, 1), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_read(OTHER_VOLUME_LBA, SCRATCH, 1), -EXO_EINVAL);
+
+    CU_ASSERT_EQUAL(ata_read_sectors(OTHER_VOLUME_LBA, after, 1), ATA_OK);
+    int same = 1;
+    for (int i = 0; i < 512; i++)
+        if (before[i] != after[i])
+            same = 0;
+    CU_ASSERT_TRUE(same);
+
+    CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+
+    disk_binding_release(OTHER_LIBOS);
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+}
+
+static void test_disk_extent_reports_the_assignment(void)
+{
+    if (!drive_present())
+        return;
+
+    page_owner_t me = syscall_current_context();
+
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p,
+                          EXO_PAGE_WRITE | EXO_PAGE_USER), 0);
+
+    CU_ASSERT_EQUAL(do_disk_extent(UNMAPPED), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_disk_extent(0), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_disk_extent(SCRATCH), -EXO_ENOENT);
+
+    CU_ASSERT_EQUAL(disk_binding_assign(me, OTHER_VOLUME_LBA, 16),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(do_disk_extent(SCRATCH), 0);
+    exo_diskextent_t *e = (exo_diskextent_t *)(uintptr_t)SCRATCH;
+    CU_ASSERT_EQUAL(e->base, OTHER_VOLUME_LBA);
+    CU_ASSERT_EQUAL(e->sectors, 16);
+
+    /* A context with a volume gets that volume and no other, and not the
+     * whole device it could take before. */
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire(), -EXO_EPERM);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), -EXO_EPERM);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(OTHER_VOLUME_LBA, 16), 0);
+
+    disk_binding_forget(me);
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_extent(SCRATCH), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+
+    CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+}
+
 void suite_syscall_disk_tests(CU_pSuite s)
 {
+    CU_add_test(s, "extent confines transfers",
+               test_extent_confines_transfers);
+    CU_add_test(s, "extent acquire arguments are validated",
+               test_extent_acquire_arguments);
+    CU_add_test(s, "another volume is untouchable",
+               test_other_volume_is_untouchable);
+    CU_add_test(s, "disk_extent reports the assignment",
+               test_disk_extent_reports_the_assignment);
     CU_add_test(s, "handlers are bound", test_handlers_are_bound);
     CU_add_test(s, "zero count is a no-op", test_zero_count_is_a_noop);
     CU_add_test(s, "oversized count rejected", test_oversized_count_rejected);

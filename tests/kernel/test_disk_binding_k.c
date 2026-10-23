@@ -231,18 +231,18 @@ static void test_revoke_mark_clear_pending(void)
                     DISK_REVOKE_ENOENT);
 
     CU_ASSERT_EQUAL(disk_binding_acquire(PAGE_OWNER_LIBOS), DISK_BIND_OK);
-    CU_ASSERT_FALSE(disk_binding_revoke_pending());
+    CU_ASSERT_FALSE(disk_binding_revoke_pending(PAGE_OWNER_LIBOS));
 
     CU_ASSERT_EQUAL(disk_binding_revoke_mark(PAGE_OWNER_LIBOS),
                     DISK_REVOKE_OK);
-    CU_ASSERT_TRUE(disk_binding_revoke_pending());
+    CU_ASSERT_TRUE(disk_binding_revoke_pending(PAGE_OWNER_LIBOS));
 
     /* The mark is an ask, not a seizure: the owner keeps using the disk. */
     CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_LIBOS);
 
     CU_ASSERT_EQUAL(disk_binding_revoke_clear(PAGE_OWNER_LIBOS),
                     DISK_REVOKE_OK);
-    CU_ASSERT_FALSE(disk_binding_revoke_pending());
+    CU_ASSERT_FALSE(disk_binding_revoke_pending(PAGE_OWNER_LIBOS));
 
     disk_binding_release(PAGE_OWNER_LIBOS);
 }
@@ -257,7 +257,7 @@ static void test_revoke_reclaim_takes_it_back(void)
     CU_ASSERT_EQUAL(disk_binding_reclaim(PAGE_OWNER_LIBOS), DISK_REVOKE_OK);
 
     CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
-    CU_ASSERT_FALSE(disk_binding_revoke_pending());
+    CU_ASSERT_FALSE(disk_binding_revoke_pending(PAGE_OWNER_LIBOS));
 
     /* Reclaiming a context that has since let go (or never held it)
      * reports ENOENT, not a phantom success. */
@@ -265,8 +265,277 @@ static void test_revoke_reclaim_takes_it_back(void)
                     DISK_REVOKE_ENOENT);
 }
 
+/* ── Extents (SCRUM-237) ─────────────────────────────────────────────────── */
+
+static void test_disjoint_extents_coexist(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 1000, 100),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 1100, 100),
+                    DISK_BIND_OK);
+
+    uint32_t base = 0, count = 0;
+    CU_ASSERT_EQUAL(disk_binding_extent_of(OTHER_LIBOS, &base, &count),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(base, 1100);
+    CU_ASSERT_EQUAL(count, 100);
+}
+
+static void test_overlapping_extent_is_busy(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 1000, 100),
+                    DISK_BIND_OK);
+
+    /* One shared sector at either edge is enough; adjacency is not overlap. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 1099, 10),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 990, 11),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 990, 10),
+                    DISK_BIND_OK);
+}
+
+static void test_whole_device_conflicts_with_any_extent(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 1000, 100),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_EBUSY);
+
+    disk_binding_release(PAGE_OWNER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_OK);
+    /* ...and the other way round. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 5, 1),
+                    DISK_BIND_EBUSY);
+}
+
+static void test_malformed_extent_is_rejected(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 5, 0),
+                    DISK_BIND_ERANGE);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS,
+                                                DISK_BIND_LBA_LIMIT, 1),
+                    DISK_BIND_ERANGE);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS,
+                                                DISK_BIND_LBA_LIMIT - 1, 2),
+                    DISK_BIND_ERANGE);
+    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
+}
+
+static void test_holder_cannot_swap_extents_silently(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 1000, 100),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 1000, 100),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 2000, 100),
+                    DISK_BIND_EBUSY);
+}
+
+static void test_check_range_confines_the_holder(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 1000, 100),
+                    DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(disk_binding_check_range(PAGE_OWNER_LIBOS, 1000, 100),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_range(PAGE_OWNER_LIBOS, 1099, 1),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_range(PAGE_OWNER_LIBOS, 999, 1),
+                    DISK_BIND_ERANGE);
+    CU_ASSERT_EQUAL(disk_binding_check_range(PAGE_OWNER_LIBOS, 1099, 2),
+                    DISK_BIND_ERANGE);
+    CU_ASSERT_EQUAL(disk_binding_check_range(PAGE_OWNER_LIBOS, 1100, 1),
+                    DISK_BIND_ERANGE);
+    CU_ASSERT_EQUAL(disk_binding_check_range(PAGE_OWNER_LIBOS, ~0ULL, 2),
+                    DISK_BIND_ERANGE);
+    /* Someone who holds nothing is not "out of range", they are unbound. */
+    CU_ASSERT_EQUAL(disk_binding_check_range(OTHER_LIBOS, 1000, 1),
+                    DISK_BIND_EBUSY);
+}
+
+static void test_reclaim_frees_only_that_owners_extent(void)
+{
+    uint32_t base, count;
+
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 1000, 100),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 2000, 100),
+                    DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(disk_binding_reclaim(PAGE_OWNER_LIBOS), DISK_REVOKE_OK);
+    CU_ASSERT_EQUAL(disk_binding_extent_of(PAGE_OWNER_LIBOS, &base, &count),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_extent_of(OTHER_LIBOS, &base, &count),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_owner(), OTHER_LIBOS);
+}
+
+static void test_extent_table_fills_up(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        CU_ASSERT_EQUAL(disk_binding_acquire_extent(
+                            (page_owner_t)(PAGE_OWNER_LIBOS + i),
+                            1000u + 10u * (uint32_t)i, 10),
+                        DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(
+                        (page_owner_t)(PAGE_OWNER_LIBOS + DISK_BIND_MAX_EXTENTS),
+                        900, 10),
+                    DISK_BIND_ENOSLOT);
+}
+
+/* ── Assigned volumes (SCRUM-237) ────────────────────────────────────────── */
+
+static void test_assigned_context_may_bind_only_its_volume(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 5000, 63),
+                    DISK_BIND_EPERM);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 10),
+                    DISK_BIND_EPERM);
+    CU_ASSERT_EQUAL(disk_binding_acquire(PAGE_OWNER_LIBOS), DISK_BIND_EPERM);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+}
+
+static void test_assigned_volume_is_fenced_from_everyone_else(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+
+    /* Nobody holds it yet, and nobody else can take it or anything over it. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 5000, 64),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 5063, 5),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 5064, 64),
+                    DISK_BIND_OK);
+
+    /* A voluntary release keeps the permission: the fence stays up between
+     * mounts, and the owner is still pinned to its volume. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+    disk_binding_release(PAGE_OWNER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 5000, 1),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire(PAGE_OWNER_LIBOS), DISK_BIND_EPERM);
+
+    /* Only teardown lifts it. */
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+    uint32_t b, c;
+    CU_ASSERT_EQUAL(disk_binding_assignment_of(PAGE_OWNER_LIBOS, &b, &c),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(OTHER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+}
+
+static void test_assignments_must_not_overlap(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(OTHER_LIBOS, 5063, 10), DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assign(OTHER_LIBOS, 5064, 10), DISK_BIND_OK);
+    /* One volume per context. */
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 9000, 8),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_FREE, 9000, 8),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assign((page_owner_t)(PAGE_OWNER_LIBOS + 2),
+                                        9000, 0),
+                    DISK_BIND_ERANGE);
+}
+
+/* One holder's revocation mark is not another's (SCRUM-237). */
+static void test_revoke_pending_is_per_owner(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 1000, 10),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 2000, 10),
+                    DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(disk_binding_revoke_mark(PAGE_OWNER_LIBOS), DISK_REVOKE_OK);
+    CU_ASSERT_TRUE(disk_binding_revoke_pending(PAGE_OWNER_LIBOS));
+    CU_ASSERT_FALSE(disk_binding_revoke_pending(OTHER_LIBOS));
+    CU_ASSERT_FALSE(disk_binding_revoke_pending(PAGE_OWNER_FREE));
+}
+
+/* disk_binding_owner() names a holder only when there is exactly one. */
+static void test_owner_is_free_with_several_holders(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 1000, 10),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 2000, 10),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
+}
+
+/* A launch must not report success for a volume its program cannot bind. */
+static void test_assign_refuses_a_volume_someone_else_holds(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_EBUSY);
+
+    disk_binding_release(OTHER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 5010, 4),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(OTHER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+}
+
 void suite_disk_binding_tests(CU_pSuite s)
 {
+    CU_add_test(s, "revoke pending is per owner",
+                test_revoke_pending_is_per_owner);
+    CU_add_test(s, "owner is free with several holders",
+                test_owner_is_free_with_several_holders);
+    CU_add_test(s, "assign refuses a volume someone else holds",
+                test_assign_refuses_a_volume_someone_else_holds);
+    CU_add_test(s, "disjoint extents coexist",
+                test_disjoint_extents_coexist);
+    CU_add_test(s, "overlapping extent is busy",
+                test_overlapping_extent_is_busy);
+    CU_add_test(s, "whole device conflicts with any extent",
+                test_whole_device_conflicts_with_any_extent);
+    CU_add_test(s, "malformed extent is rejected",
+                test_malformed_extent_is_rejected);
+    CU_add_test(s, "holder cannot swap extents silently",
+                test_holder_cannot_swap_extents_silently);
+    CU_add_test(s, "check_range confines the holder",
+                test_check_range_confines_the_holder);
+    CU_add_test(s, "reclaim frees only that owner's extent",
+                test_reclaim_frees_only_that_owners_extent);
+    CU_add_test(s, "extent table fills up", test_extent_table_fills_up);
+    CU_add_test(s, "assigned context may bind only its volume",
+                test_assigned_context_may_bind_only_its_volume);
+    CU_add_test(s, "assigned volume is fenced from everyone else",
+                test_assigned_volume_is_fenced_from_everyone_else);
+    CU_add_test(s, "assignments must not overlap",
+                test_assignments_must_not_overlap);
     CU_add_test(s, "boot bound the acquire syscall",
                 test_boot_bound_the_acquire_syscall);
     CU_add_test(s, "first acquirer succeeds", test_first_acquirer_succeeds);

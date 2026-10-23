@@ -130,7 +130,7 @@ int revoke_pending(revoke_res_t what)
     switch (what.kind) {
     case REVOKE_PAGE:        return page_revoke_pending(page_of(what));
     case REVOKE_FRAMEBUFFER: return fb_binding_revoke_pending();
-    case REVOKE_DISK:        return disk_binding_revoke_pending();
+    case REVOKE_DISK:        return disk_binding_revoke_pending(what.owner);
     default:                 return 0;
     }
 }
@@ -230,6 +230,9 @@ uint32_t revoke_all(page_owner_t who)
         record.forced++;
         total++;
     }
+    /* The context is gone, so its assigned volume goes with it (SCRUM-237);
+     * the sectors stay on disk, only the permission lapses. */
+    disk_binding_forget(who);
 
     /* SCRUM-159: page_reclaim_all() doesn't report which addresses it took
      * back, so rather than tracking them individually, wipe every mapping

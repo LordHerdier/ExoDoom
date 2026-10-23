@@ -56,6 +56,13 @@ int exofs_bdev_acquire(void)
     return 0;
 }
 
+int exofs_bdev_acquire_extent(uint32_t base, uint32_t count)
+{
+    (void)base;
+    (void)count;
+    return 0;
+}
+
 void exofs_bdev_release(void)
 {
 }
