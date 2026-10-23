@@ -6,8 +6,8 @@
  * suite covers exo_page_alloc/_free (#0/#1), exo_page_map/_unmap (#2/#3),
  * exo_fb_acquire (#4), exo_get_ticks (#5), exo_kbd_poll (#6), exo_mouse_poll
  * (#7, SCRUM-52) and exo_serial_write (#8) -- plus the dispatcher's bare
- * -EXO_ENOSYS floor via the still-unbound exo_file_open (#9), a useful "no
- * handler work at all" baseline to set the others against.
+ * -EXO_ENOSYS floor via the reserved, never-bound #9 (EXO_SYS_FILE_OPEN), a
+ * useful "no handler work at all" baseline to set the others against.
  *
  * Method: tests/kernel/syscall_bench_probe.s's three entry points, launched
  * through the real libos_build_image()/libos_enter() mechanism (SCRUM-49/
@@ -205,8 +205,9 @@ static void test_bench_fb_acquire(void)
 
 static void test_bench_dispatcher_floor(void)
 {
-    /* exo_mouse_poll (#7) is bound now (SCRUM-52) -- exo_file_open (#9) is
-     * the next syscall with no handler bound (docs/syscall_spec.md §3.2), so
+    /* exo_mouse_poll (#7) is bound now (SCRUM-52) -- #9 is reserved and
+     * will never be bound (file I/O is the LibOS exo_file_* library,
+     * SCRUM-44; docs/syscall_spec.md §3.2), so
      * the dispatcher's range check runs and it returns -EXO_ENOSYS
      * immediately, with no handler body at all. This is the floor every
      * other number's "handler work" cost sits on top of. */

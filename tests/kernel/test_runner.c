@@ -87,6 +87,7 @@ void suite_ata_tests(CU_pSuite s);
 void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
 void suite_exofs_tests(CU_pSuite s);
+void suite_exo_file_tests(CU_pSuite s);
 void suite_doom_wad_disk_tests(CU_pSuite s);
 void suite_launch_multi_tests(CU_pSuite s);
 void suite_launch_pkg_tests(CU_pSuite s);
@@ -171,6 +172,10 @@ int disk_binding_suite_cleanup(void);
  * (SCRUM-189). */
 int exofs_suite_init(void);
 int exofs_suite_cleanup(void);
+
+/* exo_file_* sits on ExoFS, so the same binding requirement (SCRUM-44). */
+int exo_file_suite_init(void);
+int exo_file_suite_cleanup(void);
 
 /* Same idea as context_launch_rebind_suite_cleanup (SCRUM-196): each test
  * here launches real contexts (with real code/data/stack pages) via the
@@ -563,6 +568,11 @@ int run_tests(void)
      * surfacing here as a pile of -EXO_EBUSY (SCRUM-189). */
     s = CU_add_suite("exofs", exofs_suite_init, exofs_suite_cleanup);
     suite_exofs_tests(s);
+
+    /* After "exofs": the descriptor layer is a thin wrapper, so an ExoFS
+     * failure should be reported there first (SCRUM-44). */
+    s = CU_add_suite("exo_file", exo_file_suite_init, exo_file_suite_cleanup);
+    suite_exo_file_tests(s);
 
     /* After "exofs": doom_wad_disk_get() (src/doom_wad_disk.c) is ExoFS
      * plus a contiguous allocation and a cache on top, mounting the real
