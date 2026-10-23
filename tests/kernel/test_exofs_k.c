@@ -325,6 +325,134 @@ static void test_foreign_owner_blocks_transfers(void)
     libos_heap_free(buf);
 }
 
+/* ---- Per-program volumes (SCRUM-237) ------------------------------------
+ *
+ * ExoFS keeps one mounted volume per copy of the library, so the kernel image
+ * (which links a single copy) cannot hold two volumes mounted at once; two
+ * real programs each link their own copy and can, which the live
+ * libos_voldemo boot shows. What this can assert is the half the kernel is
+ * responsible for: with a sector extent bound, a volume lives wholly inside
+ * it, one volume's files are not on the other, and ExoFS cannot be pointed at
+ * sectors outside the extent. Both volumes sit inside the region this suite
+ * owns (see the LBA RANGE note above).
+ */
+
+#define VOL_A_BASE (EXOFS_TEST_BASE_LBA)
+#define VOL_B_BASE (EXOFS_TEST_BASE_LBA + 2048u)
+#define VOL_EXT_SECTORS 2048u
+
+static int write_small_file(const char *path)
+{
+    exofs_file_t f;
+    if (exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f) != 0)
+        return 0;
+    int64_t n = exofs_write(&f, "x", 1);
+    exofs_close(&f);
+    return n == 1;
+}
+
+/* Bind `base`'s extent, format + mount a volume in it. Returns 0 on success. */
+static int bring_up_volume(uint32_t base)
+{
+    exofs_unmount();
+    exofs_bdev_release();
+    int rc = exofs_bdev_acquire_extent(base, VOL_EXT_SECTORS);
+    if (rc != 0) return rc;
+    rc = exofs_format(base, VOL_EXT_SECTORS);
+    if (rc != 0) return rc;
+    return exofs_mount(base);
+}
+
+static void restore_whole_device(void)
+{
+    exofs_unmount();
+    exofs_bdev_release();
+    exofs_bdev_acquire();
+}
+
+static void test_volumes_in_separate_extents_do_not_see_each_other(void)
+{
+    if (!drive_present()) return;
+
+    exofs_stat_t st;
+
+    CU_ASSERT_EQUAL(bring_up_volume(VOL_A_BASE), 0);
+    CU_ASSERT_TRUE(write_small_file("/only-in-a"));
+    exofs_unmount();
+
+    CU_ASSERT_EQUAL(bring_up_volume(VOL_B_BASE), 0);
+    CU_ASSERT_EQUAL(exofs_stat("/only-in-a", &st), -EXO_ENOENT);
+    CU_ASSERT_TRUE(write_small_file("/only-in-b"));
+    exofs_unmount();
+
+    /* Back to A: its file is still there and B's is not. */
+    exofs_bdev_release();
+    CU_ASSERT_EQUAL(exofs_bdev_acquire_extent(VOL_A_BASE, VOL_EXT_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_mount(VOL_A_BASE), 0);
+    CU_ASSERT_EQUAL(exofs_stat("/only-in-a", &st), 0);
+    CU_ASSERT_EQUAL(exofs_stat("/only-in-b", &st), -EXO_ENOENT);
+
+    restore_whole_device();
+}
+
+static void test_exofs_cannot_reach_the_other_volume(void)
+{
+    if (!drive_present()) return;
+
+    CU_ASSERT_EQUAL(bring_up_volume(VOL_A_BASE), 0);
+    CU_ASSERT_TRUE(write_small_file("/mine"));
+    exofs_unmount();
+
+    /* Holding A's extent, ExoFS cannot mount B, and a failed mount must not
+     * leave a half-mounted volume behind. */
+    CU_ASSERT_EQUAL(exofs_mount(VOL_B_BASE), -EXO_EINVAL);
+    CU_ASSERT_FALSE(exofs_is_mounted());
+
+    /* Nor format it: refused at the first transfer outside the extent, so B's
+     * superblock is whatever it was. */
+    CU_ASSERT_EQUAL(exofs_format(VOL_B_BASE, VOL_EXT_SECTORS), -EXO_EINVAL);
+
+    /* The first sector past the extent is refused at the seam, whatever
+     * ExoFS believes its geometry to be. (exofs_format() of an oversized
+     * volume is *not* refused up front -- it writes only metadata at the start
+     * -- so the kernel's per-transfer bound is what stops an overrun, and
+     * this is the assertion that it does.) */
+    uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
+    CU_ASSERT_PTR_NOT_NULL(buf);
+    if (buf) {
+        CU_ASSERT_EQUAL(exofs_bdev_write(VOL_A_BASE + VOL_EXT_SECTORS, buf, 1),
+                        -EXO_EINVAL);
+        CU_ASSERT_EQUAL(exofs_bdev_read(VOL_A_BASE + VOL_EXT_SECTORS - 1, buf, 2),
+                        -EXO_EINVAL);
+        libos_heap_free(buf);
+    }
+
+    /* And A is undamaged by all of that. */
+    CU_ASSERT_EQUAL(exofs_mount(VOL_A_BASE), 0);
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat("/mine", &st), 0);
+
+    restore_whole_device();
+}
+
+static void test_another_context_cannot_take_an_overlapping_extent(void)
+{
+    if (!drive_present()) return;
+
+    page_owner_t other = (page_owner_t)(PAGE_OWNER_LIBOS + 1);
+
+    CU_ASSERT_EQUAL(bring_up_volume(VOL_A_BASE), 0);
+
+    /* Held by us; overlapping claims fail, disjoint ones coexist. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(other, VOL_A_BASE + 100, 10),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(other, VOL_B_BASE, VOL_EXT_SECTORS),
+                    DISK_BIND_OK);
+    disk_binding_release(other);
+
+    restore_whole_device();
+}
+
 /* ---- Volume layer: format, superblock, mount ---------------------------- */
 
 static void test_format_then_mount(void)
@@ -3693,6 +3821,12 @@ void suite_exofs_tests(CU_pSuite s)
                 test_stat_rejects_dot_and_dotdot);
     CU_add_test(s, "file cycles leak nothing",
                 test_file_cycle_leaks_nothing);
+    CU_add_test(s, "volumes in separate extents do not see each other",
+                test_volumes_in_separate_extents_do_not_see_each_other);
+    CU_add_test(s, "ExoFS cannot reach the other volume's sectors",
+                test_exofs_cannot_reach_the_other_volume);
+    CU_add_test(s, "another context cannot take an overlapping extent",
+                test_another_context_cannot_take_an_overlapping_extent);
     CU_add_test(s, "ACCEPTANCE: format, write, remount, list, read back",
                 test_acceptance_round_trip);
 }
