@@ -435,8 +435,13 @@ echo "[2c/7] Build shell LibOS (SCRUM-110)"
 # src/libos_heap.c/src/libos_page_alloc.c/src/libos_fb.c. Budget is not a
 # concern: LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES are 192/192 (raised for
 # Doom, which alone uses ~97/~99 of them).
+#
+# SCRUM-263 adds src/shell/shell_help.c (help matching/formatting). It is
+# also compiled into the TESTING kernel further down, for
+# tests/kernel/test_shell_help_k.c.
 build_ring3_link_target shell src/shell "" "" \
-  src/shell/shell_main.c src/fb.c src/fb_console.c src/libos_fb.c \
+  src/shell/shell_main.c src/shell/shell_help.c \
+  src/fb.c src/fb_console.c src/libos_fb.c \
   src/stdlib.c src/stdio.c src/string.c src/ctype.c \
   src/errno.c src/fpconv.c src/libos_heap.c src/libos_page_alloc.c \
   src/libos_fs/exofs_volume.c src/libos_fs/exofs_fat.c \
@@ -914,6 +919,14 @@ if [[ "${TESTING:-0}" == "1" ]]; then
       "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL
     objs+=("build/doom_mus_$(basename "${f%.c}").o")
   done
+
+  # The shell's help matcher/formatter (SCRUM-263) is ring-3 code the src/
+  # glob never sees either; tests/kernel/test_shell_help_k.c runs it from
+  # ring 0. It makes no syscalls and calls no libc, so it needs no shim.
+  echo "    CC shell_help.c (shell help)"
+  x86_64-elf-gcc -c src/shell/shell_help.c -o build/shell_help.o \
+    "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  objs+=("build/shell_help.o")
 
   echo "[3b5/7] Gate: ExoFS still builds as a ring-3 target (SCRUM-189)"
   # Step [3a/7] above (now unconditional, SCRUM-190) compiles ExoFS one way

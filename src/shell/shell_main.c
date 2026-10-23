@@ -97,6 +97,7 @@
 #include "libos_fs/exofs.h"
 #include "exo_volume.h"
 #include "ps2.h"
+#include "shell/shell_help.h"
 #include "stdlib.h"
 
 #define SHELL_CMD_BUF_LEN 64
@@ -136,31 +137,22 @@
 static char shell_banner[] = "ExoDoom Shell\n";
 static char shell_help_text[] = "type 'help' for a list of commands\n";
 static char shell_prompt[] = "exodoom> ";
-static char shell_commands_text[] =
-    "commands: help, clear, about, wadview, clock, snake, doom, run <pkg>,\n"
-    "          memstat,\n"
-    "          pslist, disk, mkfs, mkdir <path>, ls [path],\n"
-    "          cat <path> [text...], rm <path>, cp <src> <dst>,\n"
-    "          mv <src> <dst> (copy+delete, not atomic), touch <path>,\n"
-    "          cd [path], pwd, echo <text...>,\n"
-    "          dd read <lba> <count> <path>, dd write <path> <lba>\n";
-static char shell_about_text[] = "ExoDoom shell LibOS -- SCRUM-110\n";
+static char shell_about_text[] = "ExoDoom shell LibOS\n";
 static char shell_unknown_prefix[] = "unknown command: ";
+static char shell_unknown_suffix[] = " (type 'help')\n";
+static char shell_help_nomatch_text[] = "help: no commands match '";
 static char shell_wadview_fail_text[] = "wadview: launch failed\n";
 static char shell_doom_fail_text[] = "doom: launch failed\n";
-static char shell_run_usage_text[] = "usage: run <package>   (a .exo file on the program volume)\n";
 static char shell_run_fail_text[] = "run: launch failed: err=";
 static char shell_memstat_fail_text[] = "memstat: query failed\n";
 static char shell_pslist_fail_text[] = "pslist: query failed\n";
 static char shell_fs_disk_busy_text[] = "disk busy: err=";
 static char shell_fs_mount_fail_text[] = "mount failed (run mkfs?): err=";
-static char shell_fs_noarg_text[] = "usage: path argument required\n";
 static char shell_fs_ok_text[] = "ok\n";
 static char shell_fs_err_prefix[] = "error: err=";
 static char shell_fs_no_room_text[] = "mkfs: no room for shell volume on this disk\n";
 static char shell_ls_dir_suffix[] = "/\n";
 static char shell_ls_file_prefix[] = "  ";
-static char shell_fs_usage2_text[] = "usage: <src> <dst>\n";
 static char shell_fs_toolong_text[] = "error: argument or path too long\n";
 static char shell_fs_same_text[] = "error: source and destination are the same file\n";
 static char shell_dd_badnum_text[] = "dd: not a number: ";
@@ -168,8 +160,6 @@ static char shell_dd_range_text[] =
     "dd: write refused -- only lbas below the shell volume are writable\n";
 static char shell_disk_fail_text[] = "disk: query failed\n";
 static char shell_disk_none_text[] = "disk: no drive present\n";
-static char shell_dd_usage_text[] =
-    "usage: dd read <lba> <count> <path> | dd write <path> <lba>\n";
 
 /* ExoFS itself has no notion of a working directory by design
  * (docs/filesystem.md §7) -- this is that state, kept here instead. Always
@@ -185,8 +175,8 @@ static void shell_print_prompt(fb_console_t *con);
 static void shell_run_command(fb_console_t *con, const char *line);
 static void shell_write_u32(fb_console_t *con, uint32_t v);
 static void shell_write_i64(fb_console_t *con, int64_t v);
-static void shell_run_memstat(fb_console_t *con);
-static void shell_run_pslist(fb_console_t *con);
+static void shell_run_memstat(fb_console_t *con, const char *arg);
+static void shell_run_pslist(fb_console_t *con, const char *arg);
 static int shell_cmd_match(const char *line, const char *cmd, const char **rest);
 static int shell_fs_acquire_and_mount(fb_console_t *con);
 static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba);
@@ -201,7 +191,7 @@ static int shell_next_token(const char **p, char *out, size_t out_len);
 static int shell_parse_u32(const char *s, uint32_t *out);
 static int shell_write_all(exofs_file_t *f, const void *buf, uint32_t n);
 static int shell_fs_copy_file(const char *src, const char *dst);
-static void shell_run_mkfs(fb_console_t *con);
+static void shell_run_mkfs(fb_console_t *con, const char *arg);
 static void shell_run_mkdir(fb_console_t *con, const char *arg);
 static void shell_run_ls(fb_console_t *con, const char *arg);
 static void shell_run_cat(fb_console_t *con, const char *arg);
@@ -210,14 +200,22 @@ static void shell_run_cp(fb_console_t *con, const char *arg);
 static void shell_run_mv(fb_console_t *con, const char *arg);
 static void shell_run_touch(fb_console_t *con, const char *arg);
 static void shell_run_cd(fb_console_t *con, const char *arg);
-static void shell_run_pwd(fb_console_t *con);
+static void shell_run_pwd(fb_console_t *con, const char *arg);
 static void shell_run_echo(fb_console_t *con, const char *arg);
-static void shell_run_disk(fb_console_t *con);
+static void shell_run_disk(fb_console_t *con, const char *arg);
 static void shell_run_dd(fb_console_t *con, const char *arg);
 static void shell_run_dd_read(fb_console_t *con, const char *rest);
 static int shell_dd_number(fb_console_t *con, const char **p, char *tok,
                            size_t tok_len, uint32_t *out);
 static void shell_run_dd_write(fb_console_t *con, const char *rest);
+static void shell_run_help(fb_console_t *con, const char *arg);
+static void shell_run_clear(fb_console_t *con, const char *arg);
+static void shell_run_about(fb_console_t *con, const char *arg);
+static void shell_run_wadview(fb_console_t *con, const char *arg);
+static void shell_run_clock(fb_console_t *con, const char *arg);
+static void shell_run_snake(fb_console_t *con, const char *arg);
+static void shell_run_doom(fb_console_t *con, const char *arg);
+static void shell_print_usage(fb_console_t *con, const char *name);
 
 void shell_main(void) {
     libos_fb_t fb;
@@ -291,15 +289,25 @@ static int str_eq(const char *a, const char *b) {
 
 /* ps2_key_t -> ASCII. Returns 0 for a key with no printable mapping (arrows,
  * function keys, modifiers, enter/backspace -- handled separately by the
- * caller). Shifted digits are not mapped to their symbol row (!@#$...) --
- * src/ps2.c's scancode table has no entries for those yet, so there is
- * nothing to map to regardless. */
+ * caller). Of the shifted symbols, only the three the shell's own syntax
+ * uses are mapped (SCRUM-263): '?' (`<cmd> ?`), '*' (`help xxx*`) and '_'
+ * (file names). The rest of the symbol row (!@#$...) is not -- not a
+ * decoder limit, since src/ps2.c reports the unshifted key plus the
+ * modifier mask, just nothing here needs it yet. */
 static char shell_key_to_ascii(uint8_t key, uint8_t modifiers) {
     int shifted = (modifiers & EXO_MOD_SHIFT) != 0;
 
     if (key >= KEY_A && key <= KEY_Z) {
         char c = (char)('a' + (key - KEY_A));
         return shifted ? (char)(c - 32) : c;
+    }
+    if (shifted) {
+        switch (key) {
+        case KEY_SLASH: return '?';
+        case KEY_8:     return '*';
+        case KEY_MINUS: return '_';
+        default:        break;
+        }
     }
     if (key >= KEY_1 && key <= KEY_9) {
         return (char)('1' + (key - KEY_1));
@@ -341,108 +349,299 @@ static void shell_print_prompt(fb_console_t *con) {
     fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
 }
 
-static void shell_run_command(fb_console_t *con, const char *line) {
-    const char *rest;
+/* One row per command: the help metadata `help`/`<cmd> ?`/usage errors read
+ * (src/shell/shell_help.h), plus the handler and whether it accepts
+ * arguments. This table is the only list of commands there is -- dispatch,
+ * `help all` and every usage message come from it, so adding a command is
+ * one row here (SCRUM-263). Keep it sorted by name: `help` lists rows in
+ * table order and does not sort.
+ *
+ * takes_args == 0 means trailing text is a usage error rather than being
+ * silently ignored. An argument of exactly "?" never reaches a handler --
+ * shell_run_command() prints the usage text instead.
+ *
+ * const, so it lands in .rodata with the string literals it points at --
+ * fine here, since unlike shell_cwd nothing ever writes it. */
+typedef struct {
+    shell_help_entry_t help;
+    void (*run)(fb_console_t *con, const char *arg);
+    int takes_args;
+} shell_cmd_t;
 
+static const shell_cmd_t shell_cmds[] = {
+    { { "about", SHELL_GRP_SYSTEM, "Show what this shell is",
+        "usage: about\n" },
+      shell_run_about, 0 },
+    { { "cat", SHELL_GRP_FS, "Print a file, or write text into it",
+        "usage: cat <path>\n"
+        "       cat <path> <text...>\n"
+        "     <path>           Print the file\n"
+        "     <path> <text...> Create or truncate the file; <text...> becomes its whole content\n" },
+      shell_run_cat, 1 },
+    { { "cd", SHELL_GRP_FS, "Change directory",
+        "usage: cd [path]\n"
+        "     (none)  Go to /\n"
+        "     ..      Go up one directory\n"
+        "     <path>  Absolute, or relative to the current directory\n" },
+      shell_run_cd, 1 },
+    { { "clear", SHELL_GRP_SYSTEM, "Clear the screen",
+        "usage: clear\n" },
+      shell_run_clear, 0 },
+    { { "clock", SHELL_GRP_APPS, "Launch the clock (Ctrl+Tab returns to the shell)",
+        "usage: clock\n"
+        "     Same as `run clock.exo`\n" },
+      shell_run_clock, 0 },
+    { { "cp", SHELL_GRP_FS, "Copy a file",
+        "usage: cp <src> <dst>\n"
+        "     Creates or truncates <dst>; refuses when <src> and <dst> are the same file\n" },
+      shell_run_cp, 1 },
+    { { "dd", SHELL_GRP_DISK, "Raw sector copy between the disk and a file",
+        "usage: dd read <lba> <count> <path>\n"
+        "       dd write <path> <lba>\n"
+        "     read   Copy <count> 512-byte sectors starting at <lba> into <path> (any LBA)\n"
+        "     write  Copy <path> onto the disk at <lba>; only LBAs below the shell volume\n"
+        "            are writable, so neither filesystem volume can be overwritten\n" },
+      shell_run_dd, 1 },
+    { { "disk", SHELL_GRP_DISK, "Show the drive's capacity and volume layout",
+        "usage: disk\n" },
+      shell_run_disk, 0 },
+    { { "doom", SHELL_GRP_APPS, "Launch Doom (Ctrl+Tab returns to the shell)",
+        "usage: doom\n"
+        "     Running it again starts a second, independent instance; see pslist\n" },
+      shell_run_doom, 0 },
+    { { "echo", SHELL_GRP_SYSTEM, "Print text",
+        "usage: echo <text...>\n" },
+      shell_run_echo, 1 },
+    { { "help", SHELL_GRP_SYSTEM, "Show help",
+        "usage: help [all | fs | disk | apps | system | <command> | <prefix>[*]]\n"
+        "     (none)     Show the help index\n"
+        "     all        List every command\n"
+        "     <group>    List one group's commands\n"
+        "     <command>  Same as `<command> ?`\n"
+        "     <prefix>*  List commands starting with <prefix>\n" },
+      shell_run_help, 1 },
+    { { "ls", SHELL_GRP_FS, "List a directory",
+        "usage: ls [path]\n"
+        "     (none)  List the current directory\n" },
+      shell_run_ls, 1 },
+    { { "memstat", SHELL_GRP_SYSTEM, "Show physical page usage",
+        "usage: memstat\n" },
+      shell_run_memstat, 0 },
+    { { "mkdir", SHELL_GRP_FS, "Create a directory",
+        "usage: mkdir <path>\n" },
+      shell_run_mkdir, 1 },
+    { { "mkfs", SHELL_GRP_FS, "Format the shell's scratch volume (erases it)",
+        "usage: mkfs\n"
+        "     Destroys everything on the shell volume. Never touches the program/IWAD volume\n" },
+      shell_run_mkfs, 0 },
+    { { "mv", SHELL_GRP_FS, "Move a file (copy, then delete)",
+        "usage: mv <src> <dst>\n"
+        "     Not atomic: copies <src> to <dst>, then deletes <src>\n" },
+      shell_run_mv, 1 },
+    { { "pslist", SHELL_GRP_SYSTEM, "List live contexts",
+        "usage: pslist\n" },
+      shell_run_pslist, 0 },
+    { { "pwd", SHELL_GRP_FS, "Print the current directory",
+        "usage: pwd\n" },
+      shell_run_pwd, 0 },
+    { { "rm", SHELL_GRP_FS, "Remove a file or an empty directory",
+        "usage: rm <path>\n" },
+      shell_run_rm, 1 },
+    { { "run", SHELL_GRP_APPS, "Launch a program package",
+        "usage: run <package>\n"
+        "     <package>  A .exo file on the program volume, e.g. run snake.exo\n" },
+      shell_run_run, 1 },
+    { { "snake", SHELL_GRP_APPS, "Launch Snake",
+        "usage: snake\n"
+        "     Same as `run snake.exo`\n" },
+      shell_run_snake, 0 },
+    { { "touch", SHELL_GRP_FS, "Create an empty file if it does not exist",
+        "usage: touch <path>\n" },
+      shell_run_touch, 1 },
+    { { "wadview", SHELL_GRP_APPS, "Launch the WAD/automap viewer (Q or Esc exits)",
+        "usage: wadview\n" },
+      shell_run_wadview, 0 },
+};
+
+#define SHELL_CMD_COUNT (sizeof(shell_cmds) / sizeof(shell_cmds[0]))
+
+static const shell_cmd_t *shell_cmd_find(const char *tok, size_t len) {
+    for (size_t i = 0; i < SHELL_CMD_COUNT; i++) {
+        if (shell_ci_token_eq(tok, len, shell_cmds[i].help.name)) {
+            return &shell_cmds[i];
+        }
+    }
+    return 0;
+}
+
+/* The same text as `<name> ?` -- every usage error goes through here so the
+ * two can't disagree. */
+static void shell_print_usage(fb_console_t *con, const char *name) {
+    size_t len = 0;
+    while (name[len] != '\0') {
+        len++;
+    }
+    const shell_cmd_t *cmd = shell_cmd_find(name, len);
+    if (cmd != 0) {
+        fbcon_write(con, cmd->help.usage);
+    }
+}
+
+static void shell_run_command(fb_console_t *con, const char *line) {
+    while (*line == ' ') {
+        line++;
+    }
     if (line[0] == '\0') {
         return;
     }
-    if (shell_cmd_match(line, "mkfs", &rest)) {
-        shell_run_mkfs(con);
-    } else if (shell_cmd_match(line, "mkdir", &rest)) {
-        shell_run_mkdir(con, rest);
-    } else if (shell_cmd_match(line, "ls", &rest)) {
-        shell_run_ls(con, rest);
-    } else if (shell_cmd_match(line, "cat", &rest)) {
-        shell_run_cat(con, rest);
-    } else if (shell_cmd_match(line, "rm", &rest)) {
-        shell_run_rm(con, rest);
-    } else if (shell_cmd_match(line, "cp", &rest)) {
-        shell_run_cp(con, rest);
-    } else if (shell_cmd_match(line, "mv", &rest)) {
-        shell_run_mv(con, rest);
-    } else if (shell_cmd_match(line, "touch", &rest)) {
-        shell_run_touch(con, rest);
-    } else if (shell_cmd_match(line, "cd", &rest)) {
-        shell_run_cd(con, rest);
-    } else if (str_eq(line, "pwd")) {
-        shell_run_pwd(con);
-    } else if (shell_cmd_match(line, "echo", &rest)) {
-        shell_run_echo(con, rest);
-    } else if (str_eq(line, "disk")) {
-        shell_run_disk(con);
-    } else if (shell_cmd_match(line, "dd", &rest)) {
-        shell_run_dd(con, rest);
-    } else if (str_eq(line, "help")) {
-        fbcon_write(con, shell_commands_text);
-    } else if (str_eq(line, "clear")) {
-        fbcon_clear(con);
-    } else if (str_eq(line, "about")) {
-        fbcon_write(con, shell_about_text);
-    } else if (str_eq(line, "wadview")) {
-        /* Does not return until the viewer yields back to the shell
-         * (src/syscall_launch.c's #21 handler, exo_syscall.h's own comment
-         * on exo_launch()) -- a negative return here means the
-         * launch failed before ever switching away, not that the viewer
-         * ran and came back. */
-        int64_t rc = exo_launch(EXO_LAUNCH_APP_WAD_VIEWER);
-        if (rc == 0) {
-            /* The viewer draws over this whole physical framebuffer (there
-             * is no compositor yet -- docs/architecture.md's Sprint 12
-             * roadmap tracks that separately), so on a real round trip the
-             * shell's own screen is gone by the time it resumes here.
-             * Clearing and letting the caller's shell_print_prompt() redraw
-             * is what makes "back at the shell" a clean, stable screen
-             * instead of a new prompt drawn over stale automap pixels. */
-            fbcon_clear(con);
-        } else {
-            fbcon_write(con, shell_wadview_fail_text);
-        }
-    } else if (str_eq(line, "clock")) {
-        /* Like snake below, the clock is no longer in the kernel image
-         * (SCRUM-231): this is `run clock.exo`. It never yields on its own
-         * (src/libos_clock/libos_clock.c's own comment on why), so control
-         * comes back via Ctrl+Tab (SCRUM-111). */
-        shell_run_run(con, "clock.exo");
-    } else if (str_eq(line, "snake")) {
-        /* Same round-trip convention as "wadview" above, but Snake is no
-         * longer in the kernel image (SCRUM-230): this is `run snake.exo`,
-         * read off the program volume. Does not return until Snake exits
-         * (src/libos_snake/libos_snake.c's own EXO_SYS_EXIT + exo_yield()
-         * fallback) and control round-robins back here. */
-        shell_run_run(con, "snake.exo");
-    } else if (str_eq(line, "doom")) {
-        /* Same round-trip convention again (SCRUM-66). Doom's loop does not
-         * exit on its own -- D_DoomLoop() runs forever and I_Error halts --
-         * so in practice this does not come back; Ctrl+Tab (SCRUM-111) is
-         * how you reach the shell again. A failure here is the launch
-         * itself: no WAD module (-EXO_ENODEV), or no room for the image
-         * (-EXO_ENOMEM), which is much the largest of the four.
-         *
-         * Running "doom" again from a different foreground context launches
-         * a second, independent instance rather than replacing this one
-         * (SCRUM-196) -- sys_launch() (src/syscall_launch.c) only reclaims
-         * context rows that have actually exited, not ones merely switched
-         * away from. Both stay live until each exits on its own (or the
-         * machine reboots); `pslist` lists every live context id. There is
-         * no split-screen compositor yet (SCRUM-197), so only the current
-         * foreground instance is ever visible at once. */
-        int64_t rc = exo_launch(EXO_LAUNCH_APP_DOOM);
-        if (rc == 0) {
-            fbcon_clear(con);
-        } else {
-            fbcon_write(con, shell_doom_fail_text);
-        }
-    } else if (shell_cmd_match(line, "run", &rest)) {
-        shell_run_run(con, rest);
-    } else if (str_eq(line, "memstat")) {
-        shell_run_memstat(con);
-    } else if (str_eq(line, "pslist")) {
-        shell_run_pslist(con);
-    } else {
+
+    size_t len = 0;
+    while (line[len] != '\0' && line[len] != ' ') {
+        len++;
+    }
+    const char *rest = line + len;
+    while (*rest == ' ') {
+        rest++;
+    }
+
+    const shell_cmd_t *cmd = shell_cmd_find(line, len);
+    if (cmd == 0) {
         fbcon_write(con, shell_unknown_prefix);
-        fbcon_write(con, line);
-        fbcon_write(con, "\n");
+        for (size_t i = 0; i < len; i++) {
+            fbcon_putc(con, line[i]);
+        }
+        fbcon_write(con, shell_unknown_suffix);
+        return;
+    }
+    if (str_eq(rest, "?") || (!cmd->takes_args && rest[0] != '\0')) {
+        fbcon_write(con, cmd->help.usage);
+        return;
+    }
+    cmd->run(con, rest);
+}
+
+static void shell_help_list(fb_console_t *con, const shell_help_query_t *q) {
+    char row[128];
+    int any = 0;
+    for (size_t i = 0; i < SHELL_CMD_COUNT; i++) {
+        if (shell_help_entry_matches(&shell_cmds[i].help, q)) {
+            shell_help_format_row(&shell_cmds[i].help, row, sizeof(row));
+            fbcon_write(con, row);
+            any = 1;
+        }
+    }
+    if (!any) {
+        fbcon_write(con, shell_help_nomatch_text);
+        for (size_t i = 0; i < q->word_len; i++) {
+            fbcon_putc(con, q->word[i]);
+        }
+        if (q->kind == SHELL_HELP_Q_PREFIX) {
+            fbcon_putc(con, '*');
+        }
+        fbcon_write(con, "'\n");
+    }
+}
+
+/* `help [all | <group> | <command> | <prefix>[*]]`. A group name wins over a
+ * command of the same name -- `help disk` lists the DISK group, which
+ * includes `disk` itself; `disk ?` still shows that one command. */
+static void shell_run_help(fb_console_t *con, const char *arg) {
+    shell_help_query_t q = shell_help_query_parse(arg);
+
+    if (q.kind == SHELL_HELP_Q_INDEX) {
+        fbcon_write(con,
+            "HELP - Type a command followed by a space and '?' for its options (e.g. ls ?)\n"
+            "HELP ALL      List every command\n"
+            "HELP FS       Filesystem commands (mkfs, ls, cat, ...)\n"
+            "HELP DISK     Raw disk commands\n"
+            "HELP APPS     Programs you can launch\n"
+            "HELP SYSTEM   Shell and system information\n"
+            "HELP xxx*     Commands starting with xxx\n");
+        return;
+    }
+    if (q.kind == SHELL_HELP_Q_WORD) {
+        const shell_cmd_t *cmd = shell_cmd_find(q.word, q.word_len);
+        if (cmd != 0) {
+            fbcon_write(con, cmd->help.usage);
+            return;
+        }
+    }
+    shell_help_list(con, &q);
+}
+
+static void shell_run_clear(fb_console_t *con, const char *arg) {
+    (void)arg;
+    fbcon_clear(con);
+}
+
+static void shell_run_about(fb_console_t *con, const char *arg) {
+    (void)arg;
+    fbcon_write(con, shell_about_text);
+}
+
+static void shell_run_wadview(fb_console_t *con, const char *arg) {
+    (void)arg;
+    /* Does not return until the viewer yields back to the shell
+     * (src/syscall_launch.c's #21 handler, exo_syscall.h's own comment
+     * on exo_launch()) -- a negative return here means the
+     * launch failed before ever switching away, not that the viewer
+     * ran and came back. */
+    int64_t rc = exo_launch(EXO_LAUNCH_APP_WAD_VIEWER);
+    if (rc == 0) {
+        /* The viewer draws over this whole physical framebuffer (there
+         * is no compositor yet -- docs/architecture.md's Sprint 12
+         * roadmap tracks that separately), so on a real round trip the
+         * shell's own screen is gone by the time it resumes here.
+         * Clearing and letting the caller's shell_print_prompt() redraw
+         * is what makes "back at the shell" a clean, stable screen
+         * instead of a new prompt drawn over stale automap pixels. */
+        fbcon_clear(con);
+    } else {
+        fbcon_write(con, shell_wadview_fail_text);
+    }
+}
+
+static void shell_run_clock(fb_console_t *con, const char *arg) {
+    (void)arg;
+    /* Like snake below, the clock is no longer in the kernel image
+     * (SCRUM-231): this is `run clock.exo`. It never yields on its own
+     * (src/libos_clock/libos_clock.c's own comment on why), so control
+     * comes back via Ctrl+Tab (SCRUM-111). */
+    shell_run_run(con, "clock.exo");
+}
+
+static void shell_run_snake(fb_console_t *con, const char *arg) {
+    (void)arg;
+    /* Same round-trip convention as "wadview" above, but Snake is no
+     * longer in the kernel image (SCRUM-230): this is `run snake.exo`,
+     * read off the program volume. Does not return until Snake exits
+     * (src/libos_snake/libos_snake.c's own EXO_SYS_EXIT + exo_yield()
+     * fallback) and control round-robins back here. */
+    shell_run_run(con, "snake.exo");
+}
+
+static void shell_run_doom(fb_console_t *con, const char *arg) {
+    (void)arg;
+    /* Same round-trip convention again (SCRUM-66). Doom's loop does not
+     * exit on its own -- D_DoomLoop() runs forever and I_Error halts --
+     * so in practice this does not come back; Ctrl+Tab (SCRUM-111) is
+     * how you reach the shell again. A failure here is the launch
+     * itself: no WAD module (-EXO_ENODEV), or no room for the image
+     * (-EXO_ENOMEM), which is much the largest of the four.
+     *
+     * Running "doom" again from a different foreground context launches
+     * a second, independent instance rather than replacing this one
+     * (SCRUM-196) -- sys_launch() (src/syscall_launch.c) only reclaims
+     * context rows that have actually exited, not ones merely switched
+     * away from. Both stay live until each exits on its own (or the
+     * machine reboots); `pslist` lists every live context id. There is
+     * no split-screen compositor yet (SCRUM-197), so only the current
+     * foreground instance is ever visible at once. */
+    int64_t rc = exo_launch(EXO_LAUNCH_APP_DOOM);
+    if (rc == 0) {
+        fbcon_clear(con);
+    } else {
+        fbcon_write(con, shell_doom_fail_text);
     }
 }
 
@@ -779,7 +978,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
     const char *p = arg;
 
     if (shell_next_token(&p, name, sizeof(name)) <= 0) {
-        fbcon_write(con, shell_run_usage_text);
+        shell_print_usage(con, "run");
         return;
     }
     /* Deliberately not shell_resolve_path(): shell_cwd names a directory on
@@ -884,7 +1083,8 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
  * The region stops at LIBOS_WAD_DISK_BASE_LBA regardless of how big the
  * disk actually is: that LBA is where the WAD's own volume lives, and mkfs
  * must never claim sectors it owns. */
-static void shell_run_mkfs(fb_console_t *con) {
+static void shell_run_mkfs(fb_console_t *con, const char *arg) {
+    (void)arg;
     int64_t rc = shell_disk_acquire_for(SHELL_FS_BASE_LBA);
     if (rc != 0) {
         fbcon_write(con, shell_fs_disk_busy_text);
@@ -922,7 +1122,7 @@ static void shell_run_mkfs(fb_console_t *con) {
  * shell_cwd if it is not already absolute. */
 static void shell_run_mkdir(fb_console_t *con, const char *arg) {
     if (arg[0] == '\0') {
-        fbcon_write(con, shell_fs_noarg_text);
+        shell_print_usage(con, "mkdir");
         return;
     }
     char path[SHELL_FS_RESOLVED_BUF_LEN];
@@ -1015,7 +1215,7 @@ static void shell_run_cat(fb_console_t *con, const char *arg) {
         return;
     }
     if (n == 0) {
-        fbcon_write(con, shell_fs_noarg_text);
+        shell_print_usage(con, "cat");
         return;
     }
     char path[SHELL_FS_RESOLVED_BUF_LEN];
@@ -1086,7 +1286,7 @@ static void shell_run_cat(fb_console_t *con, const char *arg) {
  * directory, matching the ticket's five-command list (no separate rmdir). */
 static void shell_run_rm(fb_console_t *con, const char *arg) {
     if (arg[0] == '\0') {
-        fbcon_write(con, shell_fs_noarg_text);
+        shell_print_usage(con, "rm");
         return;
     }
     char path[SHELL_FS_RESOLVED_BUF_LEN];
@@ -1124,7 +1324,7 @@ static void shell_run_cp(fb_console_t *con, const char *arg) {
         return;
     }
     if (split == 0) {
-        fbcon_write(con, shell_fs_usage2_text);
+        shell_print_usage(con, "cp");
         return;
     }
     char src[SHELL_FS_RESOLVED_BUF_LEN], dst[SHELL_FS_RESOLVED_BUF_LEN];
@@ -1166,7 +1366,7 @@ static void shell_run_mv(fb_console_t *con, const char *arg) {
         return;
     }
     if (split == 0) {
-        fbcon_write(con, shell_fs_usage2_text);
+        shell_print_usage(con, "mv");
         return;
     }
     char src[SHELL_FS_RESOLVED_BUF_LEN], dst[SHELL_FS_RESOLVED_BUF_LEN];
@@ -1205,7 +1405,7 @@ static void shell_run_mv(fb_console_t *con, const char *arg) {
  * untouched. */
 static void shell_run_touch(fb_console_t *con, const char *arg) {
     if (arg[0] == '\0') {
-        fbcon_write(con, shell_fs_noarg_text);
+        shell_print_usage(con, "touch");
         return;
     }
     char path[SHELL_FS_RESOLVED_BUF_LEN];
@@ -1308,7 +1508,8 @@ static void shell_run_cd(fb_console_t *con, const char *arg) {
     fbcon_write(con, shell_fs_ok_text);
 }
 
-static void shell_run_pwd(fb_console_t *con) {
+static void shell_run_pwd(fb_console_t *con, const char *arg) {
+    (void)arg;
     fbcon_write(con, shell_cwd);
     fbcon_write(con, "\n");
 }
@@ -1326,7 +1527,8 @@ static void shell_run_echo(fb_console_t *con, const char *arg) {
  * size is computed live from the same capacity via exofs_region_sectors()
  * (SCRUM-203) -- the same number `mkfs` would format, so the two commands
  * can't disagree. */
-static void shell_run_disk(fb_console_t *con) {
+static void shell_run_disk(fb_console_t *con, const char *arg) {
+    (void)arg;
     exo_diskstat_t stat;
     if (exo_diskstat(&stat) != 0) {
         fbcon_write(con, shell_disk_fail_text);
@@ -1361,7 +1563,7 @@ static int shell_dd_number(fb_console_t *con, const char **p, char *tok,
                            size_t tok_len, uint32_t *out) {
     int n = shell_next_token(p, tok, tok_len);
     if (n == 0) {
-        fbcon_write(con, shell_dd_usage_text);
+        shell_print_usage(con, "dd");
         return 0;
     }
     if (n < 0 || !shell_parse_u32(tok, out)) {
@@ -1385,7 +1587,7 @@ static void shell_run_dd(fb_console_t *con, const char *arg) {
     } else if (shell_cmd_match(arg, "write", &rest)) {
         shell_run_dd_write(con, rest);
     } else {
-        fbcon_write(con, shell_dd_usage_text);
+        shell_print_usage(con, "dd");
     }
 }
 
@@ -1407,7 +1609,7 @@ static void shell_run_dd_read(fb_console_t *con, const char *rest) {
     }
 
     if (*p == '\0') {
-        fbcon_write(con, shell_dd_usage_text);
+        shell_print_usage(con, "dd");
         return;
     }
     char path[SHELL_FS_RESOLVED_BUF_LEN];
@@ -1480,7 +1682,7 @@ static void shell_run_dd_write(fb_console_t *con, const char *rest) {
         return;
     }
     if (n == 0) {
-        fbcon_write(con, shell_dd_usage_text);
+        shell_print_usage(con, "dd");
         return;
     }
     char tok[16];
@@ -1557,7 +1759,8 @@ static void shell_run_dd_write(fb_console_t *con, const char *rest) {
  * and mapped (libos_build_image() put it there), so the -EXO_EFAULT branch
  * below is unreachable in practice and only guards against the kernel ever
  * disagreeing with that. */
-static void shell_run_memstat(fb_console_t *con) {
+static void shell_run_memstat(fb_console_t *con, const char *arg) {
+    (void)arg;
     exo_memstat_t stat;
     if (exo_memstat(&stat) != 0) {
         fbcon_write(con, shell_memstat_fail_text);
@@ -1580,7 +1783,8 @@ static void shell_run_memstat(fb_console_t *con) {
 /* `pslist` -- exo_pslist (#23, src/syscall_stat.c). Same stack-buffer
  * reasoning as shell_run_memstat() above for why -EXO_EFAULT is not
  * expected here either. */
-static void shell_run_pslist(fb_console_t *con) {
+static void shell_run_pslist(fb_console_t *con, const char *arg) {
+    (void)arg;
     exo_ps_info_t procs[EXO_PSLIST_MAX];
     int64_t rc = exo_pslist(procs, EXO_PSLIST_MAX);
     if (rc < 0) {
