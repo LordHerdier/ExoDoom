@@ -13,5 +13,9 @@ WORKDIR /work
 # -drive ...build/exodoom_disk.img: the ExoFS volume holding freedoom2.wad
 # (SCRUM-190), written by docker/scripts/build.sh's step [2e2/7]. Replaces the
 # old GRUB multiboot2 module -- see src/syscall_launch.c.
+#
+# The USB devices are a copy of QEMU_USB_ARGS in the Makefile (SCRUM-245,
+# docs/drivers/usb.md section 2) -- `make docker-run` passes its own line, so
+# this default only serves a bare `docker run exodoom-qemu`. Keep the two equal.
 ENTRYPOINT ["bash", "-lc"]
-CMD ["qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -no-reboot -display curses -serial mon:stdio"]
+CMD ["qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 -device ich9-usb-uhci1,id=uhci1 -device ich9-usb-uhci2,id=uhci2 -device ich9-usb-uhci3,id=uhci3 -device secondary-vga,id=vga2 -device secondary-vga,id=vga3 -device usb-kbd,bus=uhci1.0,port=1,display=vga2 -device usb-kbd,bus=uhci1.0,port=2,display=vga3 -drive if=none,id=usbstick,file=build/usb.img,format=raw -device usb-storage,bus=uhci3.0,port=1,drive=usbstick -no-reboot -display curses -serial mon:stdio"]

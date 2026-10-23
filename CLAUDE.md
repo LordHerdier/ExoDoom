@@ -204,7 +204,7 @@ area.
 | GDB and bare-metal debugging | `docs/debugging.md` |
 | Branches, commits, style, CI checks | `docs/contributing.md` |
 | libc per-function audit | `docs/libc_audit.md` |
-| Drivers (IDT, PIC, PIT, serial, keyboard, framebuffer, ATA, PCI, ACPI, RTC, HDA, speaker) | `docs/drivers/*.md` |
+| Drivers (IDT, PIC, PIT, serial, keyboard, framebuffer, ATA, PCI, ACPI, RTC, HDA, speaker, USB) | `docs/drivers/*.md` |
 
 **New architectural facts go into the doc that owns the subsystem, integrated
 into its existing section — not appended here.** If you find yourself writing

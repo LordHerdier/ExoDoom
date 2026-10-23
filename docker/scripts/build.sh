@@ -694,6 +694,13 @@ if [[ "$(stat -c %s build/exodoom_disk.img)" -lt "$vol_end_bytes" ]]; then
   truncate -s "$vol_end_bytes" build/exodoom_disk.img
 fi
 
+# The disk behind every QEMU line's `-device usb-storage` (SCRUM-245,
+# docs/drivers/usb.md section 2). Blank for now -- QEMU only needs the file to
+# exist; SCRUM-247 has the packer write an ExoFS volume of .exo packages here.
+# Created only when missing, so whatever a developer put on it survives a
+# rebuild.
+[[ -f build/usb.img ]] || truncate -s 16M build/usb.img
+
 echo "[3/7] Compile C sources"
 
 # -DEXO_KERNEL selects the kernel view of src/exo_syscall.h (numbers, shared
@@ -1087,4 +1094,4 @@ echo "[7/7] Create ISO -> build/exodoom.iso"
 grub-mkrescue -o build/exodoom.iso build/isodir >/dev/null
 
 echo "Done:"
-ls -lh build/exodoom build/exodoom.iso build/exodoom_disk.img
+ls -lh build/exodoom build/exodoom.iso build/exodoom_disk.img build/usb.img

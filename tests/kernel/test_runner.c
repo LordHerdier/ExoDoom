@@ -92,6 +92,7 @@ void suite_launch_multi_tests(CU_pSuite s);
 void suite_launch_pkg_tests(CU_pSuite s);
 void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
+void suite_usb_topology_tests(CU_pSuite s);
 void suite_doom_dmx_tests(CU_pSuite s);
 void suite_doom_midi_tests(CU_pSuite s);
 void suite_doom_genmidi_tests(CU_pSuite s);
@@ -584,6 +585,11 @@ int run_tests(void)
      * hardware rather than to a model of it (SCRUM-209). */
     s = CU_add_suite("pci", NULL, NULL);
     suite_pci_tests(s);
+
+    /* After "pci": the UHCI controllers docker-test attaches, as seen through
+     * the PCI layer alone -- no USB driver exists yet (SCRUM-245). */
+    s = CU_add_suite("usb_topology", NULL, NULL);
+    suite_usb_topology_tests(s);
 
     /* After "pci", which it depends on: hda_init() finds the controller
      * through pci_find_class() and maps its BAR (SCRUM-210). The cleanup
