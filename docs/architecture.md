@@ -1138,7 +1138,8 @@ focus and the active framebuffer.
 > banner uses (framebuffer-address-agnostic, so it compiles and runs
 > unmodified as compiled ring-3 code), and polls `exo_kbd_poll()` in a loop,
 > decoding `ps2_key_t` to ASCII and dispatching `help`/`clear`/`about` on
-> Enter — anything else echoes `unknown command: <line>`. `src/ps2.h`/`.c`
+> Enter — anything else echoes `unknown command: <line>` (the command set and
+> its dispatch have since moved to a table; see SCRUM-263 below). `src/ps2.h`/`.c`
 > gained `KEY_0`–`KEY_9` and a handful of punctuation keys
 > (`KEY_MINUS`/`_EQUALS`/`_COMMA`/`_PERIOD`/`_SLASH`/`_SEMICOLON`) alongside
 > this so the shell has more than a letters-only command vocabulary.
@@ -1231,6 +1232,23 @@ focus and the active framebuffer.
 > `-fno-toplevel-reorder` for every `build_ring3_link_target` target, fixing
 > this for good rather than leaving it as a convention for the next multi-
 > function target to rediscover.
+>
+> ✅ **SCRUM-263:** the shell's commands come from one table,
+> `shell_cmds[]` in `src/shell/shell_main.c`. Each row holds the name, group
+> (FS/DISK/APPS/SYSTEM), one-line summary, full usage text, handler, and
+> whether the command takes arguments. Dispatch (case-insensitive on the
+> command name only), `help`, `help all|<group>|<command>|<prefix>[*]`,
+> `<cmd> ?` and every usage error all read that table, so adding a command
+> is one row. Rows are listed in table order, so keep the table sorted. A
+> group name wins over a command of the same name (`help disk` lists the
+> group; `disk ?` shows the command). An argument of exactly `?` never
+> reaches a handler, and trailing text on a no-argument command prints its
+> usage instead of being ignored. The matching and row formatting live in
+> `src/shell/shell_help.c`, which has no console or syscall dependency:
+> `build.sh` links it into the shell and also compiles it into the TESTING
+> kernel for `tests/kernel/test_shell_help_k.c`. `shell_key_to_ascii()`
+> now maps Shift+`/`, `8`, `-` to `?`, `*`, `_`, the only shifted symbols
+> the command syntax uses.
 
 ---
 

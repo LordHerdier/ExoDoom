@@ -259,7 +259,11 @@ are tracked as modifier state.
 
 Modifier keys (Shift, Ctrl, Alt) are tracked as a bitmask updated on both press
 and release events. This state is used by the Doom keycode translator (Sprint 4,
-SCRUM-40) and potentially by the shell LibOS.
+SCRUM-40) and by the shell LibOS, whose `shell_key_to_ascii()`
+(`src/shell/shell_main.c`) uses Shift for upper-case letters and for the three
+symbols its command syntax needs: `?`, `*` and `_` (SCRUM-263). The driver
+reports only the unshifted key plus this mask; mapping shifted symbols is left
+to each consumer.
 
 ```c
 #define MOD_LSHIFT  (1 << 0)

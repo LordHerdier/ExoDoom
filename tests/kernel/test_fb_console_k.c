@@ -113,8 +113,37 @@ static void test_scroll_shifts_rows_and_clears_bottom(void)
     CU_ASSERT_TRUE(char_row_is(&fb, 3, bg));
 }
 
+/* Every printable ASCII character draws something. The font used to leave
+ * :;<=>?@ [\]^_` {|}~ blank, so the shell's prompt '>' and SCRUM-263's
+ * `<cmd> ?` rendered as empty cells. */
+static void test_every_printable_glyph_draws(void)
+{
+    framebuffer_t fb;
+    CU_ASSERT_TRUE(fb_init_bgrx8888(&fb, (uintptr_t)fb_page, TEST_FB_PITCH,
+                                     TEST_FB_WIDTH, TEST_FB_HEIGHT, TEST_FB_BPP));
+    fb_console_t con;
+    CU_ASSERT_TRUE(fbcon_init(&con, &fb));
+    fbcon_enable_cursor(&con, false);
+    fbcon_set_color(&con, 255, 255, 255, 0, 0, 0);
+
+    int blank = 0;
+    for (int ch = 33; ch <= 126; ch++) {
+        con.cursor_x = 0;
+        con.cursor_y = 0;
+        fbcon_putc(&con, (char)ch);
+        /* putc clears the cell to the black background before drawing, so
+         * an all-zero cell means the glyph is empty. */
+        if (char_row_is(&fb, 0, 0x00000000u)) {
+            blank++;
+        }
+    }
+    CU_ASSERT_EQUAL(blank, 0);
+}
+
 void suite_fb_console_tests(CU_pSuite s)
 {
     CU_add_test(s, "scroll shifts rows and clears bottom",
                 test_scroll_shifts_rows_and_clears_bottom);
+    CU_add_test(s, "every printable glyph draws",
+                test_every_printable_glyph_draws);
 }
