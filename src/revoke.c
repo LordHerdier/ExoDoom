@@ -130,7 +130,7 @@ int revoke_pending(revoke_res_t what)
     switch (what.kind) {
     case REVOKE_PAGE:        return page_revoke_pending(page_of(what));
     case REVOKE_FRAMEBUFFER: return fb_binding_revoke_pending();
-    case REVOKE_DISK:        return disk_binding_revoke_pending();
+    case REVOKE_DISK:        return disk_binding_revoke_pending(what.owner);
     default:                 return 0;
     }
 }

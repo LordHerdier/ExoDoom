@@ -179,6 +179,13 @@ int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count)
             return DISK_BIND_EBUSY;
         }
     }
+    /* Another context already *holding* sectors in the volume (a whole-device
+     * claim, say) would make the assignee's own acquire fail later, after the
+     * launch had reported success. Refuse here instead. */
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        if (extents[i].owner != PAGE_OWNER_FREE && extents[i].owner != who &&
+            overlap(base, count, extents[i].base, extents[i].count))
+            return DISK_BIND_EBUSY;
     if (!free_slot)
         return DISK_BIND_ENOSLOT;
 
@@ -246,10 +253,15 @@ page_owner_t disk_binding_owner(void)
     if (!disk_present)
         return PAGE_OWNER_FREE;
 
-    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
-        if (extents[i].owner != PAGE_OWNER_FREE)
-            return extents[i].owner;
-    return PAGE_OWNER_FREE;
+    page_owner_t sole = PAGE_OWNER_FREE;
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++) {
+        if (extents[i].owner == PAGE_OWNER_FREE)
+            continue;
+        if (sole != PAGE_OWNER_FREE)
+            return PAGE_OWNER_FREE; /* several holders: no single owner */
+        sole = extents[i].owner;
+    }
+    return sole;
 }
 
 /* ---- Revocation / repossession ------------------------------------------- */
@@ -282,15 +294,10 @@ int disk_binding_revoke_clear(page_owner_t who)
     return DISK_REVOKE_OK;
 }
 
-int disk_binding_revoke_pending(void)
+int disk_binding_revoke_pending(page_owner_t who)
 {
-    if (!disk_present)
-        return 0;
-
-    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
-        if (extents[i].owner != PAGE_OWNER_FREE && extents[i].revoke_marked)
-            return 1;
-    return 0;
+    disk_extent_t *e = held(who);
+    return e && e->revoke_marked;
 }
 
 int disk_binding_reclaim(page_owner_t who)

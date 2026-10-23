@@ -118,8 +118,8 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t base,
  * That is what stops a program asking for someone else's sectors, and is why
  * a volume stays private while its owner is between a release and the next
  * acquire. Returns DISK_BIND_OK, DISK_BIND_ERANGE (count == 0 or off the end
- * of the disk), DISK_BIND_EBUSY (overlaps another assignment, or `who`
- * already has one), DISK_BIND_ENOSLOT, or DISK_BIND_ENODEV.
+ * of the disk), DISK_BIND_EBUSY (overlaps another assignment or another
+ * context's held extent, or `who` already has one), DISK_BIND_ENOSLOT, or DISK_BIND_ENODEV.
  */
 int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count);
 
@@ -161,10 +161,11 @@ int disk_binding_check_range(page_owner_t who, uint64_t lba, uint64_t count);
  */
 void disk_binding_release(page_owner_t who);
 
-/* Some current holder, or PAGE_OWNER_FREE when nothing is held. With only
- * whole-device claims this is *the* owner, as before SCRUM-237; with several
- * extents it is the first held entry and callers that care who holds what
- * should use disk_binding_extent_of(). */
+/* The holder, when exactly one context holds an extent -- which is *the*
+ * owner of the disk as it was before SCRUM-237 -- and PAGE_OWNER_FREE when
+ * nothing is held *or several contexts hold one*. It therefore cannot answer
+ * "is this mine?" once extents are in play; ask disk_binding_extent_of(who)
+ * or disk_binding_check_range() for that. */
 page_owner_t disk_binding_owner(void);
 
 /* ---- Revocation / repossession ------------------------------------------
@@ -185,9 +186,10 @@ int disk_binding_revoke_mark(page_owner_t who);
  * DISK_REVOKE_OK. */
 int disk_binding_revoke_clear(page_owner_t who);
 
-/* Whether the current binding is marked for revocation. 0 when the disk is
- * unheld or unmarked. */
-int disk_binding_revoke_pending(void);
+/* Whether `who`'s extent is marked for revocation. 0 when `who` holds nothing
+ * or its extent is unmarked. Per owner because several contexts can hold
+ * extents (SCRUM-237): one holder's mark is not another's. */
+int disk_binding_revoke_pending(page_owner_t who);
 
 /* Phase 3 — take the disk back from `who`, marked or not. (Phase 2 is `who`
  * complying, via disk_binding_release() -- exo_disk_release, #27, from ring

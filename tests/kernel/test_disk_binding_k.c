@@ -231,18 +231,18 @@ static void test_revoke_mark_clear_pending(void)
                     DISK_REVOKE_ENOENT);
 
     CU_ASSERT_EQUAL(disk_binding_acquire(PAGE_OWNER_LIBOS), DISK_BIND_OK);
-    CU_ASSERT_FALSE(disk_binding_revoke_pending());
+    CU_ASSERT_FALSE(disk_binding_revoke_pending(PAGE_OWNER_LIBOS));
 
     CU_ASSERT_EQUAL(disk_binding_revoke_mark(PAGE_OWNER_LIBOS),
                     DISK_REVOKE_OK);
-    CU_ASSERT_TRUE(disk_binding_revoke_pending());
+    CU_ASSERT_TRUE(disk_binding_revoke_pending(PAGE_OWNER_LIBOS));
 
     /* The mark is an ask, not a seizure: the owner keeps using the disk. */
     CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_LIBOS);
 
     CU_ASSERT_EQUAL(disk_binding_revoke_clear(PAGE_OWNER_LIBOS),
                     DISK_REVOKE_OK);
-    CU_ASSERT_FALSE(disk_binding_revoke_pending());
+    CU_ASSERT_FALSE(disk_binding_revoke_pending(PAGE_OWNER_LIBOS));
 
     disk_binding_release(PAGE_OWNER_LIBOS);
 }
@@ -257,7 +257,7 @@ static void test_revoke_reclaim_takes_it_back(void)
     CU_ASSERT_EQUAL(disk_binding_reclaim(PAGE_OWNER_LIBOS), DISK_REVOKE_OK);
 
     CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
-    CU_ASSERT_FALSE(disk_binding_revoke_pending());
+    CU_ASSERT_FALSE(disk_binding_revoke_pending(PAGE_OWNER_LIBOS));
 
     /* Reclaiming a context that has since let go (or never held it)
      * reports ENOENT, not a phantom success. */
@@ -462,8 +462,59 @@ static void test_assignments_must_not_overlap(void)
                     DISK_BIND_ERANGE);
 }
 
+/* One holder's revocation mark is not another's (SCRUM-237). */
+static void test_revoke_pending_is_per_owner(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 1000, 10),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 2000, 10),
+                    DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(disk_binding_revoke_mark(PAGE_OWNER_LIBOS), DISK_REVOKE_OK);
+    CU_ASSERT_TRUE(disk_binding_revoke_pending(PAGE_OWNER_LIBOS));
+    CU_ASSERT_FALSE(disk_binding_revoke_pending(OTHER_LIBOS));
+    CU_ASSERT_FALSE(disk_binding_revoke_pending(PAGE_OWNER_FREE));
+}
+
+/* disk_binding_owner() names a holder only when there is exactly one. */
+static void test_owner_is_free_with_several_holders(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 1000, 10),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 2000, 10),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
+}
+
+/* A launch must not report success for a volume its program cannot bind. */
+static void test_assign_refuses_a_volume_someone_else_holds(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_EBUSY);
+
+    disk_binding_release(OTHER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 5010, 4),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(OTHER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+}
+
 void suite_disk_binding_tests(CU_pSuite s)
 {
+    CU_add_test(s, "revoke pending is per owner",
+                test_revoke_pending_is_per_owner);
+    CU_add_test(s, "owner is free with several holders",
+                test_owner_is_free_with_several_holders);
+    CU_add_test(s, "assign refuses a volume someone else holds",
+                test_assign_refuses_a_volume_someone_else_holds);
     CU_add_test(s, "disjoint extents coexist",
                 test_disjoint_extents_coexist);
     CU_add_test(s, "overlapping extent is busy",

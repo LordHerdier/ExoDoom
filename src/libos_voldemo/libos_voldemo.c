@@ -52,8 +52,6 @@ void libos_voldemo_main(void);
 /* .data, not .rodata -- build_ring3_link_target's objcopy step errors on an
  * empty .data extraction (see libos_clock.c). */
 static char voldemo_banner[]   = "ExoDoom per-program volume demo\n";
-static char voldemo_hello_a[]  = "/hello-a.txt";
-static char voldemo_hello_b[]  = "/hello-b.txt";
 static char voldemo_launches[] = "/launches";
 static char voldemo_message[]  = "this file lives in my own volume\n";
 
@@ -175,6 +173,9 @@ void libos_voldemo_main(void)
     uint32_t slot = (ext.base - EXO_VOLUME_REGION_BASE_LBA) /
                     EXO_VOLUME_SLOT_SECTORS;
     char name[2] = { (char)('A' + slot), '\0' };
+    /* The file name follows the slot too, so any slot can run this program. */
+    char hello[] = "/hello-?.txt";
+    hello[7] = (char)('a' + slot);
 
     printf("voldemo[%s] extent base=%u sectors=%u\n", name, (unsigned)ext.base,
            (unsigned)ext.sectors);
@@ -214,7 +215,6 @@ void libos_voldemo_main(void)
 
     /* Each copy writes a differently-named file, so that if the volumes were
      * ever shared the other copy's file would show up in the listing below. */
-    const char *hello = (slot == 0) ? voldemo_hello_a : voldemo_hello_b;
     exofs_file_t f;
     if (exofs_open(hello, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC,
                    &f) == 0) {
@@ -246,7 +246,7 @@ void libos_voldemo_main(void)
     fbcon_write(&con, "reaching for what is not mine:\n");
     void *probe = libos_heap_alloc(512);
     if (probe) {
-        for (uint32_t s = 0; s < EXO_VOLUME_MAX_SLOTS && s < 4; s++) {
+        for (uint32_t s = 0; s < EXO_VOLUME_MAX_SLOTS; s++) {
             if (s == slot)
                 continue;
             char other[8] = { 'v', 'o', 'l', 'u', 'm', 'e', (char)('A' + s), 0 };

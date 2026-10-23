@@ -198,6 +198,9 @@ static int64_t launch_enter(page_owner_t id, const libos_image_t *img,
      * launch must leave whoever holds the binding untouched (SCRUM-230). */
     if (context_switch_request(id) != CONTEXT_OK) {
         libos_destroy_image(id, img);
+        /* Drop a volume assigned by #36 (SCRUM-237): the id is about to be
+         * free for reuse and must not inherit another program's extent. */
+        disk_binding_forget(id);
         context_destroy(id);
         return -EXO_EINVAL;
     }

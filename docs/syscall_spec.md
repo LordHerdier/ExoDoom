@@ -933,8 +933,11 @@ or not the owner currently holds it. So a volume stays private across the
 owner's release/re-acquire, and a program cannot gain access to someone
 else's sectors by asking for them — only by being packaged with the slot.
 The program learns its extent from `exo_disk_extent` (#37). A second package
-claiming a slot that a live context already holds is refused at launch with
-`-EXO_EBUSY`, before any context row survives. An assignment lapses when the
+claiming a slot that a live context already holds -- or whose sectors another
+context currently holds, a whole-device claim included -- is refused at launch
+with `-EXO_EBUSY`, before any context row survives, rather than started with a
+volume it cannot bind. `disk_binding_owner()` names a holder only when there is
+exactly one; with several extents live, ask `disk_binding_extent_of(who)`. An assignment lapses when the
 context is torn down (`revoke_all()` calls `disk_binding_forget()`); a
 voluntary `exo_disk_release` deliberately does not drop it, or the program
 could re-acquire an arbitrary range afterwards. The sectors stay on disk, so
