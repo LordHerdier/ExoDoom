@@ -41,6 +41,7 @@
 #include "exo_syscall.h"
 #include "libos_launch.h"
 #include "context.h"
+#include "usb.h"
 #include "shell/shell_layout.h"
 
 extern void irq0_stub();
@@ -431,6 +432,23 @@ void kernel_main(void *mb2_info_ptr) {
         serial_print(")\n");
     } else {
         serial_print("ATA: primary master drive detected\n");
+    }
+
+    // ── USB: UHCI + HID boot keyboards (SCRUM-198) ───────────────────────
+    // After pci_init() (it walks the PCI table for class 0x0C03) and
+    // page_alloc_init() (frame lists, QHs and TDs are alloc_page() pages).
+    // Ahead of the TESTING branch so the usb suites can reach it. Runs with
+    // interrupts off: enumeration busy-waits on each controller's own frame
+    // counter, and irq0_handler()'s usb_poll() only starts servicing the
+    // keyboards' interrupt pipes once this has returned (docs/drivers/usb.md
+    // section 3). Soft-fail like hda_init()/ata_init() above.
+    int usb_rc = usb_init();
+    if (usb_rc != USB_OK) {
+        serial_print("usb: no host controller (rc=");
+        serial_print_hex64((uint64_t)(int64_t)usb_rc);
+        serial_print(")\n");
+    } else {
+        usb_dump();
     }
 
     // ── Disk syscalls (SCRUM-103/SCRUM-188) ─────────────────────────────

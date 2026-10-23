@@ -1,59 +1,31 @@
 /*
  * test_usb_topology_k.c — the QEMU USB topology SCRUM-245 settled on.
  *
- * There is no USB driver yet (SCRUM-198 brings one), so this suite asserts
- * only what the spike decided and the PCI layer can already see: the three
- * UHCI controllers QEMU_USB_TEST_ARGS in the Makefile attaches are there, sit
- * on an IRQ line the polled design can share, expose the I/O register block
- * the driver will need, and -- since SeaBIOS leaves them running -- neither
- * raise an interrupt nor DMA into RAM the kernel hands out. docker-test/docker-ci always pass those
- * devices, so every assertion is unconditional -- a failure here means the
- * command line drifted from docs/drivers/usb.md section 2, not that the
- * machine has no USB.
+ * Asserts what the spike decided and the PCI layer can see: the three UHCI
+ * controllers QEMU_USB_TEST_ARGS in the Makefile attaches are there, sit on
+ * an IRQ line the polled design can share, expose the I/O register block the
+ * driver needs, never raise an interrupt, and -- now that SCRUM-198's driver
+ * has taken them from SeaBIOS -- run the kernel's own schedule rather than
+ * the firmware's. docker-test/docker-ci always pass those devices, so every
+ * assertion is unconditional -- a failure here means the command line
+ * drifted from docs/drivers/usb.md section 2, not that the machine has no
+ * USB.
  */
 
 #include "kunit.h"
 #include "pci.h"
+#include "uhci.h"
 #include "serial.h"
 #include "io.h"
-#include "mmap.h"
-#include "vmm.h"
 
 #include <stdint.h>
 #include <stddef.h>
 
-/* Serial bus controller / USB / UHCI. Local until SCRUM-198 gives pci.h a
- * USB class define of its own. */
-#define USB_CLASS     0x0C
-#define USB_SUBCLASS  0x03
-#define USB_PROG_UHCI 0x00
-
 /* QEMU_USB_TEST_ARGS: ich9-usb-uhci1..3. */
 #define EXPECTED_UHCI 3
 
-/* UHCI's registers live in the I/O BAR at index 4 (USBBASE, config 0x20),
- * and the block is 32 bytes: USBCMD..PORTSC2 plus padding. */
-#define UHCI_BAR_INDEX 4
-#define UHCI_IO_SIZE   0x20
-
-/* UHCI I/O registers, offsets from USBBASE. */
-#define UHCI_USBCMD    0x00
-#define UHCI_USBSTS    0x02
-#define UHCI_USBINTR   0x04
-#define UHCI_FRBASEADD 0x08
-
-/* UHCI link pointers (frame list entries, QH/TD links): bit 0 terminates,
- * bit 1 says the target is a QH rather than a TD, bits 31:4 the address. */
-#define UHCI_LP_TERM   0x1u
-#define UHCI_LP_QH     0x2u
-#define UHCI_LP_ADDR   0xFFFFFFF0u
-#define UHCI_FRAMES    1024
-
-/* Schedule walk bounds: chains are short (a handful of QHs and TDs per
- * frame), and a controller schedule may loop back on itself. */
-#define WALK_MAX_STEPS 64
-#define WALK_MAX_DEPTH 4
-#define WALK_MAX_MAPS  64
+/* The I/O block is 32 bytes: USBCMD..PORTSC2 plus padding. */
+#define UHCI_IO_SIZE 0x20
 
 /* Every UHCI function PCI reports, in discovery order. One scan per test:
  * pci_init() rebuilds the table, so pointers from an earlier scan are not
@@ -65,104 +37,13 @@ static int find_uhci(const pci_device_t *out[EXPECTED_UHCI + 1])
     pci_init();
     for (int i = 0; i < pci_device_count() && n <= EXPECTED_UHCI; i++) {
         const pci_device_t *d = pci_device_at(i);
-        if (d->class_code == USB_CLASS && d->subclass == USB_SUBCLASS
-            && d->prog_if == USB_PROG_UHCI) {
+        if (d->class_code == PCI_CLASS_SERIAL_BUS
+            && d->subclass == PCI_SUBCLASS_USB
+            && d->prog_if == PCI_PROGIF_UHCI) {
             out[n++] = d;
         }
     }
     return n;
-}
-
-/* ── Reading firmware's schedule ─────────────────────────────────────────
- * SeaBIOS leaves every UHCI controller running (USBCMD.RS) with its own
- * schedule, so until SCRUM-198 resets them the hardware keeps DMA'ing into
- * whatever that schedule points at. The kernel map covers only usable RAM,
- * so pages outside it are identity-mapped here for the walk and unmapped
- * after. */
-static uint64_t walk_maps[WALK_MAX_MAPS];
-static int      walk_nmaps;
-static int      walk_overflow;
-static uint32_t walk_checked;
-static uint32_t walk_in_usable;
-static uint32_t walk_first_bad;
-
-static int peek32(uint32_t paddr, uint32_t *out)
-{
-    uint64_t page = paddr & ~(VMM_PAGE_SIZE - 1);
-
-    if (vmm_translate(page, NULL, NULL) != VMM_OK) {
-        if (walk_nmaps == WALK_MAX_MAPS
-            || vmm_map_page(page, page, VMM_PRESENT) != VMM_OK) {
-            walk_overflow = 1;
-            return 0;
-        }
-        walk_maps[walk_nmaps++] = page;
-    }
-    *out = *(volatile uint32_t *)(uintptr_t)paddr;
-    return 1;
-}
-
-static void walk_unmap_all(void)
-{
-    for (int i = 0; i < walk_nmaps; i++) {
-        vmm_unmap_page(walk_maps[i]);
-    }
-    walk_nmaps = 0;
-}
-
-/* Count [addr, addr+len) as a DMA target; flag it if any byte lies in RAM
- * the memory map calls usable -- the only RAM page_alloc can hand out. */
-static void check_target(uint32_t addr, uint32_t len)
-{
-    uint32_t count = 0;
-    const mmap_region_t *r = mmap_get_regions(&count);
-
-    walk_checked++;
-    for (uint32_t i = 0; i < count; i++) {
-        if (r[i].type != MULTIBOOT_MMAP_AVAILABLE) {
-            continue;
-        }
-        if ((uint64_t)addr < r[i].base + r[i].length
-            && (uint64_t)addr + len > r[i].base) {
-            if (walk_in_usable++ == 0) {
-                walk_first_bad = addr;
-            }
-            return;
-        }
-    }
-}
-
-/* Follow one link pointer: a horizontal chain of QHs/TDs, descending into
- * each QH's element chain. A TD's buffer is checked too -- that is where a
- * HID report actually lands. */
-static void walk_link(uint32_t lp, int depth)
-{
-    for (int step = 0; step < WALK_MAX_STEPS && !(lp & UHCI_LP_TERM);
-         step++) {
-        uint32_t a = lp & UHCI_LP_ADDR;
-        uint32_t next, w;
-
-        if (lp & UHCI_LP_QH) {
-            check_target(a, 8);
-            if (depth < WALK_MAX_DEPTH && peek32(a + 4, &w)) {
-                walk_link(w, depth + 1);            /* element chain */
-            }
-        } else {
-            uint32_t token, buf;
-            check_target(a, 16);
-            if (peek32(a + 8, &token) && peek32(a + 12, &buf) && buf != 0) {
-                /* MaxLen is bits 31:21, encoded n-1; 0x7FF means none. */
-                uint32_t maxlen = ((token >> 21) + 1) & 0x7FF;
-                if (maxlen != 0) {
-                    check_target(buf, maxlen);
-                }
-            }
-        }
-        if (!peek32(a, &next)) {
-            return;
-        }
-        lp = next;
-    }
 }
 
 static void print_dev(const pci_device_t *d)
@@ -232,8 +113,9 @@ static void test_uhci_interrupts_disabled(void)
 
     /* The claim docs/drivers/hda.md section 7 rests on: a UHCI function that
      * shares HDA's line can never raise it, because USBINTR enables no
-     * interrupt source. Checked on the register itself, as firmware left it,
-     * rather than on PCI Status' instantaneous INTx bit -- that one reads 0
+     * interrupt source. Checked on the register itself -- src/uhci.c writes
+     * 0 there during takeover and never sets it -- rather than on PCI
+     * Status' instantaneous INTx bit -- that one reads 0
      * between completions even with every source enabled. */
     for (int i = 0; i < n; i++) {
         const pci_device_t *d = uhci[i];
@@ -266,49 +148,45 @@ static void test_uhci_interrupts_disabled(void)
     }
 }
 
-static void test_firmware_schedule_avoids_usable_ram(void)
+static void test_controllers_run_kernel_schedule(void)
 {
     const pci_device_t *uhci[EXPECTED_UHCI + 1];
     int n = find_uhci(uhci);
 
-    /* Running controllers the kernel does not own yet are only safe while
-     * every frame list, QH, TD and data buffer they touch stays out of the
-     * RAM page_alloc manages (docs/drivers/usb.md section 6). */
+    /* SeaBIOS leaves every controller running its own schedule in reserved
+     * RAM (docs/drivers/usb.md section 6). After usb_init() each must have
+     * been reset and restarted on the frame list src/uhci.c allocated --
+     * i.e. no firmware structure is still being DMA'd. */
+    CU_ASSERT_EQUAL(uhci_count(), n);
     for (int i = 0; i < n; i++) {
-        pci_bar_t bar;
-        if (pci_bar_read(uhci[i], UHCI_BAR_INDEX, &bar) != PCI_OK) {
-            CU_ASSERT(0);   /* UHCI I/O BAR 4 unreadable */
-            continue;
-        }
-        uint32_t fl = inl((uint16_t)bar.base + UHCI_FRBASEADD) & ~0xFFFu;
+        const pci_device_t *d = uhci[i];
+        uhci_info_t info;
+        int found = 0;
 
-        walk_checked = walk_in_usable = walk_first_bad = 0;
-        walk_overflow = 0;
-        check_target(fl, UHCI_FRAMES * 4);
-        for (uint32_t f = 0; f < UHCI_FRAMES; f++) {
-            uint32_t lp;
-            if (!peek32(fl + f * 4, &lp)) {
+        for (int h = 0; h < uhci_count(); h++) {
+            if (uhci_get_info(h, &info) == 0 && info.bus == d->bus
+                && info.device == d->device
+                && info.function == d->function) {
+                found = 1;
                 break;
             }
-            walk_link(lp, 0);
         }
-        walk_unmap_all();
+        CU_ASSERT(found);
+        if (!found) {
+            continue;
+        }
 
-        print_dev(uhci[i]);
-        serial_print(" schedule: ");
-        serial_print_dec(walk_checked);
-        serial_print(" targets, ");
-        serial_print_dec(walk_in_usable);
-        serial_print(" in usable RAM");
-        if (walk_in_usable) {
-            serial_print(" (first 0x");
-            serial_print_hex(walk_first_bad);
-            serial_print(")");
-        }
+        uint32_t fl = inl(info.io_base + UHCI_FRBASEADD) & ~0xFFFu;
+        print_dev(d);
+        serial_print(" frbase 0x");
+        serial_print_hex(fl);
+        serial_print(" driver 0x");
+        serial_print_hex((uint32_t)info.frame_list);
         serial_print("\n");
 
-        CU_ASSERT_EQUAL(walk_overflow, 0);
-        CU_ASSERT_EQUAL(walk_in_usable, 0);
+        CU_ASSERT_EQUAL((uint64_t)fl, info.frame_list);
+        CU_ASSERT(inw(info.io_base + UHCI_USBCMD) & UHCI_CMD_RS);
+        CU_ASSERT_EQUAL(inw(info.io_base + UHCI_USBSTS) & UHCI_STS_HCH, 0);
     }
 }
 
@@ -322,6 +200,6 @@ void suite_usb_topology_tests(CU_pSuite s)
                 test_uhci_io_bar_decodes);
     CU_add_test(s, "UHCI interrupt sources are all disabled (USBINTR)",
                 test_uhci_interrupts_disabled);
-    CU_add_test(s, "firmware's live UHCI schedule stays out of usable RAM",
-                test_firmware_schedule_avoids_usable_ram);
+    CU_add_test(s, "UHCI controllers run the kernel's schedule",
+                test_controllers_run_kernel_schedule);
 }

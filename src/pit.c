@@ -3,6 +3,7 @@
 #include "pic.h"
 #include "speaker.h"
 #include "hda.h"
+#include "usb.h"
 
 static volatile uint32_t ticks = 0;
 static uint32_t frequency = 1000;
@@ -46,6 +47,12 @@ void irq0_handler() {
      * no-op until hda_init() has brought a controller up, and cheap either
      * way -- it reads two static flags before touching any register. */
     hda_tick(kernel_get_ticks_ms());
+
+    /* SCRUM-198: the USB controllers run with USBINTR = 0 and are polled
+     * here instead of wired to their INTx line, which they share with HDA
+     * (docs/drivers/usb.md section 3). Checks and re-arms interrupt-IN TDs
+     * only; a no-op until usb_init() has finished. */
+    usb_poll();
 
 #ifdef TESTING
     /* This function's own stack frame sits wherever the CPU switched RSP to

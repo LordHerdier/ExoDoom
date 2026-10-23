@@ -29,6 +29,11 @@ and queues them for consumption by the LibOS via the `exo_kbd_poll` syscall.
 doomgeneric's `DG_GetKey` dequeues these events and maps them to Doom keycodes
 for the game engine.
 
+USB keyboards (SCRUM-198) produce the same `kbd_event_t`, `ps2_key_t` and
+`MOD_*` values, but on one ring per keyboard (`src/usb_kbd.c`), never on the
+PS/2 ring described here. `exo_kbd_poll` still reads only the PS/2 ring.
+See `docs/drivers/usb.md` §10–§11.
+
 ---
 
 ## 2. Hardware background
