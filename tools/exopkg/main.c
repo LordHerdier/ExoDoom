@@ -132,10 +132,10 @@ static int check_package(const char *path)
         return 1;
     }
     printf("    exopkg: %s ok: code %u data %u bss %u stack %u params %u "
-           "pages %u/%u voices %u want 0x%x\n",
+           "pages %u/%u voices %u want 0x%x volume %u/%u\n",
            path, h.code_len, h.data_len, h.bss_len, h.stack_pages,
            h.params_len, h.min_pages, h.recommended_pages, h.sound_voices,
-           h.want_flags);
+           h.want_flags, h.volume_slot, h.volume_sectors);
     free(buf);
     return 0;
 }
@@ -149,7 +149,8 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage: %s <out.exo> <code.bin> <data.bin> <bss-len> <want>"
                 " [--params-len N] [--sound-voices N] [--min-pages N]"
-                " [--recommended-pages N] [--stack-pages N]\n"
+                " [--recommended-pages N] [--stack-pages N]"
+                " [--volume-slot N --volume-sectors N]\n"
                 "       %s --check <package.exo>\n",
                 argv[0], argv[0]);
         return 1;
@@ -157,6 +158,7 @@ int main(int argc, char **argv)
 
     uint32_t params_len = 0, sound_voices = 0, stack_pages = EXO_PKG_MAX_STACK_PAGES;
     uint32_t min_pages = 0, rec_pages = 0;
+    uint32_t volume_slot = 0, volume_sectors = 0;
     int have_min = 0, have_rec = 0;
     for (int i = 6; i < argc; i += 2) {
         uint32_t *dst = NULL;
@@ -164,6 +166,10 @@ int main(int argc, char **argv)
             dst = &params_len;
         else if (strcmp(argv[i], "--sound-voices") == 0)
             dst = &sound_voices;
+        else if (strcmp(argv[i], "--volume-slot") == 0)
+            dst = &volume_slot;
+        else if (strcmp(argv[i], "--volume-sectors") == 0)
+            dst = &volume_sectors;
         else if (strcmp(argv[i], "--stack-pages") == 0)
             dst = &stack_pages;
         else if (strcmp(argv[i], "--min-pages") == 0) {
@@ -218,6 +224,8 @@ int main(int argc, char **argv)
                                      : hdr.min_pages + HEAP_SLACK_PAGES;
     hdr.sound_voices = sound_voices;
     hdr.want_flags   = want;
+    hdr.volume_slot    = volume_slot;
+    hdr.volume_sectors = volume_sectors;
 
     size_t cap = sizeof(hdr) + code_len + data_len;
     unsigned char *out = malloc(cap);

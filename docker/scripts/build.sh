@@ -522,6 +522,26 @@ build_ring3_link_target libos_snake src/libos_snake "" "" \
   src/libos_snake/libos_snake.c src/fb.c src/fb_console.c src/libos_fb.c
 ring3_embed=1
 
+echo "[2f2/7] Build per-program volume demo LibOS (SCRUM-237)"
+# The live demonstration that each LibOS can own a filesystem: one program,
+# packaged twice below (step [2g/7]) with different volume slots, each copy
+# linking its own ExoFS (the same src/libos_fs/ set and libc-shim slice the
+# shell links -- see that step's comment for why it is that many files) and
+# mounting only the sectors the kernel assigned it. Blobs are built for the
+# packager and not linked into the kernel, like Snake and the clock above;
+# `run voldemoa.exo` / `run voldemob.exo` from the shell start the copies.
+# libos_voldemo.c MUST come first (entry point at .text offset 0).
+ring3_embed=0
+build_ring3_link_target libos_voldemo src/libos_voldemo "" "" \
+  src/libos_voldemo/libos_voldemo.c src/fb.c src/fb_console.c src/libos_fb.c \
+  src/stdlib.c src/stdio.c src/string.c src/ctype.c \
+  src/errno.c src/fpconv.c src/libos_heap.c src/libos_page_alloc.c \
+  src/libos_fs/exofs_volume.c src/libos_fs/exofs_fat.c \
+  src/libos_fs/exofs_name.c src/libos_fs/exofs_dirent.c \
+  src/libos_fs/exofs_path.c src/libos_fs/exofs_dir.c \
+  src/libos_fs/exofs_file.c src/libos_fs/exofs_blockdev.c
+ring3_embed=1
+
 echo "[2f/7] Build Doom LibOS (SCRUM-66)"
 # The convergence point: the vendored engine (src/doom/, SCRUM-63/-64), the
 # libc shim (SCRUM-51/-65), the WAD mount (SCRUM-73), the doomgeneric timer
@@ -635,6 +655,12 @@ package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,k
   --params-len 16
 package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd \
   --params-len 16 --sound-voices 8
+# SCRUM-237: one program, two packages, each requesting a private volume
+# (docs/architecture.md, src/exo_volume.h). Only the slot differs.
+package_ring3_target libos_voldemo    src/libos_voldemo    voldemoa.exo fb,disk,kbd \
+  --volume-slot 0 --volume-sectors 8192
+package_ring3_target libos_voldemo    src/libos_voldemo    voldemob.exo fb,disk,kbd \
+  --volume-slot 1 --volume-sectors 8192
 
 # Every package goes on the program volume under its own file name.
 pkg_args=()
@@ -643,6 +669,25 @@ for f in build/packages/*.exo; do
 done
 build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba" \
   "${pkg_args[@]}"
+
+# SCRUM-237: the per-program volume slots (src/exo_volume.h) sit past the
+# program volume. mkexofsimg sizes the image to end with that volume, so grow
+# it (sparse -- the slots stay unformatted until a program that owns one first
+# runs and formats it) to cover every slot, or the kernel would hand a program
+# an extent the drive does not have. Read from the header like
+# LIBOS_WAD_DISK_BASE_LBA above, so there is one number.
+vol_h=src/exo_volume.h
+vol_base="$(sed -n 's/^#define EXO_VOLUME_REGION_BASE_LBA \([0-9]*\)u\?$/\1/p' "$vol_h")"
+vol_slot="$(sed -n 's/^#define EXO_VOLUME_SLOT_SECTORS *\([0-9]*\)u\?.*$/\1/p' "$vol_h")"
+vol_max="$(sed -n 's/^#define EXO_VOLUME_MAX_SLOTS *\([0-9]*\)u\?.*$/\1/p' "$vol_h")"
+if [[ -z "$vol_base" || -z "$vol_slot" || -z "$vol_max" ]]; then
+  echo "    ERROR: could not read the volume region layout from $vol_h"
+  exit 1
+fi
+vol_end_bytes=$(( (vol_base + vol_slot * vol_max) * 512 ))
+if [[ "$(stat -c %s build/exodoom_disk.img)" -lt "$vol_end_bytes" ]]; then
+  truncate -s "$vol_end_bytes" build/exodoom_disk.img
+fi
 
 echo "[3/7] Compile C sources"
 

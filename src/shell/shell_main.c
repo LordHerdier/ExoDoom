@@ -95,6 +95,7 @@
 #include "libos_fb.h"
 #include "libos_heap.h"
 #include "libos_fs/exofs.h"
+#include "exo_volume.h"
 #include "ps2.h"
 #include "stdlib.h"
 
@@ -713,6 +714,20 @@ static int shell_fs_copy_file(const char *src, const char *dst) {
  * the matching unmount+release half. Prints its own diagnostic and returns
  * 0 on failure so each caller can just return.
  */
+/* The shell binds only the part of the disk it is about to touch (SCRUM-237),
+ * never the whole device, so a program that owns a volume of its own does not
+ * lock every shell filesystem command out with -EXO_EBUSY. The scratch volume
+ * and the raw-sector `dd` window both sit below the program volume; the
+ * program volume runs up to where the per-program slots start. */
+static int64_t shell_disk_acquire_for(uint32_t base_lba) {
+    if (base_lba >= LIBOS_WAD_DISK_BASE_LBA) {
+        return exo_disk_acquire(LIBOS_WAD_DISK_BASE_LBA,
+                                EXO_VOLUME_REGION_BASE_LBA -
+                                    LIBOS_WAD_DISK_BASE_LBA);
+    }
+    return exo_disk_acquire(0, LIBOS_WAD_DISK_BASE_LBA);
+}
+
 static int shell_fs_acquire_and_mount(fb_console_t *con) {
     return shell_fs_acquire_and_mount_at(con, SHELL_FS_BASE_LBA);
 }
@@ -720,7 +735,7 @@ static int shell_fs_acquire_and_mount(fb_console_t *con) {
 /* Same, for a volume other than the shell's scratch one -- `run` reads
  * program packages off the program volume at LIBOS_WAD_DISK_BASE_LBA. */
 static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba) {
-    int64_t rc = exo_disk_acquire();
+    int64_t rc = shell_disk_acquire_for(base_lba);
     if (rc != 0) {
         fbcon_write(con, shell_fs_disk_busy_text);
         shell_write_i64(con, rc);
@@ -870,7 +885,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
  * disk actually is: that LBA is where the WAD's own volume lives, and mkfs
  * must never claim sectors it owns. */
 static void shell_run_mkfs(fb_console_t *con) {
-    int64_t rc = exo_disk_acquire();
+    int64_t rc = shell_disk_acquire_for(SHELL_FS_BASE_LBA);
     if (rc != 0) {
         fbcon_write(con, shell_fs_disk_busy_text);
         shell_write_i64(con, rc);
