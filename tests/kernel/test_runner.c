@@ -93,6 +93,8 @@ void suite_launch_pkg_tests(CU_pSuite s);
 void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
 void suite_usb_topology_tests(CU_pSuite s);
+void suite_usb_kbd_report_tests(CU_pSuite s);
+void suite_usb_tests(CU_pSuite s);
 void suite_doom_dmx_tests(CU_pSuite s);
 void suite_doom_midi_tests(CU_pSuite s);
 void suite_doom_genmidi_tests(CU_pSuite s);
@@ -587,9 +589,20 @@ int run_tests(void)
     suite_pci_tests(s);
 
     /* After "pci": the UHCI controllers docker-test attaches, as seen through
-     * the PCI layer alone -- no USB driver exists yet (SCRUM-245). */
+     * the PCI layer, plus the check that usb_init() took them from the
+     * firmware (SCRUM-245, SCRUM-198). */
     s = CU_add_suite("usb_topology", NULL, NULL);
     suite_usb_topology_tests(s);
+
+    /* HID boot report decoding on device-less slots; no hardware. */
+    s = CU_add_suite("usb_kbd_report", NULL, NULL);
+    suite_usb_kbd_report_tests(s);
+
+    /* The live bus usb_init() enumerated, and the acceptance test: two USB
+     * keyboards typed into separately over QMP by docker/scripts/
+     * qmp-keys.sh (SCRUM-198). */
+    s = CU_add_suite("usb", NULL, NULL);
+    suite_usb_tests(s);
 
     /* After "pci", which it depends on: hda_init() finds the controller
      * through pci_find_class() and maps its BAR (SCRUM-210). The cleanup
