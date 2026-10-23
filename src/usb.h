@@ -140,6 +140,8 @@ typedef struct {
     /* Reset and enable `port`. USB_OK with *speed set if a device is there
      * and the port came up enabled; USB_ENODEV if nothing is connected. */
     int  (*port_reset)(usb_hcd_t *hcd, int port, uint8_t *speed);
+    /* Take `port`'s device off the bus (clear port enable). */
+    void (*port_disable)(usb_hcd_t *hcd, int port);
     /* Synchronous control transfer to `dev` endpoint 0. `data` is
      * setup->wLength bytes; *actual (may be NULL) gets the data-stage
      * length actually moved. */
@@ -156,6 +158,9 @@ typedef struct {
                  void *data, uint32_t len, uint32_t *actual);
     /* IRQ0 service: check and re-arm interrupt pipes. */
     void (*poll)(usb_hcd_t *hcd);
+    /* 1 while interrupt pipe `pipe` (an interrupt_open() result) is still
+     * delivering: not stalled, not unplugged, controller not halted. */
+    int  (*pipe_live)(usb_hcd_t *hcd, int pipe);
     /* Busy-wait `ms` milliseconds on the controller's own frame clock --
      * enumeration runs with interrupts off, so the PIT is no use. */
     void (*delay_ms)(usb_hcd_t *hcd, uint32_t ms);
@@ -216,3 +221,7 @@ int usb_config_find_interface(const uint8_t *config, uint16_t len,
 
 /* Print the controller and device tables on serial. */
 void usb_dump(void);
+
+/* "<what> failed (rc=0x...)\n" on serial: the one format the USB code uses
+ * for a failed step. */
+void usb_log_rc(const char *what, int rc);

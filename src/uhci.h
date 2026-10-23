@@ -76,11 +76,8 @@ typedef struct {
     uint64_t ctrl_page;     /* control-transfer TDs + buffer */
     int      pipes;         /* interrupt-IN pipes open */
     uint32_t pipe_errors;   /* failed interrupt TDs seen by poll */
+    int      halted;        /* controller stopped itself; pipes retired */
 } uhci_info_t;
 
 int uhci_count(void);
 int uhci_get_info(int idx, uhci_info_t *out);
-/* 1 if interrupt pipe `pipe` of controller `idx` is open and not halted --
- * its TD is either queued on the device or has completed and waits for the
- * next usb_poll() to collect it -- 0 if it stalled, -1 for a bad index. */
-int uhci_pipe_live(int idx, int pipe);

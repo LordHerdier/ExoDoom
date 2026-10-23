@@ -116,7 +116,9 @@ this ISR, and the same rule applies here). The hook may, per controller:
 - re-arm that TD (two dword writes).
 
 It may not walk the whole schedule, run control or bulk transfers, or
-enumerate. Hot-plug (`PORTSC` connect-status-change) is noted here and acted on
+enumerate. SCRUM-198's driver uses less than this: it reads registers only
+in a health check every 16 ticks, and not at all on a controller with no
+pipes (§8). Hot-plug (`PORTSC` connect-status-change) is noted here and acted on
 outside the ISR.
 
 **When to revisit:** only if something needs sub-millisecond completion or
@@ -226,10 +228,12 @@ A controller driver fills in a `usb_hcd_ops_t` (`src/usb.h`) and calls
 |---|---|
 | `port_count` | root ports found by probing (§4) |
 | `port_reset` | reset and enable one port; `USB_ENODEV` if nothing is connected, else the device's speed |
+| `port_disable` | take a port's device off the bus (§9) |
 | `control` | synchronous control transfer on endpoint 0, busy-waited |
 | `interrupt_open` | start polling an interrupt-IN endpoint; each completed packet goes to a callback **from IRQ0** |
 | `bulk` | synchronous bulk transfer; `USB_ENOTSUP` until SCRUM-247 |
 | `poll` | the IRQ0 service (§3 budget) |
+| `pipe_live` | whether an interrupt pipe is still delivering (not stalled, unplugged or halted) |
 | `delay_ms` | busy-wait on the controller's own frame clock |
 
 `delay_ms` exists because enumeration runs from `kernel_main` with
@@ -292,16 +296,43 @@ status stage. A transfer times out after 500 frames (plus an absolute spin
 cap in case `FRNUM` itself stops). Afterwards the chain is unhooked and one
 frame passes before its TDs are reused.
 
-**Interrupt pipes**: one TD per pipe. `uhci_poll()` (IRQ0) reads `USBSTS`
-and clears `USBINT`/`ERRINT` if set. Then, for each pipe whose TD has gone
+**Interrupt pipes**: one TD per pipe, with MaxLen set to the endpoint's
+full `wMaxPacketSize`. A smaller MaxLen would make a device that sends a
+full packet babble on every TD. `uhci_poll()` (IRQ0) skips a controller
+with no pipes entirely. On the others, a normal tick reads only TD status
+words in RAM, and no port I/O happens. No TD sets `IOC`, so `USBSTS` would
+have nothing to report about completions. For each pipe whose TD has gone
 inactive, it does one of three things:
 
 - **Success:** pass the packet to the class callback, flip the data toggle,
   and re-arm. Re-arming is three dword writes: token, status, and QH element.
 - **CRC/timeout or babble:** re-arm with the same toggle, because the packet
-  never landed.
+  never landed. After 8 failed TDs in a row (each already retried 3 times by
+  the controller), the pipe is parked as dead.
 - **STALL:** park the pipe as dead. Clearing a halt needs `CLEAR_FEATURE`,
   which is a control transfer and is outside the ISR budget.
+
+Every 16th tick there is also a **health check**, and it is the only place
+the hook reads registers:
+
+- If `USBSTS` shows `HCH`, `HSE` or `HCPE`, the controller has stopped
+  itself, so it is marked halted and every pipe on it is retired.
+- If a pipe's root port shows no device (`CCS` clear), or a connect change
+  (`CSC`, an unplug and replug), that pipe is retired.
+
+Re-enumerating a replugged device would need control transfers, so it isn't
+done here, and hot-plug isn't supported yet. `pipe_live` reports all of
+these states.
+
+During enumeration every busy-wait (control transfers, `delay_ms`, port
+reset) also stops at once if the controller halts. Without that, a dead
+controller would spin each step to the absolute cap with interrupts off.
+
+**Takeover failures** stop the controller. Its pages are freed only once it
+has provably halted. If it won't halt, they are leaked rather than handed to
+someone else while it may still be reading them. The PCI I/O decode and
+bus-mastering bits are enabled before the first register access, because
+firmware without USB legacy support need not leave them on.
 
 A completed TD that IRQ0 hasn't collected yet just waits: QEMU NAKs the
 device's next report until the TD is re-armed, and `usb-kbd` queues up to
@@ -321,6 +352,11 @@ Per connected root port, with no hub layer (§4):
 4. Full device descriptor, the 9-byte configuration descriptor, then the
    whole configuration (capped at `USB_CONFIG_MAX` = 256 bytes).
 5. Offer the configuration to each class driver.
+
+If any step before `SET_ADDRESS` fails, the port is disabled. Otherwise the
+device would still be answering at address 0 when the next port's device is
+reset and addressed there too. When the device table is full, the port is
+never reset, so it stays disabled from `HCRESET`.
 
 A device no driver claims stays addressed but unconfigured, and gets one
 serial line. On the §2 topology the boot log reads:
@@ -345,7 +381,9 @@ don't attach the mouse (§5), so `docker-run*` shows three devices.
 `usb_kbd_probe()` claims an interface that is class 3 / subclass 1 /
 protocol 1 and has an interrupt-IN endpoint. It sends `SET_CONFIGURATION`,
 `SET_PROTOCOL(boot)` and `SET_IDLE(0)`, which is optional, so a STALL is
-ignored. It then opens the pipe with a packet size of at most 8 bytes.
+ignored. It then opens the pipe at the endpoint's own packet size (up to
+64 bytes, `USB_KBD_MAX_PACKET`) and decodes only the first 8, which are the
+boot report.
 
 The boot report is a modifier byte, a reserved byte, and up to six usage IDs
 of the keys that are held right now. A report is a **state**, not an event,
@@ -382,6 +420,8 @@ ring's SPSC contract, and keeps USB input off the PS/2 ring entirely.
 ## 11. What SCRUM-199 builds on
 
 - `usb_kbd_count()`, `usb_kbd_pop(idx, &ev)`, `usb_kbd_dropped(idx)`.
+- `usb_kbd_live(idx)`: 0 once the keyboard's pipe has stalled, the device
+  has been unplugged, or its controller has halted (§8).
 - `usb_kbd_ident(idx, &id)`: controller index, root port and USB address.
   The root port is what stays stable across boots on a fixed topology
   (QEMU's `port=`). Addresses are handed out in enumeration order.
@@ -399,7 +439,7 @@ ring's SPSC contract, and keeps USB input off the PS/2 ring entirely.
 | `usb_kbd_report` | `test_usb_kbd_k.c` | no. `decode()` driven on device-less slots (`usb_kbd_test_attach()`, `TESTING` only) |
 | `usb` | `test_usb_k.c` | yes. Controllers, addresses, claimed keyboards, live pipes, pages below 4 GB, and the acceptance test |
 
-**The acceptance test** ("two USB keyboards produce independent key events")
+**The acceptance test** ("two USB keyboards and PS/2 deliver independently")
 needs real keystrokes during a headless test boot:
 
 - `docker-test` and `docker-ci` add `-qmp tcp:127.0.0.1:4444,server=on,wait=off`.
@@ -413,18 +453,23 @@ needs real keystrokes during a headless test boot:
 - Each `usb-kbd` is bound to one of those consoles by `display=` (§5), so
   keyboard A types only `a` and keyboard B only `b`.
 
-The test drains any stale events, opens an interrupts-on window of up to
-5 s so `usb_poll()` runs, and asserts four things:
+The test drains any stale events and feeds a PS/2 `z` (make and break)
+through `ps2_process_scancode()`. That is the call `irq1_handler()` makes
+for each byte, and it stands in for IRQ1, which isn't wired in a test
+build. The test then opens an interrupts-on window of up to 5 s so
+`usb_poll()` runs, and asserts four things:
 
 - keyboard 0 saw `a` and not `b`;
 - keyboard 1 saw `b` and not `a`;
-- neither keyboard saw any other key;
-- the PS/2 ring saw nothing.
+- neither USB keyboard saw any other key, the `z` included;
+- the PS/2 ring holds exactly the `z` press and release, and nothing else.
+  `kbd_enqueue()` is the only way onto that ring, so a USB path that
+  called it would show up here even with IRQ1 unwired.
 
 A passing run logs:
 
 ```
-usb_kbd: kbd0 a=1 b=0 | kbd1 a=0 b=1 | ps2 0 (2 ms)
+usb_kbd: kbd0 a=1 b=0 | kbd1 a=0 b=1 | ps2 z=1 other=0 (3 ms)
 ```
 
 The window usually closes at once, because the keys typed during earlier

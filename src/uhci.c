@@ -90,11 +90,21 @@ typedef struct {
 #define CTRL_TIMEOUT_FRAMES 500
 #define SPIN_CAP            5000000u
 
+/* uhci_poll() looks at controller and port registers only every this many
+ * IRQ0 ticks; every other tick touches nothing but TD status words in RAM. */
+#define HEALTH_PERIOD 16
+
+/* Consecutive failed interrupt TDs (each already retried 3 times by the
+ * controller, TD_CERR3) before a pipe is given up on. */
+#define PIPE_MAX_ERRORS 8
+
 typedef struct {
     uhci_qh_t *qh;
     uhci_td_t *td;
     uint8_t   *buf;
-    uint8_t    addr, ep, low_speed, toggle, dead;
+    uint8_t    addr, ep, port, low_speed, toggle;
+    volatile uint8_t dead;
+    uint8_t    errors;      /* consecutive failed TDs */
     uint16_t   max_packet;
     usb_intr_cb_t cb;
     void      *ctx;
@@ -113,6 +123,8 @@ typedef struct {
     uhci_pipe_t pipes[UHCI_MAX_PIPES];
     volatile int npipes;
     volatile uint32_t pipe_errors;
+    volatile int halted;    /* latched: controller stopped itself */
+    uint32_t   poll_ticks;
 } uhci_t;
 
 static uhci_t g_hc[UHCI_MAX_CONTROLLERS];
@@ -143,15 +155,29 @@ static uint16_t frnum(const uhci_t *hc)
     return inw(hc->io + UHCI_FRNUM) & 0x7FF;
 }
 
+/* Whether a running controller has stopped itself (HCH -- a host system or
+ * process error halts it). Latched, because nothing restarts it. Every
+ * busy-wait below checks this, so a dead controller fails each step at once
+ * instead of spinning to SPIN_CAP with interrupts off. */
+static int hc_halted(uhci_t *hc)
+{
+    if (!hc->halted && (inw(hc->io + UHCI_USBSTS) & UHCI_STS_HCH)) {
+        hc->halted = 1;
+    }
+    return hc->halted;
+}
+
 /* Wait `n` 1 ms frames by FRNUM, which the controller advances itself. That
  * is the clock that matters for everything the USB spec times, and it works
- * with interrupts off, where kernel_sleep_ms() would hlt forever. */
-static void wait_frames(const uhci_t *hc, uint32_t n)
+ * with interrupts off, where kernel_sleep_ms() would hlt forever. A halted
+ * controller's FRNUM stops, so that ends the wait too. */
+static void wait_frames(uhci_t *hc, uint32_t n)
 {
     uint16_t start = frnum(hc);
     uint32_t spins = 0;
 
-    while (((frnum(hc) - start) & 0x7FF) < n && spins++ < SPIN_CAP) {
+    while (((frnum(hc) - start) & 0x7FF) < n && spins++ < SPIN_CAP
+           && !hc_halted(hc)) {
         io_wait();
     }
 }
@@ -240,6 +266,9 @@ static int uhci_port_reset(usb_hcd_t *hcd, int port, uint8_t *speed)
     if (port < 0 || port >= hc->ports) {
         return USB_EINVAL;
     }
+    if (hc_halted(hc)) {
+        return USB_EIO;
+    }
     if (!(inw(hc->io + UHCI_PORTSC(port)) & UHCI_PORT_CCS)) {
         return USB_ENODEV;
     }
@@ -266,7 +295,7 @@ static int uhci_port_reset(usb_hcd_t *hcd, int port, uint8_t *speed)
     }
 
     uint16_t v = inw(hc->io + UHCI_PORTSC(port));
-    if (!(v & UHCI_PORT_PE)) {
+    if (!(v & UHCI_PORT_PE) || hc_halted(hc)) {
         return USB_EIO;
     }
     port_write(hc, port, 0, UHCI_PORT_CSC | UHCI_PORT_PEC);
@@ -278,6 +307,17 @@ static int uhci_port_reset(usb_hcd_t *hcd, int port, uint8_t *speed)
         *speed = (v & UHCI_PORT_LSDA) ? USB_SPEED_LOW : USB_SPEED_FULL;
     }
     return USB_OK;
+}
+
+/* Clearing PE takes the device off the bus. The core does this when it
+ * gives up on a device that may still be answering at address 0. */
+static void uhci_port_disable(usb_hcd_t *hcd, int port)
+{
+    uhci_t *hc = hcd->priv;
+
+    if (port >= 0 && port < hc->ports) {
+        port_write(hc, port, UHCI_PORT_PE, 0);
+    }
 }
 
 /* ── Control transfers ────────────────────────────────────────────────── */
@@ -304,6 +344,9 @@ static int uhci_control(usb_hcd_t *hcd, const usb_device_t *dev,
     }
     if (len > CTRL_DATA_MAX || ntd > CTRL_MAX_TDS || (len && data == NULL)) {
         return USB_EINVAL;
+    }
+    if (hc_halted(hc)) {
+        return USB_EIO;
     }
 
     memcpy(setup_buf, setup, sizeof(*setup));
@@ -350,6 +393,10 @@ static int uhci_control(usb_hcd_t *hcd, const usb_device_t *dev,
         uint32_t s = td[i].ctrl;
 
         if (s & TD_ACTIVE) {
+            if (hc_halted(hc)) {
+                rc = USB_EIO;
+                break;
+            }
             if (((frnum(hc) - start) & 0x7FF) >= CTRL_TIMEOUT_FRAMES
                 || spins++ >= SPIN_CAP) {
                 rc = USB_ETIMEOUT;
@@ -426,9 +473,11 @@ static int uhci_interrupt_open(usb_hcd_t *hcd, const usb_device_t *dev,
     p->buf = slot + PIPE_BUF_OFF;
     p->addr = dev->address;
     p->ep = ep;
+    p->port = dev->port;
     p->low_speed = dev->speed == USB_SPEED_LOW;
     p->toggle = 0;
     p->dead = 0;
+    p->errors = 0;
     p->max_packet = max_packet;
     p->cb = cb;
     p->ctx = ctx;
@@ -460,23 +509,54 @@ static int uhci_bulk(usb_hcd_t *hcd, const usb_device_t *dev,
     return USB_ENOTSUP;   /* SCRUM-247 */
 }
 
+/* Every HEALTH_PERIOD ticks: a halted controller retires all its pipes, and
+ * a port that lost its device (CCS clear, or CSC set by an unplug/replug)
+ * retires the pipes on it. Nothing is re-enumerated here -- that is control
+ * transfers, outside the ISR budget -- so a replugged keyboard stays dead
+ * until hot-plug support exists (docs/drivers/usb.md section 8). */
+static void health_check(uhci_t *hc, int n)
+{
+    if (inw(hc->io + UHCI_USBSTS)
+        & (UHCI_STS_HCH | UHCI_STS_HSE | UHCI_STS_HCPE)) {
+        hc->halted = 1;
+        for (int i = 0; i < n; i++) {
+            hc->pipes[i].dead = 1;
+        }
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        uhci_pipe_t *p = &hc->pipes[i];
+        if (p->dead) {
+            continue;
+        }
+        uint16_t v = inw(hc->io + UHCI_PORTSC(p->port));
+        if (!(v & UHCI_PORT_CCS) || (v & UHCI_PORT_CSC)) {
+            p->dead = 1;
+        }
+    }
+}
+
 /*
  * IRQ0 service, inside the budget docs/drivers/usb.md section 3 sets: read
- * USBSTS, read each pipe's TD status, hand a finished packet (<= 64 bytes,
- * 8 for a boot keyboard) to its callback, and re-arm the TD (token, status,
- * QH element). No schedule walk, no control transfer, no serial.
+ * each pipe's TD status, hand a finished packet (<= 64 bytes, 8 for a boot
+ * keyboard) to its callback, and re-arm the TD (token, status, QH element).
+ * No schedule walk, no control transfer, no serial. A controller with no
+ * pipes is not touched at all, and register reads happen only in the
+ * periodic health check -- no TD sets IOC, so USBSTS has nothing to say
+ * about completions.
  */
 static void uhci_poll(usb_hcd_t *hcd)
 {
     uhci_t *hc = hcd->priv;
-    uint16_t sts = inw(hc->io + UHCI_USBSTS);
+    int n = hc->npipes;
 
-    if (sts & (UHCI_STS_USBINT | UHCI_STS_ERRINT)) {
-        outw(hc->io + UHCI_USBSTS,
-             (uint16_t)(sts & (UHCI_STS_USBINT | UHCI_STS_ERRINT)));
+    if (n == 0 || hc->halted) {
+        return;
+    }
+    if (++hc->poll_ticks % HEALTH_PERIOD == 0) {
+        health_check(hc, n);
     }
 
-    int n = hc->npipes;
     for (int i = 0; i < n; i++) {
         uhci_pipe_t *p = &hc->pipes[i];
         if (p->dead) {
@@ -489,9 +569,11 @@ static void uhci_poll(usb_hcd_t *hcd)
         }
         if (s & TD_ERRORS) {
             hc->pipe_errors++;
-            if (s & TD_STALLED) {
-                /* A halted endpoint needs CLEAR_FEATURE, which is a control
-                 * transfer and not allowed here. Leave it parked. */
+            /* A STALL needs CLEAR_FEATURE, which is a control transfer and
+             * not allowed here; a run of CRC/timeouts is a device that has
+             * gone. Either way, park the pipe rather than re-arm it every
+             * frame forever. */
+            if ((s & TD_STALLED) || ++p->errors >= PIPE_MAX_ERRORS) {
                 p->dead = 1;
                 continue;
             }
@@ -499,10 +581,21 @@ static void uhci_poll(usb_hcd_t *hcd)
             continue;
         }
 
+        p->errors = 0;
         p->cb(p->ctx, p->buf, td_actlen(s));
         p->toggle ^= 1;
         pipe_arm(p);
     }
+}
+
+static int uhci_pipe_live(usb_hcd_t *hcd, int pipe)
+{
+    uhci_t *hc = hcd->priv;
+
+    if (pipe < 0 || pipe >= hc->npipes) {
+        return 0;
+    }
+    return !hc->halted && !hc->pipes[pipe].dead;
 }
 
 static void uhci_delay_ms(usb_hcd_t *hcd, uint32_t ms)
@@ -514,10 +607,12 @@ static const usb_hcd_ops_t uhci_ops = {
     .name           = "uhci",
     .port_count     = uhci_port_count,
     .port_reset     = uhci_port_reset,
+    .port_disable   = uhci_port_disable,
     .control        = uhci_control,
     .interrupt_open = uhci_interrupt_open,
     .bulk           = uhci_bulk,
     .poll           = uhci_poll,
+    .pipe_live      = uhci_pipe_live,
     .delay_ms       = uhci_delay_ms,
 };
 
@@ -558,6 +653,35 @@ static void log_hc(const uhci_t *hc, const char *msg)
     serial_print(msg);
 }
 
+/* Undo a partial uhci_start(): stop the controller and, once it has
+ * provably stopped, give its pages back. If it won't halt it may still be
+ * reading them, so they are leaked rather than handed to someone else. */
+static void uhci_teardown(uhci_t *hc)
+{
+    int stopped = 1;
+
+    if (hc->io) {
+        outw(hc->io + UHCI_USBCMD, 0);
+        stopped = wait_halted(hc, 1);
+    }
+    if (!stopped) {
+        log_hc(hc, "would not halt; leaking its DMA pages\n");
+        return;
+    }
+    if (hc->frame_list) {
+        free_page(hc->frame_list);
+    }
+    if (hc->sched) {
+        free_page(hc->sched);
+    }
+    if (hc->ctrl) {
+        free_page(hc->ctrl);
+    }
+    hc->frame_list = NULL;
+    hc->sched = NULL;
+    hc->ctrl = NULL;
+}
+
 static int uhci_start(uhci_t *hc, const pci_device_t *d)
 {
     pci_bar_t bar;
@@ -565,6 +689,13 @@ static int uhci_start(uhci_t *hc, const pci_device_t *d)
     if (pci_bar_read(d, UHCI_BAR_INDEX, &bar) != PCI_OK || !bar.is_io
         || bar.base == 0) {
         log_hc(hc, "no I/O BAR 4\n");
+        return USB_ENODEV;
+    }
+
+    /* I/O decode and bus mastering before the first register access:
+     * SeaBIOS leaves them on, but firmware without USB legacy support need
+     * not, and every inw() would then read 0xFFFF. */
+    if (pci_enable_device(d) != PCI_OK) {
         return USB_ENODEV;
     }
     hc->io = (uint16_t)bar.base;
@@ -586,19 +717,17 @@ static int uhci_start(uhci_t *hc, const pci_device_t *d)
     outw(hc->io + UHCI_USBCMD, UHCI_CMD_HCRESET);
     if (!wait_cmd_clear(hc, UHCI_CMD_HCRESET)) {
         log_hc(hc, "HCRESET did not complete\n");
+        uhci_teardown(hc);
         return USB_EIO;
     }
     outw(hc->io + UHCI_USBINTR, 0);
-
-    if (pci_enable_device(d) != PCI_OK) {
-        return USB_ENODEV;
-    }
 
     hc->frame_list = alloc_dma_page();
     hc->sched = alloc_dma_page();
     hc->ctrl = alloc_dma_page();
     if (!hc->frame_list || !hc->sched || !hc->ctrl) {
         log_hc(hc, "no DMA page below 4 GB\n");
+        uhci_teardown(hc);
         return USB_ENOMEM;
     }
 
@@ -619,6 +748,7 @@ static int uhci_start(uhci_t *hc, const pci_device_t *d)
     outw(hc->io + UHCI_USBCMD, UHCI_CMD_RS | UHCI_CMD_CF | UHCI_CMD_MAXP);
     if (!wait_halted(hc, 0)) {
         log_hc(hc, "did not leave halt\n");
+        uhci_teardown(hc);
         return USB_EIO;
     }
 
@@ -658,7 +788,7 @@ int uhci_probe_all(void)
         }
         if (usb_hcd_register(&hc->hcd) != USB_OK) {
             log_hc(hc, "USB core has no slot left\n");
-            outw(hc->io + UHCI_USBCMD, 0);
+            uhci_teardown(hc);
             break;
         }
         g_nhc++;
@@ -689,13 +819,6 @@ int uhci_get_info(int idx, uhci_info_t *out)
     out->ctrl_page = (uint64_t)(uintptr_t)hc->ctrl;
     out->pipes = hc->npipes;
     out->pipe_errors = hc->pipe_errors;
+    out->halted = hc->halted;
     return USB_OK;
-}
-
-int uhci_pipe_live(int idx, int pipe)
-{
-    if (idx < 0 || idx >= g_nhc || pipe < 0 || pipe >= g_hc[idx].npipes) {
-        return -1;
-    }
-    return !g_hc[idx].pipes[pipe].dead;
 }

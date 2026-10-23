@@ -146,7 +146,7 @@ static void log_port(const usb_hcd_t *hcd, int port)
     serial_print(": ");
 }
 
-static void log_rc(const char *what, int rc)
+void usb_log_rc(const char *what, int rc)
 {
     serial_print(what);
     serial_print(" failed (rc=");
@@ -154,21 +154,35 @@ static void log_rc(const char *what, int rc)
     serial_print(")\n");
 }
 
+/* Give up on a device that never got an address. It is still enabled and
+ * answering at address 0, where the next port's device is about to be
+ * addressed too, so it has to come off the bus first. */
+static void abandon_default(usb_hcd_t *hcd, int port, const char *what,
+                            int rc)
+{
+    usb_log_rc(what, rc);
+    hcd->ops->port_disable(hcd, port);
+}
+
 static void enumerate_port(usb_hcd_t *hcd, int port)
 {
     uint8_t speed = USB_SPEED_FULL;
-    int rc = hcd->ops->port_reset(hcd, port, &speed);
 
+    /* Checked before the reset: an un-reset port stays disabled (HCRESET
+     * left it so), so a device with no table slot never reaches address 0. */
+    if (g_ndevices >= USB_MAX_DEVICES || g_next_address > 127) {
+        log_port(hcd, port);
+        serial_print("device table full, port left disabled\n");
+        return;
+    }
+
+    int rc = hcd->ops->port_reset(hcd, port, &speed);
     if (rc == USB_ENODEV) {
         return;                       /* nothing plugged in */
     }
     log_port(hcd, port);
     if (rc != USB_OK) {
-        log_rc("port reset", rc);
-        return;
-    }
-    if (g_ndevices >= USB_MAX_DEVICES || g_next_address > 127) {
-        serial_print("device table full\n");
+        abandon_default(hcd, port, "port reset", rc);
         return;
     }
 
@@ -182,7 +196,7 @@ static void enumerate_port(usb_hcd_t *hcd, int port)
 
     usb_device_desc_t dd;
     if ((rc = get_descriptor(dev, USB_DESC_DEVICE, &dd, 8)) != USB_OK) {
-        log_rc("GET_DESCRIPTOR(device, 8)", rc);
+        abandon_default(hcd, port, "GET_DESCRIPTOR(device, 8)", rc);
         return;
     }
     if (dd.bMaxPacketSize0 == 8 || dd.bMaxPacketSize0 == 16
@@ -194,7 +208,7 @@ static void enumerate_port(usb_hcd_t *hcd, int port)
     rc = usb_control(dev, USB_RT_OUT | USB_RT_STANDARD | USB_RT_DEVICE,
                      USB_REQ_SET_ADDRESS, addr, 0, NULL, 0, NULL);
     if (rc != USB_OK) {
-        log_rc("SET_ADDRESS", rc);
+        abandon_default(hcd, port, "SET_ADDRESS", rc);
         return;
     }
     dev->address = addr;
@@ -203,7 +217,7 @@ static void enumerate_port(usb_hcd_t *hcd, int port)
 
     if ((rc = get_descriptor(dev, USB_DESC_DEVICE, &dd, sizeof(dd)))
         != USB_OK) {
-        log_rc("GET_DESCRIPTOR(device)", rc);
+        usb_log_rc("GET_DESCRIPTOR(device)", rc);
         return;
     }
     dev->vendor_id = dd.idVendor;
@@ -214,7 +228,7 @@ static void enumerate_port(usb_hcd_t *hcd, int port)
     usb_config_desc_t *cd = (usb_config_desc_t *)config;
     if ((rc = get_descriptor(dev, USB_DESC_CONFIG, config, sizeof(*cd)))
         != USB_OK) {
-        log_rc("GET_DESCRIPTOR(config, 9)", rc);
+        usb_log_rc("GET_DESCRIPTOR(config, 9)", rc);
         return;
     }
     uint16_t total = cd->wTotalLength;
@@ -226,7 +240,7 @@ static void enumerate_port(usb_hcd_t *hcd, int port)
     }
     if ((rc = get_descriptor(dev, USB_DESC_CONFIG, config, total))
         != USB_OK) {
-        log_rc("GET_DESCRIPTOR(config)", rc);
+        usb_log_rc("GET_DESCRIPTOR(config)", rc);
         return;
     }
     dev->config_value = cd->bConfigurationValue;

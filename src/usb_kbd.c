@@ -174,15 +174,6 @@ void usb_kbd_reset(void)
     g_nkbd = 0;
 }
 
-static void log_fail(const char *what, int rc)
-{
-    serial_print("usb_kbd: ");
-    serial_print(what);
-    serial_print(" failed (rc=");
-    serial_print_hex64((uint64_t)(int64_t)rc);
-    serial_print(") -- ");
-}
-
 int usb_kbd_probe(usb_device_t *dev, const uint8_t *config, uint16_t len)
 {
     const usb_interface_desc_t *iface;
@@ -199,17 +190,17 @@ int usb_kbd_probe(usb_device_t *dev, const uint8_t *config, uint16_t len)
         return 0;
     }
 
+    /* The TD must allow the endpoint's full packet size: a device that
+     * sends more than MaxLen babbles and the TD fails every time. decode()
+     * reads only the first 8 bytes, which is the boot report. */
     uint16_t mps = ep->wMaxPacketSize & 0x7FF;
-    if (mps < 3) {
+    if (mps < 3 || mps > USB_KBD_MAX_PACKET) {
         return 0;
-    }
-    if (mps > USB_KBD_REPORT_SIZE) {
-        mps = USB_KBD_REPORT_SIZE;    /* boot reports are 8 bytes */
     }
 
     int rc = usb_set_configuration(dev, dev->config_value);
     if (rc != USB_OK) {
-        log_fail("SET_CONFIGURATION", rc);
+        usb_log_rc("usb_kbd: SET_CONFIGURATION", rc);
         return 0;
     }
 
@@ -217,7 +208,7 @@ int usb_kbd_probe(usb_device_t *dev, const uint8_t *config, uint16_t len)
     rc = usb_control(dev, rt, USB_HID_REQ_SET_PROTOCOL, USB_HID_PROTOCOL_BOOT,
                      iface->bInterfaceNumber, NULL, 0, NULL);
     if (rc != USB_OK) {
-        log_fail("SET_PROTOCOL(boot)", rc);
+        usb_log_rc("usb_kbd: SET_PROTOCOL(boot)", rc);
         return 0;
     }
     /* Idle 0: report only on change. Optional for a boot keyboard, so a
@@ -235,7 +226,7 @@ int usb_kbd_probe(usb_device_t *dev, const uint8_t *config, uint16_t len)
                                                  & USB_EP_NUM_MASK,
                                              mps, report_cb, k);
     if (pipe < 0) {
-        log_fail("interrupt_open", pipe);
+        usb_log_rc("usb_kbd: interrupt_open", pipe);
         return 0;
     }
     k->pipe = pipe;
@@ -256,6 +247,15 @@ int usb_kbd_pop(int idx, kbd_event_t *out)
         return 0;
     }
     return kbd_ring_pop(&g_kbd[idx].ring, out);
+}
+
+int usb_kbd_live(int idx)
+{
+    if (idx < 0 || idx >= g_nkbd || g_kbd[idx].dev == NULL) {
+        return 0;
+    }
+    usb_hcd_t *hcd = g_kbd[idx].dev->hcd;
+    return hcd->ops->pipe_live(hcd, g_kbd[idx].pipe);
 }
 
 uint32_t usb_kbd_dropped(int idx)

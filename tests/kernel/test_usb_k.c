@@ -13,7 +13,10 @@
  * keyboard A is bound to (vga2) and "b" to keyboard B's (vga3), over and
  * over. The test opens a short interrupts-on window so irq0_handler()'s
  * usb_poll() can collect reports, then checks each keyboard saw only its
- * own key -- and that none of it leaked into the PS/2 ring.
+ * own key. In the same window a PS/2 keystroke ("z") goes through the real
+ * scancode decoder, and must arrive on the PS/2 ring and nowhere else --
+ * IRQ1 is not wired in a test build, so ps2_process_scancode() stands in
+ * for it, which is the exact call irq1_handler() makes per byte.
  */
 
 #include "kunit.h"
@@ -32,6 +35,10 @@
 #define QEMU_KBD_VENDOR  0x0627
 #define QEMU_KBD_PRODUCT 0x0001
 
+/* Scan code set 1: Z make / break (src/ps2.c's translation table). */
+#define PS2_Z_MAKE  0x2C
+#define PS2_Z_BREAK 0xAC
+
 /* How long the acceptance test waits for both keys. qmp-keys.sh sends a
  * pair every ~200 ms, so this is generous. */
 #define KEY_WAIT_MS 5000
@@ -47,6 +54,7 @@ static void test_controllers_registered(void)
         /* QEMU's UHCI has two root ports, found by probing PORTSC. */
         CU_ASSERT_EQUAL(info.ports, 2);
         CU_ASSERT_NOT_EQUAL(info.io_base, 0);
+        CU_ASSERT_EQUAL(info.halted, 0);
     }
 }
 
@@ -91,7 +99,7 @@ static void test_two_keyboards_claimed(void)
         CU_ASSERT_EQUAL(id.hcd, 0);
         CU_ASSERT_EQUAL(id.port, i);
         CU_ASSERT(id.pipe >= 0);
-        CU_ASSERT_EQUAL(uhci_pipe_live(id.hcd, id.pipe), 1);
+        CU_ASSERT_EQUAL(usb_kbd_live(i), 1);
     }
 
     /* Only the keyboards are claimed: the mouse and the stick wait for
@@ -134,7 +142,7 @@ static void test_keyboards_are_independent(void)
 {
     seen_t k0 = { 0 }, k1 = { 0 };
     kbd_event_t ev;
-    int ps2_events = 0;
+    int ps2_z_down = 0, ps2_z_up = 0, ps2_other = 0;
 
     if (usb_kbd_count() < EXPECTED_KBDS) {
         CU_ASSERT(0);
@@ -145,12 +153,13 @@ static void test_keyboards_are_independent(void)
      * stale; start clean. */
     drain(0, NULL);
     drain(1, NULL);
-    while (kbd_dequeue(&ev)) {
-    }
+    kbd_reset();
 
     /* Local interrupts-on window, as in test_syscall_pit_k.c: usb_poll()
      * only runs from irq0_handler(). */
     uint32_t start = kernel_get_ticks_ms();
+    ps2_process_scancode(PS2_Z_MAKE);
+    ps2_process_scancode(PS2_Z_BREAK);
     __asm__ volatile ("sti");
     while (kernel_get_ticks_ms() - start < KEY_WAIT_MS
            && !(k0.a_down && k1.b_down)) {
@@ -163,8 +172,13 @@ static void test_keyboards_are_independent(void)
     __asm__ volatile ("cli");
 
     while (kbd_dequeue(&ev)) {
-        ps2_events++;
+        if (ev.key == KEY_Z) {
+            ev.pressed ? ps2_z_down++ : ps2_z_up++;
+        } else {
+            ps2_other++;
+        }
     }
+    kbd_reset();
 
     serial_print("usb_kbd: kbd0 a=");
     serial_print_dec((uint32_t)k0.a_down);
@@ -174,8 +188,10 @@ static void test_keyboards_are_independent(void)
     serial_print_dec((uint32_t)k1.a_down);
     serial_print(" b=");
     serial_print_dec((uint32_t)k1.b_down);
-    serial_print(" | ps2 ");
-    serial_print_dec((uint32_t)ps2_events);
+    serial_print(" | ps2 z=");
+    serial_print_dec((uint32_t)ps2_z_down);
+    serial_print(" other=");
+    serial_print_dec((uint32_t)ps2_other);
     serial_print(" (");
     serial_print_dec(kernel_get_ticks_ms() - start);
     serial_print(" ms)\n");
@@ -185,9 +201,14 @@ static void test_keyboards_are_independent(void)
     CU_ASSERT_EQUAL(k0.b_down, 0);
     CU_ASSERT(k1.b_down > 0);
     CU_ASSERT_EQUAL(k1.a_down, 0);
+    /* No "z" (or anything else) leaked from PS/2 onto a USB ring... */
     CU_ASSERT_EQUAL(k0.other + k1.other, 0);
-    /* Additive: nothing from USB reaches the PS/2 path. */
-    CU_ASSERT_EQUAL(ps2_events, 0);
+    /* ...and the PS/2 ring got exactly its own keystroke, none of USB's.
+     * kbd_enqueue() is the only way onto it, so a USB path that called it
+     * would show up here whether or not IRQ1 is wired. */
+    CU_ASSERT_EQUAL(ps2_z_down, 1);
+    CU_ASSERT_EQUAL(ps2_z_up, 1);
+    CU_ASSERT_EQUAL(ps2_other, 0);
 }
 
 void suite_usb_tests(CU_pSuite s)
@@ -200,6 +221,6 @@ void suite_usb_tests(CU_pSuite s)
                 test_every_device_enumerated);
     CU_add_test(s, "both keyboards claimed with live interrupt pipes",
                 test_two_keyboards_claimed);
-    CU_add_test(s, "two USB keyboards produce independent key events",
+    CU_add_test(s, "two USB keyboards and PS/2 deliver independently",
                 test_keyboards_are_independent);
 }

@@ -25,6 +25,9 @@
 
 #define USB_KBD_MAX         4
 #define USB_KBD_REPORT_SIZE 8
+/* Largest interrupt packet accepted: full-speed's maximum, and what a UHCI
+ * pipe buffer holds. */
+#define USB_KBD_MAX_PACKET  64
 
 /* HID class requests (HID 1.11 §7.2). */
 #define USB_HID_REQ_SET_IDLE     0x0A
@@ -56,6 +59,9 @@ int usb_kbd_count(void);
 /* Oldest event from keyboard idx: 1 and *out filled, or 0 if none. */
 int usb_kbd_pop(int idx, kbd_event_t *out);
 uint32_t usb_kbd_dropped(int idx);
+/* 1 while keyboard idx's interrupt pipe is still delivering reports (not
+ * stalled, unplugged or on a halted controller), 0 otherwise. */
+int usb_kbd_live(int idx);
 int usb_kbd_ident(int idx, usb_kbd_ident_t *out);
 
 /* Decode one boot report for keyboard idx: diff it against the previous
