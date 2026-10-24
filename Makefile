@@ -1,4 +1,4 @@
-.PHONY: docker-build docker-run docker-run-kernel docker-test docker-build-doom docker-link-doom clean
+.PHONY: docker-build docker-run docker-run-kernel docker-run-blank run-blank docker-test docker-build-doom docker-link-doom clean
 
 DEBUG ?= 0
 # AUDIO_PROFILE=1 compiles in the MUSPROF/HDAPROF serial timing reports
@@ -63,6 +63,18 @@ docker-run-kernel: docker-build
 	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
 	docker run --rm -it -v "$(PWD):/work" exodoom-qemu \
 	  'qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 $(QEMU_USB_ARGS) -no-reboot -display curses -serial mon:stdio'
+
+# First-boot demo (SCRUM-234): same as docker-run-kernel, but the disk is an
+# all-zero image the size of the real one, so the shell finds no ExoFS
+# superblock and offers "no system volume -- format? [y/N]". Regenerated
+# (re-zeroed) on every run, so each boot starts from a new install;
+# build/exodoom_disk.img is left alone.
+docker-run-blank: docker-build
+	rm -f build/exodoom_blank.img
+	truncate -s "$$(stat -c %s build/exodoom_disk.img)" build/exodoom_blank.img
+	docker build -t exodoom-qemu -f docker/Dockerfile.qemu docker
+	docker run --rm -it -v "$(PWD):/work" exodoom-qemu \
+	  'qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_blank.img,format=raw,if=ide -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 $(QEMU_USB_ARGS) -no-reboot -display curses -serial mon:stdio'
 
 # build/exodoom_disk.img (written by docker/scripts/build.sh step [2e2/7],
 # SCRUM-190) replaces build/ata_scratch.img here too: its low LBAs keep that
@@ -154,6 +166,13 @@ docker-run-debug: docker-build
 # suite asserts on, and headless Docker has no audio backend to hand.
 run: docker-build
 	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 $(QEMU_USB_ARGS) -no-reboot -serial stdio
+
+# Host-qemu twin of docker-run-blank (SCRUM-234): same zeroed disk, but in a
+# real window on the host like `run`.
+run-blank: docker-build
+	rm -f build/exodoom_blank.img
+	truncate -s "$$(stat -c %s build/exodoom_disk.img)" build/exodoom_blank.img
+	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_blank.img,format=raw,if=ide -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 $(QEMU_USB_ARGS) -no-reboot -serial stdio
 
 clean:
 	rm -rf build

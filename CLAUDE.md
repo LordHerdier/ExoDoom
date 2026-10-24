@@ -32,6 +32,7 @@ and GNU Make).
 make docker-build              # Build kernel + ISO -> build/exodoom, build/exodoom.iso
 make docker-run                # Build, then boot the ISO in QEMU (GRUB menu)
 make docker-run-kernel         # Build, then boot the ISO with the GRUB menu skipped -- preferred for dev iteration
+make docker-run-blank         # Like docker-run-kernel but on a zeroed disk: exercises the first-boot format prompt
 make docker-test               # Build with TESTING=1, boot, stream serial test output
 make docker-ci                 # Same as docker-test; what CI runs
 make docker-build-doom         # Compile-only gate over vendored src/doom/ (79/79; CI runs it)

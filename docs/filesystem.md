@@ -538,6 +538,25 @@ difference.
 
 ---
 
+### First boot (SCRUM-234)
+
+The shell checks the system volume (the program volume at
+`LIBOS_WAD_DISK_BASE_LBA`) once at startup: acquire, `exofs_mount()`, unmount,
+release. Only `-EXO_EINVAL` (no superblock) means "unformatted" and gets the
+`no system volume -- format? [y/N]` prompt; a busy disk, `-EXO_ENOMEM` or an
+I/O error is reported and **never** offers a format. `y` runs `exofs_format()`
+over `[LIBOS_WAD_DISK_BASE_LBA, EXO_VOLUME_REGION_BASE_LBA)`, re-mounts to
+check, and the shell carries on without a reboot; anything else declines. The
+decisions are in `src/shell/shell_firstboot.h` (tested by
+`tests/kernel/test_shell_firstboot_k.c`); the prompt itself is manual-test
+only. `programs` lists the `*.exo` files on the volume and says `no programs
+installed` on a fresh one. A first-boot check must not assert "one block
+used": a fresh volume has two (§6b).
+
+To try it, `make docker-run-blank` boots on a zero-filled image the size of
+the real one (regenerated every run, `build/exodoom_disk.img` untouched):
+expect the prompt, `y`, then `programs` reporting `no programs installed`.
+
 ## 9. Source map
 
 | File | What it holds |

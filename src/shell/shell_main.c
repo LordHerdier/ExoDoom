@@ -98,6 +98,7 @@
 #include "libos_fs/exofs.h"
 #include "exo_volume.h"
 #include "ps2.h"
+#include "shell/shell_firstboot.h"
 #include "shell/shell_help.h"
 #include "stdlib.h"
 
@@ -163,6 +164,15 @@ static char shell_pslist_fail_text[] = "pslist: query failed\n";
 static char shell_fs_disk_busy_text[] = "disk busy: err=";
 static char shell_fs_mount_fail_text[] = "mount failed (run mkfs?): err=";
 static char shell_fs_ok_text[] = "ok\n";
+/* First boot (SCRUM-234). */
+static char shell_nosys_text[] = "no system volume";
+static char shell_firstboot_prompt_text[] = "no system volume -- format? [y/N] ";
+static char shell_firstboot_skip_text[] =
+    "not formatted: program commands will fail until the system volume exists\n";
+static char shell_firstboot_done_text[] =
+    "system volume formatted; no programs installed\n";
+static char shell_firstboot_probe_text[] = "system volume: cannot check it: err=";
+static char shell_programs_none_text[] = "no programs installed\n";
 static char shell_fs_err_prefix[] = "error: err=";
 static char shell_fs_no_room_text[] = "mkfs: no room for shell volume on this disk\n";
 static char shell_ls_dir_suffix[] = "/\n";
@@ -195,6 +205,11 @@ static int shell_cmd_match(const char *line, const char *cmd, const char **rest)
 static int shell_fs_acquire_and_mount(fb_console_t *con);
 static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba);
 static void shell_run_run(fb_console_t *con, const char *arg);
+static void shell_run_programs(fb_console_t *con, const char *arg);
+static void shell_firstboot_check(fb_console_t *con);
+static int shell_probe_system_volume(void);
+static int shell_format_volume(fb_console_t *con, uint32_t base_lba,
+                               uint32_t region_end_lba);
 static int shell_admit_report(fb_console_t *con, const void *pkg, uint32_t len);
 static void shell_fs_release(void);
 static int shell_resolve_path(const char *in, char *out, size_t out_len);
@@ -255,6 +270,7 @@ void shell_main(void) {
     fbcon_write(&con, shell_banner);
     fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
     fbcon_write(&con, shell_help_text);
+    shell_firstboot_check(&con);
     shell_print_prompt(&con);
 
     static char cmd_buf[SHELL_CMD_BUF_LEN];
@@ -453,6 +469,10 @@ static const shell_cmd_t shell_cmds[] = {
         "usage: mv <src> <dst>\n"
         "     Not atomic: copies <src> to <dst>, then deletes <src>\n" },
       shell_run_mv, 1 },
+    { { "programs", SHELL_GRP_APPS, "List installed programs",
+        "usage: programs\n"
+        "     Lists the .exo packages on the system volume\n" },
+      shell_run_programs, 0 },
     { { "pslist", SHELL_GRP_SYSTEM, "List live contexts",
         "usage: pslist\n" },
       shell_run_pslist, 0 },
@@ -1050,6 +1070,12 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         return;
     }
 
+    if (shell_firstboot_classify(shell_probe_system_volume()) ==
+        SHELL_FIRSTBOOT_UNFORMATTED) {
+        fbcon_write(con, shell_nosys_text);
+        fbcon_write(con, " (reboot to be offered a format)\n");
+        return;
+    }
     if (!shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
         return;
     }
@@ -1146,39 +1172,162 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
  * The region stops at LIBOS_WAD_DISK_BASE_LBA regardless of how big the
  * disk actually is: that LBA is where the WAD's own volume lives, and mkfs
  * must never claim sectors it owns. */
-static void shell_run_mkfs(fb_console_t *con, const char *arg) {
-    (void)arg;
-    int64_t rc = shell_disk_acquire_for(SHELL_FS_BASE_LBA);
+static int shell_format_volume(fb_console_t *con, uint32_t base_lba,
+                               uint32_t region_end_lba) {
+    int64_t rc = shell_disk_acquire_for(base_lba);
     if (rc != 0) {
         fbcon_write(con, shell_fs_disk_busy_text);
         shell_write_i64(con, rc);
         fbcon_write(con, "\n");
-        return;
+        return 0;
     }
 
     exo_diskstat_t stat;
     int64_t src = exo_diskstat(&stat);
     uint32_t vol_sectors = (src == 0)
-        ? exofs_region_sectors(SHELL_FS_BASE_LBA, LIBOS_WAD_DISK_BASE_LBA,
-                               stat.total_sectors)
+        ? exofs_region_sectors(base_lba, region_end_lba, stat.total_sectors)
         : 0u;
 
     if (vol_sectors == 0u) {
         exo_disk_release();
         fbcon_write(con, shell_fs_no_room_text);
-        return;
+        return 0;
     }
 
-    int frc = exofs_format(SHELL_FS_BASE_LBA, vol_sectors);
+    int frc = exofs_format(base_lba, vol_sectors);
     exo_disk_release();
 
     if (frc != 0) {
         fbcon_write(con, shell_fs_err_prefix);
         shell_write_i64(con, frc);
         fbcon_write(con, "\n");
+        return 0;
+    }
+    return 1;
+}
+
+static void shell_run_mkfs(fb_console_t *con, const char *arg) {
+    (void)arg;
+    if (shell_format_volume(con, SHELL_FS_BASE_LBA, LIBOS_WAD_DISK_BASE_LBA)) {
+        fbcon_write(con, shell_fs_ok_text);
+    }
+}
+
+/* Mount result for the system volume with the raw code exposed, which
+ * shell_fs_acquire_and_mount_at() hides: first boot must tell "no superblock"
+ * from "could not look". Acquires and releases the disk itself; on a failed
+ * acquire the code is the acquire's. */
+static int shell_probe_system_volume(void) {
+    int64_t arc = shell_disk_acquire_for(LIBOS_WAD_DISK_BASE_LBA);
+    if (arc != 0) {
+        return (int)arc;
+    }
+    int mrc = exofs_mount(LIBOS_WAD_DISK_BASE_LBA);
+    if (mrc == 0) {
+        exofs_unmount();
+    }
+    exo_disk_release();
+    return mrc;
+}
+
+/* SCRUM-234: on startup, check the system volume (the program volume) and,
+ * if the disk is blank, offer to format it. The decisions live in
+ * shell_firstboot.h. A blank line, n, or any other key declines. */
+static void shell_firstboot_check(fb_console_t *con) {
+    int rc = shell_probe_system_volume();
+    shell_firstboot_t state = shell_firstboot_classify(rc);
+
+    if (state == SHELL_FIRSTBOOT_PRESENT) {
         return;
     }
-    fbcon_write(con, shell_fs_ok_text);
+    if (state == SHELL_FIRSTBOOT_ERROR) {
+        fbcon_write(con, shell_firstboot_probe_text);
+        shell_write_i64(con, rc);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    fbcon_write(con, shell_firstboot_prompt_text);
+    char answer = 0;
+    for (;;) {
+        exo_kbd_event_t ev;
+        if (exo_kbd_poll(&ev) != 1 || !ev.pressed) {
+            continue;
+        }
+        if (ev.key == KEY_ENTER) {
+            break;
+        }
+        char c = shell_key_to_ascii(ev.key, ev.modifiers);
+        if (c != 0) {
+            answer = c;
+            fbcon_putc(con, c);
+            break;
+        }
+    }
+    fbcon_write(con, "\n");
+
+    if (!shell_firstboot_answer_is_yes(answer)) {
+        fbcon_write(con, shell_firstboot_skip_text);
+        return;
+    }
+    if (shell_format_volume(con, LIBOS_WAD_DISK_BASE_LBA,
+                            EXO_VOLUME_REGION_BASE_LBA) &&
+        shell_probe_system_volume() == 0) {
+        fbcon_write(con, shell_firstboot_done_text);
+    }
+}
+
+/* `programs` -- the *.exo packages on the system volume. */
+static void shell_run_programs(fb_console_t *con, const char *arg) {
+    (void)arg;
+    int rc = shell_probe_system_volume();
+    if (shell_firstboot_classify(rc) == SHELL_FIRSTBOOT_UNFORMATTED) {
+        fbcon_write(con, shell_nosys_text);
+        fbcon_write(con, " (reboot to be offered a format)\n");
+        return;
+    }
+    if (!shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
+        return;
+    }
+
+    exofs_dir_t dir;
+    rc = exofs_opendir("/", &dir);
+    if (rc != 0) {
+        shell_fs_release();
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, rc);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    int found = 0;
+    for (;;) {
+        exofs_dirinfo_t info;
+        if (exofs_readdir(&dir, &info) <= 0) {
+            break;
+        }
+        if (info.attributes & EXOFS_ATTR_DIRECTORY) {
+            continue;
+        }
+        size_t n = 0;
+        while (info.name[n] != '\0') {
+            n++;
+        }
+        if (n < 5 || info.name[n - 4] != '.' || info.name[n - 3] != 'e' ||
+            info.name[n - 2] != 'x' || info.name[n - 1] != 'o') {
+            continue;
+        }
+        found = 1;
+        fbcon_write(con, shell_ls_file_prefix);
+        fbcon_write(con, info.name);
+        fbcon_write(con, "\n");
+    }
+    exofs_closedir(&dir);
+    shell_fs_release();
+
+    if (!found) {
+        fbcon_write(con, shell_programs_none_text);
+    }
 }
 
 /* `mkdir <path>` -- exofs_mkdir(), against `arg` resolved relative to

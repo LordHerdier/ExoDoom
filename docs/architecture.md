@@ -1041,8 +1041,11 @@ Details and error codes: `docs/syscall_spec.md` §3.2 #36.
   --volume-sectors M` on `tools/exopkg` sets them; `docker/scripts/build.sh`
   step [2f2/7] builds the `libos_voldemo` demo, packaged as `voldemoa.exo`
   and `voldemob.exo` (slots 0 and 1), and grows the disk image to cover the
-  slots. `docs/syscall_spec.md` §3.5a has the rules; SCRUM-233/234 are the
-  install and first-boot halves.
+  slots. `docs/syscall_spec.md` §3.5a has the rules; SCRUM-233 (install) and SCRUM-234 (first boot, below) are the
+  two halves.
+- **First boot (SCRUM-234).** The shell probes this volume at startup and offers
+  to format it when blank; `programs` lists the packages on it. See
+  `docs/filesystem.md` "First boot".
 - **Snake and the clock are no longer in the kernel image.** Their
   `launch_apps[]` rows and `EXO_LAUNCH_APP_SNAKE`/`_CLOCK` are gone (WAD viewer
   is app id 0, Doom 1); `build.sh` builds their blobs but does not link them
