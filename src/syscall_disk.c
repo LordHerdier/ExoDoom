@@ -1,7 +1,7 @@
 #include "syscall_disk.h"
 #include "syscall.h"
 #include "exo_syscall.h"
-#include "ata.h"
+#include "blkdev.h"
 #include "disk_binding.h"
 
 #include <stddef.h>
@@ -10,14 +10,23 @@
 /* 28-bit LBA addressing only (src/ata.h) -- the highest valid sector. */
 #define ATA_MAX_LBA 0x0FFFFFFFu
 
-static int64_t ata_err_to_exo(int rc)
+_Static_assert(EXO_DISK_MAX_DEVICES == BLKDEV_MAX,
+               "exo_diskstat's device range must match the registry's");
+
+static int64_t blkdev_err_to_exo(int rc)
 {
     switch (rc) {
-    case ATA_ENODEV:  return -EXO_ENODEV;
-    case ATA_ETIMEOUT: /* fall through */
-    case ATA_EIO:      return -EXO_EIO;
+    case BLKDEV_ENODEV: return -EXO_ENODEV;
     default:            return -EXO_EIO;
     }
+}
+
+/* SCRUM-244: whether `dev`, as the full 64-bit register the dispatcher hands
+ * over, names a device that exists. Checked whole, before narrowing, for the
+ * same reason validate_disk_shape() takes 64-bit lba/count. */
+static int disk_dev_present(uint64_t dev)
+{
+    return dev <= UINT32_MAX && disk_binding_present((uint32_t)dev);
 }
 
 /* First half of the shared validation: pure argument shape, no buffer, no
@@ -83,29 +92,30 @@ static int64_t validate_disk_buf(uint64_t buf, uint64_t count, int writable)
  * holds nothing): the isolation guarantee between two LibOS volumes is this
  * check, and nothing below the syscall layer repeats it. Returns 0 to
  * proceed or a negative -EXO_E*. */
-static int64_t check_disk_access(uint64_t lba, uint64_t count)
+static int64_t check_disk_access(uint32_t dev, uint64_t lba, uint64_t count)
 {
-    switch (disk_binding_check_range(syscall_current_context(), lba, count)) {
+    switch (disk_binding_check_range(syscall_current_context(), dev, lba,
+                                     count)) {
     case DISK_BIND_OK:     return 0;
     case DISK_BIND_ERANGE: return -EXO_EINVAL;
     default:                return -EXO_EBUSY;
     }
 }
 
-/* #24 -- read `count` sectors starting at `lba` into `buf`. */
-static int64_t sys_disk_read(uint64_t lba, uint64_t buf, uint64_t count,
-                             uint64_t a4, uint64_t a5, uint64_t a6)
+/* #24 -- read `count` sectors of device `dev` starting at `lba` into `buf`. */
+static int64_t sys_disk_read(uint64_t dev, uint64_t lba, uint64_t buf,
+                             uint64_t count, uint64_t a5, uint64_t a6)
 {
-    (void)a4; (void)a5; (void)a6;
+    (void)a5; (void)a6;
 
     int64_t v = validate_disk_shape(lba, count);
     if (v <= 0)
         return v;
 
-    if (!disk_binding_present())
+    if (!disk_dev_present(dev))
         return -EXO_ENODEV;
 
-    v = check_disk_access(lba, count);
+    v = check_disk_access((uint32_t)dev, lba, count);
     if (v < 0)
         return v;
 
@@ -113,28 +123,31 @@ static int64_t sys_disk_read(uint64_t lba, uint64_t buf, uint64_t count,
     if (v <= 0)
         return v;
 
-    int rc = ata_read_sectors((uint32_t)lba, (uint8_t *)(uintptr_t)buf,
-                              (uint32_t)count);
-    if (rc != ATA_OK)
-        return ata_err_to_exo(rc);
+    const blkdev_t *bd = blkdev_get((uint32_t)dev);
+    if (bd == NULL)
+        return -EXO_ENODEV;
+    int rc = bd->read(bd->ctx, (uint32_t)lba, (uint8_t *)(uintptr_t)buf,
+                      (uint32_t)count);
+    if (rc != BLKDEV_OK)
+        return blkdev_err_to_exo(rc);
 
     return (int64_t)count;
 }
 
-/* #25 -- write `count` sectors starting at `lba` from `buf`. */
-static int64_t sys_disk_write(uint64_t lba, uint64_t buf, uint64_t count,
-                              uint64_t a4, uint64_t a5, uint64_t a6)
+/* #25 -- write `count` sectors of device `dev` starting at `lba` from `buf`. */
+static int64_t sys_disk_write(uint64_t dev, uint64_t lba, uint64_t buf,
+                              uint64_t count, uint64_t a5, uint64_t a6)
 {
-    (void)a4; (void)a5; (void)a6;
+    (void)a5; (void)a6;
 
     int64_t v = validate_disk_shape(lba, count);
     if (v <= 0)
         return v;
 
-    if (!disk_binding_present())
+    if (!disk_dev_present(dev))
         return -EXO_ENODEV;
 
-    v = check_disk_access(lba, count);
+    v = check_disk_access((uint32_t)dev, lba, count);
     if (v < 0)
         return v;
 
@@ -142,28 +155,37 @@ static int64_t sys_disk_write(uint64_t lba, uint64_t buf, uint64_t count,
     if (v <= 0)
         return v;
 
-    int rc = ata_write_sectors((uint32_t)lba, (const uint8_t *)(uintptr_t)buf,
-                               (uint32_t)count);
-    if (rc != ATA_OK)
-        return ata_err_to_exo(rc);
+    const blkdev_t *bd = blkdev_get((uint32_t)dev);
+    if (bd == NULL)
+        return -EXO_ENODEV;
+    int rc = bd->write(bd->ctx, (uint32_t)lba,
+                       (const uint8_t *)(uintptr_t)buf, (uint32_t)count);
+    if (rc != BLKDEV_OK)
+        return blkdev_err_to_exo(rc);
 
     return (int64_t)count;
 }
 
-/* #26 -- bind sectors [base, base + count) to the caller; count == 0 means
- * the whole device (SCRUM-237). The arguments arrive as full 64-bit values
- * for the same reason validate_disk_shape()'s do: truncating a raw-ABI
- * caller's high bits would turn an invalid extent into a valid one. */
-static int64_t sys_disk_acquire(uint64_t base, uint64_t count, uint64_t a3,
+/* #26 -- bind sectors [base, base + count) of device `dev` to the caller;
+ * count == 0 means the whole device (SCRUM-237, device SCRUM-244). The
+ * arguments arrive as full 64-bit values for the same reason
+ * validate_disk_shape()'s do: truncating a raw-ABI caller's high bits would
+ * turn an invalid extent into a valid one. A missing device is -EXO_ENODEV
+ * ahead of the extent's shape, the precedence #24/#25 use. */
+static int64_t sys_disk_acquire(uint64_t dev, uint64_t base, uint64_t count,
                                 uint64_t a4, uint64_t a5, uint64_t a6)
 {
-    (void)a3; (void)a4; (void)a5; (void)a6;
+    (void)a4; (void)a5; (void)a6;
+
+    if (!disk_dev_present(dev))
+        return -EXO_ENODEV;
 
     if (base > UINT32_MAX || count > UINT32_MAX)
         return -EXO_EINVAL;
 
     switch (disk_binding_acquire_extent(syscall_current_context(),
-                                        (uint32_t)base, (uint32_t)count)) {
+                                        (uint32_t)dev, (uint32_t)base,
+                                        (uint32_t)count)) {
     case DISK_BIND_OK:      return 0;
     case DISK_BIND_EBUSY:   return -EXO_EBUSY;
     case DISK_BIND_ERANGE:  return -EXO_EINVAL;
@@ -173,7 +195,8 @@ static int64_t sys_disk_acquire(uint64_t base, uint64_t count, uint64_t a3,
     }
 }
 
-/* #27 -- give the binding back (SCRUM-189).
+/* #27 -- give the binding of device `dev` back (SCRUM-189, device
+ * SCRUM-244). Only that device: a caller holding two lets go of each.
  *
  * No failure mode: disk_binding_release() is already a no-op for a context
  * that does not hold the disk, so there is nothing to report that the caller
@@ -186,25 +209,35 @@ static int64_t sys_disk_acquire(uint64_t base, uint64_t count, uint64_t a3,
  * on a headless machine cannot be holding a binding, so the release is a
  * no-op either way, and answering -EXO_ENODEV would make the unconditional
  * cleanup above impossible for the one caller that needs it most. Nothing
- * here touches the ATA bus, so there is no hardware to be absent. */
-static int64_t sys_disk_release(uint64_t a1, uint64_t a2, uint64_t a3,
+ * here touches the ATA bus, so there is no hardware to be absent. The same
+ * holds for a `dev` that names no device: nothing can be held there. */
+static int64_t sys_disk_release(uint64_t dev, uint64_t a2, uint64_t a3,
                                 uint64_t a4, uint64_t a5, uint64_t a6)
 {
-    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
 
-    disk_binding_release(syscall_current_context());
+    if (dev <= UINT32_MAX)
+        disk_binding_release(syscall_current_context(), (uint32_t)dev);
 
     return 0;
 }
 
-/* #31 -- presence + capacity (SCRUM-202). Unscoped introspection like
- * sys_memstat/sys_pslist (src/syscall_stat.c): no ownership check, and no
- * hardware touch -- both fields are state ata_init() already latched at
- * boot (disk_binding_present(), ata_get_sector_count()). */
-static int64_t sys_disk_stat(uint64_t out, uint64_t a2, uint64_t a3,
+/* #31 -- presence + capacity of device `dev` (SCRUM-202, device SCRUM-244).
+ * Unscoped introspection like sys_memstat/sys_pslist (src/syscall_stat.c):
+ * no ownership check, and no hardware touch -- both fields are state the
+ * driver latched at boot (disk_binding_present(), the registry's sector
+ * count). Any `dev` below EXO_DISK_MAX_DEVICES is a valid question whose
+ * answer may be "not present", so a LibOS enumerates the disks by asking
+ * 0, 1, ... and stopping at the first absent one (indices are dense: they
+ * are registration order). Only an index that could never name a device is
+ * -EXO_EINVAL. */
+static int64_t sys_disk_stat(uint64_t dev, uint64_t out, uint64_t a3,
                              uint64_t a4, uint64_t a5, uint64_t a6)
 {
-    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    (void)a3; (void)a4; (void)a5; (void)a6;
+
+    if (dev >= EXO_DISK_MAX_DEVICES)
+        return -EXO_EINVAL;
 
     if (!exo_range_in_user_window(out, sizeof(exo_diskstat_t)) ||
         !exo_user_range_mapped(out, sizeof(exo_diskstat_t), 1))
@@ -212,12 +245,13 @@ static int64_t sys_disk_stat(uint64_t out, uint64_t a2, uint64_t a3,
 
     exo_diskstat_t *stat_out = (exo_diskstat_t *)(uintptr_t)out;
 
-    int present = disk_binding_present();
-    stat_out->present = present ? 1 : 0;
+    const blkdev_t *bd = disk_binding_present((uint32_t)dev)
+                             ? blkdev_get((uint32_t)dev) : NULL;
+    stat_out->present = bd != NULL ? 1 : 0;
     stat_out->reserved[0] = 0;
     stat_out->reserved[1] = 0;
     stat_out->reserved[2] = 0;
-    stat_out->total_sectors = present ? ata_get_sector_count() : 0;
+    stat_out->total_sectors = bd != NULL ? bd->sectors : 0;
 
     return 0;
 }
@@ -244,9 +278,9 @@ static int64_t sys_disk_extent(uint64_t out, uint64_t a2, uint64_t a3,
     return 0;
 }
 
-void syscall_disk_init(int drive_present)
+void syscall_disk_init(uint32_t ndevs)
 {
-    disk_binding_init(drive_present);
+    disk_binding_init(ndevs);
     exo_syscall_register(EXO_SYS_DISK_READ, sys_disk_read);
     exo_syscall_register(EXO_SYS_DISK_WRITE, sys_disk_write);
     exo_syscall_register(EXO_SYS_DISK_ACQUIRE, sys_disk_acquire);

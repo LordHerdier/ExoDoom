@@ -184,7 +184,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    int rc = exofs_format(base_lba, vol_sectors);
+    int rc = exofs_format(0, base_lba, vol_sectors);
     if (rc != 0) {
         fprintf(stderr, "mkexofsimg: exofs_format failed: %d\n", rc);
         host_blockdev_close();
@@ -192,7 +192,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    rc = exofs_mount(base_lba);
+    rc = exofs_mount(0, base_lba);
     if (rc != 0) {
         fprintf(stderr, "mkexofsimg: exofs_mount failed: %d\n", rc);
         host_blockdev_close();

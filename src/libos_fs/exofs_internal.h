@@ -38,6 +38,11 @@
 typedef struct exofs_volume {
     int      mounted;
 
+    /* Block device the volume lives on (SCRUM-244); every transfer below
+     * goes to it. Not in the superblock: a volume does not know which
+     * disk it was carried on. */
+    uint32_t dev;
+
     /* Geometry, as recorded in and validated against the superblock. */
     uint32_t base_lba;       /* LBA of the superblock                     */
     uint32_t fat_lba;        /* base_lba + 1                              */

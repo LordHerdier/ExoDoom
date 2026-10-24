@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 /* The most 512-byte sectors a single exo_disk_read/exo_disk_write call will
  * transfer. The whole call runs with interrupts off (`syscall`'s FMASK
  * clears IF, src/syscall.c) and each sector is a busy-polled PIO transfer
@@ -14,11 +16,12 @@
 /*
  * syscall_disk.h -- exo_disk_read/exo_disk_write/exo_disk_acquire/
  * exo_disk_release handlers (SCRUM-103, binding SCRUM-188, release
- * SCRUM-189).
+ * SCRUM-189, device index SCRUM-244).
  *
  * Binds #24/#25/#26/#27 to the dispatcher in src/syscall.c, the same split
- * syscall_serial.c already has against src/serial.c: src/ata.c knows how to
- * drive the ATA bus, src/disk_binding.c knows who is allowed to touch it
+ * syscall_serial.c already has against src/serial.c: src/blkdev.c knows which
+ * disks exist and how to reach them (src/ata.c registers each IDE drive),
+ * src/disk_binding.c knows who is allowed to touch which sectors of each
  * right now, and this file knows what a LibOS is allowed to ask for and how
  * to answer in -EXO_E* terms. #24/#25 reject a caller that does not hold
  * the binding with -EXO_EBUSY; #26 (exo_disk_acquire) is how a caller gets
@@ -26,9 +29,10 @@
  * half of the revocation protocol (docs/syscall_spec.md §3.6), which
  * without #27 no LibOS could perform for this resource.
  *
- * Call from kernel_main after syscall_init() and ata_init() (the latter so
- * `drive_present` reflects whether a drive actually answered), ahead of the
- * TESTING branch, so the handlers are bound for both a normal boot and the
- * in-kernel test run -- same placement rule as every other syscall_*_init().
+ * Call from kernel_main after syscall_init() and ata_register_blkdevs() (the
+ * latter so `ndevs`, blkdev_count(), reflects the drives that actually
+ * answered), ahead of the TESTING branch, so the handlers are bound for both
+ * a normal boot and the in-kernel test run -- same placement rule as every
+ * other syscall_*_init().
  */
-void syscall_disk_init(int drive_present);
+void syscall_disk_init(uint32_t ndevs);

@@ -32,16 +32,23 @@
  * device as one extent -- so it conflicts with every other holder, exactly as
  * the single-owner binding did.
  *
+ * SCRUM-244 adds the device. There can be several disks (src/blkdev.h), and
+ * an extent is a range *of one device*: extents only conflict when they are
+ * on the same device, and the one-extent-per-owner rule is now one per owner
+ * per device, which is what lets an installer hold the source stick and the
+ * system disk at the same time. A whole-device claim is per device too.
+ * Revocation stays per context: marking, clearing or reclaiming a context's
+ * disk binding acts on every device it holds.
+ *
  * Unlike fb_binding.c there is no geometry to publish — a disk isn't a
- * rectangle — so the only boot-time fact this module needs is whether a
- * drive answered at all (src/ata.c's ata_init() result, already threaded
- * through syscall_disk_init()).
+ * rectangle — so the only boot-time fact this module needs is how many
+ * devices registered (blkdev_count(), threaded through syscall_disk_init()).
  */
 
 /* Status codes from disk_binding_acquire(). */
 #define DISK_BIND_OK       0    /* caller now holds the disk                */
 #define DISK_BIND_EBUSY  (-1)   /* a different context holds it             */
-#define DISK_BIND_ENODEV (-2)   /* this machine has no usable drive         */
+#define DISK_BIND_ENODEV (-2)   /* no such device                           */
 #define DISK_BIND_ERANGE (-3)   /* extent malformed, or access outside the
                                  * caller's extent                          */
 #define DISK_BIND_ENOSLOT (-4)  /* extent table full                        */
@@ -49,7 +56,7 @@
 #define DISK_BIND_EPERM  (-5)   /* the caller has an assigned extent and this
                                  * is not it                                */
 
-/* Most owners that can hold an extent at once. */
+/* Most extents held at once, across every device. */
 #define DISK_BIND_MAX_EXTENTS 8
 
 /* 28-bit LBA addressing (src/ata.h): sector count of the largest addressable
@@ -63,55 +70,55 @@
 #define DISK_REVOKE_ENOENT (-1) /* `who` does not hold the disk             */
 
 /*
- * Record whether this machine has a usable drive, and drop any existing
- * binding. Called once from syscall_disk_init() with ata_init()'s own
- * result, ahead of the TESTING branch so acquire works identically on a
- * normal boot and under the test runner. Returns DISK_BIND_OK if `present`
- * is nonzero, DISK_BIND_ENODEV otherwise.
+ * Record that devices [0, ndevs) exist, and drop every binding and
+ * assignment. Called once from syscall_disk_init() with blkdev_count(),
+ * ahead of the TESTING branch so acquire works identically on a normal boot
+ * and under the test runner. Returns DISK_BIND_OK if `ndevs` is nonzero,
+ * DISK_BIND_ENODEV otherwise.
  */
-int disk_binding_init(int present);
+int disk_binding_init(uint32_t ndevs);
 
-/* Whether disk_binding_init() was told a drive exists. The single source of
- * truth for disk presence — src/syscall_disk.c's -EXO_ENODEV check reads
- * this rather than keeping its own copy of ata_init()'s result, so the two
+/* Whether device `dev` exists as far as disk_binding_init() was told. The
+ * single source of truth for disk presence — src/syscall_disk.c's
+ * -EXO_ENODEV check reads this rather than keeping its own copy, so the two
  * can never disagree (unlike a caller re-deriving presence independently). */
-int disk_binding_present(void);
+int disk_binding_present(uint32_t dev);
+
+/* The `ndevs` disk_binding_init() was given. */
+uint32_t disk_binding_device_count(void);
+
+/* Whole-device claim on `dev`: disk_binding_acquire_extent(who, dev, 0, 0). */
+int disk_binding_acquire(page_owner_t who, uint32_t dev);
 
 /*
- * Bind the disk to `who`.
- *
- *   DISK_BIND_OK      `who` now owns it — including the case where it
- *                      already did, so a LibOS that acquires twice is not
- *                      punished for it. Only "another LibOS holds it" is
- *                      -EBUSY.
- *   DISK_BIND_EBUSY    somebody else owns it
- *   DISK_BIND_ENODEV   no drive exists
- */
-int disk_binding_acquire(page_owner_t who);
-
-/*
- * Bind the sectors [base, base + count) to `who` (SCRUM-237). `count == 0`
- * means the whole device and requires `base == 0`; anything else must lie
- * inside [0, DISK_BIND_LBA_LIMIT) without wrapping (DISK_BIND_ERANGE).
+ * Bind the sectors [base, base + count) of device `dev` to `who` (SCRUM-237,
+ * device SCRUM-244). `count == 0` means the whole device and requires
+ * `base == 0`; anything else must lie inside [0, DISK_BIND_LBA_LIMIT)
+ * without wrapping (DISK_BIND_ERANGE).
  *
  *   DISK_BIND_OK      `who` now holds exactly this extent -- including when
  *                      it already held that same extent.
- *   DISK_BIND_EBUSY    the extent overlaps another owner's, or `who` already
- *                      holds a *different* extent (release first)
+ *   DISK_BIND_EBUSY    the extent overlaps another owner's on this device,
+ *                      or `who` already holds a *different* extent of this
+ *                      device (release first). An extent of another device
+ *                      is no obstacle.
+ *   DISK_BIND_EPERM    `who` has an assigned volume and this is not it
  *   DISK_BIND_ENOSLOT  the table is full
- *   DISK_BIND_ENODEV   no drive exists
+ *   DISK_BIND_ENODEV   no such device
  *   DISK_BIND_ERANGE   malformed extent
  */
-int disk_binding_acquire_extent(page_owner_t who, uint32_t base,
+int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
                                 uint32_t count);
 
 /*
- * Assign `who` the extent [base, base + count) as its volume (SCRUM-237).
+ * Assign `who` the extent [base, base + count) of device 0 as its volume
+ * (SCRUM-237; always device 0 -- the slot region is a system-disk layout).
  * Set by the launcher from the package manifest before the program runs.
  * An assignment does not bind anything by itself; it constrains acquires:
  *
  *   - `who` may acquire only exactly this extent (anything else, including a
- *     whole-device claim, is DISK_BIND_EPERM), and
+ *     whole-device claim or any extent of another device, is
+ *     DISK_BIND_EPERM), and
  *   - no *other* context may acquire anything overlapping it
  *     (DISK_BIND_EBUSY), whether or not `who` currently holds it.
  *
@@ -134,21 +141,27 @@ int disk_binding_assignment_of(page_owner_t who, uint32_t *base,
  * program could re-acquire an arbitrary range afterwards. */
 void disk_binding_forget(page_owner_t who);
 
-/* The extent `who` holds, written to *base / *count (count is the real
- * length, never 0). DISK_BIND_OK, or DISK_BIND_EBUSY if `who` holds none. */
-int disk_binding_extent_of(page_owner_t who, uint32_t *base, uint32_t *count);
+/* The extent `who` holds on `dev`, written to *base / *count (count is the
+ * real length, never 0). DISK_BIND_OK, or DISK_BIND_EBUSY if `who` holds none
+ * there. */
+int disk_binding_extent_of(page_owner_t who, uint32_t dev, uint32_t *base,
+                           uint32_t *count);
 
 /*
- * Whether `who` may touch sectors [lba, lba + count): DISK_BIND_OK if the
- * range lies entirely inside its extent, DISK_BIND_EBUSY if `who` holds no
- * extent at all, DISK_BIND_ERANGE if it holds one and the range leaves it.
- * This is the enforcement point exo_disk_read/exo_disk_write call.
+ * Whether `who` may touch sectors [lba, lba + count) of `dev`:
+ * DISK_BIND_OK if the range lies entirely inside its extent there,
+ * DISK_BIND_EBUSY if `who` holds no extent of that device, DISK_BIND_ERANGE
+ * if it holds one and the range leaves it. This is the enforcement point
+ * exo_disk_read/exo_disk_write call.
  */
-int disk_binding_check_range(page_owner_t who, uint64_t lba, uint64_t count);
+int disk_binding_check_range(page_owner_t who, uint32_t dev, uint64_t lba,
+                             uint64_t count);
 
 /*
- * Release the binding if `who` holds it; a no-op otherwise, so reclamation
- * can call it unconditionally for a context that may never have acquired.
+ * Release `who`'s extent of `dev` if it holds one; a no-op otherwise, so
+ * cleanup can call it unconditionally for a context that may never have
+ * acquired. Extents on other devices are untouched; disk_binding_reclaim()
+ * is the every-device form.
  * This is the voluntary return in the revocation protocol
  * (docs/syscall_spec.md §3.6) and clears any pending mark along with the
  * binding. Kernel-driven reclamation goes through revoke_all() in
@@ -159,14 +172,14 @@ int disk_binding_check_range(page_owner_t who, uint64_t lba, uint64_t count);
  * function, so before that syscall existed a LibOS could acquire the disk
  * and had no way to give it back short of exiting.
  */
-void disk_binding_release(page_owner_t who);
+void disk_binding_release(page_owner_t who, uint32_t dev);
 
-/* The holder, when exactly one context holds an extent -- which is *the*
- * owner of the disk as it was before SCRUM-237 -- and PAGE_OWNER_FREE when
- * nothing is held *or several contexts hold one*. It therefore cannot answer
+/* The holder of `dev`, when exactly one context holds an extent of it --
+ * which is *the* owner of the disk as it was before SCRUM-237 -- and
+ * PAGE_OWNER_FREE when nothing is held there *or several contexts hold one*. It therefore cannot answer
  * "is this mine?" once extents are in play; ask disk_binding_extent_of(who)
  * or disk_binding_check_range() for that. */
-page_owner_t disk_binding_owner(void);
+page_owner_t disk_binding_owner(uint32_t dev);
 
 /* ---- Revocation / repossession ------------------------------------------
  *

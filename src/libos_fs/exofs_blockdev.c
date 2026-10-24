@@ -25,29 +25,32 @@
 
 #ifdef EXO_KERNEL
 
-static int64_t bdev_acquire_raw(uint32_t base, uint32_t count)
+static int64_t bdev_acquire_raw(uint32_t dev, uint32_t base, uint32_t count)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, (uint64_t)base,
-                                (uint64_t)count, 0, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, (uint64_t)dev,
+                                (uint64_t)base, (uint64_t)count, 0, 0, 0);
 }
 
-static int64_t bdev_release_raw(void)
+static int64_t bdev_release_raw(uint32_t dev)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_RELEASE, 0, 0, 0, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_RELEASE, (uint64_t)dev,
+                                0, 0, 0, 0, 0);
 }
 
-static int64_t bdev_read_raw(uint32_t lba, void *buf, uint32_t count)
+static int64_t bdev_read_raw(uint32_t dev, uint32_t lba, void *buf,
+                             uint32_t count)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_READ, (uint64_t)lba,
-                                (uint64_t)(uintptr_t)buf, (uint64_t)count,
-                                0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_READ, (uint64_t)dev,
+                                (uint64_t)lba, (uint64_t)(uintptr_t)buf,
+                                (uint64_t)count, 0, 0);
 }
 
-static int64_t bdev_write_raw(uint32_t lba, const void *buf, uint32_t count)
+static int64_t bdev_write_raw(uint32_t dev, uint32_t lba, const void *buf,
+                              uint32_t count)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_WRITE, (uint64_t)lba,
-                                (uint64_t)(uintptr_t)buf, (uint64_t)count,
-                                0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_WRITE, (uint64_t)dev,
+                                (uint64_t)lba, (uint64_t)(uintptr_t)buf,
+                                (uint64_t)count, 0, 0);
 }
 
 static int64_t bdev_ticks_raw(void)
@@ -57,24 +60,26 @@ static int64_t bdev_ticks_raw(void)
 
 #else /* !EXO_KERNEL — the real LibOS build */
 
-static int64_t bdev_acquire_raw(uint32_t base, uint32_t count)
+static int64_t bdev_acquire_raw(uint32_t dev, uint32_t base, uint32_t count)
 {
-    return exo_disk_acquire(base, count);
+    return exo_disk_acquire(dev, base, count);
 }
 
-static int64_t bdev_release_raw(void)
+static int64_t bdev_release_raw(uint32_t dev)
 {
-    return exo_disk_release();
+    return exo_disk_release(dev);
 }
 
-static int64_t bdev_read_raw(uint32_t lba, void *buf, uint32_t count)
+static int64_t bdev_read_raw(uint32_t dev, uint32_t lba, void *buf,
+                             uint32_t count)
 {
-    return exo_disk_read(lba, buf, count);
+    return exo_disk_read(dev, lba, buf, count);
 }
 
-static int64_t bdev_write_raw(uint32_t lba, const void *buf, uint32_t count)
+static int64_t bdev_write_raw(uint32_t dev, uint32_t lba, const void *buf,
+                              uint32_t count)
 {
-    return exo_disk_write(lba, buf, count);
+    return exo_disk_write(dev, lba, buf, count);
 }
 
 static int64_t bdev_ticks_raw(void)
@@ -106,7 +111,7 @@ uint32_t exofs_bdev_ticks(void)
 
 #define CHUNK EXO_DISK_MAX_SECTORS
 
-int exofs_bdev_read(uint32_t lba, void *buf, uint32_t count)
+int exofs_bdev_read(uint32_t dev, uint32_t lba, void *buf, uint32_t count)
 {
     uint8_t *p = (uint8_t *)buf;
 
@@ -121,7 +126,7 @@ int exofs_bdev_read(uint32_t lba, void *buf, uint32_t count)
 
     while (count > 0) {
         uint32_t n = (count > CHUNK) ? CHUNK : count;
-        int64_t  r = bdev_read_raw(lba, p, n);
+        int64_t  r = bdev_read_raw(dev, lba, p, n);
 
         if (r < 0) return (int)r;
 
@@ -132,7 +137,8 @@ int exofs_bdev_read(uint32_t lba, void *buf, uint32_t count)
     return 0;
 }
 
-int exofs_bdev_write(uint32_t lba, const void *buf, uint32_t count)
+int exofs_bdev_write(uint32_t dev, uint32_t lba, const void *buf,
+                     uint32_t count)
 {
     const uint8_t *p = (const uint8_t *)buf;
 
@@ -142,7 +148,7 @@ int exofs_bdev_write(uint32_t lba, const void *buf, uint32_t count)
 
     while (count > 0) {
         uint32_t n = (count > CHUNK) ? CHUNK : count;
-        int64_t  r = bdev_write_raw(lba, p, n);
+        int64_t  r = bdev_write_raw(dev, lba, p, n);
 
         if (r < 0) return (int)r;
 
@@ -153,18 +159,18 @@ int exofs_bdev_write(uint32_t lba, const void *buf, uint32_t count)
     return 0;
 }
 
-int exofs_bdev_acquire_extent(uint32_t base, uint32_t count)
+int exofs_bdev_acquire_extent(uint32_t dev, uint32_t base, uint32_t count)
 {
-    int64_t r = bdev_acquire_raw(base, count);
+    int64_t r = bdev_acquire_raw(dev, base, count);
     return (r < 0) ? (int)r : 0;
 }
 
-int exofs_bdev_acquire(void)
+int exofs_bdev_acquire(uint32_t dev)
 {
-    return exofs_bdev_acquire_extent(0, 0);
+    return exofs_bdev_acquire_extent(dev, 0, 0);
 }
 
-void exofs_bdev_release(void)
+void exofs_bdev_release(uint32_t dev)
 {
-    (void)bdev_release_raw();
+    (void)bdev_release_raw(dev);
 }

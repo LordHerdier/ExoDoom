@@ -56,12 +56,12 @@ static int drive_present(void)
 
 static int64_t do_disk_acquire(void)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, 0, 0, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, 0, 0, 0, 0, 0); /* dev 0, whole */
 }
 
 static int64_t do_disk_acquire_extent(uint64_t base, uint64_t count)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, base, count, 0, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, base, count, 0, 0, 0);
 }
 
 static int64_t do_disk_extent(uint64_t out)
@@ -71,7 +71,7 @@ static int64_t do_disk_extent(uint64_t out)
 
 static int64_t do_disk_release(void)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_RELEASE, 0, 0, 0, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_RELEASE, 0, 0, 0, 0, 0, 0); /* dev 0 */
 }
 
 /* Acquire the binding for this suite's own context before the existing
@@ -97,12 +97,12 @@ int syscall_disk_suite_cleanup(void)
 
 static int64_t do_disk_read(uint64_t lba, uint64_t buf, uint64_t count)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_READ, lba, buf, count, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_READ, 0, lba, buf, count, 0, 0);
 }
 
 static int64_t do_disk_write(uint64_t lba, uint64_t buf, uint64_t count)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_WRITE, lba, buf, count, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_WRITE, 0, lba, buf, count, 0, 0);
 }
 
 static int64_t do_alloc(void)
@@ -243,15 +243,15 @@ static void test_foreign_owner_blocks_read_write(void)
 
     /* syscall_disk_suite_init() already acquired this for `me`; hand it to
      * another context to observe the block, then give it back. */
-    disk_binding_release(me);
-    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_OK);
+    disk_binding_release(me, 0);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS, 0), DISK_BIND_OK);
 
     CU_ASSERT_EQUAL(do_disk_read(TEST_LBA, 0, 1), -EXO_EBUSY);
     CU_ASSERT_EQUAL(do_disk_write(TEST_LBA, 0, 1), -EXO_EBUSY);
 
-    disk_binding_release(OTHER_LIBOS);
+    disk_binding_release(OTHER_LIBOS, 0);
     CU_ASSERT_EQUAL(do_disk_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), me);
 }
 
 /* #27, SCRUM-189. The acquire/release pair is what makes phase 2 of the
@@ -265,14 +265,14 @@ static void test_release_returns_the_binding(void)
     page_owner_t me = syscall_current_context();
 
     CU_ASSERT_EQUAL(do_disk_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), me);
 
     CU_ASSERT_EQUAL(do_disk_release(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), PAGE_OWNER_FREE);
 
     /* Released really means released: somebody else can now take it. */
-    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_OK);
-    disk_binding_release(OTHER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS, 0), DISK_BIND_OK);
+    disk_binding_release(OTHER_LIBOS, 0);
 
     CU_ASSERT_EQUAL(do_disk_acquire(), 0);
 }
@@ -290,10 +290,10 @@ static void test_release_without_binding_is_a_noop(void)
 
     CU_ASSERT_EQUAL(do_disk_release(), 0);
     CU_ASSERT_EQUAL(do_disk_release(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), PAGE_OWNER_FREE);
 
     CU_ASSERT_EQUAL(do_disk_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), me);
 }
 
 /* Scoped to the caller: releasing while ANOTHER context holds the disk must
@@ -308,14 +308,14 @@ static void test_release_does_not_touch_a_foreign_binding(void)
     page_owner_t me = syscall_current_context();
 
     CU_ASSERT_EQUAL(do_disk_release(), 0);
-    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS, 0), DISK_BIND_OK);
 
     CU_ASSERT_EQUAL(do_disk_release(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), OTHER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), OTHER_LIBOS);
 
-    disk_binding_release(OTHER_LIBOS);
+    disk_binding_release(OTHER_LIBOS, 0);
     CU_ASSERT_EQUAL(do_disk_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), me);
 }
 
 /* A headless machine answers 0, not -EXO_ENODEV: there is no binding to
@@ -335,7 +335,7 @@ static void test_release_without_a_drive_still_succeeds(void)
  * sector count ata_init() already cached at boot. */
 static int64_t do_disk_stat(uint64_t out)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_STAT, out, 0, 0, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_STAT, 0, out, 0, 0, 0, 0);
 }
 
 static void test_disk_stat_handler_is_bound(void)
@@ -417,7 +417,7 @@ static void test_extent_acquire_arguments(void)
     CU_ASSERT_EQUAL(do_disk_acquire_extent(1ULL << 32, 8), -EXO_EINVAL);
     CU_ASSERT_EQUAL(do_disk_acquire_extent(8, 1ULL << 32), -EXO_EINVAL);
     CU_ASSERT_EQUAL(do_disk_acquire_extent(8, 0), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), PAGE_OWNER_FREE);
 
     CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), 0);
     CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), 0);
@@ -439,7 +439,7 @@ static void test_other_volume_is_untouchable(void)
 
     do_disk_release();
     CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), 0);
-    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, OTHER_VOLUME_LBA, 8),
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, OTHER_VOLUME_LBA, 8),
                     DISK_BIND_OK);
 
     int64_t p = do_alloc();
@@ -466,10 +466,10 @@ static void test_other_volume_is_untouchable(void)
     CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
     CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
 
-    disk_binding_release(OTHER_LIBOS);
+    disk_binding_release(OTHER_LIBOS, 0);
     do_disk_release();
     CU_ASSERT_EQUAL(do_disk_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), me);
 }
 
 static void test_disk_extent_reports_the_assignment(void)

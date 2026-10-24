@@ -46,7 +46,7 @@ static int drive_present(void)
 
 int exo_file_suite_init(void)
 {
-    exofs_bdev_acquire();
+    exofs_bdev_acquire(0);
     return 0;
 }
 
@@ -56,7 +56,7 @@ int exo_file_suite_cleanup(void)
      * is the silent-size-loss case exo_file.h warns about. */
     exo_file_close_all();
     exofs_unmount();
-    exofs_bdev_release();
+    exofs_bdev_release(0);
     return 0;
 }
 
@@ -67,15 +67,15 @@ static int fresh_volume(void)
 {
     exo_file_close_all();
     exofs_unmount();
-    if (exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS) != 0) return 0;
-    if (exofs_mount(EXOFS_TEST_BASE_LBA) != 0) return 0;
+    if (exofs_format(0, EXOFS_TEST_BASE_LBA, VOL_SECTORS) != 0) return 0;
+    if (exofs_mount(0, EXOFS_TEST_BASE_LBA) != 0) return 0;
     return 1;
 }
 
 static int remount(void)
 {
     exofs_unmount();
-    return exofs_mount(EXOFS_TEST_BASE_LBA) == 0;
+    return exofs_mount(0, EXOFS_TEST_BASE_LBA) == 0;
 }
 
 /* ---- Constants ---------------------------------------------------------- */

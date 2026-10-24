@@ -700,6 +700,12 @@ fi
 # rebuild.
 [[ -f build/usb.img ]] || truncate -s 16M build/usb.img
 
+# The second IDE drive behind every QEMU line's $(QEMU_DISK2_ARGS) (SCRUM-244):
+# block device 1, the install-stick stand-in. Blank and sparse; the multidisk
+# KUnit suite formats it, and SCRUM-233 puts packages on it. Created only when
+# missing, like usb.img above.
+[[ -f build/exodoom_disk2.img ]] || truncate -s 8M build/exodoom_disk2.img
+
 echo "[3/7] Compile C sources"
 
 # -DEXO_KERNEL selects the kernel view of src/exo_syscall.h (numbers, shared
@@ -1094,4 +1100,4 @@ echo "[7/7] Create ISO -> build/exodoom.iso"
 grub-mkrescue -o build/exodoom.iso build/isodir >/dev/null
 
 echo "Done:"
-ls -lh build/exodoom build/exodoom.iso build/exodoom_disk.img build/usb.img
+ls -lh build/exodoom build/exodoom.iso build/exodoom_disk.img build/exodoom_disk2.img build/usb.img

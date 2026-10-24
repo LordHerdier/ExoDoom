@@ -5,10 +5,12 @@
 
 /*
  * disk_binding.c — the disk ownership table (SCRUM-188, extended by
- * SCRUM-237 from one owner to one sector extent per owner).
+ * SCRUM-237 from one owner to one sector extent per owner, and by SCRUM-244
+ * to one extent per owner *per device*).
  *
- * State is whether a drive was found at boot and a small table of
- * {owner, base, count, revoke mark}. Extents never overlap, which is the
+ * State is how many devices exist (src/blkdev.h) and a small table of
+ * {owner, device, base, count, revoke mark}. Extents on the same device
+ * never overlap, which is the
  * whole isolation story at this layer: src/syscall_disk.c asks
  * disk_binding_check_range() before every transfer, so a LibOS can only
  * reach sectors it holds. A whole-device claim is just the extent
@@ -25,29 +27,46 @@
 
 typedef struct {
     page_owner_t owner;   /* PAGE_OWNER_FREE = unused slot                  */
+    uint32_t     dev;     /* block device index (src/blkdev.h); 0 for every
+                           * assignment -- volume slots are a device-0 layout */
     uint32_t     base;
     uint32_t     count;   /* real length, never 0                           */
     int          revoke_marked; /* the kernel has asked `owner` to let go   */
 } disk_extent_t;
 
-static int           disk_present;
+/* Devices [0, disk_ndevs) exist. Set once from blkdev_count() at boot
+ * (syscall_disk_init()); the KUnit suites set it directly to model a
+ * machine with fewer drives than the test boot attached. */
+static uint32_t      disk_ndevs;
 static disk_extent_t extents[DISK_BIND_MAX_EXTENTS];
 
 /* Volumes assigned by the launcher (SCRUM-237); same shape as `extents` but
- * with no mark -- an assignment is permission, not a binding. */
+ * with no mark -- an assignment is permission, not a binding. Always device
+ * 0: the slot region (src/exo_volume.h) is a system-disk layout. */
 static disk_extent_t assigned[DISK_BIND_MAX_EXTENTS];
 
-static void clear_all(void)
+static void clear_slot(disk_extent_t *e)
 {
-    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++) {
-        extents[i].owner         = PAGE_OWNER_FREE;
-        extents[i].base          = 0;
-        extents[i].count         = 0;
-        extents[i].revoke_marked = 0;
-    }
+    e->owner         = PAGE_OWNER_FREE;
+    e->dev           = 0;
+    e->base          = 0;
+    e->count         = 0;
+    e->revoke_marked = 0;
 }
 
-static disk_extent_t *find(page_owner_t who)
+static disk_extent_t *find(page_owner_t who, uint32_t dev)
+{
+    if (who == PAGE_OWNER_FREE)
+        return NULL;
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        if (extents[i].owner == who && extents[i].dev == dev)
+            return &extents[i];
+    return NULL;
+}
+
+/* Any extent `who` holds, on any device -- what the revocation entry points
+ * act on, since a context being reclaimed gives up every disk it holds. */
+static disk_extent_t *find_any(page_owner_t who)
 {
     if (who == PAGE_OWNER_FREE)
         return NULL;
@@ -68,39 +87,43 @@ static disk_extent_t *find_assigned(page_owner_t who)
 }
 
 /* Do [a, a+an) and [b, b+bn) share a sector? 64-bit so a whole-device end
- * cannot wrap. */
+ * cannot wrap. Callers compare devices first: the same LBA on two devices is
+ * two different sectors. */
 static int overlap(uint32_t a, uint32_t an, uint32_t b, uint32_t bn)
 {
     return (uint64_t)a < (uint64_t)b + bn && (uint64_t)b < (uint64_t)a + an;
 }
 
-int disk_binding_init(int present)
+int disk_binding_init(uint32_t ndevs)
 {
-    disk_present = present ? 1 : 0;
-    clear_all();
+    disk_ndevs = ndevs;
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++) {
-        assigned[i].owner = PAGE_OWNER_FREE;
-        assigned[i].base  = 0;
-        assigned[i].count = 0;
+        clear_slot(&extents[i]);
+        clear_slot(&assigned[i]);
     }
 
-    return disk_present ? DISK_BIND_OK : DISK_BIND_ENODEV;
+    return disk_ndevs ? DISK_BIND_OK : DISK_BIND_ENODEV;
 }
 
-int disk_binding_present(void)
+int disk_binding_present(uint32_t dev)
 {
-    return disk_present;
+    return dev < disk_ndevs;
 }
 
-int disk_binding_acquire(page_owner_t who)
+uint32_t disk_binding_device_count(void)
 {
-    return disk_binding_acquire_extent(who, 0, 0);
+    return disk_ndevs;
 }
 
-int disk_binding_acquire_extent(page_owner_t who, uint32_t base,
+int disk_binding_acquire(page_owner_t who, uint32_t dev)
+{
+    return disk_binding_acquire_extent(who, dev, 0, 0);
+}
+
+int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
                                 uint32_t count)
 {
-    if (!disk_present)
+    if (!disk_binding_present(dev))
         return DISK_BIND_ENODEV;
 
     /* PAGE_OWNER_FREE is the "unheld" sentinel, so it can never be an owner —
@@ -119,16 +142,19 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t base,
     }
 
     /* A context with an assigned volume may bind that volume and nothing
-     * else; everyone else is kept out of every assigned volume. */
+     * else -- no other device either, or a packaged program could reach a
+     * second disk just by asking; everyone else is kept out of every
+     * assigned volume. */
     disk_extent_t *own = find_assigned(who);
-    if (own && (own->base != base || own->count != count))
+    if (own && (own->dev != dev || own->base != base || own->count != count))
         return DISK_BIND_EPERM;
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
         if (assigned[i].owner != PAGE_OWNER_FREE && assigned[i].owner != who &&
+            assigned[i].dev == dev &&
             overlap(base, count, assigned[i].base, assigned[i].count))
             return DISK_BIND_EBUSY;
 
-    disk_extent_t *mine = find(who);
+    disk_extent_t *mine = find(who, dev);
     if (mine) {
         /* Re-acquire of the same extent is success; a different one is not
          * silently swapped in, because the old one may hold a mounted
@@ -145,7 +171,7 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t base,
                 free_slot = e;
             continue;
         }
-        if (overlap(base, count, e->base, e->count))
+        if (e->dev == dev && overlap(base, count, e->base, e->count))
             return DISK_BIND_EBUSY;
     }
 
@@ -153,6 +179,7 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t base,
         return DISK_BIND_ENOSLOT;
 
     free_slot->owner         = who;
+    free_slot->dev           = dev;
     free_slot->base          = base;
     free_slot->count         = count;
     free_slot->revoke_marked = 0;
@@ -162,7 +189,7 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t base,
 
 int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count)
 {
-    if (!disk_present)
+    if (!disk_binding_present(0))
         return DISK_BIND_ENODEV;
     if (who == PAGE_OWNER_FREE || find_assigned(who))
         return DISK_BIND_EBUSY;
@@ -184,12 +211,14 @@ int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count)
      * launch had reported success. Refuse here instead. */
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
         if (extents[i].owner != PAGE_OWNER_FREE && extents[i].owner != who &&
+            extents[i].dev == 0 &&
             overlap(base, count, extents[i].base, extents[i].count))
             return DISK_BIND_EBUSY;
     if (!free_slot)
         return DISK_BIND_ENOSLOT;
 
     free_slot->owner = who;
+    free_slot->dev   = 0;
     free_slot->base  = base;
     free_slot->count = count;
     return DISK_BIND_OK;
@@ -210,16 +239,14 @@ int disk_binding_assignment_of(page_owner_t who, uint32_t *base,
 void disk_binding_forget(page_owner_t who)
 {
     disk_extent_t *a = find_assigned(who);
-    if (a) {
-        a->owner = PAGE_OWNER_FREE;
-        a->base  = 0;
-        a->count = 0;
-    }
+    if (a)
+        clear_slot(a);
 }
 
-int disk_binding_extent_of(page_owner_t who, uint32_t *base, uint32_t *count)
+int disk_binding_extent_of(page_owner_t who, uint32_t dev, uint32_t *base,
+                           uint32_t *count)
 {
-    disk_extent_t *e = find(who);
+    disk_extent_t *e = find(who, dev);
     if (!e)
         return DISK_BIND_EBUSY;
 
@@ -228,9 +255,10 @@ int disk_binding_extent_of(page_owner_t who, uint32_t *base, uint32_t *count)
     return DISK_BIND_OK;
 }
 
-int disk_binding_check_range(page_owner_t who, uint64_t lba, uint64_t count)
+int disk_binding_check_range(page_owner_t who, uint32_t dev, uint64_t lba,
+                             uint64_t count)
 {
-    disk_extent_t *e = find(who);
+    disk_extent_t *e = find(who, dev);
     if (!e)
         return DISK_BIND_EBUSY;
 
@@ -241,21 +269,25 @@ int disk_binding_check_range(page_owner_t who, uint64_t lba, uint64_t count)
     return DISK_BIND_OK;
 }
 
-void disk_binding_release(page_owner_t who)
+void disk_binding_release(page_owner_t who, uint32_t dev)
 {
     /* The voluntary return, and the compliance half of the revocation
-     * protocol: dropping the binding drops the mark with it. */
-    (void)disk_binding_reclaim(who);
+     * protocol: dropping the binding drops the mark with it. One device
+     * only -- an installer holding the source and the system disk lets go
+     * of each when it is done with it. */
+    disk_extent_t *e = find(who, dev);
+    if (e)
+        clear_slot(e);
 }
 
-page_owner_t disk_binding_owner(void)
+page_owner_t disk_binding_owner(uint32_t dev)
 {
-    if (!disk_present)
+    if (!disk_binding_present(dev))
         return PAGE_OWNER_FREE;
 
     page_owner_t sole = PAGE_OWNER_FREE;
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++) {
-        if (extents[i].owner == PAGE_OWNER_FREE)
+        if (extents[i].owner == PAGE_OWNER_FREE || extents[i].dev != dev)
             continue;
         if (sole != PAGE_OWNER_FREE)
             return PAGE_OWNER_FREE; /* several holders: no single owner */
@@ -264,51 +296,55 @@ page_owner_t disk_binding_owner(void)
     return sole;
 }
 
-/* ---- Revocation / repossession ------------------------------------------- */
+/* ---- Revocation / repossession -------------------------------------------
+ *
+ * Per context, not per device (SCRUM-244): the kernel asks a context to give
+ * back the disk, and reclaims it, as one resource, so every extent the
+ * context holds on every device is marked, cleared or taken together. That
+ * keeps src/revoke.c's REVOKE_DISK a single resource kind. */
 
-/* Does `who` hold an extent? PAGE_OWNER_FREE never does — it is the "unheld"
- * sentinel, and without this check reclaiming on its behalf would match an
- * unused slot and report a phantom success. */
-static disk_extent_t *held(page_owner_t who)
-{
-    return disk_present ? find(who) : NULL;
-}
-
+/* PAGE_OWNER_FREE never holds anything — it is the "unheld" sentinel, and
+ * without find_any()'s check reclaiming on its behalf would match an unused
+ * slot and report a phantom success. */
 int disk_binding_revoke_mark(page_owner_t who)
 {
-    disk_extent_t *e = held(who);
-    if (!e)
+    if (!find_any(who))
         return DISK_REVOKE_ENOENT;
 
-    e->revoke_marked = 1;
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        if (extents[i].owner == who)
+            extents[i].revoke_marked = 1;
     return DISK_REVOKE_OK;
 }
 
 int disk_binding_revoke_clear(page_owner_t who)
 {
-    disk_extent_t *e = held(who);
-    if (!e)
+    if (!find_any(who))
         return DISK_REVOKE_ENOENT;
 
-    e->revoke_marked = 0;
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        if (extents[i].owner == who)
+            extents[i].revoke_marked = 0;
     return DISK_REVOKE_OK;
 }
 
 int disk_binding_revoke_pending(page_owner_t who)
 {
-    disk_extent_t *e = held(who);
-    return e && e->revoke_marked;
+    if (who == PAGE_OWNER_FREE)
+        return 0;
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        if (extents[i].owner == who && extents[i].revoke_marked)
+            return 1;
+    return 0;
 }
 
 int disk_binding_reclaim(page_owner_t who)
 {
-    disk_extent_t *e = held(who);
-    if (!e)
+    if (!find_any(who))
         return DISK_REVOKE_ENOENT;
 
-    e->owner         = PAGE_OWNER_FREE;
-    e->base          = 0;
-    e->count         = 0;
-    e->revoke_marked = 0;
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        if (extents[i].owner == who)
+            clear_slot(&extents[i]);
     return DISK_REVOKE_OK;
 }

@@ -50,6 +50,9 @@
  * up being and recorded in the superblock, so `exofs_mount()` needs only
  * the base.
  *
+ * The volume goes on block device `dev` (0 = the system disk, SCRUM-244);
+ * the caller must already hold an extent of it covering the volume.
+ *
  * Destroys whatever was in [base_lba, base_lba + total_sectors). Returns 0,
  * -EXO_EINVAL (`total_sectors` below EXOFS_MIN_SECTORS, or a volume whose
  * FAT would exceed EXOFS_MAX_BLOCKS), -EXO_ENOMEM, or any error
@@ -58,7 +61,7 @@
  *
  * Does not leave the volume mounted; call exofs_mount() afterwards.
  */
-int exofs_format(uint32_t base_lba, uint32_t total_sectors);
+int exofs_format(uint32_t dev, uint32_t base_lba, uint32_t total_sectors);
 
 /*
  * How many sectors a volume starting at `base_lba` may claim, given the
@@ -74,15 +77,17 @@ uint32_t exofs_region_sectors(uint32_t base_lba, uint32_t region_end_lba,
                               uint32_t disk_total_sectors);
 
 /*
- * Mount the volume at `base_lba`: read and validate the superblock, then
- * read the whole FAT into memory.
+ * Mount the volume at `base_lba` of block device `dev` (SCRUM-244): read and
+ * validate the superblock, then read the whole FAT into memory. One volume
+ * is mounted at a time, whichever device it is on; copying between two
+ * volumes means reading into a buffer, unmounting, and mounting the other.
  *
  * Returns 0, -EXO_EINVAL (no ExoFS superblock there, an unsupported
  * version, or internally inconsistent geometry — this is what a blank or
  * foreign disk gets, and the reason the superblock exists), -EXO_EBUSY (a
  * volume is already mounted), -EXO_ENOMEM, or a device error.
  */
-int exofs_mount(uint32_t base_lba);
+int exofs_mount(uint32_t dev, uint32_t base_lba);
 
 /*
  * Write back any FAT sectors modified since the last sync.

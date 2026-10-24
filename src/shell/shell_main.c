@@ -122,6 +122,11 @@
  * silently assumed one. */
 #define SHELL_FS_BASE_LBA    8192u
 
+/* Block device every fixed LBA above lives on: the system disk, which the
+ * kernel always numbers 0 (SCRUM-244). Both shell volumes, the program
+ * volume and the `dd` window are on it. */
+#define SHELL_SYS_DEV        0u
+
 /* Longest line of text `cat <path> <text...>` will write in one call --
  * bounded by SHELL_CMD_BUF_LEN, since the text comes straight out of
  * cmd_buf. Not a filesystem limit. */
@@ -935,11 +940,11 @@ static int shell_fs_copy_file(const char *src, const char *dst) {
  * program volume runs up to where the per-program slots start. */
 static int64_t shell_disk_acquire_for(uint32_t base_lba) {
     if (base_lba >= LIBOS_WAD_DISK_BASE_LBA) {
-        return exo_disk_acquire(LIBOS_WAD_DISK_BASE_LBA,
+        return exo_disk_acquire(SHELL_SYS_DEV, LIBOS_WAD_DISK_BASE_LBA,
                                 EXO_VOLUME_REGION_BASE_LBA -
                                     LIBOS_WAD_DISK_BASE_LBA);
     }
-    return exo_disk_acquire(0, LIBOS_WAD_DISK_BASE_LBA);
+    return exo_disk_acquire(SHELL_SYS_DEV, 0, LIBOS_WAD_DISK_BASE_LBA);
 }
 
 static int shell_fs_acquire_and_mount(fb_console_t *con) {
@@ -957,12 +962,12 @@ static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba) {
         return 0;
     }
 
-    int mrc = exofs_mount(base_lba);
+    int mrc = exofs_mount(SHELL_SYS_DEV, base_lba);
     if (mrc != 0) {
         fbcon_write(con, shell_fs_mount_fail_text);
         shell_write_i64(con, mrc);
         fbcon_write(con, "\n");
-        exo_disk_release();
+        exo_disk_release(SHELL_SYS_DEV);
         return 0;
     }
 
@@ -971,7 +976,7 @@ static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba) {
 
 static void shell_fs_release(void) {
     exofs_unmount();
-    exo_disk_release();
+    exo_disk_release(SHELL_SYS_DEV);
 }
 
 /* Admission check for `run` (SCRUM-232): compare the package's manifest with
@@ -1183,19 +1188,19 @@ static int shell_format_volume(fb_console_t *con, uint32_t base_lba,
     }
 
     exo_diskstat_t stat;
-    int64_t src = exo_diskstat(&stat);
+    int64_t src = exo_diskstat(SHELL_SYS_DEV, &stat);
     uint32_t vol_sectors = (src == 0)
         ? exofs_region_sectors(base_lba, region_end_lba, stat.total_sectors)
         : 0u;
 
     if (vol_sectors == 0u) {
-        exo_disk_release();
+        exo_disk_release(SHELL_SYS_DEV);
         fbcon_write(con, shell_fs_no_room_text);
         return 0;
     }
 
-    int frc = exofs_format(base_lba, vol_sectors);
-    exo_disk_release();
+    int frc = exofs_format(SHELL_SYS_DEV, base_lba, vol_sectors);
+    exo_disk_release(SHELL_SYS_DEV);
 
     if (frc != 0) {
         fbcon_write(con, shell_fs_err_prefix);
@@ -1222,11 +1227,11 @@ static int shell_probe_system_volume(void) {
     if (arc != 0) {
         return (int)arc;
     }
-    int mrc = exofs_mount(LIBOS_WAD_DISK_BASE_LBA);
+    int mrc = exofs_mount(SHELL_SYS_DEV, LIBOS_WAD_DISK_BASE_LBA);
     if (mrc == 0) {
         exofs_unmount();
     }
-    exo_disk_release();
+    exo_disk_release(SHELL_SYS_DEV);
     return mrc;
 }
 
@@ -1733,16 +1738,29 @@ static void shell_run_echo(fb_console_t *con, const char *arg) {
     fbcon_write(con, "\n");
 }
 
-/* `disk` -- exo_diskstat() (#31) for presence/capacity, plus the WAD's LBA
- * range this shell already knows about at compile time
- * (LIBOS_WAD_DISK_BASE_LBA, src/doom_wad_disk.h). The shell volume's own
- * size is computed live from the same capacity via exofs_region_sectors()
- * (SCRUM-203) -- the same number `mkfs` would format, so the two commands
- * can't disagree. */
+/* One `disk` line: "disk N: S sectors (~M MiB)". */
+static void shell_disk_line(fb_console_t *con, uint32_t dev,
+                            const exo_diskstat_t *stat) {
+    fbcon_write(con, "disk ");
+    shell_write_u32(con, dev);
+    fbcon_write(con, ": ");
+    shell_write_u32(con, stat->total_sectors);
+    fbcon_write(con, " sectors (~");
+    shell_write_u32(con, stat->total_sectors / 2048u); /* 512B/sector -> MiB */
+    fbcon_write(con, " MiB)\n");
+}
+
+/* `disk` -- exo_diskstat() (#31) for presence/capacity of every block device
+ * (SCRUM-244: asked 0, 1, ... until the first absent one), plus, for the
+ * system disk, the WAD's LBA range this shell already knows about at compile
+ * time (LIBOS_WAD_DISK_BASE_LBA, src/doom_wad_disk.h). The shell volume's
+ * own size is computed live from the same capacity via
+ * exofs_region_sectors() (SCRUM-203) -- the same number `mkfs` would format,
+ * so the two commands can't disagree. */
 static void shell_run_disk(fb_console_t *con, const char *arg) {
     (void)arg;
     exo_diskstat_t stat;
-    if (exo_diskstat(&stat) != 0) {
+    if (exo_diskstat(SHELL_SYS_DEV, &stat) != 0) {
         fbcon_write(con, shell_disk_fail_text);
         return;
     }
@@ -1751,11 +1769,8 @@ static void shell_run_disk(fb_console_t *con, const char *arg) {
         return;
     }
 
-    fbcon_write(con, "drive: present, ");
-    shell_write_u32(con, stat.total_sectors);
-    fbcon_write(con, " sectors (~");
-    shell_write_u32(con, stat.total_sectors / 2048u); /* 512B/sector -> MiB */
-    fbcon_write(con, " MiB)\n");
+    shell_disk_line(con, SHELL_SYS_DEV, &stat);
+    uint32_t sys_sectors = stat.total_sectors;
     fbcon_write(con, "  wad volume:   lba ");
     shell_write_u32(con, LIBOS_WAD_DISK_BASE_LBA);
     fbcon_write(con, "+\n");
@@ -1764,8 +1779,15 @@ static void shell_run_disk(fb_console_t *con, const char *arg) {
     fbcon_write(con, "+ (");
     shell_write_u32(con, exofs_region_sectors(SHELL_FS_BASE_LBA,
                                               LIBOS_WAD_DISK_BASE_LBA,
-                                              stat.total_sectors));
+                                              sys_sectors));
     fbcon_write(con, " sectors)\n");
+
+    for (uint32_t dev = SHELL_SYS_DEV + 1u; dev < EXO_DISK_MAX_DEVICES; dev++) {
+        if (exo_diskstat(dev, &stat) != 0 || !stat.present) {
+            break;
+        }
+        shell_disk_line(con, dev, &stat);
+    }
 }
 
 /* Next token of a `dd` command line as a uint32_t (shell_parse_u32()).
@@ -1851,7 +1873,7 @@ static void shell_run_dd_read(fb_console_t *con, const char *rest) {
 
     uint8_t sector[512];
     for (uint32_t i = 0; i < count; i++) {
-        int64_t got = exo_disk_read(lba + i, sector, 1);
+        int64_t got = exo_disk_read(SHELL_SYS_DEV, lba + i, sector, 1);
         if (got < 0) {
             rc = (int)got;
             break;
@@ -1947,7 +1969,7 @@ static void shell_run_dd_write(fb_console_t *con, const char *rest) {
                 sector[z] = 0;
             }
         }
-        int64_t wrote = exo_disk_write(lba + i, sector, 1);
+        int64_t wrote = exo_disk_write(SHELL_SYS_DEV, lba + i, sector, 1);
         if (wrote < 0) {
             rc = (int)wrote;
             break;
