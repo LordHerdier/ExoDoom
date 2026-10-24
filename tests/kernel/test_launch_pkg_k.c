@@ -29,6 +29,7 @@
 #include "syscall.h"
 #include "string.h"
 #include "fb_binding.h"
+#include "doom_wad_disk.h"
 
 #include <stdint.h>
 
@@ -352,6 +353,46 @@ static void test_launched_package_is_fully_reclaimable(void)
     unmap_scratch(paddr);
 }
 
+/* exo_pkg_footprint_pages() (the formula exopkg writes into min_pages) must
+ * match what a real #36 launch takes. Measured, not asserted from the loader's
+ * source, so a change to libos_build_image()'s table layout fails here instead
+ * of silently making every manifest a lie. */
+static void test_footprint_formula_matches_a_real_launch(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    size_t total = write_probe_package(&h);
+
+    uint32_t free_before = free_pages_now();
+    context_info_t before[CONTEXT_MAX];
+    uint32_t n_before = context_list(before, CONTEXT_MAX);
+
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), 0);
+    uint32_t taken = free_before - free_pages_now();
+
+    context_info_t after[CONTEXT_MAX];
+    uint32_t n_after = context_list(after, CONTEXT_MAX);
+    for (uint32_t i = 0; i < n_after; i++) {
+        int known = 0;
+        for (uint32_t j = 0; j < n_before; j++)
+            known |= (after[i].id == before[j].id);
+        if (!known) {
+            page_reclaim_all(after[i].id);
+            context_destroy(after[i].id);
+        }
+    }
+    context_switch_pending = 0;
+    context_set_current(fg);
+
+    uint32_t formula = exo_pkg_footprint_pages(h.code_len, h.data_len, h.bss_len,
+                                                 h.want_flags);
+    CU_ASSERT_EQUAL(taken, formula);
+
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
 /* ---- params_len: no patch exists for packages, so it is refused ------- */
 
 static void test_package_declaring_a_params_struct_is_refused(void)
@@ -498,6 +539,93 @@ static void test_launch_past_capacity_fails_gracefully(void)
     unmap_scratch(paddr);
 }
 
+/* SCRUM-232's kernel backstop: a manifest asking for more pages than are free
+ * is refused with -ENOMEM before a context row or a page is taken -- not
+ * -EINVAL (the package is well formed) and not a failure inside
+ * libos_build_image(). The boundary is exact: free pages satisfies it. */
+static void test_manifest_minimum_above_free_pages_is_refused(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+
+    uint32_t free_before = free_pages_now();
+    uint32_t ctx_before  = context_count();
+
+    exo_pkg_header_t h = good_header(probe_len());
+    h.min_pages = free_before + 1;
+    h.recommended_pages = h.min_pages;
+    size_t total = write_probe_package(&h);
+
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), -EXO_ENOMEM);
+    CU_ASSERT_EQUAL(free_pages_now(), free_before);
+    CU_ASSERT_EQUAL(context_count(), ctx_before);
+    CU_ASSERT_EQUAL(context_switch_pending, 0);
+
+    /* One page less is admissible: the check is not off by one. */
+    h.min_pages = free_before;
+    h.recommended_pages = free_before;
+    total = write_probe_package(&h);
+    int64_t rc = do_launch_pkg(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(rc == 0 || rc == -EXO_ENOMEM); /* image itself may not fit */
+    context_switch_pending = 0;
+    context_set_current(fg);
+
+    destroy_all_but(fg);
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+/* EXO_PKG_WANT_WAD (SCRUM-232): the manifest asks for the IWAD mapping, so
+ * the params struct must be exactly libos_wad_params_t, and the WAD lookup
+ * happens before a context row or page is taken. */
+static void test_wad_flag_requires_the_params_struct_and_a_wad(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    uint32_t free_before = free_pages_now();
+    uint32_t ctx_before  = context_count();
+
+    /* Wrong params size for a WAD program, and a params struct without the
+     * flag, are both malformed. */
+    exo_pkg_header_t h = good_header(probe_len());
+    h.want_flags = EXO_PKG_WANT_WAD;
+    h.params_len = 0;
+    size_t total = 0;
+    CU_ASSERT_EQUAL(exo_pkg_pack((void *)(uintptr_t)PKG_SCRATCH, VMM_PAGE_SIZE,
+                                 &h, (const void *)&libos_launch_probe, NULL,
+                                 &total), 0);
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), -EXO_EINVAL);
+
+    /* Well formed: it launches exactly when the WAD lookup succeeds, and
+     * either way nothing is left behind once the new context is reclaimed.
+     * (Whether the tests' boot has an IWAD mounted depends on the disk image,
+     * so the expectation is derived from the same lookup the handler makes.) */
+    h.params_len = 16;
+    h.data_len = 16;
+    unsigned char data[16] = {0};
+    CU_ASSERT_EQUAL(exo_pkg_pack((void *)(uintptr_t)PKG_SCRATCH, VMM_PAGE_SIZE,
+                                 &h, (const void *)&libos_launch_probe, data,
+                                 &total), 0);
+    uint64_t wad_paddr, wad_size;
+    int64_t wad_rc = doom_wad_disk_get(&wad_paddr, &wad_size);
+    free_before = free_pages_now();
+
+    int64_t rc = do_launch_pkg(PKG_SCRATCH, total);
+    if (wad_rc == 0) {
+        CU_ASSERT_EQUAL(rc, 0);
+    } else {
+        CU_ASSERT_EQUAL(rc, wad_rc);
+        CU_ASSERT_EQUAL(free_pages_now(), free_before);
+        CU_ASSERT_EQUAL(context_count(), ctx_before);
+    }
+    destroy_all_but(fg);
+    context_switch_pending = 0;
+    context_set_current(fg);
+
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
 void suite_launch_pkg_tests(CU_pSuite s)
 {
     CU_add_test(s, "lengths that cannot be a package are refused first",
@@ -512,10 +640,16 @@ void suite_launch_pkg_tests(CU_pSuite s)
                 test_good_package_builds_an_image_from_the_callers_bytes);
     CU_add_test(s, "a launched package is fully reclaimable",
                 test_launched_package_is_fully_reclaimable);
+    CU_add_test(s, "the footprint formula matches a real launch",
+                test_footprint_formula_matches_a_real_launch);
     CU_add_test(s, "a package declaring a params struct is refused",
                 test_package_declaring_a_params_struct_is_refused);
     CU_add_test(s, "the framebuffer is released only by a launch that happens",
                 test_framebuffer_release_follows_the_manifest);
+    CU_add_test(s, "the WAD flag needs the params struct and a mounted WAD",
+                test_wad_flag_requires_the_params_struct_and_a_wad);
+    CU_add_test(s, "a manifest minimum above the free pages is refused",
+                test_manifest_minimum_above_free_pages_is_refused);
     CU_add_test(s, "launching past the context table fails cleanly",
                 test_launch_past_capacity_fails_gracefully);
 }

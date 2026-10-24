@@ -3,6 +3,8 @@
 #include "exo_syscall.h"
 #include "page_alloc.h"
 #include "context.h"
+#include "fb_binding.h"
+#include "pcm_mixer.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -38,6 +40,37 @@ static int64_t sys_memstat(uint64_t out, uint64_t a2, uint64_t a3,
                       &stat_out->kernel_pages, &stat_out->libos_pages);
     stat_out->region_count = page_alloc_region_count();
     stat_out->reserved = 0;
+
+    return 0;
+}
+
+/* #37 — free-resource snapshot for a launcher's admission check (SCRUM-232).
+ *   0             *out filled
+ *   -EXO_EFAULT   [out, out + sizeof(exo_resstat_t)) is not entirely inside
+ *                 the LibOS window and mapped writable
+ * Reports only; whether a program fits is the launcher's decision. */
+static int64_t sys_resstat(uint64_t out, uint64_t a2, uint64_t a3,
+                           uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+
+    if (!exo_range_in_user_window(out, sizeof(exo_resstat_t)) ||
+        !exo_user_range_mapped(out, sizeof(exo_resstat_t), 1))
+        return -EXO_EFAULT;
+
+    exo_resstat_t *r = (exo_resstat_t *)(uintptr_t)out;
+
+    uint32_t total, free_pages, kernel, libos;
+    page_alloc_totals(&total, &free_pages, &kernel, &libos);
+    uint32_t live = context_count();
+    uint32_t active = pcm_mixer_active_voices();
+
+    r->free_pages = free_pages;
+    r->free_contexts = live < CONTEXT_MAX ? CONTEXT_MAX - live : 0;
+    r->sound_voices_free = active < PCM_MIXER_VOICES ? PCM_MIXER_VOICES - active : 0;
+    r->fb_held = fb_binding_owner() != PAGE_OWNER_FREE;
+    for (int i = 0; i < 4; i++)
+        r->reserved[i] = 0;
 
     return 0;
 }
@@ -83,4 +116,5 @@ void syscall_stat_init(void)
 {
     exo_syscall_register(EXO_SYS_MEMSTAT, sys_memstat);
     exo_syscall_register(EXO_SYS_PSLIST,  sys_pslist);
+    exo_syscall_register(EXO_SYS_RESSTAT, sys_resstat);
 }

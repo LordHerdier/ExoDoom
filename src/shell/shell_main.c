@@ -89,6 +89,7 @@
  */
 
 #include "doom_wad_disk.h"
+#include "exo_admit.h"
 #include "exo_syscall.h"
 #include "fb.h"
 #include "fb_console.h"
@@ -145,10 +146,20 @@ static char shell_commands_text[] =
     "          dd read <lba> <count> <path>, dd write <path> <lba>\n";
 static char shell_about_text[] = "ExoDoom shell LibOS -- SCRUM-110\n";
 static char shell_unknown_prefix[] = "unknown command: ";
-static char shell_wadview_fail_text[] = "wadview: launch failed\n";
-static char shell_doom_fail_text[] = "doom: launch failed\n";
 static char shell_run_usage_text[] = "usage: run <package>   (a .exo file on the program volume)\n";
 static char shell_run_fail_text[] = "run: launch failed: err=";
+/* Admission lines (SCRUM-232). Deliberate wording: "needs N pages, M free" is
+ * the demo line -- the kernel reported, the launcher decided. */
+static char shell_admit_refused_text[] = "run: refused: ";
+static char shell_admit_needs_text[] = "needs ";
+static char shell_admit_pages_text[] = " pages, ";
+static char shell_admit_free_text[] = " free\n";
+static char shell_admit_noctx_text[] = "no free context slot (all in use)\n";
+static char shell_admit_degraded_text[] = "run: granted, degraded: ";
+static char shell_admit_rec_text[] = "recommended ";
+static char shell_admit_voices_text[] = "wants ";
+static char shell_admit_have_text[] = " sound voices, ";
+static char shell_admit_fb_text[] = "run: framebuffer is held; taking it over\n";
 static char shell_memstat_fail_text[] = "memstat: query failed\n";
 static char shell_pslist_fail_text[] = "pslist: query failed\n";
 static char shell_fs_disk_busy_text[] = "disk busy: err=";
@@ -184,6 +195,7 @@ static void shell_print_prompt(fb_console_t *con);
 static void shell_run_command(fb_console_t *con, const char *line);
 static void shell_write_u32(fb_console_t *con, uint32_t v);
 static void shell_write_i64(fb_console_t *con, int64_t v);
+static int shell_admit_report(fb_console_t *con, const void *pkg, uint32_t len);
 static void shell_run_memstat(fb_console_t *con);
 static void shell_run_pslist(fb_console_t *con);
 static int shell_cmd_match(const char *line, const char *cmd, const char **rest);
@@ -379,24 +391,11 @@ static void shell_run_command(fb_console_t *con, const char *line) {
     } else if (str_eq(line, "about")) {
         fbcon_write(con, shell_about_text);
     } else if (str_eq(line, "wadview")) {
-        /* Does not return until the viewer yields back to the shell
-         * (src/syscall_launch.c's #21 handler, exo_syscall.h's own comment
-         * on exo_launch()) -- a negative return here means the
-         * launch failed before ever switching away, not that the viewer
-         * ran and came back. */
-        int64_t rc = exo_launch(EXO_LAUNCH_APP_WAD_VIEWER);
-        if (rc == 0) {
-            /* The viewer draws over this whole physical framebuffer (there
-             * is no compositor yet -- docs/architecture.md's Sprint 12
-             * roadmap tracks that separately), so on a real round trip the
-             * shell's own screen is gone by the time it resumes here.
-             * Clearing and letting the caller's shell_print_prompt() redraw
-             * is what makes "back at the shell" a clean, stable screen
-             * instead of a new prompt drawn over stale automap pixels. */
-            fbcon_clear(con);
-        } else {
-            fbcon_write(con, shell_wadview_fail_text);
-        }
+        /* Like clock/snake/doom below: `run wadview.exo` (SCRUM-232). The
+         * package asks for the IWAD in its manifest (EXO_PKG_WANT_WAD), so it
+         * launches through #36 like everything else, and through the same
+         * admission check. Does not return until the viewer yields back. */
+        shell_run_run(con, "wadview.exo");
     } else if (str_eq(line, "clock")) {
         /* Like snake below, the clock is no longer in the kernel image
          * (SCRUM-231): this is `run clock.exo`. It never yields on its own
@@ -411,27 +410,20 @@ static void shell_run_command(fb_console_t *con, const char *line) {
          * fallback) and control round-robins back here. */
         shell_run_run(con, "snake.exo");
     } else if (str_eq(line, "doom")) {
-        /* Same round-trip convention again (SCRUM-66). Doom's loop does not
+        /* `run doom.exo` (SCRUM-232): the same admission check as every
+         * other program, so a machine without the pages says "needs N pages,
+         * M free" instead of failing inside the loader. Doom's loop does not
          * exit on its own -- D_DoomLoop() runs forever and I_Error halts --
          * so in practice this does not come back; Ctrl+Tab (SCRUM-111) is
-         * how you reach the shell again. A failure here is the launch
-         * itself: no WAD module (-EXO_ENODEV), or no room for the image
-         * (-EXO_ENOMEM), which is much the largest of the four.
+         * how you reach the shell again.
          *
          * Running "doom" again from a different foreground context launches
          * a second, independent instance rather than replacing this one
-         * (SCRUM-196) -- sys_launch() (src/syscall_launch.c) only reclaims
-         * context rows that have actually exited, not ones merely switched
-         * away from. Both stay live until each exits on its own (or the
-         * machine reboots); `pslist` lists every live context id. There is
-         * no split-screen compositor yet (SCRUM-197), so only the current
-         * foreground instance is ever visible at once. */
-        int64_t rc = exo_launch(EXO_LAUNCH_APP_DOOM);
-        if (rc == 0) {
-            fbcon_clear(con);
-        } else {
-            fbcon_write(con, shell_doom_fail_text);
-        }
+         * (SCRUM-196): #36 only reclaims context rows that have actually
+         * exited, not ones merely switched away from. `pslist` lists every
+         * live context id. There is no split-screen compositor yet
+         * (SCRUM-197), so only the foreground instance is visible. */
+        shell_run_run(con, "doom.exo");
     } else if (shell_cmd_match(line, "run", &rest)) {
         shell_run_run(con, rest);
     } else if (str_eq(line, "memstat")) {
@@ -745,6 +737,61 @@ static void shell_fs_release(void) {
     exo_disk_release();
 }
 
+/* Admission check for `run` (SCRUM-232): compare the package's manifest with
+ * what the kernel reports free (exo_resstat, #37) and say what was decided.
+ * Returns 1 to go ahead (granted or degraded), 0 if refused. A package this
+ * cannot parse is let through: exo_launch_pkg() owns the format check and
+ * reports it with its own error, and this must not second-guess it. The
+ * report is a snapshot, so #36 keeps a page-count backstop of its own. */
+static int shell_admit_report(fb_console_t *con, const void *pkg, uint32_t len) {
+    exo_pkg_header_t hdr;
+    const void *code, *data;
+    if (exo_pkg_parse(pkg, len, &hdr, &code, &data) != 0) {
+        return 1;
+    }
+    exo_resstat_t res;
+    if (exo_resstat(&res) != 0) {
+        return 1;
+    }
+
+    exo_admit_t a;
+    exo_admit(&hdr, &res, &a);
+
+    if (a.verdict == EXO_ADMIT_REFUSED) {
+        fbcon_write(con, shell_admit_refused_text);
+        if (a.reason == EXO_ADMIT_CONTEXTS) {
+            fbcon_write(con, shell_admit_noctx_text);
+        } else {
+            fbcon_write(con, shell_admit_needs_text);
+            shell_write_u32(con, a.needed);
+            fbcon_write(con, shell_admit_pages_text);
+            shell_write_u32(con, a.have);
+            fbcon_write(con, shell_admit_free_text);
+        }
+        return 0;
+    }
+    if (a.verdict == EXO_ADMIT_DEGRADED) {
+        fbcon_write(con, shell_admit_degraded_text);
+        if (a.reason == EXO_ADMIT_PAGES) {
+            fbcon_write(con, shell_admit_rec_text);
+            shell_write_u32(con, a.needed);
+            fbcon_write(con, shell_admit_pages_text);
+            shell_write_u32(con, a.have);
+            fbcon_write(con, shell_admit_free_text);
+        } else {
+            fbcon_write(con, shell_admit_voices_text);
+            shell_write_u32(con, a.needed);
+            fbcon_write(con, shell_admit_have_text);
+            shell_write_u32(con, a.have);
+            fbcon_write(con, shell_admit_free_text);
+        }
+    }
+    if (a.fb_displaces) {
+        fbcon_write(con, shell_admit_fb_text);
+    }
+    return 1;
+}
+
 /* `run <package>` -- SCRUM-230. Reads `/<package>` off the program volume
  * (LIBOS_WAD_DISK_BASE_LBA, where build.sh's mkexofsimg step puts packaged
  * programs next to the IWAD) into a heap buffer and hands the bytes to the
@@ -844,6 +891,11 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         fbcon_write(con, shell_fs_err_prefix);
         shell_write_i64(con, rc != 0 ? rc : -EXO_EIO);
         fbcon_write(con, "\n");
+        return;
+    }
+
+    if (!shell_admit_report(con, pkg, st.size)) {
+        libos_heap_free(pkg);
         return;
     }
 

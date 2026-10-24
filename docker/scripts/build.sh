@@ -625,15 +625,14 @@ package_ring3_target() {
 }
 
 # Launch params struct = libos_wad_params_t (src/libos_wad_params.h): two u64.
-# Doom and the WAD viewer still launch through #21 (they need the WAD mapping
-# a package cannot yet request, see docs/architecture.md), so their packages
-# are produced and checked here but not yet launchable via `run`.
+# "wad" (SCRUM-232) is the manifest's request for the IWAD mapping and the
+# params patch, which is what lets Doom and the WAD viewer launch via `run`.
 # Add Tetris (SCRUM-183) / the calculator here when their targets exist.
 package_ring3_target libos_snake      src/libos_snake      snake.exo   fb,kbd
 package_ring3_target libos_clock      src/libos_clock      clock.exo   fb,kbd
-package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,kbd \
+package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,kbd,wad \
   --params-len 16
-package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd \
+package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd,wad \
   --params-len 16 --sound-voices 8
 
 # Every package goes on the program volume under its own file name.
