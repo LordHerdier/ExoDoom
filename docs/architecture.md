@@ -1049,12 +1049,34 @@ Details and error codes: `docs/syscall_spec.md` §3.2 #36.
   (`ring3_embed=0`), and the shell's `snake`/`clock` commands are `run
   snake.exo`/`run clock.exo`. The kernel half is asserted by the
   `launch_pkg` suite; the boot half is a manual `make docker-run-kernel` check.
+- **Admission (SCRUM-232).** The manifest's `min_pages`/`recommended_pages`/
+  `sound_voices`/`want_flags` are read at launch. The kernel *reports* what is
+  free (`exo_resstat`, #38: free pages, free context slots, voices, whether the
+  framebuffer is held); the *launcher* decides, using `exo_admit()` in
+  `src/exo_admit.h` (header-only, pure, tested with hand-built structs). Fewer
+  free pages than `min_pages`, or no free context slot, is a refusal; pages
+  between min and recommended, or fewer voices than wanted, is a degraded grant;
+  a held framebuffer is *not* a refusal (displacing the holder is the designed
+  launch, SCRUM-196) and is only reported. The shell's `run` prints the verdict,
+  e.g. `run: refused: needs 271 pages, 40 free`, instead of the launch failing
+  inside `libos_build_image()`. #36 keeps a backstop (`free_pages < min_pages`
+  is `-EXO_ENOMEM` before anything is allocated) for a launcher that skips the
+  check; it is a floor, not the policy. `min_pages` is not a guess:
+  `exo_pkg_footprint_pages()` (`src/exo_pkg.h`) is the formula `exopkg` uses
+  (code + data/bss + the fixed 16-page stack + 4 page-table pages, + 33 more for
+  `EXO_PKG_WANT_WAD` since the WAD's tables are the program's own), and
+  `test_launch_pkg_k.c` measures a real launch against it.
+- **Doom and the WAD viewer launch this way too.** `EXO_PKG_WANT_WAD` (with
+  `params_len` = 16) makes #36 map the IWAD and patch `libos_wad_params_t`
+  exactly as #21's `LAUNCH_NEEDS_WAD` rows do (shared `launch_attach_wad`), so
+  the shell's `doom` and `wadview` are `run doom.exo` / `run wadview.exo` and go
+  through the same admission check. The #21 rows, `EXO_LAUNCH_APP_*` and the
+  embedded blobs are still in the kernel image: the `launch_multi` and fuzz
+  suites drive them, and retiring them is follow-up work.
 - **Limits worth knowing.** The header's `stack_pages` is advisory (the builder
-  always maps `LIBOS_LAUNCH_STACK_PAGES`); a package cannot request the WAD
-  mapping or a params patch, so Doom and the WAD viewer still launch through
-  #21 until SCRUM-232 gives the manifest a way to say so (their packages are
-  built and checked, with `params_len` set, but #36 refuses a non-zero
-  `params_len`).
+  always maps `LIBOS_LAUNCH_STACK_PAGES`). `recommended_pages` is `min + 16`
+  unless `--recommended-pages` overrides it; it is not a measurement of what a
+  program's heap grows to.
 
 ### Multi-application (Sprint 12)
 

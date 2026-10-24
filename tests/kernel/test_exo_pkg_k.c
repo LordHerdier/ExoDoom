@@ -338,7 +338,7 @@ static void c_min_over_rec(exo_pkg_header_t *h)
 static void c_voices(exo_pkg_header_t *h)
 { h->sound_voices = EXO_PKG_MAX_SOUND_VOICES + 1; }
 static void c_flags(exo_pkg_header_t *h)
-{ h->want_flags |= 1u << 3; }
+{ h->want_flags |= 1u << 4; }
 static void c_noop(exo_pkg_header_t *h)
 { (void)h; }
 

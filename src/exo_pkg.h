@@ -56,6 +56,9 @@
 #define EXO_PKG_WANT_FRAMEBUFFER (1u << 0)
 #define EXO_PKG_WANT_DISK        (1u << 1)
 #define EXO_PKG_WANT_KEYBOARD    (1u << 2)
+#define EXO_PKG_WANT_WAD         (1u << 3) /* mount the IWAD and patch the program's
+                                            * first .data global (params_len must be
+                                            * sizeof(libos_wad_params_t), 16), SCRUM-232 */
 
 /* Negative sentinel returns for exo_pkg_pack()/exo_pkg_parse(). Deliberately
  * NOT src/exo_errno.h's -EXO_E* space: that header is kernel/LibOS-only and
@@ -97,7 +100,8 @@
 /* Every want_flags bit this version defines; anything else is rejected so a
  * v1 parser never silently accepts a request it does not understand. */
 #define EXO_PKG_WANT_ALL (EXO_PKG_WANT_FRAMEBUFFER | EXO_PKG_WANT_DISK | \
-                          EXO_PKG_WANT_KEYBOARD)
+                          EXO_PKG_WANT_KEYBOARD | \
+                          EXO_PKG_WANT_WAD)
 
 typedef struct {
     uint32_t magic;   /* EXO_PKG_MAGIC */
@@ -143,6 +147,44 @@ typedef struct {
  * change and needs an EXO_PKG_VERSION bump. */
 _Static_assert(sizeof(exo_pkg_header_t) == 60,
                "exo_pkg_header_t is an on-disk layout");
+
+/* Pages a launch takes from the PMM before the program runs a single
+ * instruction (SCRUM-232): the code, the data+bss, the fixed stack and the
+ * page-table pages libos_build_image() builds around them. This is what
+ * min_pages must at least be -- a manifest below it admits a program that
+ * then fails inside the loader, which is the failure the admission check
+ * exists to replace. Shared so the packer (tools/exopkg) and the kernel test
+ * that measures a real launch against it use one formula.
+ *
+ * The stack is EXO_PKG_MAX_STACK_PAGES, not the header's stack_pages: the
+ * builder always maps LIBOS_LAUNCH_STACK_PAGES (== the max), and stack_pages
+ * is advisory until it takes a count (docs/architecture.md SS7). */
+#define EXO_PKG_TABLE_PAGES 4u /* PML4 + PDPT + PD + PT; measured, see
+                                * tests/kernel/test_launch_pkg_k.c */
+/* EXO_PKG_WANT_WAD adds the IWAD mapping (src/libos_wad_map.h): the WAD's
+ * pages are shared, but the page tables over them are the program's own, one
+ * PT per 2 MiB. The manifest cannot know the WAD's size, so this is the
+ * worst case -- LIBOS_WAD_MAX_BYTES (64 MiB) / 2 MiB, plus one for an
+ * unaligned start. That makes min_pages a conservative bound, not an exact
+ * footprint: a real launch takes at most this many, and
+ * tests/kernel/test_launch_pkg_k.c asserts it. */
+#define EXO_PKG_WAD_TABLE_PAGES 33u
+
+static inline uint32_t exo_pkg_pages(uint64_t bytes)
+{
+    return (uint32_t)((bytes + EXO_PKG_PAGE_SIZE - 1) / EXO_PKG_PAGE_SIZE);
+}
+
+static inline uint32_t exo_pkg_footprint_pages(uint32_t code_len,
+                                               uint32_t data_len,
+                                               uint32_t bss_len,
+                                               uint32_t want_flags)
+{
+    return exo_pkg_pages(code_len) +
+           exo_pkg_pages((uint64_t)data_len + bss_len) +
+           EXO_PKG_MAX_STACK_PAGES + EXO_PKG_TABLE_PAGES +
+           ((want_flags & EXO_PKG_WANT_WAD) ? EXO_PKG_WAD_TABLE_PAGES : 0u);
+}
 
 /* Everything pack and parse both check about a header, in one place so the
  * two cannot disagree on what a valid package is. Returns 0 or an

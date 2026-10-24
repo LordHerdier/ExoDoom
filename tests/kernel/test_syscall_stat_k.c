@@ -23,6 +23,7 @@
 #include "context.h"
 #include "vmm.h"
 #include "page_alloc.h"
+#include "fb_binding.h"
 
 #include <stdint.h>
 
@@ -34,6 +35,11 @@
 static int64_t do_memstat(uint64_t out)
 {
     return exo_syscall_dispatch(EXO_SYS_MEMSTAT, out, 0, 0, 0, 0, 0);
+}
+
+static int64_t do_resstat(uint64_t out)
+{
+    return exo_syscall_dispatch(EXO_SYS_RESSTAT, out, 0, 0, 0, 0, 0);
 }
 
 static int64_t do_pslist(uint64_t out, uint64_t max)
@@ -82,6 +88,67 @@ static void test_handlers_are_bound(void)
 {
     CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_MEMSTAT));
     CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_PSLIST));
+    CU_ASSERT_PTR_NOT_NULL(exo_syscall_handler(EXO_SYS_RESSTAT));
+}
+
+static uint64_t new_address_space(void);
+
+/* ── resstat (SCRUM-232) ──────────────────────────────────────────────── */
+
+static void test_resstat_bad_out_rejected(void)
+{
+    CU_ASSERT_EQUAL(do_resstat(0), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_resstat(UNMAPPED), -EXO_EFAULT);
+}
+
+static void test_resstat_matches_kernel_state(void)
+{
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p, EXO_PAGE_WRITE | EXO_PAGE_USER), 0);
+
+    exo_resstat_t *r = (exo_resstat_t *)(uintptr_t)SCRATCH;
+    /* Poison first so a field the handler forgets to write cannot pass by
+     * accident on a zeroed page. */
+    for (unsigned i = 0; i < sizeof(*r) / sizeof(uint32_t); i++)
+        ((uint32_t *)r)[i] = 0xDEADBEEFu;
+
+    CU_ASSERT_EQUAL(do_resstat(SCRATCH), 0);
+
+    uint32_t total, free_pages, kernel, libos;
+    page_alloc_totals(&total, &free_pages, &kernel, &libos);
+    CU_ASSERT_EQUAL(r->free_pages, free_pages);
+    CU_ASSERT_EQUAL(r->free_contexts, CONTEXT_MAX - context_count());
+    CU_ASSERT(r->sound_voices_free <= 8);
+    CU_ASSERT_EQUAL(r->fb_held, fb_binding_owner() != PAGE_OWNER_FREE);
+    for (int i = 0; i < 4; i++)
+        CU_ASSERT_EQUAL(r->reserved[i], 0);
+
+    CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+}
+
+static void test_resstat_tracks_context_slots(void)
+{
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p, EXO_PAGE_WRITE | EXO_PAGE_USER), 0);
+    exo_resstat_t *r = (exo_resstat_t *)(uintptr_t)SCRATCH;
+
+    CU_ASSERT_EQUAL(do_resstat(SCRATCH), 0);
+    uint32_t before = r->free_contexts;
+
+    page_owner_t id;
+    CU_ASSERT_EQUAL(context_create(new_address_space(), &id), CONTEXT_OK);
+    CU_ASSERT_EQUAL(do_resstat(SCRATCH), 0);
+    CU_ASSERT_EQUAL(r->free_contexts, before - 1);
+
+    context_destroy(id);
+    CU_ASSERT_EQUAL(do_resstat(SCRATCH), 0);
+    CU_ASSERT_EQUAL(r->free_contexts, before);
+
+    CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
 }
 
 /* ── memstat ──────────────────────────────────────────────────────────── */
@@ -222,6 +289,10 @@ void suite_syscall_stat_tests(CU_pSuite s)
 
     CU_add_test(s, "pslist: max over cap rejected", test_pslist_max_over_cap_rejected);
     CU_add_test(s, "pslist: NULL out rejected", test_pslist_null_out_rejected);
+    CU_add_test(s, "resstat: bad out pointer rejected", test_resstat_bad_out_rejected);
+    CU_add_test(s, "resstat: matches kernel state", test_resstat_matches_kernel_state);
+    CU_add_test(s, "resstat: free_contexts tracks context_create/destroy",
+                test_resstat_tracks_context_slots);
     CU_add_test(s, "pslist: zero max is a no-op", test_pslist_zero_max_is_a_noop);
     CU_add_test(s, "pslist: unmapped in-window rejected",
                test_pslist_unmapped_in_window_rejected);

@@ -20,11 +20,13 @@
  *
  * usage: exopkg <out.exo> <code.bin> <data.bin> <bss-len> <want> [options]
  *        exopkg --check <package.exo>
- *   <want> is a comma-separated list of: fb, disk, kbd, or "none".
+ *   <want> is a comma-separated list of: fb, disk, kbd, wad, or "none".
+ *   "wad" (SCRUM-232) asks the kernel to map the IWAD and patch the first
+ *   .data global; it needs --params-len 16.
  *   options (SCRUM-231; each defaults to the derived value described above):
  *     --params-len N          size of the first-global launch params struct
  *     --sound-voices N        PCM mixer voices wanted
- *     --min-pages N           admission minimum (default: image + stack)
+ *     --min-pages N           admission minimum (default: exo_pkg_footprint_pages())
  *     --recommended-pages N   admission recommendation (default: min + slack)
  *     --stack-pages N         stack pages (default: EXO_PKG_MAX_STACK_PAGES)
  *   --check parses a finished package with exo_pkg_parse() and prints its
@@ -95,16 +97,13 @@ static int parse_want(const char *s, uint32_t *out)
             want |= EXO_PKG_WANT_DISK;
         else if (strcmp(tok, "kbd") == 0)
             want |= EXO_PKG_WANT_KEYBOARD;
+        else if (strcmp(tok, "wad") == 0)
+            want |= EXO_PKG_WANT_WAD;
         else if (strcmp(tok, "none") != 0)
             return -1;
     }
     *out = want;
     return 0;
-}
-
-static uint32_t pages(uint64_t bytes)
-{
-    return (uint32_t)((bytes + EXO_PKG_PAGE_SIZE - 1) / EXO_PKG_PAGE_SIZE);
 }
 
 static int parse_u32(const char *s, uint32_t *out)
@@ -196,7 +195,7 @@ int main(int argc, char **argv)
 
     uint32_t want;
     if (parse_want(argv[5], &want) != 0) {
-        fprintf(stderr, "exopkg: invalid <want> '%s' (fb,disk,kbd or none)\n",
+        fprintf(stderr, "exopkg: invalid <want> '%s' (fb,disk,kbd,wad or none)\n",
                 argv[5]);
         return 1;
     }
@@ -217,9 +216,10 @@ int main(int argc, char **argv)
     hdr.stack_pages = stack_pages;
     hdr.params_len  = params_len;
     hdr.min_pages   = have_min ? min_pages
-                               : pages(code_len) +
-                                 pages((uint64_t)data_len + bss_len) +
-                                 hdr.stack_pages;
+                               : exo_pkg_footprint_pages((uint32_t)code_len,
+                                                         (uint32_t)data_len,
+                                                         (uint32_t)bss_len,
+                                                         want);
     hdr.recommended_pages = have_rec ? rec_pages
                                      : hdr.min_pages + HEAP_SLACK_PAGES;
     hdr.sound_voices = sound_voices;

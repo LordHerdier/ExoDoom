@@ -152,6 +152,9 @@
 /* Which sectors of the disk are this program's own volume (SCRUM-237).
  * Appended for the reason #28-30 were. */
 #define EXO_SYS_DISK_EXTENT         37
+/* Free-resource report for a launcher's admission check (SCRUM-232).
+ * Appended for the reason #28-30 were. */
+#define EXO_SYS_RESSTAT             38
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -161,7 +164,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        38
+#define EXO_SYS_COUNT        39
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -307,6 +310,18 @@ typedef struct {
     uint32_t reserved;      /* zeroed by the kernel                         */
 } exo_memstat_t;
 
+/* exo_resstat(out) — #38 (SCRUM-232).  What is free right now, for a
+ * launcher deciding whether a program's manifest (src/exo_pkg.h) fits. The
+ * kernel only reports; grant / degrade / refuse is the launcher's policy.
+ * Like exo_memstat, deliberately unscoped introspection. */
+typedef struct {
+    uint32_t free_pages;        /* unallocated pages (exo_memstat's free_pages) */
+    uint32_t free_contexts;     /* CONTEXT_MAX minus live contexts              */
+    uint32_t sound_voices_free; /* PCM mixer voices not currently sounding      */
+    uint32_t fb_held;           /* 1 if some context holds the framebuffer      */
+    uint32_t reserved[4];       /* zeroed by the kernel                         */
+} exo_resstat_t;
+
 /* exo_rtc_read(out) — #35.  Calendar date and time from the CMOS RTC, which
  * the kernel treats as UTC (no time zones).  unix_secs is seconds since
  * 1970-01-01 00:00:00 and is derived from the other fields. */
@@ -380,6 +395,7 @@ _Static_assert(sizeof(exo_ps_info_t)     ==  8, "exo_ps_info_t layout is ABI");
 _Static_assert(sizeof(exo_diskstat_t)    ==  8, "exo_diskstat_t layout is ABI");
 _Static_assert(sizeof(exo_diskextent_t)  ==  8, "exo_diskextent_t layout is ABI");
 _Static_assert(sizeof(exo_rtc_time_t)    == 16, "exo_rtc_time_t layout is ABI");
+_Static_assert(sizeof(exo_resstat_t)     == 32, "exo_resstat_t layout is ABI");
 #endif /* __ASSEMBLER__ */
 
 #ifndef EXO_KERNEL
@@ -853,6 +869,19 @@ static inline int64_t exo_rtc_read(exo_rtc_time_t *out)
 static inline int64_t exo_launch_pkg(const void *pkg, uint64_t len)
 {
     return exo_syscall2(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len);
+}
+
+/* #38 — fill *out with what is free right now (SCRUM-232).  A snapshot: it
+ * can be stale by the time the launch happens, which is why #36 keeps its own
+ * cheap page check as a backstop.
+ *
+ *   0            *out filled
+ *   -EXO_EFAULT  [out, out + sizeof(exo_resstat_t)) is not entirely inside the
+ *                LibOS window and mapped writable
+ */
+static inline int64_t exo_resstat(exo_resstat_t *out)
+{
+    return exo_syscall1(EXO_SYS_RESSTAT, (uint64_t)(uintptr_t)out);
 }
 
 #endif /* !EXO_KERNEL */

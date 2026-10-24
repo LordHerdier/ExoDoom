@@ -221,15 +221,62 @@ static int64_t launch_enter(page_owner_t id, const libos_image_t *img,
          * switch is armed: every failure path above leaves whoever holds the
          * binding untouched.
          *
-         * KNOWN GAP (SCRUM-232): this displaces the holder whoever the
+         * KNOWN GAP: this displaces the holder whoever the
          * caller is -- the shell displacing a still-running Snake is the
          * designed case (SCRUM-196), so "caller must be the holder" is not
          * available. #21 always had this reach; #36 only adds that the
-         * package, not a kernel table, supplies the flag. Telling a
-         * launcher from an arbitrary LibOS needs the admission check. */
+         * package, not a kernel table, supplies the flag. SCRUM-232's
+         * admission check does not close it: it reports a held framebuffer
+         * (exo_resstat.fb_held) so the launcher can say it is taking it over,
+         * but telling a launcher from an arbitrary LibOS is still open.
+         */
         fb_binding_release(fb_binding_owner());
     }
 
+    return 0;
+}
+
+/*
+ * Map the shared WAD buffer into a freshly built image and patch its launch
+ * params (shared by #21's LAUNCH_NEEDS_WAD rows and #36's EXO_PKG_WANT_WAD,
+ * SCRUM-232, so the two cannot drift). On failure tears down the image and
+ * the context row, like launch_enter(), so the caller only returns the error.
+ *
+ * wad_paddr/wad_size name the shared, cached buffer doom_wad_disk_get()
+ * returned -- never this launch's alone -- so a failure here tears down this
+ * app's own image/context but must not free those pages; some other
+ * still-live app (or a future launch) may be mapping the same buffer.
+ *
+ * SCRUM-175: libos_wad_params_t -- the only thing the app cannot learn
+ * through an ordinary syscall (see src/libos_wad_params.h) -- is patched
+ * directly into the app's own first .data global. See
+ * libos_launch_patch_params()'s comment (src/libos_launch.h) for why that is
+ * safe: it requires only that the TU owning that global stays first in
+ * build.sh's source list for the target. The global lives in ordinary
+ * writable .data, so the app could corrupt its own wad_vaddr/wad_size after
+ * launch -- an accepted widening, not something the kernel needs to guard.
+ */
+static int64_t launch_attach_wad(page_owner_t id, libos_image_t *img,
+                                 uint64_t wad_paddr, uint64_t wad_size)
+{
+    if (libos_map_wad((uint64_t *)(uintptr_t)img->pml4_phys,
+                      wad_paddr, wad_size) != VMM_OK) {
+        libos_destroy_image(id, img);
+        disk_binding_forget(id); /* a volume #36 assigned (SCRUM-237) */
+        context_destroy(id);
+        return -EXO_EINVAL;
+    }
+
+    libos_wad_params_t params = {
+        .wad_vaddr = LIBOS_WAD_VADDR,
+        .wad_size  = wad_size,
+    };
+    if (libos_launch_patch_params(img, &params, sizeof(params)) != VMM_OK) {
+        libos_destroy_image(id, img);
+        disk_binding_forget(id); /* a volume #36 assigned (SCRUM-237) */
+        context_destroy(id);
+        return -EXO_EINVAL;
+    }
     return 0;
 }
 
@@ -291,39 +338,9 @@ static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
     }
 
     if (app->flags & LAUNCH_NEEDS_WAD) {
-        /* wad_paddr/wad_size name the shared, cached buffer doom_wad_disk_get()
-         * above returned -- never this launch's alone -- so a failure here
-         * or below tears down this app's own image/context but must not
-         * free those pages; some other still-live app (or a future launch)
-         * may be mapping the same buffer. */
-        if (libos_map_wad((uint64_t *)(uintptr_t)launch_img.pml4_phys,
-                          wad_paddr, wad_size) != VMM_OK) {
-            libos_destroy_image(id, &launch_img);
-            context_destroy(id);
-            return -EXO_EINVAL;
-        }
-
-        /* SCRUM-175: patch libos_wad_params_t -- the only thing the app
-         * cannot learn through an ordinary syscall (see
-         * src/libos_wad_params.h) -- directly into the app's own first
-         * .data global, rather than hand-mapping a separate side-channel
-         * page the way an earlier version of this mechanism did. See
-         * libos_launch_patch_params()'s own comment (src/libos_launch.h) for
-         * why that is safe: it requires only that the TU owning that global
-         * stays first in build.sh's source list for the target. Unlike the
-         * old side-channel page (mapped read-only), the global lives in
-         * ordinary writable .data, so the app itself could in principle
-         * corrupt its own wad_vaddr/wad_size after launch -- an accepted
-         * widening, not a regression the kernel needs to guard against, per
-         * that same comment. */
-        libos_wad_params_t params = {
-            .wad_vaddr = LIBOS_WAD_VADDR,
-            .wad_size  = wad_size,
-        };
-        if (libos_launch_patch_params(&launch_img, &params, sizeof(params)) != VMM_OK) {
-            libos_destroy_image(id, &launch_img);
-            context_destroy(id);
-            return -EXO_EINVAL;
+        int64_t wrc = launch_attach_wad(id, &launch_img, wad_paddr, wad_size);
+        if (wrc != 0) {
+            return wrc;
         }
     }
 
@@ -382,7 +399,9 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t a3,
      * the WAD viewer still launch through #21. Launching such a package
      * would start it with a zero-filled params struct and let it misbehave
      * later, so refuse it now rather than run it half-configured. */
-    if (hdr.params_len != 0) {
+    int wants_wad = (hdr.want_flags & EXO_PKG_WANT_WAD) != 0;
+    if (wants_wad ? hdr.params_len != sizeof(libos_wad_params_t)
+                  : hdr.params_len != 0) {
         return -EXO_EINVAL;
     }
     /* A package with no code has nothing for entry_vaddr to point at;
@@ -393,6 +412,28 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t a3,
     }
 
     launch_reclaim_exited();
+
+    /* Looked up before anything is allocated, same ordering as #21: a
+     * missing or unreadable WAD fails without a context row or a page taken. */
+    uint64_t wad_paddr = 0, wad_size = 0;
+    if (wants_wad) {
+        int64_t wad_rc = doom_wad_disk_get(&wad_paddr, &wad_size);
+        if (wad_rc != 0) {
+            return wad_rc;
+        }
+    }
+
+    /* Backstop, not policy (SCRUM-232): whether a program fits is the
+     * launcher's call, made from exo_resstat (#38) and the manifest. This is
+     * only here so a launcher that skips that check gets a clean -ENOMEM
+     * before anything is allocated, rather than a half-built image failing
+     * inside libos_build_image(). The manifest is the package's own claim, so
+     * it is a floor on what the kernel will try, never a promise. */
+    uint32_t total_pages, free_pages, kernel_pages, libos_pages;
+    page_alloc_totals(&total_pages, &free_pages, &kernel_pages, &libos_pages);
+    if (free_pages < hdr.min_pages) {
+        return -EXO_ENOMEM;
+    }
 
     page_owner_t id;
     int create_rc = context_create(vmm_kernel_pml4(), &id);
@@ -418,6 +459,13 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t a3,
             context_destroy(id);
             return arc == DISK_BIND_EBUSY ? -EXO_EBUSY
                  : arc == DISK_BIND_ENODEV ? -EXO_ENODEV : -EXO_EINVAL;
+        }
+    }
+
+    if (wants_wad) {
+        int64_t wrc = launch_attach_wad(id, &launch_img, wad_paddr, wad_size);
+        if (wrc != 0) {
+            return wrc;
         }
     }
 
