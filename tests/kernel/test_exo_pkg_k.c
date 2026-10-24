@@ -42,8 +42,8 @@ static void fill_fixture_header(exo_pkg_header_t *hdr)
     hdr->want_flags = EXO_PKG_WANT_FRAMEBUFFER | EXO_PKG_WANT_KEYBOARD;
     hdr->reserved[0] = 0;
     hdr->reserved[1] = 0;
-    hdr->reserved[2] = 0;
-    hdr->reserved[3] = 0;
+    hdr->volume_slot = 0;
+    hdr->volume_sectors = 0;
 }
 
 /* ---- round trip ----------------------------------------------------------
@@ -330,7 +330,7 @@ static void c_stack_over(exo_pkg_header_t *h)
 static void c_params(exo_pkg_header_t *h)
 { h->params_len = h->data_len + 1; }
 static void c_reserved(exo_pkg_header_t *h)
-{ h->reserved[3] = 1; }
+{ h->reserved[1] = 1; }
 static void c_stack_zero(exo_pkg_header_t *h)
 { h->stack_pages = 0; }
 static void c_min_over_rec(exo_pkg_header_t *h)
@@ -341,6 +341,66 @@ static void c_flags(exo_pkg_header_t *h)
 { h->want_flags |= 1u << 4; }
 static void c_noop(exo_pkg_header_t *h)
 { (void)h; }
+
+/* SCRUM-237 volume request. A valid one needs WANT_DISK and a slot/size that
+ * fit the volume region; each of these breaks exactly one rule. */
+static void c_vol_ok(exo_pkg_header_t *h)
+{
+    h->want_flags |= EXO_PKG_WANT_DISK;
+    h->volume_slot = EXO_VOLUME_MAX_SLOTS - 1;
+    h->volume_sectors = EXO_VOLUME_SLOT_SECTORS;
+}
+static void c_vol_no_disk(exo_pkg_header_t *h)
+{ c_vol_ok(h); h->want_flags &= ~EXO_PKG_WANT_DISK; }
+static void c_vol_slot_over(exo_pkg_header_t *h)
+{ c_vol_ok(h); h->volume_slot = EXO_VOLUME_MAX_SLOTS; }
+static void c_vol_size_over(exo_pkg_header_t *h)
+{ c_vol_ok(h); h->volume_sectors = EXO_VOLUME_SLOT_SECTORS + 1; }
+static void c_vol_slot_without_size(exo_pkg_header_t *h)
+{ h->want_flags |= EXO_PKG_WANT_DISK; h->volume_slot = 1; }
+
+static void test_volume_request_is_validated(void)
+{
+    CU_ASSERT_EQUAL(parse_after(c_vol_ok), 0);
+    CU_ASSERT_EQUAL(parse_after(c_vol_no_disk), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_vol_slot_over), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_vol_size_over), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_vol_slot_without_size), EXO_PKG_EINVAL);
+
+    /* pack applies the same rules, so a bad request is never written. */
+    void (*bad[])(exo_pkg_header_t *) = {
+        c_vol_no_disk, c_vol_slot_over, c_vol_size_over,
+        c_vol_slot_without_size,
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        exo_pkg_header_t hdr;
+        fill_fixture_header(&hdr);
+        bad[i](&hdr);
+        unsigned char buf[sizeof(exo_pkg_header_t) + sizeof(fixture_code) +
+                           sizeof(fixture_data)];
+        size_t out_len = 0;
+        CU_ASSERT_EQUAL(exo_pkg_pack(buf, sizeof(buf), &hdr, fixture_code,
+                                     fixture_data, &out_len),
+                        EXO_PKG_EINVAL);
+    }
+}
+
+static void test_volume_request_round_trips(void)
+{
+    exo_pkg_header_t hdr, parsed;
+    fill_fixture_header(&hdr);
+    c_vol_ok(&hdr);
+
+    unsigned char buf[sizeof(exo_pkg_header_t) + sizeof(fixture_code) +
+                       sizeof(fixture_data)];
+    size_t out_len = 0;
+    const void *c = NULL, *d = NULL;
+    CU_ASSERT_EQUAL(exo_pkg_pack(buf, sizeof(buf), &hdr, fixture_code,
+                                 fixture_data, &out_len), 0);
+    CU_ASSERT_EQUAL(exo_pkg_parse(buf, out_len, &parsed, &c, &d), 0);
+    CU_ASSERT_EQUAL(parsed.volume_slot, EXO_VOLUME_MAX_SLOTS - 1);
+    CU_ASSERT_EQUAL(parsed.volume_sectors, EXO_VOLUME_SLOT_SECTORS);
+}
 
 static void test_parse_rejects_caps(void)
 {
@@ -401,6 +461,10 @@ static void test_pack_parse_unaligned_buffer(void)
 
 void suite_exo_pkg_tests(CU_pSuite s)
 {
+    CU_add_test(s, "volume request is validated by pack and parse",
+                test_volume_request_is_validated);
+    CU_add_test(s, "volume request round-trips through pack -> parse",
+                test_volume_request_round_trips);
     CU_add_test(s, "pack -> parse round-trips header, code and data bytes",
                 test_round_trip_preserves_header_and_bytes);
     CU_add_test(s, "pack -> parse round-trips a package with no code/data",

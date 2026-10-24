@@ -44,7 +44,7 @@ static int64_t sys_memstat(uint64_t out, uint64_t a2, uint64_t a3,
     return 0;
 }
 
-/* #37 — free-resource snapshot for a launcher's admission check (SCRUM-232).
+/* #38 — free-resource snapshot for a launcher's admission check (SCRUM-232).
  *   0             *out filled
  *   -EXO_EFAULT   [out, out + sizeof(exo_resstat_t)) is not entirely inside
  *                 the LibOS window and mapped writable

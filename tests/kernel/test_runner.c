@@ -87,11 +87,15 @@ void suite_ata_tests(CU_pSuite s);
 void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
 void suite_exofs_tests(CU_pSuite s);
+void suite_exo_file_tests(CU_pSuite s);
 void suite_doom_wad_disk_tests(CU_pSuite s);
 void suite_launch_multi_tests(CU_pSuite s);
 void suite_launch_pkg_tests(CU_pSuite s);
 void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
+void suite_usb_topology_tests(CU_pSuite s);
+void suite_usb_kbd_report_tests(CU_pSuite s);
+void suite_usb_tests(CU_pSuite s);
 void suite_doom_dmx_tests(CU_pSuite s);
 void suite_doom_midi_tests(CU_pSuite s);
 void suite_doom_genmidi_tests(CU_pSuite s);
@@ -104,6 +108,7 @@ void suite_doom_sound_music_tests(CU_pSuite s);
 void suite_exo_pkg_tests(CU_pSuite s);
 void suite_exo_admit_tests(CU_pSuite s);
 void suite_acpi_tests(CU_pSuite s);
+void suite_shell_help_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -170,6 +175,10 @@ int disk_binding_suite_cleanup(void);
  * (SCRUM-189). */
 int exofs_suite_init(void);
 int exofs_suite_cleanup(void);
+
+/* exo_file_* sits on ExoFS, so the same binding requirement (SCRUM-44). */
+int exo_file_suite_init(void);
+int exo_file_suite_cleanup(void);
 
 /* Same idea as context_launch_rebind_suite_cleanup (SCRUM-196): each test
  * here launches real contexts (with real code/data/stack pages) via the
@@ -563,6 +572,11 @@ int run_tests(void)
     s = CU_add_suite("exofs", exofs_suite_init, exofs_suite_cleanup);
     suite_exofs_tests(s);
 
+    /* After "exofs": the descriptor layer is a thin wrapper, so an ExoFS
+     * failure should be reported there first (SCRUM-44). */
+    s = CU_add_suite("exo_file", exo_file_suite_init, exo_file_suite_cleanup);
+    suite_exo_file_tests(s);
+
     /* After "exofs": doom_wad_disk_get() (src/doom_wad_disk.c) is ExoFS
      * plus a contiguous allocation and a cache on top, mounting the real
      * IWAD's own volume at LIBOS_WAD_DISK_BASE_LBA rather than a throwaway
@@ -584,6 +598,22 @@ int run_tests(void)
      * hardware rather than to a model of it (SCRUM-209). */
     s = CU_add_suite("pci", NULL, NULL);
     suite_pci_tests(s);
+
+    /* After "pci": the UHCI controllers docker-test attaches, as seen through
+     * the PCI layer, plus the check that usb_init() took them from the
+     * firmware (SCRUM-245, SCRUM-198). */
+    s = CU_add_suite("usb_topology", NULL, NULL);
+    suite_usb_topology_tests(s);
+
+    /* HID boot report decoding on device-less slots; no hardware. */
+    s = CU_add_suite("usb_kbd_report", NULL, NULL);
+    suite_usb_kbd_report_tests(s);
+
+    /* The live bus usb_init() enumerated, and the acceptance test: two USB
+     * keyboards typed into separately over QMP by docker/scripts/
+     * qmp-keys.sh (SCRUM-198). */
+    s = CU_add_suite("usb", NULL, NULL);
+    suite_usb_tests(s);
 
     /* After "pci", which it depends on: hda_init() finds the controller
      * through pci_find_class() and maps its BAR (SCRUM-210). The cleanup
@@ -681,6 +711,11 @@ int run_tests(void)
 
     s = CU_add_suite("acpi", NULL, NULL);
     suite_acpi_tests(s);
+
+    /* The shell's help matcher (SCRUM-263): pure string logic, no device or
+     * syscall dependency. */
+    s = CU_add_suite("shell_help", NULL, NULL);
+    suite_shell_help_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not

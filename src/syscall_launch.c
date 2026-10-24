@@ -56,6 +56,8 @@
 #include "context.h"
 #include "libos_launch.h"
 #include "exo_pkg.h"
+#include "exo_volume.h"
+#include "disk_binding.h"
 #include "libos_wad_map.h"
 #include "libos_wad_params.h"
 #include "libos_wad_viewer/libos_wad_viewer_layout.h"
@@ -196,6 +198,9 @@ static int64_t launch_enter(page_owner_t id, const libos_image_t *img,
      * launch must leave whoever holds the binding untouched (SCRUM-230). */
     if (context_switch_request(id) != CONTEXT_OK) {
         libos_destroy_image(id, img);
+        /* Drop a volume assigned by #36 (SCRUM-237): the id is about to be
+         * free for reuse and must not inherit another program's extent. */
+        disk_binding_forget(id);
         context_destroy(id);
         return -EXO_EINVAL;
     }
@@ -257,6 +262,7 @@ static int64_t launch_attach_wad(page_owner_t id, libos_image_t *img,
     if (libos_map_wad((uint64_t *)(uintptr_t)img->pml4_phys,
                       wad_paddr, wad_size) != VMM_OK) {
         libos_destroy_image(id, img);
+        disk_binding_forget(id); /* a volume #36 assigned (SCRUM-237) */
         context_destroy(id);
         return -EXO_EINVAL;
     }
@@ -267,6 +273,7 @@ static int64_t launch_attach_wad(page_owner_t id, libos_image_t *img,
     };
     if (libos_launch_patch_params(img, &params, sizeof(params)) != VMM_OK) {
         libos_destroy_image(id, img);
+        disk_binding_forget(id); /* a volume #36 assigned (SCRUM-237) */
         context_destroy(id);
         return -EXO_EINVAL;
     }
@@ -417,7 +424,7 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t a3,
     }
 
     /* Backstop, not policy (SCRUM-232): whether a program fits is the
-     * launcher's call, made from exo_resstat (#37) and the manifest. This is
+     * launcher's call, made from exo_resstat (#38) and the manifest. This is
      * only here so a launcher that skips that check gets a clean -ENOMEM
      * before anything is allocated, rather than a half-built image failing
      * inside libos_build_image(). The manifest is the package's own claim, so
@@ -438,6 +445,21 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t a3,
                           hdr.bss_len, &launch_img) != VMM_OK) {
         context_destroy(id);
         return -EXO_ENOMEM;
+    }
+
+    /* The manifest's volume request becomes a sector extent the program alone
+     * may bind (SCRUM-237). Done after the image exists but before the
+     * program runs, and undone with the context if it cannot be granted --
+     * another running program already holds that slot, say. */
+    if (hdr.volume_sectors != 0) {
+        int arc = disk_binding_assign(id, exo_volume_slot_base(hdr.volume_slot),
+                                      hdr.volume_sectors);
+        if (arc != DISK_BIND_OK) {
+            revoke_all(id);
+            context_destroy(id);
+            return arc == DISK_BIND_EBUSY ? -EXO_EBUSY
+                 : arc == DISK_BIND_ENODEV ? -EXO_ENODEV : -EXO_EINVAL;
+        }
     }
 
     if (wants_wad) {

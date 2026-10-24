@@ -65,6 +65,16 @@
 int exofs_bdev_acquire(void);
 
 /*
+ * Same, for the sectors [base, base + count) only (SCRUM-237). The syscall
+ * then refuses every transfer outside that range, so this is how a volume is
+ * confined to its own part of the disk and how two programs hold two volumes
+ * at once; exofs_bdev_acquire() above is the whole-device special case
+ * (count == 0). Extra errors: -EXO_EINVAL (malformed extent), -EXO_ENOMEM
+ * (the kernel's extent table is full).
+ */
+int exofs_bdev_acquire_extent(uint32_t base, uint32_t count);
+
+/*
  * Give the binding back (#27, SCRUM-189).
  *
  * The counterpart to exofs_bdev_acquire, and the reason #27 exists at all:

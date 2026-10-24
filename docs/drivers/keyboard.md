@@ -29,6 +29,11 @@ and queues them for consumption by the LibOS via the `exo_kbd_poll` syscall.
 doomgeneric's `DG_GetKey` dequeues these events and maps them to Doom keycodes
 for the game engine.
 
+USB keyboards (SCRUM-198) produce the same `kbd_event_t`, `ps2_key_t` and
+`MOD_*` values, but on one ring per keyboard (`src/usb_kbd.c`), never on the
+PS/2 ring described here. `exo_kbd_poll` still reads only the PS/2 ring.
+See `docs/drivers/usb.md` §10–§11.
+
 ---
 
 ## 2. Hardware background
@@ -259,7 +264,11 @@ are tracked as modifier state.
 
 Modifier keys (Shift, Ctrl, Alt) are tracked as a bitmask updated on both press
 and release events. This state is used by the Doom keycode translator (Sprint 4,
-SCRUM-40) and potentially by the shell LibOS.
+SCRUM-40) and by the shell LibOS, whose `shell_key_to_ascii()`
+(`src/shell/shell_main.c`) uses Shift for upper-case letters and for the three
+symbols its command syntax needs: `?`, `*` and `_` (SCRUM-263). The driver
+reports only the unshifted key plus this mask; mapping shifted symbols is left
+to each consumer.
 
 ```c
 #define MOD_LSHIFT  (1 << 0)

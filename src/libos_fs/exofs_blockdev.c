@@ -25,9 +25,10 @@
 
 #ifdef EXO_KERNEL
 
-static int64_t bdev_acquire_raw(void)
+static int64_t bdev_acquire_raw(uint32_t base, uint32_t count)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, 0, 0, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, (uint64_t)base,
+                                (uint64_t)count, 0, 0, 0, 0);
 }
 
 static int64_t bdev_release_raw(void)
@@ -56,9 +57,9 @@ static int64_t bdev_ticks_raw(void)
 
 #else /* !EXO_KERNEL — the real LibOS build */
 
-static int64_t bdev_acquire_raw(void)
+static int64_t bdev_acquire_raw(uint32_t base, uint32_t count)
 {
-    return exo_disk_acquire();
+    return exo_disk_acquire(base, count);
 }
 
 static int64_t bdev_release_raw(void)
@@ -152,10 +153,15 @@ int exofs_bdev_write(uint32_t lba, const void *buf, uint32_t count)
     return 0;
 }
 
+int exofs_bdev_acquire_extent(uint32_t base, uint32_t count)
+{
+    int64_t r = bdev_acquire_raw(base, count);
+    return (r < 0) ? (int)r : 0;
+}
+
 int exofs_bdev_acquire(void)
 {
-    int64_t r = bdev_acquire_raw();
-    return (r < 0) ? (int)r : 0;
+    return exofs_bdev_acquire_extent(0, 0);
 }
 
 void exofs_bdev_release(void)

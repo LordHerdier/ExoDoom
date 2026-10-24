@@ -4,7 +4,7 @@
 /*
  * exo_admit -- the launch admission check (SCRUM-232).
  *
- * A package (src/exo_pkg.h) declares what it needs; exo_resstat (#37,
+ * A package (src/exo_pkg.h) declares what it needs; exo_resstat (#38,
  * src/exo_syscall.h) reports what is free. This compares the two. The kernel
  * supplies the numbers and nothing else: whether a program fits, runs
  * degraded or is turned away is the LAUNCHER's decision, which is why this is

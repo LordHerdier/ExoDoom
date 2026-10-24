@@ -38,6 +38,15 @@ Builds the test kernel with `TESTING=1`, boots it in QEMU, and streams serial
 output to your terminal.  Look for `ALL TESTS PASSED` or `TESTS FAILED` at the
 end.
 
+### Keystrokes during a test boot
+
+`docker-test` and `docker-ci` also open QMP on `127.0.0.1:4444` and run
+`docker/scripts/qmp-keys.sh` in the background. The script types `a` into
+the USB keyboard bound to console `vga2` and `b` into the one on `vga3`, for
+as long as QEMU runs. The `usb` suite's acceptance test reads those keys
+(`docs/drivers/usb.md` §12). Nothing types into the PS/2 keyboard, and its
+IRQ1 is not wired under `TESTING`.
+
 ### In CI
 
 `make docker-ci` always builds with `TESTING=1`.  The GitHub Actions workflow

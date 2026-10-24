@@ -368,7 +368,14 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 ### 3.2 Syscall table
 
 > **Implementation status key:** ⬜ Not started · 🔄 Prerequisite in progress ·
-> ✅ Done
+> ✅ Done · 🚫 Reserved, never bound
+>
+> **#9–16 (`EXO_SYS_FILE_*`) are permanently unbound.** File I/O is policy,
+> so it lives in the LibOS: `exo_file_*` is a descriptor-table library over
+> ExoFS (`src/libos_fs/exo_file.h`, SCRUM-44; `docs/filesystem.md` §6d), which
+> reaches the disk only through #24/#25. The numbers stay reserved rather than
+> reused, so a stale caller gets `-EXO_ENOSYS`; `src/exo_syscall.h` no longer
+> has stubs for them. See §4.
 
 | #  | Syscall                             | Category    | Status | Description + Doom usage                                                                                                                                                                                                                                                       |
 | -- | ----------------------------------- | ----------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -381,14 +388,14 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 6  | `exo_kbd_poll(event_out)`           | Input       | ✅     | Dequeue next keyboard event into `event_out` struct `{uint8_t pressed; uint8_t key; uint8_t modifiers; uint8_t reserved}`. `key` is a decoded `ps2_key_t` index (`KEY_A`, `KEY_ESC`, …), not a raw PS/2 scancode — the kernel's scancode decoder runs before the event is queued. `modifiers` is the `EXO_MOD_*` shift/ctrl/alt mask sampled when the event was queued, so a chord decodes correctly even if the modifier is released before the LibOS polls — Doom binds shift (run), ctrl (fire) and alt (strafe). Returns `1` if event available, `0` if empty, `-EXO_EFAULT` if `event_out` isn't entirely inside the LibOS window. No ownership to check — the keyboard isn't acquired/released like the framebuffer. Bound in `src/syscall_kbd.c` (SCRUM-39) on top of the IRQ1 handler + scancode table (SCRUM-13/-14) and ring buffer (SCRUM-18), all now done. |
 | 7  | `exo_mouse_poll(state_out)`         | Input       | ✅     | Write accumulated mouse state `{int16_t dx; int16_t dy; uint8_t buttons; uint8_t reserved}` to `state_out`, then reset the dx/dy accumulators (`buttons` is a level and is left as-is). `reserved` is zeroed by the kernel and keeps the struct a fixed 6 bytes. Returns `0`, or `-EXO_EFAULT` if `state_out` isn't entirely inside the LibOS window (same `exo_range_in_user_window` + `exo_user_range_mapped` pair #6 uses). No ownership to check, same reasoning as #6. Bound in `src/syscall_mouse.c` on top of the IRQ12 handler + 3-byte packet decoder + delta accumulator, all in `src/ps2_mouse.c` (SCRUM-52) — the controller init (`0xA8`/config byte/`0xF4`), IRQ12 wiring and packet decode did not actually exist before this ticket despite SCRUM-19/28/29 being marked done; see that ticket's own note. Dx is right-positive, dy is **up-positive** (raw PS/2 sign convention, not screen-down) — whoever wires this into Doom's `ev_mouse` (SCRUM-80) negates dy the way the dead SDL code in `src/doom/i_input.c` already shows. |
 | 8  | `exo_serial_write(buf, len)`        | Debug       | ✅     | Write `len` bytes from `buf` to COM1. Returns `len` on success (COM1 is a busy-wait UART; there is no partial write), `-EFAULT` if `[buf, buf+len)` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)`, `-EINVAL` if `len` exceeds 4096 (`SERIAL_WRITE_MAX_LEN`) — the whole call runs with interrupts off (`syscall`'s FMASK clears IF), so an uncapped write would stall the machine for as long as COM1 takes to drain it. `len == 0` always succeeds regardless of `buf`. No ownership to check — COM1 is not acquired/released the way the framebuffer is, just a channel every LibOS may write to. Implemented in SCRUM-50 (`src/syscall_serial.c`). `printf` now routes through it for the ring-3 LibOS build (SCRUM-51, `src/stdio.c`, gated on `#ifdef EXO_KERNEL`); `fprintf` is still unimplemented (§2.3).                                    |
-| 9  | `exo_file_open(path, mode)`         | File I/O    | ⬜     | Open a file on the ramdisk/ATA filesystem. `mode`: `0`=read, `1`=write, `2`=read+write. Returns file descriptor (≥ 0) or negative error. Used by `fopen` shim.                                                                                                                 |
-| 10 | `exo_file_close(fd)`                | File I/O    | ⬜     | Close file descriptor. Returns `0` or `-EBADF`. Used by `fclose` shim.                                                                                                                                                                                                         |
-| 11 | `exo_file_read(fd, buf, count)`     | File I/O    | ⬜     | Read up to `count` bytes from `fd` into `buf`. Returns bytes read, `0` at EOF, or negative error. Used by `fread` shim.                                                                                                                                                        |
-| 12 | `exo_file_write(fd, buf, count)`    | File I/O    | ⬜     | Write `count` bytes from `buf` to `fd`. Returns bytes written or negative error. Used by `fwrite` shim.                                                                                                                                                                        |
-| 13 | `exo_file_seek(fd, offset, whence)` | File I/O    | ⬜     | Seek to position. `whence`: `0`=`SEEK_SET`, `1`=`SEEK_CUR`, `2`=`SEEK_END`. Returns new position or negative error. Used by `fseek`/`ftell` shim.                                                                                                                              |
-| 14 | `exo_file_stat(path, size_out)`     | File I/O    | ⬜     | Write file size to `*size_out`. Returns `0` or `-ENOENT`. Used by `M_FileExists` (`fopen` check) and `M_FileLength`.                                                                                                                                                           |
-| 15 | `exo_file_remove(path)`             | File I/O    | ⬜     | Delete a file. Returns `0` or `-ENOENT`. Used by `remove()` for old save games.                                                                                                                                                                                                |
-| 16 | `exo_file_rename(old, new)`         | File I/O    | ⬜     | Rename a file. Returns `0` or negative error. Used by `rename()` for save game rotation.                                                                                                                                                                                       |
+| 9  | `exo_file_open(path, mode)`         | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Open a file. **Never a syscall** — see #9–16 note below; now `exo_file_open(path, flags)` in `src/libos_fs/exo_file.h` (SCRUM-44). |
+| 10 | `exo_file_close(fd)`                | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Close a descriptor. LibOS `exo_file_close` (SCRUM-44). |
+| 11 | `exo_file_read(fd, buf, count)`     | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Read from a descriptor. LibOS `exo_file_read` (SCRUM-44). |
+| 12 | `exo_file_write(fd, buf, count)`    | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Write to a descriptor. LibOS `exo_file_write` (SCRUM-44). |
+| 13 | `exo_file_seek(fd, offset, whence)` | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Seek; returns the new position (also `ftell`). LibOS `exo_file_seek` (SCRUM-44). |
+| 14 | `exo_file_stat(path, size_out)`     | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). File size of `path`. LibOS `exo_file_stat` (SCRUM-44); backs `M_FileExists`/`M_FileLength` once SCRUM-42 lands. |
+| 15 | `exo_file_remove(path)`             | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Delete a file. Will be LibOS-side too, over `exofs_unlink` — SCRUM-106. |
+| 16 | `exo_file_rename(old, new)`         | File I/O    | 🚫     | **Reserved, never bound** (`-EXO_ENOSYS`). Rename a file. Will be LibOS-side too; ExoFS has no rename yet — SCRUM-106. |
 | 17 | `exo_sound_tone(freq, dur_ms)`      | Sound       | ✅     | Play a tone on the PC speaker at `freq` Hz for `dur_ms` milliseconds and return at once; IRQ0 ends it (SCRUM-98/100, `src/syscall_sound.c`). `0`, or `-EXO_EINVAL` for `freq` outside 19–20000 or `dur_ms` outside 1–`SOUND_TONE_MAX_MS` (10000) — `dur_ms = 0` is refused so every tone ring 3 starts ends on its own. Last tone wins. Used by the Doom sound module (SCRUM-101). |
 | 18 | `exo_sound_stop()`                  | Sound       | ✅     | Silence the PC speaker now. `0` (also when nothing is sounding), or `-EXO_EPERM` if the tone sounding was started by another context. `exo_exit` silences the exiting context's tone the same way. Used by the Doom sound module (SCRUM-101). |
 | 19 | `exo_yield()`                       | Scheduling  | ✅     | Cooperatively yield CPU to next runnable LibOS context. Returns when rescheduled. Called once per idle-loop iteration by the real shell LibOS (SCRUM-110, `src/shell/shell_main.c`) and optionally by `DG_SleepMs`. Still a no-op in practice today: nothing yet registers a second context via `context_create()` on a normal boot (Doom is not linked in), so the call always finds nothing else `READY`. Bound in SCRUM-109 (`src/syscall_yield.c`) to `context_switch_request()` (SCRUM-108) via a round-robin scan of the context table, `context_next_ready()` (`src/context.c`) — the minimum policy the acceptance criterion needs, not a real scheduler (priority/fairness/wake-on-event is SCRUM-147's job). No error return: if nothing else is `READY`, including a caller with no row in the table (the boot-time default LibOS), it is a no-op that returns `0`.                                                                                                                                          |
@@ -396,9 +403,9 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 21 | `exo_launch(app_id)`                | Lifecycle   | ✅     | Build the ring-3 LibOS app named by `app_id` (an `EXO_LAUNCH_APP_*` value: `WAD_VIEWER`, `DOOM`; Snake left the table in SCRUM-230 and the clock in SCRUM-231, both launch via #36) as its own context and `context_switch_request()` to it immediately; reclaims (`revoke_all` + `context_destroy`) whatever the previous launch of *that app* left behind first. Apps whose table row sets `LAUNCH_NEEDS_WAD` (the viewer and Doom) also get the WAD module mapped read-only at `LIBOS_WAD_VADDR` and its address/length patched in via `libos_launch_patch_params()`, where `DG_Init` reads them. Like `exo_yield()`, does not return control to the caller until something switches back — the app's own `exo_exit()`/`exo_yield()` round trip, or Ctrl+Tab (SCRUM-111) for an app that never yields. Returns `-EXO_EINVAL` for an unknown `app_id`, `-EXO_ENODEV` if a WAD-needing app has no module, `-EXO_ENOMEM` if the image or a context row will not fit — all of those only if the launch failed before the switch was armed. The shell no longer calls it (SCRUM-232: `wadview`/`doom`/`snake`/`clock` are all `run <name>.exo` through #36); the rows stay because `launch_multi` and the fuzz suite still drive it, and retiring them is follow-up work. Replaced the four per-app syscalls #21–#24 in SCRUM-184 (`src/syscall_launch.c`). |
 | 22 | `exo_memstat(stat_out)`             | Introspection | ✅   | Write a page-usage snapshot of the whole PMM to `stat_out`: `{uint32_t total_pages, free_pages, kernel_pages, libos_pages, region_count, reserved}` (24 bytes). Deliberately unscoped — every context's pages, not just the caller's. Returns `0`, or `-EFAULT` if `[stat_out, stat_out + sizeof(exo_memstat_t))` is not entirely inside the LibOS window and mapped writable (same check #4/#6 use). Invoked by the shell's `memstat` command. Implemented in SCRUM-113 (`src/syscall_stat.c`, `src/page_alloc.c`). |
 | 23 | `exo_pslist(out, max)`              | Introspection | ✅   | Write up to `max` `exo_ps_info_t` entries (`{uint16_t id; uint8_t state; uint8_t reserved; uint32_t page_count}`, 8 bytes each) to `out` — one per live LibOS context, the caller included (the shell is itself `context_create()`'d, SCRUM-178). `state` mirrors `context_state_t`: `1`=READY, `2`=RUNNING, `3`=BLOCKED. Returns the number of entries written (`0..max`), `-EINVAL` if `max` exceeds `EXO_PSLIST_MAX` (`#define EXO_PSLIST_MAX CONTEXT_MAX` — `src/exo_syscall.h` `#include`s `src/context.h` rather than restating the number, after a hardcoded copy went stale and silently re-capped this at 3 across SCRUM-193's `CONTEXT_MAX` bump), or `-EFAULT` if `[out, out + max * sizeof(exo_ps_info_t))` is not entirely inside the LibOS window and mapped writable. Invoked by the shell's `pslist` command. Implemented in SCRUM-113 (`src/syscall_stat.c`, `src/context.c`). |
-| 24 | `exo_disk_read(lba, buf, count)`    | Storage     | ✅     | Read `count` consecutive 512-byte sectors starting at 28-bit LBA `lba` into `buf` (at least `count * 512` bytes), via one `ata_read_sectors()` multi-sector PIO command covering the whole run (SCRUM-190; previously one `ata_read_sector()` command per sector). Returns `count` on success (`count == 0` always succeeds and touches nothing, checked before everything else below), `-EINVAL` if `count` exceeds `EXO_DISK_MAX_SECTORS` (128, `src/syscall_disk.h`) or `lba + count - 1` overflows 28-bit LBA space, `-ENODEV` if no drive was detected at boot, `-EBUSY` if the caller does not hold the disk binding (§3.5a — a headless machine answers `-ENODEV` rather than `-EBUSY`, same precedence `exo_disk_acquire` uses), `-EFAULT` if `[buf, buf + count*512)` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` and mapped writable (same `exo_range_in_user_window`/`exo_user_range_mapped` pair #8 uses — checked last, so a caller with no claim on the disk learns nothing about whether its buffer pointer happens to be valid), or `-EIO` if a sector faults partway through the transfer (no partial-success byte count — ATA gives no way to tell "this sector failed" from "this sector was never attempted" once a fault stops the loop). Sector-addressed only, zero filesystem knowledge — the ported FAT-like fs (SCRUM-189) is LibOS-side, on top of this. Implemented in SCRUM-103 (`src/syscall_disk.c`, on top of the ATA PIO driver, SCRUM-102, `src/ata.c`); ownership enforcement SCRUM-188 (`src/disk_binding.c`). |
-| 25 | `exo_disk_write(lba, buf, count)`   | Storage     | ✅     | Same shape as #24, writing `count` sectors from `buf` via one `ata_write_sectors()` multi-sector PIO command. `buf` is checked readable rather than writable. Same error codes, same binding check. Implemented in SCRUM-103 (`src/syscall_disk.c`); ownership enforcement SCRUM-188. |
-| 26 | `exo_disk_acquire()`                | Storage     | ✅     | Bind the disk to the caller — one exclusive owner at a time, the same pre-SCRUM-112 shape `exo_fb_acquire` (#4) originally had (§3.5a). Must succeed before #24/#25 will do anything for the caller. Returns `0` (including a re-acquire by the current owner), `-EBUSY` if another context holds it, or `-ENODEV` if this machine has no drive. Implemented in SCRUM-188 (`src/syscall_disk.c`, `src/disk_binding.c`). |
+| 24 | `exo_disk_read(lba, buf, count)`    | Storage     | ✅     | Read `count` consecutive 512-byte sectors starting at 28-bit LBA `lba` into `buf` (at least `count * 512` bytes), via one `ata_read_sectors()` multi-sector PIO command covering the whole run (SCRUM-190; previously one `ata_read_sector()` command per sector). Returns `count` on success (`count == 0` always succeeds and touches nothing, checked before everything else below), `-EINVAL` if `count` exceeds `EXO_DISK_MAX_SECTORS` (128, `src/syscall_disk.h`) or `lba + count - 1` overflows 28-bit LBA space, `-ENODEV` if no drive was detected at boot, `-EBUSY` if the caller does not hold the disk binding (§3.5a — a headless machine answers `-ENODEV` rather than `-EBUSY`, same precedence `exo_disk_acquire` uses), `-EFAULT` if `[buf, buf + count*512)` is not entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` and mapped writable (same `exo_range_in_user_window`/`exo_user_range_mapped` pair #8 uses — checked last, so a caller with no claim on the disk learns nothing about whether its buffer pointer happens to be valid), or `-EIO` if a sector faults partway through the transfer (no partial-success byte count — ATA gives no way to tell "this sector failed" from "this sector was never attempted" once a fault stops the loop). Sector-addressed only, zero filesystem knowledge — the ported FAT-like fs (SCRUM-189) is LibOS-side, on top of this. Implemented in SCRUM-103 (`src/syscall_disk.c`, on top of the ATA PIO driver, SCRUM-102, `src/ata.c`); ownership enforcement SCRUM-188 (`src/disk_binding.c`). **Extent bound (SCRUM-237):** the whole `[lba, lba + count)` must lie inside the caller's acquired extent, else `-EINVAL`; a caller holding no extent still gets `-EBUSY`. The check runs after the shape and presence checks and before the buffer check. |
+| 25 | `exo_disk_write(lba, buf, count)`   | Storage     | ✅     | Same shape as #24, writing `count` sectors from `buf` via one `ata_write_sectors()` multi-sector PIO command. `buf` is checked readable rather than writable. Same error codes, same binding check. Implemented in SCRUM-103 (`src/syscall_disk.c`); ownership enforcement SCRUM-188. **Extent bound (SCRUM-237):** the whole `[lba, lba + count)` must lie inside the caller's acquired extent, else `-EINVAL`; a caller holding no extent still gets `-EBUSY`. The check runs after the shape and presence checks and before the buffer check. |
+| 26 | `exo_disk_acquire(base, count)`     | Storage     | ✅     | Bind the sectors `[base, base + count)` to the caller (§3.5a); `count == 0` (with `base == 0`) means the whole device, which is what the argument-less call meant before SCRUM-237. Extents of different owners never overlap, so any number of LibOSes can hold disjoint ranges at once — that is what lets each program have a filesystem volume of its own. Must succeed before #24/#25 will do anything for the caller, and those then refuse every sector outside the range. Returns `0` (including a re-acquire of the same extent), `-EBUSY` (overlaps another context's extent or assigned volume, or the caller already holds a *different* extent — release first), `-EINVAL` (malformed extent: `count == 0` with `base != 0`, past the 28-bit LBA limit, or an argument over 32 bits), `-EPERM` (the caller has an assigned volume, #37, and this is not it), `-ENOMEM` (extent table full) or `-ENODEV` (no drive). Implemented in SCRUM-188 (`src/syscall_disk.c`, `src/disk_binding.c`), ranges in SCRUM-237. |
 | 27 | `exo_disk_release()`                | Storage     | ✅     | Give the binding back — the voluntary counterpart to #26, and the only way a LibOS can perform §3.6's phase 2 for this resource. Always returns `0`: releasing a binding the caller does not hold is a no-op rather than an error, mirroring #26's "a re-acquire by the current owner is success" rule, so a LibOS unwinding an error path can release unconditionally without first working out whether its acquire succeeded. Unlike #24/#25/#26 this does **not** answer `-ENODEV` on a headless machine — a caller there cannot be holding a binding, so the release is a no-op either way and failing would break exactly that unconditional-cleanup pattern; nothing in the handler touches the ATA bus. Flushing whatever sat above the binding is the caller's job, not the kernel's — ExoFS calls `exofs_unmount()` before `exofs_bdev_release()` because dropping the binding with dirty FAT sectors cached loses them silently. Implemented in SCRUM-189 (`src/syscall_disk.c`, `src/disk_binding.c`). |
 | 28 | `exo_sound_pcm(buf, num_samples, rate_hz, vol, sep, priority)` | Sound | ✅ | Queue `num_samples` bytes of 8-bit *unsigned* mono PCM at `buf`, recorded at `rate_hz`, on one of the software mixer's `PCM_MIXER_VOICES` (8) voices, and return at once — the samples are **copied** into kernel pages, so `buf` is the caller's again immediately (§3.5b on why a ring-3 pointer cannot be played in place). `rate_hz` is the rate the samples were recorded at, not the hardware's: the mixer resamples per voice (`src/pcm_mixer.c`, SCRUM-212), which is what lets a DMX lump be handed over exactly as `doom_dmx_parse()` reports it. `vol` 0–127, `sep` 0–255 (128 centred), `priority` in Doom's `sfxinfo_t` sense where **lower is more important**. Returns a non-negative voice handle for #29, or `-EXO_EINVAL` (`num_samples` 0 or over `SOUND_PCM_MAX_SAMPLES` = 196608, `src/syscall_sound.h`; or `rate_hz` outside 1–65535, above which the mixer's 16.16 phase step overflows), `-EXO_ENODEV` (no HDA controller, or the output stream refused to start), `-EXO_EFAULT` (`[buf, buf+num_samples)` not entirely inside the LibOS window **and mapped** — the same `exo_range_in_user_window`/`exo_user_range_mapped` pair #8 and #24 use), `-EXO_EBUSY` (every voice busy with sound at least as important; nothing already playing is disturbed, which is the mixer's own non-starvation rule surfaced at the ABI), or `-EXO_ENOMEM` (no contiguous run of kernel pages that size). Validation order is shape → device → buffer, the precedence §3.5a settled on. The stream is started lazily by the first successful call. Implemented in SCRUM-213 (`src/syscall_sound.c`, on top of `src/pcm_mixer.c` and `src/hda.c`). |
 | 29 | `exo_sound_pcm_stop(handle)` | Sound | ✅ | Stop the voice `handle` names. Returns `0`, including for a handle whose sound has already finished or been taken over by a more important one — there is then nothing left to stop and no error to report — `-EXO_EPERM` if that voice is playing another context's sound, or `-EXO_EINVAL` for a negative handle, which #28 never issues. Also frees that voice's staging pages. `exo_exit` stops the exiting context's voices the same way (`syscall_sound_release()`). Implemented in SCRUM-213. |
@@ -408,10 +415,11 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 33 | `exo_sound_stream_stop()` | Sound | ✅ | Drop everything buffered, detach the ring from the mixer **then** free its pages, and release the binding so another context may bind. Returns `0`, also when nothing is held; `-EXO_EPERM` if another context holds the stream (left playing). `exo_exit` does this implicitly through `syscall_sound_release()`. Implemented in SCRUM-219. |
 | 34 | `exo_sound_stream_volume(vol)` | Sound | ✅ | Set the music voice's level, `vol` 0–127 (clamped by `pcm_mixer_music_set_volume()`; the sfx voices are unaffected). **Unowned:** any context may call it, with or without the stream bound, and the level persists across bind/release — Doom's `I_SetMusicVolume` runs before the first song exists, so requiring the stream would make the slider unusable until music started. Always returns `0`. Implemented in SCRUM-219. |
 | 35 | `exo_rtc_read(out)` | Timer | ✅ | Write the CMOS RTC's calendar time to `out`, an `exo_rtc_time_t` (`year`, `month`, `day`, `hour`, `minute`, `second`, `reserved`, `uint64_t unix_secs`; 16 bytes). UTC, no time zones; `unix_secs` is derived from the other fields. **Unowned,** like #5 — time is not a resource anyone acquires. **User-pointer validation:** `[out, out + sizeof(exo_rtc_time_t))` must lie entirely inside `[EXO_USER_VA_BASE, EXO_USER_VA_END)` (`exo_range_in_user_window`, §3.7) *and* be mapped writable (`exo_user_range_mapped`, SCRUM-186) — the same pair `exo_memstat` (#22) runs — and it is checked before the clock is touched; `*out` is written only on success. Returns `0`, `-EXO_EFAULT` (NULL, kernel, unmapped, read-only or straddling pointer), `-EXO_ENODEV` (the ACPI FADT says there is no CMOS RTC) or `-EXO_EIO` (the clock never settled, reports invalid RAM, or returned a non-date). Driver and rationale: `docs/drivers/rtc.md`. Implemented in SCRUM-249 (`src/rtc.c`, `src/syscall_rtc.c`). |
-| 36 | `exo_launch_pkg(pkg, len)` | Lifecycle | ✅ | Build and switch to the LibOS packaged in the `len` bytes at `pkg` — the whole `src/exo_pkg.h` package (header, code, data) exactly as it sits in a file — instead of one the kernel image already contains (#21). **The launcher is ring 3, not the kernel:** a LibOS (today the shell's `run <name>`) reads the package out of ExoFS itself and hands over the bytes, which keeps the kernel at "sectors and nothing above them" (#24). The handler is #21's path from the point the bytes exist: `exo_pkg_parse()` bounds every length against the loader's caps (`EXO_PKG_MAX_*`, asserted equal to `LIBOS_LAUNCH_MAX_*` in `src/libos_launch.h`) and copies the header out by value, `libos_build_image()` copies the sections into pages the new context owns (so `pkg` is the caller's again on return), and the tail — `context_prime_irq`, the framebuffer release, `context_switch_request` — is the same shared helper `sys_launch()` uses. The framebuffer binding is released when the manifest sets `EXO_PKG_WANT_FRAMEBUFFER`, where #21 uses a per-app table flag. Like #21, control does not return until something switches back. Returns `0`, `-EXO_EINVAL` (`len` under the header size or over `EXO_LAUNCH_PKG_MAX_LEN` = 60 + 2·192·4096; or any malformed package: bad magic/version, a length over the caps, a bad manifest field, shorter than its own header claims, no code, or a `params_len` that does not match the manifest: 0 without `EXO_PKG_WANT_WAD`, exactly `sizeof(libos_wad_params_t)` (16) with it — a program that expects a params patch the manifest did not ask for is refused rather than started half-configured), `-EXO_EFAULT` (`[pkg, pkg+len)` not entirely inside the LibOS window **and mapped**) `-EXO_ENODEV`/the WAD lookup's error (`EXO_PKG_WANT_WAD` set and no IWAD mounted; nothing allocated) or `-EXO_ENOMEM` (no free context row, fewer free pages than the manifest's `min_pages` — the kernel backstop, checked before anything is allocated — or no pages for the image). `EXO_PKG_WANT_WAD` makes the handler map the shared IWAD buffer read-only at `LIBOS_WAD_VADDR` and patch `libos_wad_params_t` into the program's first `.data` global, the same helper (`launch_attach_wad`) #21's `LAUNCH_NEEDS_WAD` rows use. **The backstop is not the admission policy:** whether a program fits, runs degraded or is refused is the launcher's decision, made from #37 and the manifest (`src/exo_admit.h`); the kernel only refuses what could never load. Validation order is shape → buffer → contents, and every refusal happens before a context row or page is taken. **Known gap:** the framebuffer release, like #21's, takes the binding from whoever holds it, not only from the caller; the shell displacing a running Snake is the designed case (SCRUM-196). SCRUM-232's admission check reports the held binding (`fb_held`) so the launcher can say so, but does not tell a launcher from an arbitrary LibOS. The release happens only after the switch is armed, so a refused launch leaves the holder untouched. **Not yet expressible:** the header's `stack_pages` is advisory (the builder always maps `LIBOS_LAUNCH_STACK_PAGES`). Implemented in SCRUM-230 (`src/syscall_launch.c`; `tests/kernel/test_launch_pkg_k.c`). |
-| 37 | `exo_resstat(out)` | Introspection | ✅ | Write a free-resource snapshot to `out`, an `exo_resstat_t` (`free_pages`, `free_contexts` = `CONTEXT_MAX` − live contexts, `sound_voices_free` = `PCM_MIXER_VOICES` − sounding, `fb_held` = 1 if some context holds the framebuffer binding, `reserved[4]` zeroed; 32 bytes). **Reports, does not decide:** it is what a launcher compares a package manifest against (`src/exo_admit.h`: grant / grant-degraded / refuse), so the policy stays in ring 3. Unscoped introspection like #22, and a snapshot — it can be stale by the time a launch happens, which is why #36 keeps its own `min_pages` check. **User-pointer validation:** the `exo_range_in_user_window` + `exo_user_range_mapped(…, writable)` pair #22 runs; `*out` is written only on success. Returns `0` or `-EXO_EFAULT`. Implemented in SCRUM-232 (`src/syscall_stat.c`; `tests/kernel/test_syscall_stat_k.c`). |
+| 36 | `exo_launch_pkg(pkg, len)` | Lifecycle | ✅ | Build and switch to the LibOS packaged in the `len` bytes at `pkg` — the whole `src/exo_pkg.h` package (header, code, data) exactly as it sits in a file — instead of one the kernel image already contains (#21). **The launcher is ring 3, not the kernel:** a LibOS (today the shell's `run <name>`) reads the package out of ExoFS itself and hands over the bytes, which keeps the kernel at "sectors and nothing above them" (#24). The handler is #21's path from the point the bytes exist: `exo_pkg_parse()` bounds every length against the loader's caps (`EXO_PKG_MAX_*`, asserted equal to `LIBOS_LAUNCH_MAX_*` in `src/libos_launch.h`) and copies the header out by value, `libos_build_image()` copies the sections into pages the new context owns (so `pkg` is the caller's again on return), and the tail — `context_prime_irq`, the framebuffer release, `context_switch_request` — is the same shared helper `sys_launch()` uses. The framebuffer binding is released when the manifest sets `EXO_PKG_WANT_FRAMEBUFFER`, where #21 uses a per-app table flag. Like #21, control does not return until something switches back. Returns `0`, `-EXO_EINVAL` (`len` under the header size or over `EXO_LAUNCH_PKG_MAX_LEN` = 60 + 2·192·4096; or any malformed package: bad magic/version, a length over the caps, a bad manifest field, shorter than its own header claims, no code, or a `params_len` that does not match the manifest: 0 without `EXO_PKG_WANT_WAD`, exactly `sizeof(libos_wad_params_t)` (16) with it — a program that expects a params patch the manifest did not ask for is refused rather than started half-configured), `-EXO_EFAULT` (`[pkg, pkg+len)` not entirely inside the LibOS window **and mapped**) `-EXO_ENODEV`/the WAD lookup's error (`EXO_PKG_WANT_WAD` set and no IWAD mounted; nothing allocated) or `-EXO_EBUSY`/`-EXO_ENODEV`/`-EXO_EINVAL` (the manifest requested a volume (`volume_slot`/`volume_sectors`, SCRUM-237) and `disk_binding_assign` refused it — another running program already holds that slot, no drive, or a malformed extent; the context is torn down), `-EXO_ENOMEM` (no free context row, fewer free pages than the manifest's `min_pages` — the kernel backstop, checked before anything is allocated — or no pages for the image). `EXO_PKG_WANT_WAD` makes the handler map the shared IWAD buffer read-only at `LIBOS_WAD_VADDR` and patch `libos_wad_params_t` into the program's first `.data` global, the same helper (`launch_attach_wad`) #21's `LAUNCH_NEEDS_WAD` rows use. **The backstop is not the admission policy:** whether a program fits, runs degraded or is refused is the launcher's decision, made from #37 and the manifest (`src/exo_admit.h`); the kernel only refuses what could never load. Validation order is shape → buffer → contents, and every refusal happens before a context row or page is taken. **Known gap:** the framebuffer release, like #21's, takes the binding from whoever holds it, not only from the caller; the shell displacing a running Snake is the designed case (SCRUM-196). SCRUM-232's admission check reports the held binding (`fb_held`) so the launcher can say so, but does not tell a launcher from an arbitrary LibOS. The release happens only after the switch is armed, so a refused launch leaves the holder untouched. **Not yet expressible:** the header's `stack_pages` is advisory (the builder always maps `LIBOS_LAUNCH_STACK_PAGES`). Implemented in SCRUM-230 (`src/syscall_launch.c`; `tests/kernel/test_launch_pkg_k.c`). |
+| 37 | `exo_disk_extent(out)` | Storage | ✅ | Write the sector extent this program's package was assigned to `*out` (`exo_diskextent_t`: `u32 base`, `u32 sectors`, 8 bytes). The extent comes from the package manifest's volume request (`volume_slot`/`volume_sectors` in `src/exo_pkg.h`, slot layout in `src/exo_volume.h`), which `exo_launch_pkg` (#36) turns into a kernel-side *assignment* before the program runs. Unscoped introspection like #31 — it reveals only the caller's own range. The program then passes exactly this to `exo_disk_acquire` and formats/mounts ExoFS at `.base`. Returns `0`, `-ENOENT` (no volume assigned: the package did not request one, or the caller was not launched from a package), or `-EFAULT` (`[out, out+8)` not mapped writable in the LibOS window). Implemented in SCRUM-237 (`src/syscall_disk.c`). |
+| 38 | `exo_resstat(out)` | Introspection | ✅ | Write a free-resource snapshot to `out`, an `exo_resstat_t` (`free_pages`, `free_contexts` = `CONTEXT_MAX` − live contexts, `sound_voices_free` = `PCM_MIXER_VOICES` − sounding, `fb_held` = 1 if some context holds the framebuffer binding, `reserved[4]` zeroed; 32 bytes). **Reports, does not decide:** it is what a launcher compares a package manifest against (`src/exo_admit.h`: grant / grant-degraded / refuse), so the policy stays in ring 3. Unscoped introspection like #22, and a snapshot — it can be stale by the time a launch happens, which is why #36 keeps its own `min_pages` check. **User-pointer validation:** the `exo_range_in_user_window` + `exo_user_range_mapped(…, writable)` pair #22 runs; `*out` is written only on success. Returns `0` or `-EXO_EFAULT`. Implemented in SCRUM-232 (`src/syscall_stat.c`; `tests/kernel/test_syscall_stat_k.c`). |
 
-**Total: 37 syscalls.** This is the complete interface needed to run Doom with
+**Total: 39 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking, plus the single
 argument-based LibOS-launch syscall (#21) that backs the shell's interactive
 demo commands and its package-based sibling (#36, SCRUM-230) that launches a
@@ -439,26 +447,26 @@ pass-through rather than a translation table.
 
 | Code | Value | Meaning | Emitted today by |
 | --- | --- | --- | --- |
-| `EXO_EPERM` | 1 | Operation not permitted for this LibOS | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3) |
-| `EXO_ENOENT` | 2 | No such file | not yet — reserved for `exo_file_*` (#9-16) |
+| `EXO_EPERM` | 1 | Operation not permitted for this LibOS | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3), `exo_disk_acquire` (#26, SCRUM-237: the caller has an assigned volume and asked for a different extent) |
+| `EXO_ENOENT` | 2 | No such file | no syscall — LibOS ExoFS / `exo_file_*` (SCRUM-189/44) |
 | `EXO_EIO` | 5 | Disk I/O fault partway through a sector transfer | `exo_disk_read`/`exo_disk_write` (#24/#25) |
-| `EXO_EBADF` | 9 | Bad file descriptor | not yet — reserved for `exo_file_*` |
+| `EXO_EBADF` | 9 | Bad file descriptor | no syscall — LibOS `exo_file_*` (SCRUM-44), for a descriptor not open |
 | `EXO_ENOMEM` | 12 | Out of physical pages / heap | `exo_page_alloc` (#0), `exo_page_map` (#2, no page for an intermediate table), `exo_page_unmap` (#3, split requires a page), `exo_fb_acquire` (#4, no contiguous run free for the virtual framebuffer, SCRUM-112) |
-| `EXO_EACCES` | 13 | Permission denied | not yet bound to a handler |
+| `EXO_EACCES` | 13 | Permission denied | no syscall — LibOS ExoFS / `exo_file_*` (read on a write-only handle and vice versa) |
 | `EXO_EFAULT` | 14 | Pointer argument outside the caller's address space | `exo_fb_acquire` (#4), `exo_kbd_poll` (#6), `exo_serial_write` (#8), `exo_disk_read`/`exo_disk_write` (#24/#25), `exo_launch_pkg` (#36) |
-| `EXO_EBUSY` | 16 | Resource held by another LibOS | `exo_disk_acquire`/`exo_disk_read`/`exo_disk_write` (#24/#25/#26, SCRUM-188) — `exo_fb_acquire` (#4) returned this too, pre-SCRUM-112, when the framebuffer was a single exclusive binding rather than a private buffer per caller |
-| `EXO_EEXIST` | 17 | File already exists | not yet — reserved for `exo_file_open`/`exo_file_rename` |
+| `EXO_EBUSY` | 16 | Resource held by another LibOS | `exo_disk_acquire`/`exo_disk_read`/`exo_disk_write` (#24/#25/#26, SCRUM-188; #26 also for an extent overlapping another's or an assigned volume, SCRUM-237) — `exo_fb_acquire` (#4) returned this too, pre-SCRUM-112, when the framebuffer was a single exclusive binding rather than a private buffer per caller |
+| `EXO_EEXIST` | 17 | File already exists | no syscall — LibOS ExoFS (`exofs_mkdir`) |
 | `EXO_ENODEV` | 19 | The hardware resource does not exist on this machine | `exo_fb_acquire` (#4, no framebuffer), `exo_disk_read`/`exo_disk_write`/`exo_disk_acquire` (#24/#25/#26, no drive detected at boot) |
-| `EXO_ENOTDIR` | 20 | Not a directory | not yet — reserved for `exo_file_*` |
-| `EXO_EISDIR` | 21 | Is a directory | not yet — reserved for `exo_file_*` |
+| `EXO_ENOTDIR` | 20 | Not a directory | no syscall — LibOS ExoFS / `exo_file_*` |
+| `EXO_EISDIR` | 21 | Is a directory | no syscall — LibOS ExoFS / `exo_file_*` |
 | `EXO_EINVAL` | 22 | Malformed or out-of-range argument | `exo_page_free` (#1), `exo_page_map`/`exo_page_unmap` (#2/#3), `exo_serial_write` (#8, `len` over `SERIAL_WRITE_MAX_LEN`), `exo_launch_pkg` (#36, bad length or malformed package), `exo_disk_read`/`exo_disk_write` (#24/#25, `count` over `EXO_DISK_MAX_SECTORS` or LBA range overflow) |
-| `EXO_ENFILE` | 23 | System-wide open-file table full | not yet — reserved for `exo_file_open` |
-| `EXO_EMFILE` | 24 | Per-context file descriptor table full | not yet — reserved for `exo_file_open` |
+| `EXO_ENFILE` | 23 | System-wide open-file table full | no syscall — LibOS ExoFS's open-entry table (`EXOFS_MAX_OPEN_HANDLES`), passed through by `exo_file_open` |
+| `EXO_EMFILE` | 24 | Per-context file descriptor table full | no syscall — LibOS `exo_file_open` (SCRUM-44, `EXO_FILE_MAX_FDS`) |
 | `EXO_EFBIG` | 27 | File too large | not yet — reserved for `exo_file_write` |
-| `EXO_ENOSPC` | 28 | Ramdisk full | not yet — reserved for `exo_file_write` |
+| `EXO_ENOSPC` | 28 | Volume full | no syscall — LibOS ExoFS / `exo_file_write` |
 | `EXO_ESPIPE` | 29 | Seek on a non-seekable descriptor | not yet — reserved for `exo_file_seek` |
 | `EXO_EROFS` | 30 | Write attempted on a read-only filesystem | not yet — reserved for `exo_file_write` (e.g. a memory-mapped WAD reader, §4.1) |
-| `EXO_ENOSYS` | 38 | Syscall number not implemented, or out of range | `exo_syscall_dispatch` (`src/syscall.c`) for every unbound number — #7, #9-20 today |
+| `EXO_ENOSYS` | 38 | Syscall number not implemented, or out of range | `exo_syscall_dispatch` (`src/syscall.c`) for every unbound number — #9–16, which are reserved and stay unbound (§3.2) |
 
 **"0 on success" is the default, not a universal rule.** Several bound
 syscalls document a positive success value instead of `0`, because the value
@@ -889,20 +897,65 @@ scheduling (SCRUM-147) invalidates that assumption and will need a lock here.
 > loop that the test harness deliberately never launches (see
 > `tests/kernel/test_shell_libos_k.c`'s own comment).
 
-### 3.5a Disk binding (SCRUM-188, release SCRUM-189)
+### 3.5a Disk binding (SCRUM-188, release SCRUM-189, extents SCRUM-237)
 
 `exo_disk_read`/`exo_disk_write` (§3.2 #24/#25, SCRUM-103) shipped with no
 ownership concept: the raw disk was the one exokernel resource any LibOS
-could touch regardless of who else was using it. This section closes that
-gap the same way §3.5 closed it for the framebuffer — except the disk stays
-at the *pre-SCRUM-112* shape: a single exclusive owner, established by an
-explicit acquire call. There is no per-context multiplexing here and none is
-planned — a disk head cannot be virtualized into one private copy per caller
-the way a framebuffer can (`src/fb_shadow.c`). Implemented in
-`src/disk_binding.c` (the ownership table, ABI-agnostic, structurally a
-trimmed `fb_binding.c` with no geometry to publish) and `src/syscall_disk.c`
-(the `#24`/`#25`/`#26`/`#27` handlers and the `-EXO_E*` mapping), tested in
+could touch regardless of who else was using it. SCRUM-188 closed that gap
+the way §3.5 closed it for the framebuffer, at the *pre-SCRUM-112* shape: a
+single exclusive owner, established by an explicit acquire call. A disk head
+cannot be virtualized into one private copy per caller the way a framebuffer
+can (`src/fb_shadow.c`), so there is still no per-context *multiplexing* of
+one device.
+
+What SCRUM-237 changed is what is being owned. The unit of ownership is no
+longer "the disk" but **a sector extent** `[base, base + count)`, one per
+owner, and extents never overlap. A whole-device claim is just the extent
+`[0, 2^28)`, so everything above that says "the disk" still holds as the
+degenerate case: `exo_disk_acquire(0, 0)` conflicts with every other holder,
+exactly as the old single-owner binding did. Disjoint extents, though,
+coexist — two LibOSes can each hold their own range of the one drive at the
+same time, and `exo_disk_read`/`exo_disk_write` refuse any transfer that
+leaves the caller's range. That refusal is the entire isolation story at the
+kernel layer: the kernel never learns what a program writes into its extent
+(a FAT-like ExoFS volume, a different filesystem, raw data), only that the
+sectors are the caller's. This is what makes per-program filesystems
+possible without a kernel filesystem — each program links its own
+`src/libos_fs/` and mounts at its extent's base.
+
+Implemented in `src/disk_binding.c` (the ownership table, ABI-agnostic,
+structurally a trimmed `fb_binding.c` with no geometry to publish, holding up
+to `DISK_BIND_MAX_EXTENTS` = 8 extents) and `src/syscall_disk.c` (the
+`#24`/`#25`/`#26`/`#27`/`#37` handlers and the `-EXO_E*` mapping), tested in
 `tests/kernel/test_disk_binding_k.c` and `tests/kernel/test_syscall_disk_k.c`.
+
+**Assigned volumes.** A program that asks for a volume in its package
+manifest (`volume_slot`, `volume_sectors`, `src/exo_pkg.h`) is *assigned* a
+fixed extent by `exo_launch_pkg` (#36) before it runs: slot `n` is the extent
+starting at `EXO_VOLUME_REGION_BASE_LBA + n * EXO_VOLUME_SLOT_SECTORS`
+(`src/exo_volume.h`). An assignment is permission, not a binding, and it
+constrains acquires in both directions: the assigned context may bind exactly
+that extent and nothing else (`-EXO_EPERM` — not even the whole device), and
+no *other* context may bind anything overlapping it (`-EXO_EBUSY`), whether
+or not the owner currently holds it. So a volume stays private across the
+owner's release/re-acquire, and a program cannot gain access to someone
+else's sectors by asking for them — only by being packaged with the slot.
+The program learns its extent from `exo_disk_extent` (#37). A second package
+claiming a slot that a live context already holds -- or whose sectors another
+context currently holds, a whole-device claim included -- is refused at launch
+with `-EXO_EBUSY`, before any context row survives, rather than started with a
+volume it cannot bind. `disk_binding_owner()` names a holder only when there is
+exactly one; with several extents live, ask `disk_binding_extent_of(who)`. An assignment lapses when the
+context is torn down (`revoke_all()` calls `disk_binding_forget()`); a
+voluntary `exo_disk_release` deliberately does not drop it, or the program
+could re-acquire an arbitrary range afterwards. The sectors stay on disk, so
+the next launch of the same package finds its filesystem again.
+
+**Known limits.** The fence exists only while the owner is alive: with no
+assignment live, a whole-device acquirer can reach every slot (the KUnit
+suites rely on that). Slot numbers are assigned by hand in
+`docker/scripts/build.sh`; nothing allocates them at install time (SCRUM-233).
+There is one extent per owner.
 
 **Publication.** `syscall_disk_init(drive_present)` calls
 `disk_binding_init(drive_present)` before registering any of
@@ -916,21 +969,25 @@ below) rather than `-EXO_ENOSYS` — the syscalls exist, the hardware
 does not.
 
 **Establish.** `exo_disk_acquire` (`#26`) records
-`syscall_current_context()` as the owner. A re-acquire by the current owner
-succeeds, same "not punished for calling twice" rule §3.2 states for
-`exo_fb_acquire`; only "another LibOS holds it" is `-EXO_EBUSY`.
+`syscall_current_context()` as the owner of the requested extent. A
+re-acquire of the *same* extent by its owner succeeds, same "not punished for
+calling twice" rule §3.2 states for `exo_fb_acquire`; "an overlapping extent
+is held" is `-EXO_EBUSY`, and so is asking for a different extent while still
+holding one, since the old one may have a volume mounted on it.
 
 **Enforce.** `exo_disk_read`/`exo_disk_write` check
-`disk_binding_owner() == syscall_current_context()` after the count/LBA
+`disk_binding_check_range(syscall_current_context(), lba, count)` after the count/LBA
 shape check (`validate_disk_shape()`) and the drive-presence check, but
 *before* the buffer check (`validate_disk_buf()`) — so `count == 0`'s
 no-op-success contract runs first as before, a headless machine still
 answers `-ENODEV` rather than `-EBUSY` (the same precedence
 `exo_disk_acquire` uses), and a caller with no claim on the disk learns
-nothing about whether its own buffer pointer happens to be valid. An unheld
-or someone-else's binding is not public property, same rule
-`fb_binding_check_map()` enforces for the framebuffer; both cases answer
-`-EXO_EBUSY`.
+nothing about whether its own buffer pointer happens to be valid. A caller
+that holds no extent is not public-property either, same rule
+`fb_binding_check_map()` enforces for the framebuffer: `-EXO_EBUSY`. A caller
+that holds an extent but reaches past it gets `-EXO_EINVAL` — the range is
+out of bounds *for this caller* — which keeps "you hold nothing" and "you hold
+something else" distinguishable.
 
 **Release.** `exo_disk_release` (`#27`, SCRUM-189) calls
 `disk_binding_release(syscall_current_context())` and returns `0`
@@ -1415,9 +1472,9 @@ anything above this layer starts allocating pages in a hot loop.
 >
 > What still holds: the three *use cases* below (WAD, config, saves) and
 > their differing requirements, which is why they are kept. `exo_file_*`
-> (#9–16) remains the planned syscall surface for SCRUM-44, but it will be
-> implemented on top of the LibOS filesystem rather than on a kernel
-> ramdisk. §4.1's memory-mapped WAD shortcut is what `fopen` does today
+> did not stay a syscall surface: SCRUM-44 shipped it as a LibOS library
+> over ExoFS (`src/libos_fs/exo_file.h`, `docs/filesystem.md` §6d), and
+> #9–16 are permanently reserved and unbound (§3.2). §4.1's memory-mapped WAD shortcut is what `fopen` does today
 > (SCRUM-65) and is itself due to be retired by SCRUM-190, which moves the
 > IWAD onto the disk and drops the multiboot module.
 
@@ -1465,8 +1522,9 @@ interface.
 **What the port actually does instead:** the ATA driver (SCRUM-102) and
 `exo_disk_read`/`exo_disk_write` (SCRUM-103) give the kernel sector access
 and no more; ExoFS (SCRUM-189, `src/libos_fs/`, `docs/filesystem.md`) is a
-FAT-like filesystem linked as LibOS code on top of those syscalls; and
-`exo_file_*` / the `FILE*` shim (SCRUM-44/42) will sit on ExoFS. The libc
+FAT-like filesystem linked as LibOS code on top of those syscalls;
+`exo_file_*` (SCRUM-44) is a descriptor table over ExoFS in the same LibOS
+rather than a syscall; and the `FILE*` shim (SCRUM-42) will sit on that. The libc
 shim still translates `FILE*` to descriptors, exactly as above — only the
 layer underneath it changed sides of the kernel boundary.
 

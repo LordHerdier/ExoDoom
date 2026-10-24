@@ -15,6 +15,7 @@
 #include "page_alloc.h"
 #include "vmm.h"
 #include "exo_errno.h"
+#include "exo_volume.h"
 
 #include <stdint.h>
 
@@ -29,7 +30,11 @@ int64_t doom_wad_disk_get(uint64_t *out_paddr, uint64_t *out_size)
         return 0;
     }
 
-    int rc = exofs_bdev_acquire();
+    /* Only the program volume, not the whole disk: a program holding its own
+     * volume extent (SCRUM-237) must not make the IWAD unreadable. */
+    int rc = exofs_bdev_acquire_extent(LIBOS_WAD_DISK_BASE_LBA,
+                                       EXO_VOLUME_REGION_BASE_LBA -
+                                           LIBOS_WAD_DISK_BASE_LBA);
     if (rc != 0) {
         return rc;
     }

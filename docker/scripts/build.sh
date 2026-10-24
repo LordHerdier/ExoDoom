@@ -435,8 +435,13 @@ echo "[2c/7] Build shell LibOS (SCRUM-110)"
 # src/libos_heap.c/src/libos_page_alloc.c/src/libos_fb.c. Budget is not a
 # concern: LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES are 192/192 (raised for
 # Doom, which alone uses ~97/~99 of them).
+#
+# SCRUM-263 adds src/shell/shell_help.c (help matching/formatting). It is
+# also compiled into the TESTING kernel further down, for
+# tests/kernel/test_shell_help_k.c.
 build_ring3_link_target shell src/shell "" "" \
-  src/shell/shell_main.c src/fb.c src/fb_console.c src/libos_fb.c \
+  src/shell/shell_main.c src/shell/shell_help.c \
+  src/fb.c src/fb_console.c src/libos_fb.c \
   src/stdlib.c src/stdio.c src/string.c src/ctype.c \
   src/errno.c src/fpconv.c src/libos_heap.c src/libos_page_alloc.c \
   src/libos_fs/exofs_volume.c src/libos_fs/exofs_fat.c \
@@ -520,6 +525,26 @@ echo "[2f/7] Build Snake LibOS (SCRUM-182)"
 ring3_embed=0
 build_ring3_link_target libos_snake src/libos_snake "" "" \
   src/libos_snake/libos_snake.c src/fb.c src/fb_console.c src/libos_fb.c
+ring3_embed=1
+
+echo "[2f2/7] Build per-program volume demo LibOS (SCRUM-237)"
+# The live demonstration that each LibOS can own a filesystem: one program,
+# packaged twice below (step [2g/7]) with different volume slots, each copy
+# linking its own ExoFS (the same src/libos_fs/ set and libc-shim slice the
+# shell links -- see that step's comment for why it is that many files) and
+# mounting only the sectors the kernel assigned it. Blobs are built for the
+# packager and not linked into the kernel, like Snake and the clock above;
+# `run voldemoa.exo` / `run voldemob.exo` from the shell start the copies.
+# libos_voldemo.c MUST come first (entry point at .text offset 0).
+ring3_embed=0
+build_ring3_link_target libos_voldemo src/libos_voldemo "" "" \
+  src/libos_voldemo/libos_voldemo.c src/fb.c src/fb_console.c src/libos_fb.c \
+  src/stdlib.c src/stdio.c src/string.c src/ctype.c \
+  src/errno.c src/fpconv.c src/libos_heap.c src/libos_page_alloc.c \
+  src/libos_fs/exofs_volume.c src/libos_fs/exofs_fat.c \
+  src/libos_fs/exofs_name.c src/libos_fs/exofs_dirent.c \
+  src/libos_fs/exofs_path.c src/libos_fs/exofs_dir.c \
+  src/libos_fs/exofs_file.c src/libos_fs/exofs_blockdev.c
 ring3_embed=1
 
 echo "[2f/7] Build Doom LibOS (SCRUM-66)"
@@ -634,6 +659,12 @@ package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,k
   --params-len 16
 package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd,wad \
   --params-len 16 --sound-voices 8
+# SCRUM-237: one program, two packages, each requesting a private volume
+# (docs/architecture.md, src/exo_volume.h). Only the slot differs.
+package_ring3_target libos_voldemo    src/libos_voldemo    voldemoa.exo fb,disk,kbd \
+  --volume-slot 0 --volume-sectors 8192
+package_ring3_target libos_voldemo    src/libos_voldemo    voldemob.exo fb,disk,kbd \
+  --volume-slot 1 --volume-sectors 8192
 
 # Every package goes on the program volume under its own file name.
 pkg_args=()
@@ -642,6 +673,32 @@ for f in build/packages/*.exo; do
 done
 build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba" \
   "${pkg_args[@]}"
+
+# SCRUM-237: the per-program volume slots (src/exo_volume.h) sit past the
+# program volume. mkexofsimg sizes the image to end with that volume, so grow
+# it (sparse -- the slots stay unformatted until a program that owns one first
+# runs and formats it) to cover every slot, or the kernel would hand a program
+# an extent the drive does not have. Read from the header like
+# LIBOS_WAD_DISK_BASE_LBA above, so there is one number.
+vol_h=src/exo_volume.h
+vol_base="$(sed -n 's/^#define EXO_VOLUME_REGION_BASE_LBA \([0-9]*\)u\?$/\1/p' "$vol_h")"
+vol_slot="$(sed -n 's/^#define EXO_VOLUME_SLOT_SECTORS *\([0-9]*\)u\?.*$/\1/p' "$vol_h")"
+vol_max="$(sed -n 's/^#define EXO_VOLUME_MAX_SLOTS *\([0-9]*\)u\?.*$/\1/p' "$vol_h")"
+if [[ -z "$vol_base" || -z "$vol_slot" || -z "$vol_max" ]]; then
+  echo "    ERROR: could not read the volume region layout from $vol_h"
+  exit 1
+fi
+vol_end_bytes=$(( (vol_base + vol_slot * vol_max) * 512 ))
+if [[ "$(stat -c %s build/exodoom_disk.img)" -lt "$vol_end_bytes" ]]; then
+  truncate -s "$vol_end_bytes" build/exodoom_disk.img
+fi
+
+# The disk behind every QEMU line's `-device usb-storage` (SCRUM-245,
+# docs/drivers/usb.md section 2). Blank for now -- QEMU only needs the file to
+# exist; SCRUM-247 has the packer write an ExoFS volume of .exo packages here.
+# Created only when missing, so whatever a developer put on it survives a
+# rebuild.
+[[ -f build/usb.img ]] || truncate -s 16M build/usb.img
 
 echo "[3/7] Compile C sources"
 
@@ -722,9 +779,9 @@ echo "[3a/7] Compile ExoFS into the kernel (SCRUM-189, SCRUM-190)"
 # The shell target (step [2c/7], SCRUM-202) is now a second, independent
 # ring-3 compile of these same sources -- its own object files
 # (build/shell_exofs_*.o via build_ring3_link_target's naming), not these
-# kernel-view ones, so the two coexist with no symbol collision. SCRUM-44
-# (exo_file_*) and SCRUM-237 (per-program volumes) are future ring-3
-# consumers of the same library. Step [3b5/7] below, TESTING-only, keeps
+# kernel-view ones, so the two coexist with no symbol collision. The glob
+# also takes in exo_file.c, the descriptor layer (SCRUM-44), which the
+# exo_file KUnit suite drives through this kernel-view build. Step [3b5/7] below, TESTING-only, keeps
 # proving ExoFS stays portable to a ring-3 target with nothing more than a
 # build_ring3_link_target call -- which is exactly what step [2c/7] now is.
 _compile_exofs_one() {
@@ -869,6 +926,14 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     objs+=("build/doom_mus_$(basename "${f%.c}").o")
   done
 
+  # The shell's help matcher/formatter (SCRUM-263) is ring-3 code the src/
+  # glob never sees either; tests/kernel/test_shell_help_k.c runs it from
+  # ring 0. It makes no syscalls and calls no libc, so it needs no shim.
+  echo "    CC shell_help.c (shell help)"
+  x86_64-elf-gcc -c src/shell/shell_help.c -o build/shell_help.o \
+    "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  objs+=("build/shell_help.o")
+
   echo "[3b5/7] Gate: ExoFS still builds as a ring-3 target (SCRUM-189)"
   # Step [3a/7] above (now unconditional, SCRUM-190) compiles ExoFS one way
   # only -- WITH -DEXO_KERNEL, for both the kernel's own launch-time disk
@@ -877,8 +942,9 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # earns its keep: it catches a kernel-only dependency creeping into
   # src/libos_fs/ at the moment it is introduced, rather than at the next
   # full rebuild of the shell target, which may be a while after whatever
-  # broke it. SCRUM-44 (exo_file_*) and SCRUM-237 (per-program volumes) are
-  # future ring-3 consumers besides the shell.
+  # broke it. exo_file.c (SCRUM-44) is covered here too: no ring-3 target
+  # links it until the FILE* shim (SCRUM-42), so this gate is its only
+  # ring-3 build.
   #
   # So: compile every source a second time with probe_cflags (the ring-3
   # CFLAGS, -mcmodel=large) and WITHOUT -DEXO_KERNEL, which selects the
@@ -1028,4 +1094,4 @@ echo "[7/7] Create ISO -> build/exodoom.iso"
 grub-mkrescue -o build/exodoom.iso build/isodir >/dev/null
 
 echo "Done:"
-ls -lh build/exodoom build/exodoom.iso build/exodoom_disk.img
+ls -lh build/exodoom build/exodoom.iso build/exodoom_disk.img build/usb.img

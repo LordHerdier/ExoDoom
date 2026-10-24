@@ -77,7 +77,12 @@
 #define EXO_SYS_MOUSE_POLL    7
 /* Debug */
 #define EXO_SYS_SERIAL_WRITE  8
-/* File I/O */
+/* File I/O -- reserved, never bound. Files are LibOS-side policy over
+ * exo_disk_read/exo_disk_write: exo_file_* is a library in
+ * src/libos_fs/exo_file.h (SCRUM-44), not a syscall. The numbers stay
+ * reserved rather than reused so an old caller gets -EXO_ENOSYS, and #9 is
+ * what test_syscall_k.c / test_syscall_bench_k.c use as "an unbound
+ * number". */
 #define EXO_SYS_FILE_OPEN     9
 #define EXO_SYS_FILE_CLOSE   10
 #define EXO_SYS_FILE_READ    11
@@ -144,9 +149,12 @@
  * this one takes the bytes of an exo_pkg.h package a ring-3 launcher read off
  * disk, so the set of runnable programs is no longer a link-time constant. */
 #define EXO_SYS_LAUNCH_PKG          36
+/* Which sectors of the disk are this program's own volume (SCRUM-237).
+ * Appended for the reason #28-30 were. */
+#define EXO_SYS_DISK_EXTENT         37
 /* Free-resource report for a launcher's admission check (SCRUM-232).
  * Appended for the reason #28-30 were. */
-#define EXO_SYS_RESSTAT             37
+#define EXO_SYS_RESSTAT             38
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -156,7 +164,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        38
+#define EXO_SYS_COUNT        39
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -222,16 +230,6 @@
  */
 #define EXO_USER_VA_BASE  0x0000400000000000ULL
 #define EXO_USER_VA_END   0x0000800000000000ULL
-
-/* exo_file_open modes (docs/syscall_spec.md §3.2 #9) */
-#define EXO_O_RDONLY    0
-#define EXO_O_WRONLY    1
-#define EXO_O_RDWR      2
-
-/* exo_file_seek whence values, matching stdio's SEEK_* ordering (#13) */
-#define EXO_SEEK_SET    0
-#define EXO_SEEK_CUR    1
-#define EXO_SEEK_END    2
 
 /* ---- Shared argument structs -------------------------------------------- */
 /*
@@ -312,7 +310,7 @@ typedef struct {
     uint32_t reserved;      /* zeroed by the kernel                         */
 } exo_memstat_t;
 
-/* exo_resstat(out) — #37 (SCRUM-232).  What is free right now, for a
+/* exo_resstat(out) — #38 (SCRUM-232).  What is free right now, for a
  * launcher deciding whether a program's manifest (src/exo_pkg.h) fits. The
  * kernel only reports; grant / degrade / refuse is the launcher's policy.
  * Like exo_memstat, deliberately unscoped introspection. */
@@ -362,6 +360,12 @@ typedef struct {
     uint32_t total_sectors; /* 0 if !present                                */
 } exo_diskstat_t;
 
+/* #37 result (SCRUM-237): the sector extent assigned to the caller's volume. */
+typedef struct {
+    uint32_t base;    /* first LBA of the volume                        */
+    uint32_t sectors; /* length in sectors, never 0                     */
+} exo_diskextent_t;
+
 /* EXO_PSLIST_MAX *is* CONTEXT_MAX (src/context.h) — included here rather than
  * restated as a separate literal, so the two can never drift the way they
  * did across SCRUM-193: that ticket raised VMM_MAX_ADDRESS_SPACES (and so
@@ -389,6 +393,7 @@ _Static_assert(sizeof(exo_mouse_state_t) ==  6, "exo_mouse_state_t layout is ABI
 _Static_assert(sizeof(exo_memstat_t)     == 24, "exo_memstat_t layout is ABI");
 _Static_assert(sizeof(exo_ps_info_t)     ==  8, "exo_ps_info_t layout is ABI");
 _Static_assert(sizeof(exo_diskstat_t)    ==  8, "exo_diskstat_t layout is ABI");
+_Static_assert(sizeof(exo_diskextent_t)  ==  8, "exo_diskextent_t layout is ABI");
 _Static_assert(sizeof(exo_rtc_time_t)    == 16, "exo_rtc_time_t layout is ABI");
 _Static_assert(sizeof(exo_resstat_t)     == 32, "exo_resstat_t layout is ABI");
 #endif /* __ASSEMBLER__ */
@@ -570,66 +575,9 @@ static inline int64_t exo_serial_write(const void *buf, uint64_t len)
     return exo_syscall2(EXO_SYS_SERIAL_WRITE, (uint64_t)(uintptr_t)buf, len);
 }
 
-/* #9 — open path on the ramdisk.  mode is one of EXO_O_*.  Returns an fd >= 0,
- * or -EXO_ENOENT / -EXO_EMFILE.  Backs fopen. */
-static inline int64_t exo_file_open(const char *path, uint32_t mode)
-{
-    return exo_syscall2(EXO_SYS_FILE_OPEN, (uint64_t)(uintptr_t)path,
-                        (uint64_t)mode);
-}
-
-/* #10 — close fd.  0 or -EXO_EBADF. */
-static inline int64_t exo_file_close(int32_t fd)
-{
-    return exo_syscall1(EXO_SYS_FILE_CLOSE, (uint64_t)(int64_t)fd);
-}
-
-/* #11 — read up to count bytes into buf.  Bytes read, 0 at EOF, or negative
- * error.  Backs fread. */
-static inline int64_t exo_file_read(int32_t fd, void *buf, uint64_t count)
-{
-    return exo_syscall3(EXO_SYS_FILE_READ, (uint64_t)(int64_t)fd,
-                        (uint64_t)(uintptr_t)buf, count);
-}
-
-/* #12 — write count bytes from buf.  Bytes written or negative error.  Backs
- * fwrite. */
-static inline int64_t exo_file_write(int32_t fd, const void *buf,
-                                     uint64_t count)
-{
-    return exo_syscall3(EXO_SYS_FILE_WRITE, (uint64_t)(int64_t)fd,
-                        (uint64_t)(uintptr_t)buf, count);
-}
-
-/* #13 — seek.  whence is one of EXO_SEEK_*.  Returns the new absolute
- * position or negative error.  Backs fseek and ftell. */
-static inline int64_t exo_file_seek(int32_t fd, int64_t offset, uint32_t whence)
-{
-    return exo_syscall3(EXO_SYS_FILE_SEEK, (uint64_t)(int64_t)fd,
-                        (uint64_t)offset, (uint64_t)whence);
-}
-
-/* #14 — write the size of path to *size_out.  0 or -EXO_ENOENT.  Backs
- * M_FileExists and M_FileLength. */
-static inline int64_t exo_file_stat(const char *path, uint64_t *size_out)
-{
-    return exo_syscall2(EXO_SYS_FILE_STAT, (uint64_t)(uintptr_t)path,
-                        (uint64_t)(uintptr_t)size_out);
-}
-
-/* #15 — delete path.  0 or -EXO_ENOENT.  Backs remove(). */
-static inline int64_t exo_file_remove(const char *path)
-{
-    return exo_syscall1(EXO_SYS_FILE_REMOVE, (uint64_t)(uintptr_t)path);
-}
-
-/* #16 — rename oldpath to newpath.  0 or negative error.  Backs rename(),
- * used for save game rotation. */
-static inline int64_t exo_file_rename(const char *oldpath, const char *newpath)
-{
-    return exo_syscall2(EXO_SYS_FILE_RENAME, (uint64_t)(uintptr_t)oldpath,
-                        (uint64_t)(uintptr_t)newpath);
-}
+/* #9-#16 have no stubs: they were reserved for kernel file syscalls that
+ * were never bound. File I/O is LibOS code -- exo_file_* lives in
+ * src/libos_fs/exo_file.h, over ExoFS (SCRUM-44). */
 
 /* #17 — start a PC speaker tone.  Returns immediately; the kernel stops the
  * tone after dur_ms.  0, or -EXO_EINVAL for freq outside 19..20000 Hz or
@@ -734,13 +682,18 @@ static inline int64_t exo_disk_write(uint32_t lba, const void *buf,
                         (uint64_t)(uintptr_t)buf, (uint64_t)count);
 }
 
-/* #26 — bind the disk to the caller (SCRUM-188). Must succeed before
- * exo_disk_read/exo_disk_write will do anything for this caller. Returns 0
- * (including a re-acquire by the current owner), -EXO_EBUSY if another
- * context holds it, or -EXO_ENODEV if this machine has no drive. */
-static inline int64_t exo_disk_acquire(void)
+/* #26 — bind sectors [base, base + count) to the caller (SCRUM-188, ranges
+ * SCRUM-237). count == 0 (and base == 0) claims the whole device, which is
+ * what the argument-less call did before ranges existed. Must succeed before
+ * exo_disk_read/exo_disk_write will do anything for this caller, and those
+ * then refuse any sector outside [base, base + count). Returns 0 (including a
+ * re-acquire of the same extent), -EXO_EBUSY if the extent overlaps another
+ * context's or the caller already holds a different one, -EXO_EINVAL for a
+ * malformed extent, -EXO_ENOMEM if the extent table is full, or -EXO_ENODEV
+ * if this machine has no drive. */
+static inline int64_t exo_disk_acquire(uint32_t base, uint32_t count)
 {
-    return exo_syscall0(EXO_SYS_DISK_ACQUIRE);
+    return exo_syscall2(EXO_SYS_DISK_ACQUIRE, (uint64_t)base, (uint64_t)count);
 }
 
 /* #27 — give the disk binding back (SCRUM-189). The voluntary counterpart to
@@ -768,6 +721,17 @@ static inline int64_t exo_disk_release(void)
 static inline int64_t exo_diskstat(exo_diskstat_t *out)
 {
     return exo_syscall1(EXO_SYS_DISK_STAT, (uint64_t)(uintptr_t)out);
+}
+
+/* #37 — the sector extent this program's package asked for and the kernel
+ * assigned at launch (SCRUM-237). Pass exactly this to exo_disk_acquire and
+ * format/mount ExoFS at .base. Returns 0 with *out filled, -EXO_ENOENT if the
+ * caller has no volume (its package did not request one, or it was not
+ * launched from a package), or -EXO_EFAULT if [out, out + 8) is not mapped
+ * writable in the LibOS window. */
+static inline int64_t exo_disk_extent(exo_diskextent_t *out)
+{
+    return exo_syscall1(EXO_SYS_DISK_EXTENT, (uint64_t)(uintptr_t)out);
 }
 
 /* #28 — queue `num_samples` bytes of 8-bit *unsigned* mono PCM at `buf`,
@@ -907,7 +871,7 @@ static inline int64_t exo_launch_pkg(const void *pkg, uint64_t len)
     return exo_syscall2(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len);
 }
 
-/* #37 — fill *out with what is free right now (SCRUM-232).  A snapshot: it
+/* #38 — fill *out with what is free right now (SCRUM-232).  A snapshot: it
  * can be stale by the time the launch happens, which is why #36 keeps its own
  * cheap page check as a backstop.
  *

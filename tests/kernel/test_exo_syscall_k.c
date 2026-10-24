@@ -66,14 +66,16 @@ static void test_numbers_match_spec(void)
     CU_ASSERT_EQUAL(EXO_SYS_SOUND_STREAM_VOLUME, 34);
     CU_ASSERT_EQUAL(EXO_SYS_RTC_READ,            35);
     CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_PKG,          36);
+    CU_ASSERT_EQUAL(EXO_SYS_DISK_EXTENT,         37);
 }
 
 /* The dispatcher will range-check against EXO_SYS_COUNT, so it has to stay one
- * past the last number — 38 as of exo_resstat (SCRUM-232). */
+ * past the last number — 39 as of exo_resstat (SCRUM-232), after the per-program
+ * volume extent (SCRUM-237). */
 static void test_count_is_one_past_last(void)
 {
     CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_RESSTAT + 1);
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 38);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 39);
 }
 
 /* Two syscalls sharing a number would route silently to the wrong handler. */
@@ -93,7 +95,7 @@ static void test_numbers_are_unique(void)
         EXO_SYS_SOUND_PCM_PARAMS, EXO_SYS_DISK_STAT,
         EXO_SYS_SOUND_STREAM_WRITE, EXO_SYS_SOUND_STREAM_STOP,
         EXO_SYS_SOUND_STREAM_VOLUME, EXO_SYS_RTC_READ, EXO_SYS_LAUNCH_PKG,
-        EXO_SYS_RESSTAT,
+        EXO_SYS_DISK_EXTENT, EXO_SYS_RESSTAT,
     };
     /* 64-bit so the mask keeps working as the table grows; the assert makes
      * the ceiling explicit rather than letting the shift go undefined. */
@@ -209,15 +211,8 @@ static void test_ps_info_layout(void)
 
 static void test_argument_constants(void)
 {
-    CU_ASSERT_EQUAL(EXO_O_RDONLY, 0);
-    CU_ASSERT_EQUAL(EXO_O_WRONLY, 1);
-    CU_ASSERT_EQUAL(EXO_O_RDWR,   2);
-
-    /* Same ordering as stdio's SEEK_*, so the FILE* shim can pass them
-     * straight through. */
-    CU_ASSERT_EQUAL(EXO_SEEK_SET, 0);
-    CU_ASSERT_EQUAL(EXO_SEEK_CUR, 1);
-    CU_ASSERT_EQUAL(EXO_SEEK_END, 2);
+    /* exo_file_* open flags and whence values moved to
+     * src/libos_fs/exo_file.h with SCRUM-44; test_exo_file_k.c checks them. */
 
     /* Page flags are a mask, not an enum. */
     CU_ASSERT_EQUAL(EXO_PAGE_READ | EXO_PAGE_WRITE | EXO_PAGE_USER
@@ -266,13 +261,16 @@ static void *const volatile raw_stub_addresses[] = {
     (void *)exo_syscall5_thunk,
     (void *)exo_syscall6_thunk,
 };
+/* #9-#16 (EXO_SYS_FILE_*) are reserved and never bound, so they have no stub:
+ * exo_file_* is a LibOS library (src/libos_fs/exo_file.h, SCRUM-44). */
+#define RESERVED_UNSTUBBED_NUMBERS \
+    (EXO_SYS_FILE_RENAME - EXO_SYS_FILE_OPEN + 1)
+
 static void *const volatile stub_addresses[] = {
     (void *)exo_page_alloc,   (void *)exo_page_free,   (void *)exo_page_map,
     (void *)exo_page_unmap,   (void *)exo_fb_acquire,  (void *)exo_get_ticks,
     (void *)exo_kbd_poll,     (void *)exo_mouse_poll,  (void *)exo_serial_write,
-    (void *)exo_file_open,    (void *)exo_file_close,  (void *)exo_file_read,
-    (void *)exo_file_write,   (void *)exo_file_seek,   (void *)exo_file_stat,
-    (void *)exo_file_remove,  (void *)exo_file_rename, (void *)exo_sound_tone,
+    (void *)exo_sound_tone,
     (void *)exo_sound_stop,   (void *)exo_yield,       (void *)exo_exit,
     (void *)exo_launch,            (void *)exo_memstat,
     (void *)exo_pslist,            (void *)exo_disk_read,
@@ -282,7 +280,7 @@ static void *const volatile stub_addresses[] = {
     (void *)exo_diskstat,
     (void *)exo_sound_stream_write, (void *)exo_sound_stream_stop,
     (void *)exo_sound_stream_volume,
-    (void *)exo_rtc_read, (void *)exo_launch_pkg,
+    (void *)exo_rtc_read, (void *)exo_launch_pkg, (void *)exo_disk_extent,
     (void *)exo_resstat,
 };
 
@@ -290,7 +288,8 @@ static void test_every_syscall_has_a_stub(void)
 {
     unsigned i;
 
-    CU_ASSERT_EQUAL(sizeof(stub_addresses) / sizeof(stub_addresses[0]),
+    CU_ASSERT_EQUAL(sizeof(stub_addresses) / sizeof(stub_addresses[0])
+                    + RESERVED_UNSTUBBED_NUMBERS,
                     EXO_SYS_COUNT);
 
     for (i = 0; i < sizeof(stub_addresses) / sizeof(stub_addresses[0]); i++) {

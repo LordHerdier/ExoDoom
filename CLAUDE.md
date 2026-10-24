@@ -83,7 +83,7 @@ Full guide: `docs/testing.md`. Debugging with GDB: `docs/debugging.md`.
 serial_init -> idt_init -> tss_init -> mmap_init/memory_init -> acpi_init -> page_alloc_init
   -> vmm_init -> syscall_init + every syscall_*_init
   -> pic_remap -> IRQ0 + spurious IRQ7/15 gates -> pit_init
-  -> pci_init -> hda_init -> ata_init -> rtc_init + syscall_rtc_init
+  -> pci_init -> hda_init -> ata_init -> usb_init -> rtc_init + syscall_rtc_init
   [-DTESTING]    serial_flush -> qemu_exit(run_tests())
   [normal boot]  fb + fbcon -> kbd_init -> sti -> launch the shell LibOS (ring 3)
 ```
@@ -111,6 +111,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | ACPI table parser (RSDP/RSDT/XSDT/FADT; runs before `vmm_init`) | `src/acpi.c/h` |
 | CMOS real-time clock (polled; `exo_rtc_read` #35) | `src/rtc.c/h`, `src/syscall_rtc.c/h` |
 | Intel HDA audio | `src/hda.c/h` |
+| USB: core + host-controller ops, UHCI (polled from IRQ0), HID boot keyboard (one event ring per keyboard) | `src/usb.c/h`, `src/uhci.c/h`, `src/usb_kbd.c/h` |
 | PC speaker | `src/speaker.c/h` |
 | Doom sound (tone table, speaker sequencer, PCM path) | `src/doom_sfx_tone.c/h`, `src/doom_sound.c/h`, `src/doom_sound_pcm.c/h` |
 | WAD DMX sound lump decoder | `src/doom_dmx.c/h` |
@@ -125,7 +126,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h`, `src/disk_binding.c/h` |
 | Resource revocation | `src/revoke.c/h` and the `*_revoke_*` primitives |
 | Disk (ATA PIO) | `src/ata.c/h`, `src/syscall_disk.c/h` |
-| LibOS-space filesystem (ExoFS) | `src/libos_fs/` — **not part of the kernel** |
+| LibOS-space filesystem (ExoFS) + `exo_file_*` descriptor API | `src/libos_fs/` (`exo_file.c/h` for descriptors) — **not part of the kernel**; syscalls #9–16 are reserved, never bound |
 | Keyboard / mouse | `src/ps2.c/h`, `src/kbd_ring.c/h`, `src/ps2_mouse.c/h` |
 | Freestanding libc | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`, `src/fpconv.c/h`; header-only shims `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/*.h` |
 | Fixed-point trigonometry | `src/fixed_math.c/h` |
@@ -179,6 +180,9 @@ area.
   §10.
 - Mixer and stream design, including why `src/pcm_mixer.c` includes no device
   header. → `docs/drivers/hda.md` §12.
+- USB is polled from `irq0_handler()` with `USBINTR = 0`, never an IRQ (UHCI
+  shares HDA's line); the hook may not run control transfers.
+  → `docs/drivers/usb.md` §3, §8.
 
 **Filesystem and Doom**
 - ExoFS is LibOS code over `exo_disk_*`; disk buffers come from
@@ -204,7 +208,7 @@ area.
 | GDB and bare-metal debugging | `docs/debugging.md` |
 | Branches, commits, style, CI checks | `docs/contributing.md` |
 | libc per-function audit | `docs/libc_audit.md` |
-| Drivers (IDT, PIC, PIT, serial, keyboard, framebuffer, ATA, PCI, ACPI, RTC, HDA, speaker) | `docs/drivers/*.md` |
+| Drivers (IDT, PIC, PIT, serial, keyboard, framebuffer, ATA, PCI, ACPI, RTC, HDA, speaker, USB) | `docs/drivers/*.md` |
 
 **New architectural facts go into the doc that owns the subsystem, integrated
 into its existing section — not appended here.** If you find yourself writing

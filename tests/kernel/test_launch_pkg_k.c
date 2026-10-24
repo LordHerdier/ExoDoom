@@ -25,6 +25,8 @@
 #include "page_alloc.h"
 #include "libos_launch.h"
 #include "exo_pkg.h"
+#include "disk_binding.h"
+#include "revoke.h"
 #include "exo_syscall.h"
 #include "syscall.h"
 #include "string.h"
@@ -231,7 +233,7 @@ static int64_t launch_corrupted(corrupt_fn corrupt, size_t *len_out)
 
 static void corrupt_magic(exo_pkg_header_t *h)    { h->magic ^= 1u; }
 static void corrupt_version(exo_pkg_header_t *h)  { h->version += 1u; }
-static void corrupt_reserved(exo_pkg_header_t *h) { h->reserved[2] = 1u; }
+static void corrupt_reserved(exo_pkg_header_t *h) { h->reserved[1] = 1u; }
 static void corrupt_no_code(exo_pkg_header_t *h)  { h->code_len = 0; }
 static void corrupt_oversize(exo_pkg_header_t *h)
 {
@@ -504,6 +506,111 @@ static void test_framebuffer_release_follows_the_manifest(void)
     fb_binding_init(had_fb ? &saved : (const fb_geometry_t *)0);
 }
 
+/* ---- Volume: the manifest's request becomes a fenced sector extent ------ */
+
+/* Tear down every launched context the way exo_exit()/revoke does, which is
+ * what lifts a volume assignment (destroy_all_but() above only frees pages). */
+static void revoke_all_but(page_owner_t keep)
+{
+    context_info_t live[CONTEXT_MAX];
+    uint32_t n = context_list(live, CONTEXT_MAX);
+    for (uint32_t i = 0; i < n; i++) {
+        if (live[i].id != keep) {
+            revoke_all(live[i].id);
+            context_destroy(live[i].id);
+        }
+    }
+}
+
+static page_owner_t first_context_but(page_owner_t not_this)
+{
+    context_info_t live[CONTEXT_MAX];
+    uint32_t n = context_list(live, CONTEXT_MAX);
+    for (uint32_t i = 0; i < n; i++)
+        if (live[i].id != not_this)
+            return live[i].id;
+    return PAGE_OWNER_FREE;
+}
+
+static void test_volume_request_assigns_a_fenced_extent(void)
+{
+    if (!disk_binding_present())
+        return;
+
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    h.want_flags     = EXO_PKG_WANT_DISK;
+    h.volume_slot    = 2;
+    h.volume_sectors = 64;
+    size_t total = write_probe_package(&h);
+
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), 0);
+    page_owner_t child = first_context_but(fg);
+    CU_ASSERT_NOT_EQUAL(child, PAGE_OWNER_FREE);
+    context_switch_pending = 0;
+    context_set_current(fg);
+
+    uint32_t base = 0, count = 0;
+    CU_ASSERT_EQUAL(disk_binding_assignment_of(child, &base, &count),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(base, exo_volume_slot_base(2));
+    CU_ASSERT_EQUAL(count, 64);
+
+    /* The volume is fenced from other contexts while the child is alive... */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(fg, base, 1), DISK_BIND_EBUSY);
+    /* ...and a second package claiming the same slot is refused, with no
+     * context row left behind. */
+    context_info_t before[CONTEXT_MAX];
+    uint32_t n_before = context_list(before, CONTEXT_MAX);
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(context_switch_pending, 0);
+    context_info_t after[CONTEXT_MAX];
+    CU_ASSERT_EQUAL(context_list(after, CONTEXT_MAX), n_before);
+
+    /* A different slot is fine alongside it: two volumes at once. */
+    h.volume_slot = 3;
+    total = write_probe_package(&h);
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), 0);
+    context_switch_pending = 0;
+    context_set_current(fg);
+
+    /* Tearing the contexts down lifts the fence. */
+    revoke_all_but(fg);
+    CU_ASSERT_EQUAL(disk_binding_assignment_of(child, &base, &count),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(fg, exo_volume_slot_base(2), 64),
+                    DISK_BIND_OK);
+    disk_binding_release(fg);
+
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+static void test_no_volume_request_assigns_nothing(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    h.want_flags = EXO_PKG_WANT_DISK;
+    size_t total = write_probe_package(&h);
+
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), 0);
+    page_owner_t child = first_context_but(fg);
+    context_switch_pending = 0;
+    context_set_current(fg);
+
+    uint32_t base, count;
+    CU_ASSERT_EQUAL(disk_binding_assignment_of(child, &base, &count),
+                    DISK_BIND_EBUSY);
+
+    revoke_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
 /* ---- Exhaustion: past CONTEXT_MAX rows the launch fails cleanly -------- */
 
 static void test_launch_past_capacity_fails_gracefully(void)
@@ -650,6 +757,10 @@ void suite_launch_pkg_tests(CU_pSuite s)
                 test_wad_flag_requires_the_params_struct_and_a_wad);
     CU_add_test(s, "a manifest minimum above the free pages is refused",
                 test_manifest_minimum_above_free_pages_is_refused);
+    CU_add_test(s, "a volume request assigns a fenced extent",
+                test_volume_request_assigns_a_fenced_extent);
+    CU_add_test(s, "a package with no volume request gets none",
+                test_no_volume_request_assigns_nothing);
     CU_add_test(s, "launching past the context table fails cleanly",
                 test_launch_past_capacity_fails_gracefully);
 }

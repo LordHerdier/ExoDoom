@@ -252,9 +252,11 @@ At 1024×768, the console is 128 columns × 48 rows.
 
 ### Font
 
-A static 8×8 bitmap font (`font8x8_basic`) covers ASCII 32–127. Each glyph is 8
-bytes — one byte per row, one bit per pixel, LSB = leftmost pixel. Control
-characters (0–31) and characters above 127 are rendered as blank or `?`.
+A static 8×8 bitmap font (`font8x8_basic`) covers ASCII 32–126; every
+printable character has a glyph (`test_fb_console_k.c` checks this, after
+SCRUM-263 found `` :;<=>?@[\]^_`{|}~ `` blank). Each glyph is 8 bytes — one
+byte per row, one bit per pixel, LSB = leftmost pixel. Control characters
+(0–31) and 127 render blank; bytes above 127 are drawn as `?`.
 
 ### Glyph rendering (`draw_glyph8x16`)
 
