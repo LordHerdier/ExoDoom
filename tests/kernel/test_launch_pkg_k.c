@@ -720,6 +720,15 @@ static void test_wad_flag_requires_the_params_struct_and_a_wad(void)
     int64_t rc = do_launch_pkg(PKG_SCRATCH, total);
     if (wad_rc == 0) {
         CU_ASSERT_EQUAL(rc, 0);
+        /* The WAD part of the formula is a worst case: a real launch takes
+         * the plain footprint plus only the tables over this WAD, never more
+         * than the formula says. */
+        uint32_t taken = free_before - free_pages_now();
+        uint32_t plain = exo_pkg_footprint_pages(h.code_len, h.data_len,
+                                                 h.bss_len, 0);
+        CU_ASSERT_TRUE(taken >= plain);
+        CU_ASSERT_TRUE(taken <= exo_pkg_footprint_pages(h.code_len, h.data_len,
+                                                        h.bss_len, h.want_flags));
     } else {
         CU_ASSERT_EQUAL(rc, wad_rc);
         CU_ASSERT_EQUAL(free_pages_now(), free_before);

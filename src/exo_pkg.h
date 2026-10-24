@@ -165,7 +165,9 @@ _Static_assert(sizeof(exo_pkg_header_t) == 60,
  * pages are shared, but the page tables over them are the program's own, one
  * PT per 2 MiB. The manifest cannot know the WAD's size, so this is the
  * worst case -- LIBOS_WAD_MAX_BYTES (64 MiB) / 2 MiB, plus one for an
- * unaligned start -- which keeps min_pages a true floor. */
+ * unaligned start. That makes min_pages a conservative bound, not an exact
+ * footprint: a real launch takes at most this many, and
+ * tests/kernel/test_launch_pkg_k.c asserts it. */
 #define EXO_PKG_WAD_TABLE_PAGES 33u
 
 static inline uint32_t exo_pkg_pages(uint64_t bytes)

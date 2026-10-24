@@ -154,6 +154,9 @@ static char shell_admit_degraded_text[] = "run: granted, degraded: ";
 static char shell_admit_rec_text[] = "recommended ";
 static char shell_admit_voices_text[] = "wants ";
 static char shell_admit_have_text[] = " sound voices, ";
+static char shell_admit_oom_text[] = "run: refused: out of pages, ";
+static char shell_admit_oom_tail_text[] =
+    " free (the IWAD is loaded on first use, after the check)\n";
 static char shell_admit_fb_text[] = "run: framebuffer is held; taking it over\n";
 static char shell_memstat_fail_text[] = "memstat: query failed\n";
 static char shell_pslist_fail_text[] = "pslist: query failed\n";
@@ -1117,6 +1120,14 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
     libos_heap_free(pkg);
     if (lrc == 0) {
         fbcon_clear(con);
+    } else if (lrc == -EXO_ENOMEM) {
+        /* The check passed on a snapshot taken before #36 loaded the IWAD
+         * (doom_wad_disk_get() allocates it on first use), so the kernel's
+         * backstop can still say no. Say why, with the figure that is true now. */
+        exo_resstat_t res;
+        fbcon_write(con, shell_admit_oom_text);
+        shell_write_u32(con, exo_resstat(&res) == 0 ? res.free_pages : 0);
+        fbcon_write(con, shell_admit_oom_tail_text);
     } else {
         fbcon_write(con, shell_run_fail_text);
         shell_write_i64(con, lrc);
