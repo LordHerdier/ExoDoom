@@ -1081,6 +1081,53 @@ Details and error codes: `docs/syscall_spec.md` §3.2 #36.
   unless `--recommended-pages` overrides it; it is not a measurement of what a
   program's heap grows to.
 
+### Slide decks (`slides`)
+
+The shell's `slides` command (`run slides.exo`) presents a deck inside
+ExoDoom. Converting the deck happens on the build host. The kernel has no part
+in it, and the LibOS never parses PowerPoint, PDF or PNG.
+
+```
+.pptx --soffice--> .pdf --pdftoppm--> slide-NN.ppm --mkslides--> slides/<name>.exs
+   (tools/mkslides/pptx2exs.sh, on the host)
+                                   build.sh: mkslides --check, then mkexofsimg
+                                   -> /<name>.exs on the program volume
+```
+
+- **Format.** `src/exo_slides.h` is header-only and depends on nothing, like
+  `src/exo_pkg.h`. The host packer (`tools/mkslides/main.c`), the viewer
+  (`src/libos_slides/`) and `tests/kernel/test_exo_slides_k.c` all include it,
+  so there is one encoder and one decoder. A deck is a 32-byte header, an index
+  of `{offset, length}` per slide, and one RLE stream per slide. Each stream is
+  24-bit pixels in 1..128-pixel packets, and runs can cross rows. Decoding
+  writes BGRX8888 with a caller-chosen stride and checks bounds on every
+  packet: a stream that runs over or stops short is `EXO_SLIDES_EDATA`, and
+  nothing outside the slide is written.
+- **Why RLE and not the `fun/gif-boot` GIF decoder.** That decoder uses a
+  palette of at most 256 colours per frame. Slides are anti-aliased text on
+  flat fills, so quantising them makes text edges band. RLE over full colour
+  already reduces the 15-slide project deck from 26.6 MB raw to 2.4 MB at
+  1024×577.
+- **Why the conversion happens on the host.** LibreOffice and poppler are too
+  large to add to `docker/Dockerfile.build`. `pptx2exs.sh` only needs `soffice`
+  (for `.pptx` input), `pdftoppm` and `cc`. A deck set in fonts the host lacks
+  (the project deck uses Calibri and Consolas) is reflowed by LibreOffice with
+  substitute fonts, and text can overlap. Export a PDF from PowerPoint and pass
+  the `.pdf`, which carries its own fonts.
+- **Viewer.** The viewer binds the program-volume extent the shell's `run`
+  uses, lists `/*.exs` and shows a picker when there is more than one deck. It
+  reads the chosen deck into the LibOS heap, then unmounts and releases the
+  disk before the first slide. Each slide is decoded into one heap buffer and
+  fitted and centred with nearest-neighbour scaling in 16.16 fixed point; the
+  target is `-mno-sse`. A deck rendered at the screen's width is copied 1:1
+  with a letterbox. Heap use is the deck plus `width*height*4`, about 5 MiB for
+  the project deck. This is more than the page counts `exopkg` derives, so
+  admission reports a degraded grant, never a refusal.
+- **Getting a deck in.** Run `tools/mkslides/pptx2exs.sh deck.pptx
+  slides/deck.exs [width]` (or `make slides`), then `make docker-build`.
+  `build.sh` writes every `slides/*.exs` onto the program volume. An empty
+  `slides/` is fine.
+
 ### Multi-application (Sprint 12)
 
 The eventual goal is **cooperative multitasking** between the Doom LibOS and a

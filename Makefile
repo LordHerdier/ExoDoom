@@ -1,4 +1,4 @@
-.PHONY: docker-build docker-run docker-run-kernel docker-run-blank run-blank docker-test docker-build-doom docker-link-doom clean
+.PHONY: docker-build docker-run docker-run-kernel docker-run-blank run-blank docker-test docker-build-doom docker-link-doom slides clean
 
 DEBUG ?= 0
 # AUDIO_PROFILE=1 compiles in the MUSPROF/HDAPROF serial timing reports
@@ -173,6 +173,17 @@ run-blank: docker-build
 	rm -f build/exodoom_blank.img
 	truncate -s "$$(stat -c %s build/exodoom_disk.img)" build/exodoom_blank.img
 	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_blank.img,format=raw,if=ide -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 $(QEMU_USB_ARGS) -no-reboot -serial stdio
+
+# Host-side, not Docker: render a presentation into slides/ for the `slides`
+# viewer (docs/architecture.md "Slide decks"). Needs LibreOffice (for .pptx)
+# and pdftoppm on the host. The next docker-build puts the deck on the disk.
+#   make slides PPTX=talk.pptx            -> slides/talk.exs
+#   make slides PPTX=talk.pdf SLIDES_WIDTH=800
+PPTX ?= ExoDoom_Presentation.pptx
+SLIDES_WIDTH ?= 1024
+slides:
+	mkdir -p slides
+	tools/mkslides/pptx2exs.sh "$(PPTX)" "slides/$(basename $(notdir $(PPTX))).exs" $(SLIDES_WIDTH)
 
 clean:
 	rm -rf build

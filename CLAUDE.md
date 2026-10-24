@@ -40,6 +40,7 @@ make docker-link-doom          # Link gate: every libc symbol Doom needs resolve
 make docker-build DEBUG=1      # Unoptimized build (-g -O0) for GDB
 make docker-build AUDIO_PROFILE=1  # Compile in MUSPROF/HDAPROF serial timing reports (docs/drivers/hda.md 12.12)
 make docker-run-debug DEBUG=1  # Boot QEMU frozen at start, GDB stub on port 1234
+make slides PPTX=talk.pptx     # HOST-side (LibreOffice + pdftoppm): render a deck to slides/talk.exs for `slides`
 make clean                     # rm -rf build
 ```
 
@@ -135,6 +136,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | doomgeneric platform layer | `src/doomgeneric_exo.c/h` |
 | Doom net stub / fatal-error path / mounted IWAD registry | `src/doom_net_stub.c`, `src/doom_panic.c/h`, `src/doom_wad.c/h`, `src/doom_wad_disk.c/h` |
 | LibOS apps | `src/shell/`, `src/libos_wad_viewer/`, `src/libos_clock/`, … |
+| Slide decks (`.exs` format, host packer, viewer LibOS) | `src/exo_slides.h`, `tools/mkslides/`, `src/libos_slides/`, decks in `slides/` → `docs/architecture.md` §7 "Slide decks" |
 | Test framework | `src/kunit.h`, `tests/kernel/*.c`, `tests/kernel/kunit.c`, `tests/kernel/ring3_probe.s` |
 
 ## Gotchas that bite first

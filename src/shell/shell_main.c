@@ -244,6 +244,7 @@ static void shell_run_about(fb_console_t *con, const char *arg);
 static void shell_run_wadview(fb_console_t *con, const char *arg);
 static void shell_run_clock(fb_console_t *con, const char *arg);
 static void shell_run_snake(fb_console_t *con, const char *arg);
+static void shell_run_slides(fb_console_t *con, const char *arg);
 static void shell_run_doom(fb_console_t *con, const char *arg);
 static void shell_print_usage(fb_console_t *con, const char *name);
 
@@ -486,6 +487,11 @@ static const shell_cmd_t shell_cmds[] = {
         "usage: run <package>\n"
         "     <package>  A .exo file on the program volume, e.g. run snake.exo\n" },
       shell_run_run, 1 },
+    { { "slides", SHELL_GRP_APPS, "Present a slide deck (Q or Esc exits)",
+        "usage: slides\n"
+        "     Same as `run slides.exo`. Shows the .exs decks on the program volume;\n"
+        "     arrows/Space step, digits+Enter jump. Decks: tools/mkslides/pptx2exs.sh\n" },
+      shell_run_slides, 0 },
     { { "snake", SHELL_GRP_APPS, "Launch Snake",
         "usage: snake\n"
         "     Same as `run snake.exo`\n" },
@@ -630,6 +636,15 @@ static void shell_run_clock(fb_console_t *con, const char *arg) {
      * (src/libos_clock/libos_clock.c's own comment on why), so control
      * comes back via Ctrl+Tab (SCRUM-111). */
     shell_run_run(con, "clock.exo");
+}
+
+static void shell_run_slides(fb_console_t *con, const char *arg) {
+    (void)arg;
+    /* `run slides.exo`. The viewer finds its decks itself: it binds and
+     * mounts the program volume, reads the chosen deck into its own heap
+     * and releases the disk before the first slide
+     * (src/libos_slides/libos_slides.c). */
+    shell_run_run(con, "slides.exo");
 }
 
 static void shell_run_snake(fb_console_t *con, const char *arg) {

@@ -547,6 +547,23 @@ build_ring3_link_target libos_voldemo src/libos_voldemo "" "" \
   src/libos_fs/exofs_file.c src/libos_fs/exofs_blockdev.c
 ring3_embed=1
 
+echo "[2f3/7] Build slide-deck viewer LibOS"
+# Presents an .exs deck (src/exo_slides.h) from the program volume. Same
+# ExoFS + libc-shim slice as the volume demo above, because it mounts the
+# program volume itself to find and read the deck. Packaged, not linked into
+# the kernel; `slides` in the shell is `run slides.exo`. libos_slides.c MUST
+# come first (entry point at .text offset 0).
+ring3_embed=0
+build_ring3_link_target libos_slides src/libos_slides "" "" \
+  src/libos_slides/libos_slides.c src/fb.c src/fb_console.c src/libos_fb.c \
+  src/stdlib.c src/stdio.c src/string.c src/ctype.c \
+  src/errno.c src/fpconv.c src/libos_heap.c src/libos_page_alloc.c \
+  src/libos_fs/exofs_volume.c src/libos_fs/exofs_fat.c \
+  src/libos_fs/exofs_name.c src/libos_fs/exofs_dirent.c \
+  src/libos_fs/exofs_path.c src/libos_fs/exofs_dir.c \
+  src/libos_fs/exofs_file.c src/libos_fs/exofs_blockdev.c
+ring3_embed=1
+
 echo "[2f/7] Build Doom LibOS (SCRUM-66)"
 # The convergence point: the vendored engine (src/doom/, SCRUM-63/-64), the
 # libc shim (SCRUM-51/-65), the WAD mount (SCRUM-73), the doomgeneric timer
@@ -665,12 +682,29 @@ package_ring3_target libos_voldemo    src/libos_voldemo    voldemoa.exo fb,disk,
   --volume-slot 0 --volume-sectors 8192
 package_ring3_target libos_voldemo    src/libos_voldemo    voldemob.exo fb,disk,kbd \
   --volume-slot 1 --volume-sectors 8192
+# The deck itself is read into the heap (a few MiB), not the image, so the
+# derived page counts undersell it; that only ever makes the grant
+# "degraded", never a refusal.
+package_ring3_target libos_slides     src/libos_slides     slides.exo  fb,disk,kbd
 
 # Every package goes on the program volume under its own file name.
 pkg_args=()
 for f in build/packages/*.exo; do
   pkg_args+=("$f" "$(basename "$f")")
 done
+
+# Slide decks (src/exo_slides.h) go on the same volume, for `slides`. They are
+# made on the host by tools/mkslides/pptx2exs.sh (LibreOffice is not in this
+# image) and dropped in slides/; none is fine. mkslides --check decodes every
+# slide the way the viewer will, so a bad deck fails here, not mid-talk.
+gcc -std=c99 -O2 -Wall -Wextra -Werror \
+  tools/mkslides/main.c -o build/mkslides
+shopt -s nullglob
+for f in slides/*.exs; do
+  build/mkslides --check "$f"
+  pkg_args+=("$f" "$(basename "$f")")
+done
+shopt -u nullglob
 build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba" \
   "${pkg_args[@]}"
 
