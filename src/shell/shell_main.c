@@ -1367,7 +1367,7 @@ static void shell_run_programs(fb_console_t *con, const char *arg) {
  * device-1 binding; on success the volume is left mounted. */
 static int shell_install_mount_src(fb_console_t *con) {
     int rc = exofs_mount(SHELL_SRC_DEV, SHELL_SRC_BASE_LBA);
-    if (rc == -EXO_EINVAL) {
+    if (shell_firstboot_classify(rc) == SHELL_FIRSTBOOT_UNFORMATTED) {
         fbcon_write(con, shell_install_novol_text);
         return 0;
     }
@@ -1429,9 +1429,17 @@ static void shell_run_install(fb_console_t *con, const char *arg) {
     const char *p = arg;
 
     int tok = shell_next_token(&p, name, sizeof(name));
-    if (tok < 0 ||
-        (tok > 0 && shell_install_resolve(name, path, sizeof(path)) != 0)) {
+    if (tok < 0) {
         fbcon_write(con, shell_fs_toolong_text);
+        return;
+    }
+    if (tok > 0 && shell_install_resolve(name, path, sizeof(path)) != 0) {
+        /* Too long once ".exo" is added, or a bare "/" naming no file. */
+        if (name[0] == '/' && name[1] == '\0') {
+            shell_print_usage(con, "install");
+        } else {
+            fbcon_write(con, shell_fs_toolong_text);
+        }
         return;
     }
 

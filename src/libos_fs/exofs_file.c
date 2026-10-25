@@ -433,14 +433,16 @@ static int append_run(exofs_volume_t *v, exofs_file_t *f, uint32_t idx,
     if (f->first_block == EXOFS_NO_BLOCK) {
         if (idx != 0) return 0;
     } else {
-        uint32_t blk;
+        /* One walk to idx - 1, then one FAT lookup: idx is an append only
+         * when idx - 1 is the chain's last block. */
+        uint32_t next;
         if (idx == 0) return 0;
-        int rc = block_at(v, f, idx, &blk);
-        if (rc == 0) return 0;              /* block exists: an overwrite */
-        if (rc != -EXO_EINVAL) return rc;
-        rc = block_at(v, f, idx - 1, &tail);
+        int rc = block_at(v, f, idx - 1, &tail);
         if (rc == -EXO_EINVAL) return 0;    /* a hole before idx */
         if (rc < 0) return rc;
+        rc = exofs_fat_get(v, tail, &next);
+        if (rc < 0) return rc;
+        if (next != EXOFS_BLOCK_EOC) return 0;  /* block exists: overwrite */
     }
 
     uint32_t whole = len / EXOFS_BLOCK_SIZE;
@@ -464,7 +466,12 @@ static int append_run(exofs_volume_t *v, exofs_file_t *f, uint32_t idx,
         f->dirty = 1;
     } else {
         rc = exofs_fat_set(v, tail, first);
-        if (rc < 0) return rc;
+        if (rc < 0) {
+            for (uint32_t i = 0; i < run; i++) {
+                (void)exofs_fat_free(v, first + i);
+            }
+            return rc;
+        }
     }
     f->cur_block = first + run - 1u;
     f->cur_index = idx + run - 1u;

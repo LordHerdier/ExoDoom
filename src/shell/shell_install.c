@@ -25,7 +25,9 @@ int shell_install_resolve(const char *name, char *out, size_t out_len) {
         if (n + 1 >= out_len) {
             return -EXO_EINVAL;
         }
-        if (name[k] == '.') {
+        if (name[k] == '/') {
+            has_dot = 0;             /* only the last component counts */
+        } else if (name[k] == '.') {
             has_dot = 1;
         }
         out[n++] = name[k];

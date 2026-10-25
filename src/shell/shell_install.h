@@ -28,10 +28,10 @@ typedef struct {
 /*
  * Turn the user's `install` argument into the path on both volumes: a
  * leading '/' is added when missing (names are relative to the volume root,
- * like `run`'s), and a name with no '.' gets ".exo", so `install doom` means
- * /doom.exo while `install freedoom2.wad` is taken as written. Returns 0, or
- * -EXO_EINVAL for an empty name or one that does not fit in `out` -- a
- * truncated name is a different file.
+ * like `run`'s), and a name whose last component has no '.' gets ".exo",
+ * so `install doom` means /doom.exo while `install freedoom2.wad` is taken
+ * as written. Returns 0, or -EXO_EINVAL for an empty name or one that does
+ * not fit in `out` -- a truncated name is a different file.
  */
 int shell_install_resolve(const char *name, char *out, size_t out_len);
 

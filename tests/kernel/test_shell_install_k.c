@@ -168,6 +168,17 @@ static void test_resolve_leading_slash_once(void)
     CU_ASSERT_STRING_EQUAL(out, "/clock.exo");
 }
 
+/* Only the last component decides: a dot in a directory name does not
+ * count as the file's extension. */
+static void test_resolve_dotted_directory(void)
+{
+    char out[32];
+    CU_ASSERT_EQUAL(shell_install_resolve("v1.2/doom", out, sizeof(out)), 0);
+    CU_ASSERT_STRING_EQUAL(out, "/v1.2/doom.exo");
+    CU_ASSERT_EQUAL(shell_install_resolve("v1.2/a.wad", out, sizeof(out)), 0);
+    CU_ASSERT_STRING_EQUAL(out, "/v1.2/a.wad");
+}
+
 /* A name that only fits once ".exo" is dropped is refused, not cut short:
  * a truncated name is a different file. */
 static void test_resolve_refuses_overlong(void)
@@ -383,6 +394,8 @@ void suite_shell_install_tests(CU_pSuite s)
                 test_resolve_keeps_extension);
     CU_add_test(s, "resolve: leading slash not doubled",
                 test_resolve_leading_slash_once);
+    CU_add_test(s, "resolve: a dotted directory is not an extension",
+                test_resolve_dotted_directory);
     CU_add_test(s, "resolve: overlong name refused, not truncated",
                 test_resolve_refuses_overlong);
     CU_add_test(s, "resolve: empty name refused",
