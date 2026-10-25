@@ -38,11 +38,12 @@
  * per device, which is what lets an installer hold the source stick and the
  * system disk at the same time. A whole-device claim is per device too.
  * Revocation stays per context: marking, clearing or reclaiming a context's
- * disk binding acts on every device it holds.
+ * disk binding acts on every device it holds, and an extent acquired while
+ * a mark is pending starts marked.
  *
  * Unlike fb_binding.c there is no geometry to publish — a disk isn't a
- * rectangle — so the only boot-time fact this module needs is how many
- * devices registered (blkdev_count(), threaded through syscall_disk_init()).
+ * rectangle — and which devices exist it asks the block-device registry
+ * (src/blkdev.h) directly rather than keeping a copy.
  */
 
 /* Status codes from disk_binding_acquire(). */
@@ -70,22 +71,20 @@
 #define DISK_REVOKE_ENOENT (-1) /* `who` does not hold the disk             */
 
 /*
- * Record that devices [0, ndevs) exist, and drop every binding and
- * assignment. Called once from syscall_disk_init() with blkdev_count(),
- * ahead of the TESTING branch so acquire works identically on a normal boot
- * and under the test runner. Returns DISK_BIND_OK if `ndevs` is nonzero,
+ * Drop every binding and assignment. Called once from syscall_disk_init(),
+ * after the drivers have registered their disks and ahead of the TESTING
+ * branch so acquire works identically on a normal boot and under the test
+ * runner. Returns DISK_BIND_OK if any device is registered,
  * DISK_BIND_ENODEV otherwise.
  */
-int disk_binding_init(uint32_t ndevs);
+int disk_binding_init(void);
 
-/* Whether device `dev` exists as far as disk_binding_init() was told. The
- * single source of truth for disk presence — src/syscall_disk.c's
- * -EXO_ENODEV check reads this rather than keeping its own copy, so the two
- * can never disagree (unlike a caller re-deriving presence independently). */
+/* Whether block device `dev` exists: blkdev_get(dev) != NULL. The registry
+ * is the single source of truth for disk presence — this reads it rather
+ * than keeping a copy, and src/syscall_disk.c's -EXO_ENODEV check goes
+ * through here, so the two can never disagree. A machine with no system
+ * disk has no device 0 even if it has others (blkdev.h). */
 int disk_binding_present(uint32_t dev);
-
-/* The `ndevs` disk_binding_init() was given. */
-uint32_t disk_binding_device_count(void);
 
 /* Whole-device claim on `dev`: disk_binding_acquire_extent(who, dev, 0, 0). */
 int disk_binding_acquire(page_owner_t who, uint32_t dev);
@@ -97,7 +96,8 @@ int disk_binding_acquire(page_owner_t who, uint32_t dev);
  * without wrapping (DISK_BIND_ERANGE).
  *
  *   DISK_BIND_OK      `who` now holds exactly this extent -- including when
- *                      it already held that same extent.
+ *                      it already held that same extent. A new extent starts
+ *                      marked for revocation if `who` has a mark pending.
  *   DISK_BIND_EBUSY    the extent overlaps another owner's on this device,
  *                      or `who` already holds a *different* extent of this
  *                      device (release first). An extent of another device

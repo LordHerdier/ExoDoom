@@ -16,7 +16,6 @@
 #include "ps2.h"
 #include "ps2_mouse.h"
 #include "ata.h"
-#include "blkdev.h"
 #include "pci.h"
 #include "hda.h"
 #include "sleep.h"
@@ -428,8 +427,9 @@ void kernel_main(void *mb2_info_ptr) {
     // same soft-fail pattern as vmm_init() above.
     //
     // SCRUM-244: every IDE position is probed and each disk that answered is
-    // registered as a block device (src/blkdev.h), primary master first, so
-    // the system disk is device 0. The CD-ROM GRUB booted from is skipped.
+    // registered as a block device (src/blkdev.h): the primary master in the
+    // slot reserved for the system disk, device 0, the others from 1 up. The
+    // CD-ROM GRUB booted from is skipped.
     int ata_rc = ata_init();
     if (ata_rc != ATA_OK) {
         serial_print("ATA: no primary master drive (rc=");
@@ -462,13 +462,14 @@ void kernel_main(void *mb2_info_ptr) {
 
     // ── Disk syscalls (SCRUM-103/SCRUM-188) ─────────────────────────────
     // Binds exo_disk_read/_write/_acquire/_release (#24/#25/#26/#27) in
-    // front of the block-device registry above, passing along how many
-    // devices registered so the handlers can return -EXO_ENODEV without
-    // re-probing the bus. Same placement rule as every other syscall *_init(): after
+    // front of the block-device registry, after every driver that registers
+    // disks into it (ATA above; USB mass storage, SCRUM-247, will register
+    // from usb_init()), so the handlers answer -EXO_ENODEV from the registry
+    // without re-probing the bus. Same placement rule as every other syscall *_init(): after
     // syscall_init(), ahead of the TESTING branch. syscall_disk_init() also
     // calls disk_binding_init() before registering any of the three, so the
     // ownership/binding gate (SCRUM-188) is live from the first syscall.
-    syscall_disk_init(blkdev_count());
+    syscall_disk_init();
 
     // ── Timer syscall (SCRUM-172) ────────────────────────────────────────
     // Binds exo_get_ticks (#5). After pit_init() -- the handler reports

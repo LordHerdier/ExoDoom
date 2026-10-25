@@ -84,8 +84,8 @@ Full guide: `docs/testing.md`. Debugging with GDB: `docs/debugging.md`.
 serial_init -> idt_init -> tss_init -> mmap_init/memory_init -> acpi_init -> page_alloc_init
   -> vmm_init -> syscall_init + every syscall_*_init
   -> pic_remap -> IRQ0 + spurious IRQ7/15 gates -> pit_init
-  -> pci_init -> hda_init -> ata_init + ata_register_blkdevs -> syscall_disk_init
-  -> usb_init -> rtc_init + syscall_rtc_init
+  -> pci_init -> hda_init -> ata_init + ata_register_blkdevs -> usb_init
+  -> syscall_disk_init -> rtc_init + syscall_rtc_init
   [-DTESTING]    serial_flush -> qemu_exit(run_tests())
   [normal boot]  fb + fbcon -> kbd_init -> sti -> launch the shell LibOS (ring 3)
 ```

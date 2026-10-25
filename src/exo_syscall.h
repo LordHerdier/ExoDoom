@@ -180,9 +180,10 @@
 #define EXO_LAUNCH_APP_DOOM       1
 #define EXO_LAUNCH_APP_COUNT      2
 
-/* Device indices exo_diskstat (#31) will answer for: [0, this). Devices are
- * numbered densely in registration order, device 0 being the system disk
- * (SCRUM-244), so the first absent index ends the list. */
+/* Device indices exo_diskstat (#31) will answer for: [0, this). Device 0 is
+ * reserved for the system disk and stays absent on a machine without one;
+ * other disks are numbered from 1 (SCRUM-244). Enumerate by asking every
+ * index, not by stopping at the first absent one. */
 #define EXO_DISK_MAX_DEVICES      4u
 
 /* Largest package exo_launch_pkg() will look at: the format's own worst case
@@ -730,7 +731,8 @@ static inline int64_t exo_disk_release(uint32_t dev)
  * (SCRUM-202, device SCRUM-244). No acquire needed first: unscoped
  * introspection like exo_memstat/exo_pslist, not a resource grant. An absent
  * device is not an error -- it reports present == 0 -- so the disks are
- * enumerated by asking dev = 0, 1, ... until the first absent one. Returns 0
+ * enumerated by asking every dev below EXO_DISK_MAX_DEVICES (device 0 can be
+ * absent while others are present). Returns 0
  * with *out filled, -EXO_EINVAL if dev >= EXO_DISK_MAX_DEVICES, or
  * -EXO_EFAULT if [out, out + sizeof(exo_diskstat_t)) is not entirely inside
  * the LibOS window and mapped writable. */

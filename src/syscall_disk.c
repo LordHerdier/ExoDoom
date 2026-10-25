@@ -21,12 +21,17 @@ static int64_t blkdev_err_to_exo(int rc)
     }
 }
 
-/* SCRUM-244: whether `dev`, as the full 64-bit register the dispatcher hands
- * over, names a device that exists. Checked whole, before narrowing, for the
- * same reason validate_disk_shape() takes 64-bit lba/count. */
-static int disk_dev_present(uint64_t dev)
+/* SCRUM-244: the device `dev` names, as the full 64-bit register the
+ * dispatcher hands over, or NULL if there is none. Checked whole, before
+ * narrowing, for the same reason validate_disk_shape() takes 64-bit
+ * lba/count. disk_binding_present() is the same registry lookup, so there
+ * is one answer to "does this device exist", and a handler that got a
+ * device here uses that same pointer for the transfer. */
+static const blkdev_t *disk_dev(uint64_t dev)
 {
-    return dev <= UINT32_MAX && disk_binding_present((uint32_t)dev);
+    if (dev > UINT32_MAX || !disk_binding_present((uint32_t)dev))
+        return NULL;
+    return blkdev_get((uint32_t)dev);
 }
 
 /* First half of the shared validation: pure argument shape, no buffer, no
@@ -112,7 +117,8 @@ static int64_t sys_disk_read(uint64_t dev, uint64_t lba, uint64_t buf,
     if (v <= 0)
         return v;
 
-    if (!disk_dev_present(dev))
+    const blkdev_t *bd = disk_dev(dev);
+    if (bd == NULL)
         return -EXO_ENODEV;
 
     v = check_disk_access((uint32_t)dev, lba, count);
@@ -123,9 +129,6 @@ static int64_t sys_disk_read(uint64_t dev, uint64_t lba, uint64_t buf,
     if (v <= 0)
         return v;
 
-    const blkdev_t *bd = blkdev_get((uint32_t)dev);
-    if (bd == NULL)
-        return -EXO_ENODEV;
     int rc = bd->read(bd->ctx, (uint32_t)lba, (uint8_t *)(uintptr_t)buf,
                       (uint32_t)count);
     if (rc != BLKDEV_OK)
@@ -144,7 +147,8 @@ static int64_t sys_disk_write(uint64_t dev, uint64_t lba, uint64_t buf,
     if (v <= 0)
         return v;
 
-    if (!disk_dev_present(dev))
+    const blkdev_t *bd = disk_dev(dev);
+    if (bd == NULL)
         return -EXO_ENODEV;
 
     v = check_disk_access((uint32_t)dev, lba, count);
@@ -155,9 +159,6 @@ static int64_t sys_disk_write(uint64_t dev, uint64_t lba, uint64_t buf,
     if (v <= 0)
         return v;
 
-    const blkdev_t *bd = blkdev_get((uint32_t)dev);
-    if (bd == NULL)
-        return -EXO_ENODEV;
     int rc = bd->write(bd->ctx, (uint32_t)lba,
                        (const uint8_t *)(uintptr_t)buf, (uint32_t)count);
     if (rc != BLKDEV_OK)
@@ -177,7 +178,7 @@ static int64_t sys_disk_acquire(uint64_t dev, uint64_t base, uint64_t count,
 {
     (void)a4; (void)a5; (void)a6;
 
-    if (!disk_dev_present(dev))
+    if (disk_dev(dev) == NULL)
         return -EXO_ENODEV;
 
     if (base > UINT32_MAX || count > UINT32_MAX)
@@ -228,8 +229,9 @@ static int64_t sys_disk_release(uint64_t dev, uint64_t a2, uint64_t a3,
  * driver latched at boot (disk_binding_present(), the registry's sector
  * count). Any `dev` below EXO_DISK_MAX_DEVICES is a valid question whose
  * answer may be "not present", so a LibOS enumerates the disks by asking
- * 0, 1, ... and stopping at the first absent one (indices are dense: they
- * are registration order). Only an index that could never name a device is
+ * every index below EXO_DISK_MAX_DEVICES -- not stopping at the first absent
+ * one, since device 0 stays empty on a machine with no system disk
+ * (src/blkdev.h). Only an index that could never name a device is
  * -EXO_EINVAL. */
 static int64_t sys_disk_stat(uint64_t dev, uint64_t out, uint64_t a3,
                              uint64_t a4, uint64_t a5, uint64_t a6)
@@ -245,8 +247,7 @@ static int64_t sys_disk_stat(uint64_t dev, uint64_t out, uint64_t a3,
 
     exo_diskstat_t *stat_out = (exo_diskstat_t *)(uintptr_t)out;
 
-    const blkdev_t *bd = disk_binding_present((uint32_t)dev)
-                             ? blkdev_get((uint32_t)dev) : NULL;
+    const blkdev_t *bd = disk_dev(dev);
     stat_out->present = bd != NULL ? 1 : 0;
     stat_out->reserved[0] = 0;
     stat_out->reserved[1] = 0;
@@ -278,9 +279,9 @@ static int64_t sys_disk_extent(uint64_t out, uint64_t a2, uint64_t a3,
     return 0;
 }
 
-void syscall_disk_init(uint32_t ndevs)
+void syscall_disk_init(void)
 {
-    disk_binding_init(ndevs);
+    disk_binding_init();
     exo_syscall_register(EXO_SYS_DISK_READ, sys_disk_read);
     exo_syscall_register(EXO_SYS_DISK_WRITE, sys_disk_write);
     exo_syscall_register(EXO_SYS_DISK_ACQUIRE, sys_disk_acquire);

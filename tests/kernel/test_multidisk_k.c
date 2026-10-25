@@ -14,7 +14,8 @@
  *   - an ExoFS volume on each device, and a file copied between them;
  *   - reclaiming a context releases every device it held.
  *
- * Tests that need the second drive return early when blkdev_count() < 2, so
+ * Tests that need the second drive return early when device 0 or 1 is
+ * missing, so
  * a boot without it (a developer's own QEMU line) still passes; the
  * argument-shape tests run regardless.
  *
@@ -57,7 +58,17 @@
 
 static int two_disks(void)
 {
-    return blkdev_count() >= 2;
+    return blkdev_get(DEV_SYS) != NULL && blkdev_get(DEV_STICK) != NULL;
+}
+
+/* An index below EXO_DISK_MAX_DEVICES with nothing registered, or
+ * EXO_DISK_MAX_DEVICES if every slot is filled. */
+static uint32_t absent_index(void)
+{
+    for (uint32_t d = 0; d < EXO_DISK_MAX_DEVICES; d++)
+        if (blkdev_get(d) == NULL)
+            return d;
+    return EXO_DISK_MAX_DEVICES;
 }
 
 static int64_t do_acquire(uint64_t dev, uint64_t base, uint64_t count)
@@ -116,7 +127,7 @@ int multidisk_suite_cleanup(void)
 
 static void test_absent_device_is_enodev(void)
 {
-    uint32_t none = blkdev_count();
+    uint32_t none = absent_index();
     uint8_t *buf = libos_heap_alloc(512);
     CU_ASSERT_PTR_NOT_NULL(buf);
 
@@ -358,6 +369,44 @@ out:
     reset_bindings();
 }
 
+/* Revocation is per context: an extent taken while a revoke is pending is
+ * part of what was asked for, so it starts marked. Otherwise a context could
+ * pick up a second device, release the first, and look as if it had
+ * complied while still holding a disk. */
+static void test_new_extent_inherits_revoke_mark(void)
+{
+    if (!two_disks())
+        return;
+
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, DEV_SYS,
+                                                RAW_LBA, 1), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_revoke_mark(OTHER_LIBOS), DISK_REVOKE_OK);
+
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS, DEV_STICK),
+                    DISK_BIND_OK);
+    disk_binding_release(OTHER_LIBOS, DEV_SYS);
+    CU_ASSERT_TRUE(disk_binding_revoke_pending(OTHER_LIBOS));
+
+    /* Clearing the mark clears it on every device. */
+    CU_ASSERT_EQUAL(disk_binding_revoke_clear(OTHER_LIBOS), DISK_REVOKE_OK);
+    CU_ASSERT_FALSE(disk_binding_revoke_pending(OTHER_LIBOS));
+
+    reset_bindings();
+}
+
+/* With no mark pending, a new extent starts unmarked. */
+static void test_new_extent_unmarked_without_pending(void)
+{
+    if (!two_disks())
+        return;
+
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS, DEV_STICK),
+                    DISK_BIND_OK);
+    CU_ASSERT_FALSE(disk_binding_revoke_pending(OTHER_LIBOS));
+
+    reset_bindings();
+}
+
 /* Reclaiming a context gives back every device it held, not just one. */
 static void test_reclaim_releases_every_device(void)
 {
@@ -407,6 +456,10 @@ void suite_multidisk_tests(CU_pSuite s)
                 test_same_lba_two_devices_distinct);
     CU_add_test(s, "ExoFS file copied between devices",
                 test_copy_file_between_devices);
+    CU_add_test(s, "extent taken during a pending revoke starts marked",
+                test_new_extent_inherits_revoke_mark);
+    CU_add_test(s, "extent taken with no revoke pending starts unmarked",
+                test_new_extent_unmarked_without_pending);
     CU_add_test(s, "reclaim releases every device",
                 test_reclaim_releases_every_device);
 }

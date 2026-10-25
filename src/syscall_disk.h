@@ -1,7 +1,5 @@
 #pragma once
 
-#include <stdint.h>
-
 /* The most 512-byte sectors a single exo_disk_read/exo_disk_write call will
  * transfer. The whole call runs with interrupts off (`syscall`'s FMASK
  * clears IF, src/syscall.c) and each sector is a busy-polled PIO transfer
@@ -29,10 +27,11 @@
  * half of the revocation protocol (docs/syscall_spec.md §3.6), which
  * without #27 no LibOS could perform for this resource.
  *
- * Call from kernel_main after syscall_init() and ata_register_blkdevs() (the
- * latter so `ndevs`, blkdev_count(), reflects the drives that actually
- * answered), ahead of the TESTING branch, so the handlers are bound for both
- * a normal boot and the in-kernel test run -- same placement rule as every
- * other syscall_*_init().
+ * Call from kernel_main after syscall_init() and after every driver that
+ * registers disks (ata_register_blkdevs(); later USB mass storage), ahead
+ * of the TESTING branch, so the handlers are bound for both a normal boot
+ * and the in-kernel test run -- same placement rule as every other
+ * syscall_*_init(). Which devices exist is read from the registry on every
+ * call, not latched here.
  */
-void syscall_disk_init(uint32_t ndevs);
+void syscall_disk_init(void);

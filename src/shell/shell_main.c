@@ -188,7 +188,7 @@ static char shell_dd_badnum_text[] = "dd: not a number: ";
 static char shell_dd_range_text[] =
     "dd: write refused -- only lbas below the shell volume are writable\n";
 static char shell_disk_fail_text[] = "disk: query failed\n";
-static char shell_disk_none_text[] = "disk: no drive present\n";
+static char shell_disk_none_text[] = "disk 0: no system disk present\n";
 
 /* ExoFS itself has no notion of a working directory by design
  * (docs/filesystem.md §7) -- this is that state, kept here instead. Always
@@ -1750,8 +1750,12 @@ static void shell_disk_line(fb_console_t *con, uint32_t dev,
     fbcon_write(con, " MiB)\n");
 }
 
+static void shell_run_disk_system(fb_console_t *con,
+                                  const exo_diskstat_t *stat);
+
 /* `disk` -- exo_diskstat() (#31) for presence/capacity of every block device
- * (SCRUM-244: asked 0, 1, ... until the first absent one), plus, for the
+ * (SCRUM-244: every index below EXO_DISK_MAX_DEVICES, since the system
+ * disk's slot 0 can be empty while others are present), plus, for the
  * system disk, the WAD's LBA range this shell already knows about at compile
  * time (LIBOS_WAD_DISK_BASE_LBA, src/doom_wad_disk.h). The shell volume's
  * own size is computed live from the same capacity via
@@ -1766,11 +1770,23 @@ static void shell_run_disk(fb_console_t *con, const char *arg) {
     }
     if (!stat.present) {
         fbcon_write(con, shell_disk_none_text);
-        return;
+    } else {
+        shell_run_disk_system(con, &stat);
     }
 
-    shell_disk_line(con, SHELL_SYS_DEV, &stat);
-    uint32_t sys_sectors = stat.total_sectors;
+    for (uint32_t dev = SHELL_SYS_DEV + 1u; dev < EXO_DISK_MAX_DEVICES; dev++) {
+        if (exo_diskstat(dev, &stat) == 0 && stat.present) {
+            shell_disk_line(con, dev, &stat);
+        }
+    }
+}
+
+/* The system disk's `disk` lines: its size and the volumes this shell
+ * places on it at fixed LBAs. */
+static void shell_run_disk_system(fb_console_t *con,
+                                  const exo_diskstat_t *stat) {
+    shell_disk_line(con, SHELL_SYS_DEV, stat);
+    uint32_t sys_sectors = stat->total_sectors;
     fbcon_write(con, "  wad volume:   lba ");
     shell_write_u32(con, LIBOS_WAD_DISK_BASE_LBA);
     fbcon_write(con, "+\n");
@@ -1781,13 +1797,6 @@ static void shell_run_disk(fb_console_t *con, const char *arg) {
                                               LIBOS_WAD_DISK_BASE_LBA,
                                               sys_sectors));
     fbcon_write(con, " sectors)\n");
-
-    for (uint32_t dev = SHELL_SYS_DEV + 1u; dev < EXO_DISK_MAX_DEVICES; dev++) {
-        if (exo_diskstat(dev, &stat) != 0 || !stat.present) {
-            break;
-        }
-        shell_disk_line(con, dev, &stat);
-    }
 }
 
 /* Next token of a `dd` command line as a uint32_t (shell_parse_u32()).

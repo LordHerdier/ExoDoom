@@ -77,11 +77,12 @@
 
 /* One IDE position (SCRUM-244). Indexed primary master, primary slave,
  * secondary master, secondary slave -- the order QEMU numbers `-drive
- * if=ide,index=N` in, and the order ata_register_blkdevs() registers them,
- * so the primary master is block device 0. */
+ * if=ide,index=N` in. ata_register_blkdevs() puts the primary master in the
+ * registry's reserved system slot (block device 0) and the rest after it. */
 typedef struct {
     uint16_t io;       /* command-block base                              */
     uint16_t ctl;      /* control-block port (device control / alt status) */
+    uint8_t  bus;      /* 0 primary, 1 secondary -- index into g_bus_sel  */
     uint8_t  select;   /* DRIVE_HEAD value: LBA mode + master/slave bit    */
     uint8_t  present;  /* answered IDENTIFY as an ATA disk                */
     /* Sectors per DRQ data block for every transfer below: the value
@@ -96,11 +97,21 @@ typedef struct {
 } ata_drive_t;
 
 static ata_drive_t g_drives[ATA_MAX_DRIVES] = {
-    { ATA_PRIMARY_IO,   ATA_PRIMARY_CTL,   ATA_DRIVE_HEAD_LBA,                        0, 1, 0 },
-    { ATA_PRIMARY_IO,   ATA_PRIMARY_CTL,   ATA_DRIVE_HEAD_LBA | ATA_DRIVE_HEAD_SLAVE, 0, 1, 0 },
-    { ATA_SECONDARY_IO, ATA_SECONDARY_CTL, ATA_DRIVE_HEAD_LBA,                        0, 1, 0 },
-    { ATA_SECONDARY_IO, ATA_SECONDARY_CTL, ATA_DRIVE_HEAD_LBA | ATA_DRIVE_HEAD_SLAVE, 0, 1, 0 },
+    { ATA_PRIMARY_IO,   ATA_PRIMARY_CTL,   0, ATA_DRIVE_HEAD_LBA,                        0, 1, 0 },
+    { ATA_PRIMARY_IO,   ATA_PRIMARY_CTL,   0, ATA_DRIVE_HEAD_LBA | ATA_DRIVE_HEAD_SLAVE, 0, 1, 0 },
+    { ATA_SECONDARY_IO, ATA_SECONDARY_CTL, 1, ATA_DRIVE_HEAD_LBA,                        0, 1, 0 },
+    { ATA_SECONDARY_IO, ATA_SECONDARY_CTL, 1, ATA_DRIVE_HEAD_LBA | ATA_DRIVE_HEAD_SLAVE, 0, 1, 0 },
 };
+
+/* Which drive each bus last had selected (its `select` byte), or
+ * ATA_SEL_UNKNOWN. A drive-select costs a ~400ns settle before the newly
+ * selected drive's status is valid, and under KVM each of the four
+ * alternate-status reads that make up that delay is a VM exit -- so it is
+ * paid only when the selection actually changes, not on every command to
+ * the drive that is already selected. ata_init() resets both to unknown, so
+ * every probe pays it. */
+#define ATA_SEL_UNKNOWN 0xFFu
+static uint8_t g_bus_sel[2] = { ATA_SEL_UNKNOWN, ATA_SEL_UNKNOWN };
 
 /* Bounded busy-wait, not a PIT-timed one: on real/QEMU hardware BSY/DRQ
  * resolve in microseconds, and tying this to kernel_get_ticks_ms() would
@@ -131,7 +142,7 @@ static ata_drive_t g_drives[ATA_MAX_DRIVES] = {
  * can also clear a pending IRQ, which this must not do) is the standard way
  * to force the delay: each I/O read takes on the order of 100ns on real
  * hardware. The same delay is what a drive-select needs before the newly
- * selected drive's status is valid (SCRUM-244), so ata_select() pays it too. */
+ * selected drive's status is valid (SCRUM-244) -- see ata_select_drive(). */
 static void ata_delay_400ns(const ata_drive_t *d) {
     (void)inb(d->ctl);
     (void)inb(d->ctl);
@@ -184,20 +195,29 @@ static int ata_wait_ready(const ata_drive_t *d) {
     return ATA_OK;
 }
 
+/* Write DRIVE_HEAD for `d` (its master/slave bit, LBA mode, and the LBA
+ * bits 24-27 in `lba_hi`) -- every command does, because two drives share a
+ * bus's registers (SCRUM-244) and the previous command may have been for
+ * the other one. If that changed which drive is selected, wait the 400ns
+ * for the newly selected one to drive the status lines before anyone polls
+ * or writes the rest of the command block; if it did not, the drive was
+ * already selected and settled, and the delay would only cost VM exits. */
+static void ata_select_drive(const ata_drive_t *d, uint8_t lba_hi) {
+    outb(d->io + ATA_REG_DRIVE_HEAD, d->select | (lba_hi & 0x0F));
+    if (g_bus_sel[d->bus] != d->select) {
+        ata_delay_400ns(d);
+        g_bus_sel[d->bus] = d->select;
+    }
+}
+
 /* Program the drive/head + LBA + sector-count registers common to every
  * READ/WRITE SECTORS command, single- or multi-sector. Caller writes
  * COMMAND next. `count` is cast straight into the 8-bit SECCOUNT
  * register, so it must be in [1, 255] -- the only callers below cap well
  * under that (EXO_DISK_MAX_SECTORS is 128). Count 0 would mean "256
- * sectors" per the ATA spec, which nothing here needs or checks for.
- *
- * DRIVE_HEAD is written on every command, with this drive's master/slave
- * bit, because two drives share a bus's registers (SCRUM-244): the previous
- * command may have been for the other one. The 400ns delay after it lets
- * the newly selected drive drive the status lines before anyone polls. */
+ * sectors" per the ATA spec, which nothing here needs or checks for. */
 static void ata_select(const ata_drive_t *d, uint32_t lba, uint32_t count) {
-    outb(d->io + ATA_REG_DRIVE_HEAD, d->select | ((lba >> 24) & 0x0F));
-    ata_delay_400ns(d);
+    ata_select_drive(d, (uint8_t)(lba >> 24));
     outb(d->io + ATA_REG_SECCOUNT, (uint8_t)count);
     outb(d->io + ATA_REG_LBA_LO, (uint8_t)(lba & 0xFF));
     outb(d->io + ATA_REG_LBA_MID, (uint8_t)((lba >> 8) & 0xFF));
@@ -213,8 +233,7 @@ static int ata_probe(ata_drive_t *d) {
     d->block = 1;
     d->sectors = 0;
 
-    outb(d->io + ATA_REG_DRIVE_HEAD, d->select);
-    ata_delay_400ns(d);
+    ata_select_drive(d, 0);
 
     /* 0x00: nothing wired at this position (QEMU reads an absent slave, and
      * an empty bus, as zero). 0xFF: a floating bus with no controller
@@ -223,6 +242,22 @@ static int ata_probe(ata_drive_t *d) {
      * DG_Init/doom_wad.c use for a missing resource. */
     uint8_t status = inb(d->io + ATA_REG_STATUS);
     if (status == 0x00 || status == 0xFF) {
+        return ATA_ENODEV;
+    }
+
+    /* Register echo: a device that is there latches what is written to its
+     * command-block registers; an empty position does not (QEMU reads an
+     * absent drive's registers as 0, a floating bus reads 0xFF). The status
+     * check above only rules out the two clean "nothing here" answers -- a
+     * floating bus can also settle at something like 0x7F or 0x80, with BSY
+     * apparently set, and without this the BSY poll below would spin its
+     * whole ATA_POLL_ITERS budget (~10 s) per empty position before giving
+     * up. Probing four positions instead of one (SCRUM-244) is what made
+     * that worth guarding against. */
+    outb(d->io + ATA_REG_SECCOUNT, 0x55);
+    outb(d->io + ATA_REG_LBA_LO, 0xAA);
+    if (inb(d->io + ATA_REG_SECCOUNT) != 0x55 ||
+        inb(d->io + ATA_REG_LBA_LO) != 0xAA) {
         return ATA_ENODEV;
     }
 
@@ -282,7 +317,7 @@ static int ata_probe(ata_drive_t *d) {
      * keeps the single-sector-per-DRQ commands -- slower, never wrong. */
     uint32_t mult = id[ATA_IDENTIFY_MULT_WORD] & 0xFF;
     if (mult > 1) {
-        outb(d->io + ATA_REG_DRIVE_HEAD, d->select);
+        ata_select_drive(d, 0);
         outb(d->io + ATA_REG_SECCOUNT, (uint8_t)mult);
         outb(d->io + ATA_REG_COMMAND, ATA_CMD_SET_MULTIPLE);
         ata_delay_400ns(d);
@@ -301,6 +336,11 @@ static int ata_probe(ata_drive_t *d) {
  * that asked "is the system disk there?" before keeps asking it; whether
  * other drives answered is ata_drive_present(). */
 int ata_init(void) {
+    /* Whatever ran before (firmware, GRUB, or the previous ata_init() call
+     * from a test suite) may have left either drive selected. */
+    g_bus_sel[0] = ATA_SEL_UNKNOWN;
+    g_bus_sel[1] = ATA_SEL_UNKNOWN;
+
     int rc0 = ATA_ENODEV;
     for (unsigned i = 0; i < ATA_MAX_DRIVES; i++) {
         int rc = ata_probe(&g_drives[i]);
@@ -435,22 +475,6 @@ int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count) {
     return ata_write_on(&g_drives[0], lba, buf, count);
 }
 
-int ata_read_sectors_on(unsigned drive, uint32_t lba, uint8_t *buf,
-                        uint32_t count) {
-    if (drive >= ATA_MAX_DRIVES) {
-        return ATA_ENODEV;
-    }
-    return ata_read_on(&g_drives[drive], lba, buf, count);
-}
-
-int ata_write_sectors_on(unsigned drive, uint32_t lba, const uint8_t *buf,
-                         uint32_t count) {
-    if (drive >= ATA_MAX_DRIVES) {
-        return ATA_ENODEV;
-    }
-    return ata_write_on(&g_drives[drive], lba, buf, count);
-}
-
 int ata_read_sector(uint32_t lba, uint8_t *buf) {
     return ata_read_sectors(lba, buf, 1);
 }
@@ -492,7 +516,13 @@ int ata_register_blkdevs(void) {
             .write   = ata_blk_write,
             .ctx     = &g_drives[i],
         };
-        if (blkdev_register(&dev) < 0) {
+        /* The primary master is the system disk and goes in the reserved
+         * slot 0. Every other drive goes after it -- never into slot 0, even
+         * when the primary master is absent, or a lone second disk would be
+         * taken for the system volume (blkdev.h). */
+        int rc = (i == 0) ? blkdev_register_system(&dev)
+                          : blkdev_register(&dev);
+        if (rc < 0) {
             break;
         }
         n++;

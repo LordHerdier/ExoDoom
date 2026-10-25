@@ -22,8 +22,9 @@
  * ata_register_blkdevs() puts every disk that answered into the block-device
  * registry (src/blkdev.h), which is how the syscall layer reaches it. The
  * unsuffixed calls below still mean the primary master, so ring-0 users of
- * the system disk (and test_ata_k.c) are unchanged; the `_on` forms take a
- * position.
+ * the system disk (and test_ata_k.c) are unchanged; every other drive is
+ * reached only through the block-device ops ata_register_blkdevs()
+ * registers.
  *
  * Polled, not IRQ14-driven: "PIO" here means programmed I/O with a
  * busy-polled status register, matching this ticket's minimal acceptance bar
@@ -94,14 +95,10 @@ uint32_t ata_multiple_block(void);
 int ata_drive_present(unsigned drive);
 uint32_t ata_drive_sector_count(unsigned drive);
 
-/* ata_read_sectors()/ata_write_sectors() for an explicit position. Same
- * contract; ATA_ENODEV for a position with no disk. */
-int ata_read_sectors_on(unsigned drive, uint32_t lba, uint8_t *buf,
-                        uint32_t count);
-int ata_write_sectors_on(unsigned drive, uint32_t lba, const uint8_t *buf,
-                         uint32_t count);
-
-/* Register every present position with src/blkdev.h, in position order, so
- * the primary master (when present) is block device 0. Call once from
- * kernel_main after ata_init(). Returns how many were registered. */
+/* Register every present position with src/blkdev.h: the primary master in
+ * the reserved system slot (block device 0), the others in position order
+ * from slot 1 -- never in slot 0, even with no primary master. The block
+ * ops are the only way anything above this driver reaches a drive other
+ * than the primary master. Call once from kernel_main after ata_init().
+ * Returns how many were registered. */
 int ata_register_blkdevs(void);

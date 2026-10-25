@@ -207,9 +207,9 @@ kernel_main  (src/kernel.c)
     ├─ syscall_init()         — EFER.SCE / STAR / LSTAR / FMASK
     ├─ syscall_mem_init()     — bind exo_page_alloc / exo_page_free
     ├─ syscall_fb_init(fb)    — publish FB geometry, bind exo_fb_acquire
-    ├─ ata_init() + ata_register_blkdevs() — probe all four IDE positions (CD-ROM skipped), register each disk as a block device, primary master = device 0 (SCRUM-244)
-    ├─ syscall_disk_init(blkdev_count()) — bind exo_disk_* (#24–#27, #31, #37) over the registry
+    ├─ ata_init() + ata_register_blkdevs() — probe all four IDE positions (CD-ROM skipped), register each disk as a block device; the primary master takes the reserved system slot, device 0 (SCRUM-244)
     ├─ usb_init()             — take every UHCI from the BIOS, enumerate root ports, claim HID boot keyboards; after pci_init/ata_init, interrupts still off (SCRUM-198)
+    ├─ syscall_disk_init()    — bind exo_disk_* (#24–#27, #31, #37) over the registry; after every driver that registers disks
     ├─ rtc_init() + syscall_rtc_init() — cache the FADT century register, bind exo_rtc_read (#35); after pit_init (SCRUM-249)
     │
     │  [if compiled with -DTESTING]

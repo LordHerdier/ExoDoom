@@ -81,9 +81,8 @@ order yields a *mountable* volume with a garbage FAT.
 
 A volume lives on a caller-supplied **block device** and starts at a
 caller-supplied base LBA, not at LBA 0. The device (SCRUM-244) is the index
-the kernel's `exo_disk_*` syscalls take — 0 is the system disk, and each
-further disk the kernel found is the next index (`exo_diskstat`, #31,
-enumerates them). `exofs_format(dev, base, sectors)` and
+the kernel's `exo_disk_*` syscalls take — 0 is reserved for the system disk,
+other disks are 1 and up (`exo_diskstat`, #31, enumerates them). `exofs_format(dev, base, sectors)` and
 `exofs_mount(dev, base)` take it, the mounted volume records it
 (`exofs_volume_t::dev`), and every transfer goes to it. It is **not** in the
 superblock: a volume does not know which disk it is carried on, so the same

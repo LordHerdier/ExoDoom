@@ -1,4 +1,5 @@
 #include "disk_binding.h"
+#include "blkdev.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -8,7 +9,7 @@
  * SCRUM-237 from one owner to one sector extent per owner, and by SCRUM-244
  * to one extent per owner *per device*).
  *
- * State is how many devices exist (src/blkdev.h) and a small table of
+ * State is a small table of
  * {owner, device, base, count, revoke mark}. Extents on the same device
  * never overlap, which is the
  * whole isolation story at this layer: src/syscall_disk.c asks
@@ -34,10 +35,6 @@ typedef struct {
     int          revoke_marked; /* the kernel has asked `owner` to let go   */
 } disk_extent_t;
 
-/* Devices [0, disk_ndevs) exist. Set once from blkdev_count() at boot
- * (syscall_disk_init()); the KUnit suites set it directly to model a
- * machine with fewer drives than the test boot attached. */
-static uint32_t      disk_ndevs;
 static disk_extent_t extents[DISK_BIND_MAX_EXTENTS];
 
 /* Volumes assigned by the launcher (SCRUM-237); same shape as `extents` but
@@ -94,25 +91,21 @@ static int overlap(uint32_t a, uint32_t an, uint32_t b, uint32_t bn)
     return (uint64_t)a < (uint64_t)b + bn && (uint64_t)b < (uint64_t)a + an;
 }
 
-int disk_binding_init(uint32_t ndevs)
+int disk_binding_init(void)
 {
-    disk_ndevs = ndevs;
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++) {
         clear_slot(&extents[i]);
         clear_slot(&assigned[i]);
     }
 
-    return disk_ndevs ? DISK_BIND_OK : DISK_BIND_ENODEV;
+    return blkdev_count() ? DISK_BIND_OK : DISK_BIND_ENODEV;
 }
 
+/* The registry, not a copy of it: a device exists here exactly when
+ * blkdev_get() has it, so the two can never disagree. */
 int disk_binding_present(uint32_t dev)
 {
-    return dev < disk_ndevs;
-}
-
-uint32_t disk_binding_device_count(void)
-{
-    return disk_ndevs;
+    return blkdev_get(dev) != NULL;
 }
 
 int disk_binding_acquire(page_owner_t who, uint32_t dev)
@@ -178,11 +171,18 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
     if (!free_slot)
         return DISK_BIND_ENOSLOT;
 
+    /* Revocation is per context: if the kernel has asked `who` to give its
+     * disk binding back, an extent it takes now is part of what it was asked
+     * for. Starting it unmarked would let a context that has been asked to
+     * comply pick up a second device, release the first, and look as if it
+     * had complied while still holding a disk. */
+    int marked = disk_binding_revoke_pending(who);
+
     free_slot->owner         = who;
     free_slot->dev           = dev;
     free_slot->base          = base;
     free_slot->count         = count;
-    free_slot->revoke_marked = 0;
+    free_slot->revoke_marked = marked;
 
     return DISK_BIND_OK;
 }

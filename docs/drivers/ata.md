@@ -116,10 +116,21 @@ any position. `ata_init()` is safe to call again — the KUnit suites do — and
 only re-probes; it registers nothing.
 
 **Registration.** `kernel_main` calls `ata_register_blkdevs()` once, after
-`ata_init()`, which registers every present position with
-`blkdev_register()` in position order. The primary master is therefore
-block device 0 whenever it is present, and the primary slave is device 1
-on the test boot. `syscall_disk_init(blkdev_count())` follows.
+`ata_init()`. The primary master goes in the registry's reserved system slot
+with `blkdev_register_system()` — block device 0 — and every other present
+position takes the next free slot from 1 up with `blkdev_register()`, in
+position order; the primary slave is device 1 on the test boot. With no
+primary master, device 0 stays empty instead of going to whichever disk was
+found next (`docs/syscall_spec.md` §3.5a has why). `syscall_disk_init()`
+follows, after `usb_init()`.
+
+**Empty positions are rejected without a long wait.** After the status
+check, the probe writes `0x55`/`0xAA` to the sector-count and LBA-low
+registers and reads them back. A drive that is there latches them; an empty
+position does not (QEMU reads an absent drive's registers as `0`, a floating
+bus reads `0xFF`). Without this, a floating bus that settles at something
+like `0x7F` or `0x80` — BSY apparently set — would make the BSY poll spin its
+whole `ATA_POLL_ITERS` budget (~10 s) for each empty position.
 
 ---
 
@@ -128,12 +139,15 @@ on the test boot. `syscall_disk_init(blkdev_count())` follows.
 `ata_read_sector(lba, buf)`/`ata_write_sector(lba, buf)` are thin,
 count-1 wrappers around `ata_read_sectors(lba, buf, count)`/
 `ata_write_sectors(lba, buf, count)` (SCRUM-190), which address the primary
-master; `ata_read_sectors_on(pos, …)`/`ata_write_sectors_on(pos, …)` take a
-position, and the block-device ops `ata_register_blkdevs()` registers call
-the same code with the drive bound in. All of them do:
+master; every other drive is reached only through the block-device ops
+`ata_register_blkdevs()` registers, which call the same code with the drive
+bound in. All of them do:
 
 1. Program drive/head (LBA mode, this drive's master/slave bit, top 4 LBA
-   bits), wait ~400 ns for the selection to settle, then sector count and
+   bits) — waiting ~400 ns for the selection to settle only if that changed
+   which drive the bus has selected (`ata_select_drive()`; each of the four
+   alternate-status reads in the delay is a VM exit under KVM, so it is not
+   paid on every command to the drive already selected) — then sector count and
    the low/mid/high LBA bytes (`ata_select`) — **once**, for the whole run,
    not once per sector. Re-issuing the command block per sector would reset
    the drive's internal auto-incrementing LBA, which is exactly what
@@ -235,12 +249,6 @@ int ata_read_sectors(uint32_t lba, uint8_t *buf, uint32_t count);
 int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count);
 uint32_t ata_get_sector_count(void);
 uint32_t ata_multiple_block(void);
-
-/* Any position. */
-int ata_read_sectors_on(unsigned drive, uint32_t lba, uint8_t *buf,
-                        uint32_t count);
-int ata_write_sectors_on(unsigned drive, uint32_t lba, const uint8_t *buf,
-                         uint32_t count);
 ```
 
 `buf` must point to at least `count` (1 for the single-sector calls) * 512
@@ -323,10 +331,11 @@ the port base, control port and drive-select bit became per-drive state
 their signatures as primary-master wrappers so ring-0 users of the system
 disk did not change.
 
-**Device numbers are registration order, not IDE positions.** With only a
-slave attached, the slave would be device 0. Nothing relies on IDE
-positions above this file; the system disk being device 0 holds because
-every QEMU line attaches it at `index=0`.
+**Device 0 is the primary master or nothing.** Device numbers are not IDE
+positions, but slot 0 is reserved for the primary master: with only a slave
+attached, the slave is device 1 and device 0 is absent, so it can never be
+mistaken for the system disk. Nothing above this file depends on any other
+position-to-device mapping.
 
 **The CD-ROM is skipped, not driven.** Packet (ATAPI) devices take
 `PACKET` commands, not `READ SECTORS`, and this driver has no use for one,
