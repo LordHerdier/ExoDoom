@@ -176,3 +176,97 @@ int shell_install_copy(const shell_vol_t *src, const shell_vol_t *dst,
     }
     return 0;
 }
+
+int shell_install_is_glob(const char *path) {
+    for (size_t k = 0; path[k] != '\0'; k++) {
+        if (path[k] == '*') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Greedy with one backtrack point: on a mismatch, let the last '*' swallow
+ * one more character and retry. Linear for one '*', and never recursive. */
+int shell_install_glob_match(const char *pattern, const char *name) {
+    const char *p = pattern, *n = name;
+    const char *star = NULL, *resume = NULL;
+    while (*n != '\0') {
+        if (*p == '*') {
+            star = p++;
+            resume = n;
+        } else if (*p == *n) {
+            p++;
+            n++;
+        } else if (star != NULL) {
+            p = star + 1;
+            n = ++resume;
+        } else {
+            return 0;
+        }
+    }
+    while (*p == '*') {
+        p++;
+    }
+    return *p == '\0';
+}
+
+int shell_install_matches(const shell_vol_t *src, const char *pattern,
+                          char *names, uint32_t stride, uint32_t max,
+                          uint32_t *count) {
+    *count = 0;
+    const char *pat = pattern[0] == '/' ? pattern + 1 : pattern;
+    for (size_t k = 0; pat[k] != '\0'; k++) {
+        if (pat[k] == '/') {
+            return -EXO_EINVAL;
+        }
+    }
+
+    int rc = exofs_mount(src->dev, src->base);
+    if (rc != 0) {
+        return rc;
+    }
+    exofs_dir_t dir;
+    rc = exofs_opendir("/", &dir);
+    if (rc != 0) {
+        exofs_unmount();
+        return rc;
+    }
+    for (;;) {
+        exofs_dirinfo_t info;
+        int more = exofs_readdir(&dir, &info);
+        if (more < 0) {
+            rc = more;
+            break;
+        }
+        if (more == 0) {
+            break;
+        }
+        if ((info.attributes & EXOFS_ATTR_DIRECTORY) ||
+            !shell_install_glob_match(pat, info.name)) {
+            continue;
+        }
+        if (*count == max) {
+            rc = -EXO_ENOSPC;
+            break;
+        }
+        char *out = names + (size_t)*count * stride;
+        size_t n = 0;
+        out[n++] = '/';
+        for (size_t k = 0; info.name[k] != '\0'; k++) {
+            if (n + 1 >= stride) {
+                rc = -EXO_EINVAL;
+                break;
+            }
+            out[n++] = info.name[k];
+        }
+        if (rc != 0) {
+            break;
+        }
+        out[n] = '\0';
+        (*count)++;
+    }
+    exofs_closedir(&dir);
+    exofs_unmount();
+    return rc;
+}

@@ -141,6 +141,12 @@
 #define SHELL_INSTALL_CHUNK       (1024u * 1024u)
 #define SHELL_INSTALL_CHUNK_SMALL (64u * 1024u)
 
+/* `install <pattern>`: how many matches one command takes, and the room for
+ * each one's path ("/" + an ExoFS name + NUL). The list is built before the
+ * first copy; past the limit nothing is installed. */
+#define SHELL_INSTALL_MAX_MATCHES 64u
+#define SHELL_INSTALL_NAME_STRIDE (EXOFS_MAX_NAME + 2u)
+
 /* Longest line of text `cat <path> <text...>` will write in one call --
  * bounded by SHELL_CMD_BUF_LEN, since the text comes straight out of
  * cmd_buf. Not a filesystem limit. */
@@ -199,6 +205,12 @@ static char shell_install_busy_text[] = "install: ";
 static char shell_install_copying_text[] = "installing ";
 static char shell_install_done_text[] = "installed ";
 static char shell_install_bytes_text[] = " bytes)\n";
+static char shell_install_nomatch_text[] = "install: nothing on the install disk matches ";
+static char shell_install_toomany_text[] = "install: too many matches; nothing installed\n";
+static char shell_install_toplevel_text[] =
+    "install: wildcards only match files at the top of the install disk\n";
+static char shell_install_of_text[] = " of ";
+static char shell_install_files_text[] = " files\n";
 static char shell_fs_err_prefix[] = "error: err=";
 static char shell_fs_no_room_text[] = "mkfs: no room for shell volume on this disk\n";
 static char shell_ls_dir_suffix[] = "/\n";
@@ -479,10 +491,12 @@ static const shell_cmd_t shell_cmds[] = {
         "     <prefix>*  List commands starting with <prefix>\n" },
       shell_run_help, 1 },
     { { "install", SHELL_GRP_APPS, "Copy a program from the install disk onto the system volume",
-        "usage: install [name]\n"
-        "     (none)  List the files on the install disk\n"
-        "     <name>  Copy it to the system volume, replacing any copy there;\n"
-        "             a name with no extension means <name>.exo, e.g. install doom\n" },
+        "usage: install [name | pattern]\n"
+        "     (none)     List the files on the install disk\n"
+        "     <name>     Copy it to the system volume, replacing any copy there;\n"
+        "                a name with no extension means <name>.exo, e.g. install doom\n"
+        "     <pattern>  Copy every file at the top of the install disk that matches;\n"
+        "                * matches any characters: install * (every .exo), install *.*\n" },
       shell_run_install, 1 },
     { { "ls", SHELL_GRP_FS, "List a directory",
         "usage: ls [path]\n"
@@ -1486,37 +1500,89 @@ static void shell_run_install(fb_console_t *con, const char *arg) {
         return;
     }
 
-    uint32_t chunk = SHELL_INSTALL_CHUNK;
-    uint8_t *buf = libos_heap_alloc(chunk);
-    if (buf == NULL) {
-        chunk = SHELL_INSTALL_CHUNK_SMALL;
-        buf = libos_heap_alloc(chunk);
+    shell_vol_t src = { SHELL_SRC_DEV, SHELL_SRC_BASE_LBA };
+    shell_vol_t dst = { SHELL_SYS_DEV, LIBOS_WAD_DISK_BASE_LBA };
+
+    /* What to copy: the one path, or every match of a pattern, listed in
+     * full before the first copy so a failure part-way cannot change which
+     * files the rest of the list names. */
+    char *names = path;
+    uint32_t count = 1;
+    int rc = 0;
+    int glob = shell_install_is_glob(path);
+    if (glob) {
+        names = libos_heap_alloc(SHELL_INSTALL_MAX_MATCHES *
+                                 SHELL_INSTALL_NAME_STRIDE);
+        rc = names == NULL ? -EXO_ENOMEM
+                           : shell_install_matches(&src, path, names,
+                                                   SHELL_INSTALL_NAME_STRIDE,
+                                                   SHELL_INSTALL_MAX_MATCHES,
+                                                   &count);
+        if (rc == 0 && count == 0) {
+            fbcon_write(con, shell_install_nomatch_text);
+            fbcon_write(con, path);
+            fbcon_write(con, "\n");
+        }
     }
-    int rc = -EXO_ENOMEM;
-    uint32_t copied = 0;
-    if (buf != NULL) {
+
+    uint32_t chunk = SHELL_INSTALL_CHUNK;
+    uint8_t *buf = NULL;
+    if (rc == 0 && count > 0) {
+        buf = libos_heap_alloc(chunk);
+        if (buf == NULL) {
+            chunk = SHELL_INSTALL_CHUNK_SMALL;
+            buf = libos_heap_alloc(chunk);
+        }
+        if (buf == NULL) {
+            rc = -EXO_ENOMEM;
+        }
+    }
+
+    uint32_t ok = 0;
+    for (uint32_t i = 0; rc == 0 && i < count; i++) {
+        const char *one = glob ? names + i * SHELL_INSTALL_NAME_STRIDE : path;
+        uint32_t copied = 0;
         fbcon_write(con, shell_install_copying_text);
-        fbcon_write(con, path);
+        fbcon_write(con, one);
         fbcon_write(con, "\n");
-        shell_vol_t src = { SHELL_SRC_DEV, SHELL_SRC_BASE_LBA };
-        shell_vol_t dst = { SHELL_SYS_DEV, LIBOS_WAD_DISK_BASE_LBA };
-        rc = shell_install_copy(&src, &dst, path, buf, chunk, &copied);
-        libos_heap_free(buf);
+        int crc = shell_install_copy(&src, &dst, one, buf, chunk, &copied);
+        if (crc != 0) {
+            /* One bad file does not stop the rest of a pattern. */
+            fbcon_write(con, shell_fs_err_prefix);
+            shell_write_i64(con, crc);
+            fbcon_write(con, "\n");
+            continue;
+        }
+        ok++;
+        fbcon_write(con, shell_install_done_text);
+        fbcon_write(con, one);
+        fbcon_write(con, " (");
+        shell_write_u32(con, copied);
+        fbcon_write(con, shell_install_bytes_text);
+    }
+
+    libos_heap_free(buf);
+    if (glob) {
+        libos_heap_free(names);
     }
     exo_disk_release(SHELL_SYS_DEV);
     exo_disk_release(SHELL_SRC_DEV);
 
-    if (rc != 0) {
+    if (rc == -EXO_ENOSPC && glob) {
+        fbcon_write(con, shell_install_toomany_text);
+    } else if (rc == -EXO_EINVAL && glob) {
+        fbcon_write(con, shell_install_toplevel_text);
+    } else if (rc != 0) {
         fbcon_write(con, shell_fs_err_prefix);
         shell_write_i64(con, rc);
         fbcon_write(con, "\n");
-        return;
+    } else if (glob && count > 0) {
+        fbcon_write(con, shell_install_done_text);
+        shell_write_u32(con, ok);
+        fbcon_write(con, shell_install_of_text);
+        shell_write_u32(con, count);
+        fbcon_write(con, shell_install_files_text);
     }
-    fbcon_write(con, shell_install_done_text);
-    fbcon_write(con, path);
-    fbcon_write(con, " (");
-    shell_write_u32(con, copied);
-    fbcon_write(con, shell_install_bytes_text);
 }
 
 /* `mkdir <path>` -- exofs_mkdir(), against `arg` resolved relative to

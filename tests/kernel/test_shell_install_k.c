@@ -386,6 +386,146 @@ out:
     teardown();
 }
 
+/* ---- Patterns (`install *`) --------------------------------------------- */
+
+static void test_glob_match(void)
+{
+    CU_ASSERT_TRUE(shell_install_glob_match("*.exo", "doom.exo"));
+    CU_ASSERT_TRUE(shell_install_glob_match("*.exo", ".exo"));
+    CU_ASSERT_FALSE(shell_install_glob_match("*.exo", "freedoom2.wad"));
+    CU_ASSERT_FALSE(shell_install_glob_match("*.exo", "doom.exo.bak"));
+    CU_ASSERT_TRUE(shell_install_glob_match("*", "anything"));
+    CU_ASSERT_TRUE(shell_install_glob_match("*", ""));
+    CU_ASSERT_TRUE(shell_install_glob_match("*.*", "freedoom2.wad"));
+    CU_ASSERT_FALSE(shell_install_glob_match("*.*", "README"));
+    CU_ASSERT_TRUE(shell_install_glob_match("d*m.exo", "doom.exo"));
+    CU_ASSERT_TRUE(shell_install_glob_match("d*m.exo", "dm.exo"));
+    /* Backtracking: the first 'o' tried is not the one that matches. */
+    CU_ASSERT_TRUE(shell_install_glob_match("*o.exo", "voldemoo.exo"));
+    CU_ASSERT_TRUE(shell_install_glob_match("**.exo", "snake.exo"));
+    CU_ASSERT_FALSE(shell_install_glob_match("Doom.exo", "doom.exo"));
+    CU_ASSERT_TRUE(shell_install_glob_match("doom.exo", "doom.exo"));
+}
+
+/* `install *` is "every package": the no-extension rule turns "*" into
+ * "*.exo", and that is what makes it a pattern. */
+static void test_star_resolves_to_packages(void)
+{
+    char out[32];
+    CU_ASSERT_EQUAL(shell_install_resolve("*", out, sizeof(out)), 0);
+    CU_ASSERT_STRING_EQUAL(out, "/*.exo");
+    CU_ASSERT_TRUE(shell_install_is_glob(out));
+    CU_ASSERT_EQUAL(shell_install_resolve("*.wad", out, sizeof(out)), 0);
+    CU_ASSERT_STRING_EQUAL(out, "/*.wad");
+    CU_ASSERT_FALSE(shell_install_is_glob("/doom.exo"));
+}
+
+#define STRIDE 32u
+
+static void test_matches_lists_files(void)
+{
+    if (!setup(SYS_VOL_SECTORS))
+        return;
+    static const uint8_t byte = 0x5A;
+    CU_ASSERT_EQUAL(put_file(&stick, "/a.exo", &byte, 1), 0);
+    CU_ASSERT_EQUAL(put_file(&stick, "/b.exo", &byte, 1), 0);
+    CU_ASSERT_EQUAL(put_file(&stick, "/c.wad", &byte, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, STICK_VOL_BASE), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/dir.exo"), 0);   /* never a match */
+    exofs_unmount();
+
+    char *names = libos_heap_alloc(8u * STRIDE);
+    CU_ASSERT(names != NULL);
+    if (names == NULL)
+        goto out;
+
+    uint32_t count = 99;
+    CU_ASSERT_EQUAL(shell_install_matches(&stick, "/*.exo", names, STRIDE, 8u,
+                                          &count), 0);
+    CU_ASSERT_EQUAL(count, 2u);
+    CU_ASSERT_STRING_EQUAL(names, "/a.exo");
+    CU_ASSERT_STRING_EQUAL(names + STRIDE, "/b.exo");
+    CU_ASSERT_FALSE(exofs_is_mounted());
+
+    CU_ASSERT_EQUAL(shell_install_matches(&stick, "/*.*", names, STRIDE, 8u,
+                                          &count), 0);
+    CU_ASSERT_EQUAL(count, 3u);
+
+    CU_ASSERT_EQUAL(shell_install_matches(&stick, "/z*", names, STRIDE, 8u,
+                                          &count), 0);
+    CU_ASSERT_EQUAL(count, 0u);
+out:
+    libos_heap_free(names);
+    teardown();
+}
+
+/* More matches than the caller has room for is refused whole, and a pattern
+ * below the top level is refused outright. */
+static void test_matches_limits(void)
+{
+    if (!setup(SYS_VOL_SECTORS))
+        return;
+    static const uint8_t byte = 0x5A;
+    CU_ASSERT_EQUAL(put_file(&stick, "/a.exo", &byte, 1), 0);
+    CU_ASSERT_EQUAL(put_file(&stick, "/b.exo", &byte, 1), 0);
+    CU_ASSERT_EQUAL(put_file(&stick, "/c.exo", &byte, 1), 0);
+
+    char *names = libos_heap_alloc(8u * STRIDE);
+    CU_ASSERT(names != NULL);
+    if (names == NULL)
+        goto out;
+    uint32_t count = 0;
+    CU_ASSERT_EQUAL(shell_install_matches(&stick, "/*.exo", names, STRIDE, 2u,
+                                          &count), -EXO_ENOSPC);
+    CU_ASSERT_FALSE(exofs_is_mounted());
+    CU_ASSERT_EQUAL(shell_install_matches(&stick, "/games/*.exo", names,
+                                          STRIDE, 8u, &count), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(count, 0u);
+out:
+    libos_heap_free(names);
+    teardown();
+}
+
+/* `install *` end to end: every listed package lands on the system volume. */
+static void test_install_every_match(void)
+{
+    if (!setup(SYS_VOL_SECTORS))
+        return;
+    uint8_t *src = libos_heap_alloc(FILE_LEN);
+    uint8_t *got = libos_heap_alloc(FILE_LEN);
+    uint8_t *buf = libos_heap_alloc(CHUNK);
+    char *names = libos_heap_alloc(8u * STRIDE);
+    CU_ASSERT(src && got && buf && names);
+    if (!src || !got || !buf || !names)
+        goto out;
+    fill(src, FILE_LEN, 0x31);
+    CU_ASSERT_EQUAL(put_file(&stick, "/one.exo", src, FILE_LEN), 0);
+    CU_ASSERT_EQUAL(put_file(&stick, "/two.exo", src, 700u), 0);
+    CU_ASSERT_EQUAL(put_file(&stick, "/data.wad", src, 10u), 0);
+
+    char pat[16];
+    uint32_t count = 0;
+    CU_ASSERT_EQUAL(shell_install_resolve("*", pat, sizeof(pat)), 0);
+    CU_ASSERT_EQUAL(shell_install_matches(&stick, pat, names, STRIDE, 8u,
+                                          &count), 0);
+    CU_ASSERT_EQUAL(count, 2u);
+    for (uint32_t i = 0; i < count; i++)
+        CU_ASSERT_EQUAL(shell_install_copy(&stick, &sysvol, names + i * STRIDE,
+                                           buf, CHUNK, NULL), 0);
+
+    CU_ASSERT_EQUAL(get_file(&sysvol, "/one.exo", got, FILE_LEN),
+                    (int64_t)FILE_LEN);
+    CU_ASSERT_EQUAL(memcmp(got, src, FILE_LEN), 0);
+    CU_ASSERT_EQUAL(get_file(&sysvol, "/two.exo", got, FILE_LEN), 700);
+    CU_ASSERT_EQUAL(stat_on(&sysvol, "/data.wad"), -EXO_ENOENT);
+out:
+    libos_heap_free(src);
+    libos_heap_free(got);
+    libos_heap_free(buf);
+    libos_heap_free(names);
+    teardown();
+}
+
 void suite_shell_install_tests(CU_pSuite s)
 {
     CU_add_test(s, "resolve: bare name gets .exo",
@@ -412,4 +552,14 @@ void suite_shell_install_tests(CU_pSuite s)
                 test_enospc_removes_partial);
     CU_add_test(s, "a directory is refused",
                 test_directory_refused);
+    CU_add_test(s, "glob: * matches any run of characters",
+                test_glob_match);
+    CU_add_test(s, "glob: install * means every .exo",
+                test_star_resolves_to_packages);
+    CU_add_test(s, "glob: matching files listed, directories skipped",
+                test_matches_lists_files);
+    CU_add_test(s, "glob: too many matches or a subdirectory refused",
+                test_matches_limits);
+    CU_add_test(s, "glob: install * copies every package",
+                test_install_every_match);
 }

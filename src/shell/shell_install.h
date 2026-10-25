@@ -52,4 +52,33 @@ int shell_install_copy(const shell_vol_t *src, const shell_vol_t *dst,
                        const char *path, uint8_t *buf, uint32_t chunk,
                        uint32_t *copied);
 
+/* 1 if a resolved path names a pattern (contains '*') rather than a file. */
+int shell_install_is_glob(const char *path);
+
+/*
+ * Match one file name against a pattern in which '*' stands for any run of
+ * characters, including none, and every other character only for itself
+ * (case-sensitive, like ExoFS names). `install *` resolves to "*.exo"
+ * (shell_install_resolve()'s no-extension rule), which is what makes it
+ * mean "every package".
+ */
+int shell_install_glob_match(const char *pattern, const char *name);
+
+/*
+ * List the files at the root of `src` whose names match `pattern` (a
+ * resolved path: "/" then a name pattern, with no further '/' -- wildcards
+ * only reach the top of the install disk). Each match is stored as an
+ * absolute path, "/<name>", at `names + i * stride`, in directory order.
+ * Directories never match. The caller holds the binding; this mounts and
+ * unmounts.
+ *
+ * Returns 0 with *count matches, -EXO_EINVAL for a pattern with a '/' after
+ * the leading one, -EXO_ENOSPC if more than `max` files match (nothing
+ * should be installed from a list that was cut short), or a mount or
+ * directory error.
+ */
+int shell_install_matches(const shell_vol_t *src, const char *pattern,
+                          char *names, uint32_t stride, uint32_t max,
+                          uint32_t *count);
+
 #endif /* EXODOOM_SHELL_INSTALL_H */

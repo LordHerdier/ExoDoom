@@ -610,6 +610,17 @@ the IWAD plus every `.exo`. A name with no `.` means `<name>.exo`, so
 (`install freedoom2.wad`), not pulled in by the package that needs it. After
 a copy, `programs` lists it and `run` launches it, no reboot.
 
+A `*` in the name makes it a pattern over the files at the top of the install
+disk. `*` stands for any run of characters, matching is case-sensitive, and
+directories never match. The no-extension rule applies first, so
+`install *` means `*.exo`, i.e. every package. `install *.wad` brings the
+IWAD, and `install *.*` copies everything. The matches are listed in full
+before the first copy, up to 64. More than that installs nothing rather than
+a truncated list. A file that fails is reported, the rest still copy, and a
+summary line closes the run. Matching and listing
+(`shell_install_glob_match()`/`shell_install_matches()`) are in
+`src/shell/shell_install.c`, tested with the rest of the suite.
+
 The shell holds both disks for the whole copy (device 1 whole, the program
 volume's extent on device 0, `docs/syscall_spec.md` §3.5a). Because only one
 volume can be mounted (§8), `src/shell/shell_install.c` alternates: mount the
