@@ -50,6 +50,19 @@ This is also why zeroing is not left to the caller as an option. A caller
 that forgets it does not get a slightly untidy block; it gets a directory
 that appears to contain another file's entries.
 
+**One exception: whole-block file appends (SCRUM-233).**
+`exofs_fat_alloc_run()` claims a run of consecutive free blocks *without*
+zeroing them, and only `exofs_write()`'s append path calls it. It is still
+"data before claim", because the claim lives only in the in-RAM FAT until
+the next flush. The append writes every byte of the run in one transfer, then
+links it onto the chain. If that write fails, it frees the run before anything
+can flush. So an interrupted append leaves at most free blocks with new bytes
+in them, the same outcome as the "zero, then claim" row above. The point is
+cost. Per-block allocation wrote each block twice (zeros, then data) and
+walked the whole chain to find its tail, which made the 28 MB IWAD take
+minutes to write from the shell's `install`. Directory blocks, partial blocks,
+overwrites and writes past the end still go through `exofs_fat_alloc()`.
+
 ### 1.2 Chain teardown validates before it frees
 
 `exofs_chain_free()` walks the chain **twice** — once to validate it end to
@@ -422,10 +435,24 @@ call makes sequential I/O O(blocks²) — for SCRUM-190's ~28 MB IWAD that is
 block it touched and its chain index, so a forward step costs one link and
 only a backwards seek pays for a re-walk.
 
+**Whole-block appends are batched (SCRUM-233).** When a write reaches a
+block-aligned position exactly one past the end of the chain, `append_run()`
+claims up to `WRITE_BATCH_BLOCKS` (128) consecutive free blocks with
+`exofs_fat_alloc_run()` (§1.1). It writes them with one `exofs_bdev_write()`
+through an in-window scratch buffer, and links them on from the cached tail.
+That is the write-side mirror of `exofs_read()`'s `READ_BATCH_BLOCKS`. A run
+stops at the first occupied block, and the next one picks up in the next gap.
+Anything else falls back to one block at a time: an overwrite of existing
+blocks, a write past the end that leaves a hole, or a leading or trailing
+partial block. `tests/kernel/test_exofs_k.c` pins this: fragmented free space,
+overwrite, holes, a full volume, and one disk write per appended block.
+
 **Holes are free.** Seeking past the end and writing leaves a gap that reads
 as zeros, with no hole tracking anywhere — every block is zeroed when
 allocated (§1.1), so unwritten bytes inside an allocated block are already
-zero.
+zero. The append path's unzeroed runs never contain a hole, because each of
+their blocks is written in full, and a write past the end does not take that
+path.
 
 ### Durability
 
@@ -527,9 +554,10 @@ difference.
   on each of several devices at once (SCRUM-244), but it still mounts one
   volume, so copying a file between two volumes means: hold both, mount the
   source, read the file into a `libos_heap_alloc()` buffer, unmount, mount
-  the destination, write. That is what `install` (SCRUM-233) does and what
-  `tests/kernel/test_multidisk_k.c`'s copy test asserts. Making the mount
-  state a handle instead of a static is the change that would lift this.
+  the destination, write. That is what `tests/kernel/test_multidisk_k.c`'s
+  copy test asserts, and what `install` (below) does a chunk at a time.
+  Making the mount state a handle instead of a static is the change that
+  would lift this.
 - **Unmount before releasing the binding.** `exofs_bdev_release(dev)`
   (`exo_disk_release`, #27) drops the binding on that device immediately; it cannot know a
   filesystem was mounted on top of it. The FAT is resident and written back
@@ -570,6 +598,44 @@ used": a fresh volume has two (§6b).
 To try it, `make docker-run-blank` boots on a zero-filled image the size of
 the real one (regenerated every run, `build/exodoom_disk.img` untouched):
 expect the prompt, `y`, then `programs` reporting `no programs installed`.
+
+### Install (SCRUM-233)
+
+`install <name>` copies one file from the install disk onto the system
+volume; `install` alone lists the install disk. The install disk is block
+device 1 (the second IDE drive until USB mass storage, SCRUM-247), with an
+ExoFS volume at LBA 0 that `docker/scripts/build.sh` rewrites on every build:
+the IWAD plus every `.exo`. A name with no `.` means `<name>.exo`, so
+`install doom` is `/doom.exo`; the IWAD is just another file
+(`install freedoom2.wad`), not pulled in by the package that needs it. After
+a copy, `programs` lists it and `run` launches it, no reboot.
+
+The shell holds both disks for the whole copy (device 1 whole, the program
+volume's extent on device 0, `docs/syscall_spec.md` §3.5a). Because only one
+volume can be mounted (§8), `src/shell/shell_install.c` alternates: mount the
+source, read one chunk at its offset, unmount, mount the destination, write it
+at the same offset, unmount. Every mount re-reads the resident FAT, so the
+shell uses a 1 MiB `libos_heap_alloc()` buffer (64 KiB if the heap cannot
+spare that) to keep the IWAD to a few dozen mount pairs. With
+`exofs_write()`'s batched appends (§6c) the whole IWAD installs in a few
+seconds under QEMU. Before them, it took over three minutes. Two rules a change
+here must keep:
+
+- **Stat the source before touching the destination.** A name the install
+  disk does not have is `-EXO_ENOENT` with the system volume untouched;
+  opening the destination with `EXOFS_O_TRUNC` first would wipe an installed
+  package of that name on a typo.
+- **A failed copy unlinks the destination.** A half-written package would
+  otherwise sit on the volume for `run` to trip over. An existing file of the
+  same name is replaced, so a failed *reinstall* leaves no copy at all, not
+  the old one.
+
+The copy returns with nothing mounted, so the releases that follow never drop
+a binding under a mounted volume. `tests/kernel/test_shell_install_k.c` covers
+name resolution and the copy (multi-chunk, exact-multiple and empty files,
+reinstall, missing source, `-EXO_ENOSPC` cleanup, directories). A test boot
+reformats device 1, so a QEMU line run after `make docker-test` without a
+rebuild finds an empty install disk.
 
 ## 9. Source map
 
@@ -650,7 +716,7 @@ consumer.
   syscall with interrupts off and a chain re-walk is invisible to a test that
   only checks results. The name allocator is what that first caught (§6).
 - **Write ordering is load-bearing** (§1). Allocation zeroes a block before
-  claiming it, chain teardown validates before it frees, `format` writes the
+  claiming it (the append path writes its data before linking instead, §1.1), chain teardown validates before it frees, `format` writes the
   superblock last, and `rmdir`/`unlink` unlink from the parent before freeing
   blocks. Reversing any of them turns a harmless leak into two files sharing
   storage; do not "tidy" them into a more natural-looking order.

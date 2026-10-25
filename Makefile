@@ -29,8 +29,11 @@ QEMU_USB_ARGS = \
 # Second IDE drive (SCRUM-244): the primary slave, `index=1`, which the kernel
 # registers as block device 1 -- the stand-in for an install stick until USB
 # mass storage (SCRUM-247) exists. The system disk is pinned to `index=0` on
-# every line so the two can never swap. docker/scripts/build.sh creates the
-# image (blank, only when missing); tests/kernel/test_multidisk_k.c formats it.
+# every line so the two can never swap. docker/scripts/build.sh rewrites the
+# image on every build as an ExoFS volume holding the IWAD and every .exo, the
+# source the shell's `install` copies from (SCRUM-233). A test boot reformats
+# it (test_multidisk_k.c, test_shell_install_k.c), so a hand-rolled QEMU line
+# run after `make docker-test` without a rebuild finds it empty.
 # -cdrom keeps IDE index 2, the secondary master, which the kernel skips.
 QEMU_DISK2_ARGS = -drive file=build/exodoom_disk2.img,format=raw,if=ide,index=1
 

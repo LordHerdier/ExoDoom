@@ -100,6 +100,7 @@
 #include "ps2.h"
 #include "shell/shell_firstboot.h"
 #include "shell/shell_help.h"
+#include "shell/shell_install.h"
 #include "stdlib.h"
 
 #define SHELL_CMD_BUF_LEN 64
@@ -126,6 +127,19 @@
  * kernel always numbers 0 (SCRUM-244). Both shell volumes, the program
  * volume and the `dd` window are on it. */
 #define SHELL_SYS_DEV        0u
+
+/* Block device `install` copies from: the install stick. Until USB mass
+ * storage (SCRUM-247) that is the second IDE drive, which the kernel numbers
+ * 1 (docs/drivers/ata.md); its ExoFS volume starts at LBA 0, as
+ * docker/scripts/build.sh writes it. */
+#define SHELL_SRC_DEV        1u
+#define SHELL_SRC_BASE_LBA   0u
+
+/* `install` copy buffer: large, because every chunk costs a mount of each
+ * volume (shell_install.c), with a smaller fallback when the heap cannot
+ * spare the large one. */
+#define SHELL_INSTALL_CHUNK       (1024u * 1024u)
+#define SHELL_INSTALL_CHUNK_SMALL (64u * 1024u)
 
 /* Longest line of text `cat <path> <text...>` will write in one call --
  * bounded by SHELL_CMD_BUF_LEN, since the text comes straight out of
@@ -178,6 +192,13 @@ static char shell_firstboot_done_text[] =
     "system volume formatted; no programs installed\n";
 static char shell_firstboot_probe_text[] = "system volume: cannot check it: err=";
 static char shell_programs_none_text[] = "no programs installed\n";
+static char shell_install_nodev_text[] = "install: no source disk\n";
+static char shell_install_novol_text[] = "install: source disk has no volume\n";
+static char shell_install_empty_text[] = "install: source disk is empty\n";
+static char shell_install_busy_text[] = "install: ";
+static char shell_install_copying_text[] = "installing ";
+static char shell_install_done_text[] = "installed ";
+static char shell_install_bytes_text[] = " bytes)\n";
 static char shell_fs_err_prefix[] = "error: err=";
 static char shell_fs_no_room_text[] = "mkfs: no room for shell volume on this disk\n";
 static char shell_ls_dir_suffix[] = "/\n";
@@ -211,6 +232,7 @@ static int shell_fs_acquire_and_mount(fb_console_t *con);
 static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba);
 static void shell_run_run(fb_console_t *con, const char *arg);
 static void shell_run_programs(fb_console_t *con, const char *arg);
+static void shell_run_install(fb_console_t *con, const char *arg);
 static void shell_firstboot_check(fb_console_t *con);
 static int shell_probe_system_volume(void);
 static int shell_format_volume(fb_console_t *con, uint32_t base_lba,
@@ -456,6 +478,12 @@ static const shell_cmd_t shell_cmds[] = {
         "     <command>  Same as `<command> ?`\n"
         "     <prefix>*  List commands starting with <prefix>\n" },
       shell_run_help, 1 },
+    { { "install", SHELL_GRP_APPS, "Copy a program from the install disk onto the system volume",
+        "usage: install [name]\n"
+        "     (none)  List the files on the install disk\n"
+        "     <name>  Copy it to the system volume, replacing any copy there;\n"
+        "             a name with no extension means <name>.exo, e.g. install doom\n" },
+      shell_run_install, 1 },
     { { "ls", SHELL_GRP_FS, "List a directory",
         "usage: ls [path]\n"
         "     (none)  List the current directory\n" },
@@ -1333,6 +1361,154 @@ static void shell_run_programs(fb_console_t *con, const char *arg) {
     if (!found) {
         fbcon_write(con, shell_programs_none_text);
     }
+}
+
+/* Mount the install disk's volume, or say why not. The caller holds the
+ * device-1 binding; on success the volume is left mounted. */
+static int shell_install_mount_src(fb_console_t *con) {
+    int rc = exofs_mount(SHELL_SRC_DEV, SHELL_SRC_BASE_LBA);
+    if (rc == -EXO_EINVAL) {
+        fbcon_write(con, shell_install_novol_text);
+        return 0;
+    }
+    if (rc != 0) {
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, rc);
+        fbcon_write(con, "\n");
+        return 0;
+    }
+    return 1;
+}
+
+/* `install` with no argument: every file on the install disk's root, not
+ * only packages -- the IWAD is installed the same way (`install
+ * freedoom2.wad`). */
+static void shell_install_list(fb_console_t *con) {
+    if (!shell_install_mount_src(con)) {
+        return;
+    }
+    exofs_dir_t dir;
+    int rc = exofs_opendir("/", &dir);
+    if (rc != 0) {
+        exofs_unmount();
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, rc);
+        fbcon_write(con, "\n");
+        return;
+    }
+    int found = 0;
+    for (;;) {
+        exofs_dirinfo_t info;
+        if (exofs_readdir(&dir, &info) <= 0) {
+            break;
+        }
+        if (info.attributes & EXOFS_ATTR_DIRECTORY) {
+            continue;
+        }
+        found = 1;
+        fbcon_write(con, shell_ls_file_prefix);
+        fbcon_write(con, info.name);
+        fbcon_write(con, "\n");
+    }
+    exofs_closedir(&dir);
+    exofs_unmount();
+    if (!found) {
+        fbcon_write(con, shell_install_empty_text);
+    }
+}
+
+/* `install [name]` -- SCRUM-233. Holds both disks for the whole copy (one
+ * extent per owner per device, docs/syscall_spec.md §3.5a): the install
+ * disk whole, and the system disk's program volume exactly as `run` binds
+ * it. shell_install_copy() does the mounting and always returns with
+ * nothing mounted, so the releases below never drop a binding under a
+ * mounted volume (docs/filesystem.md §8). */
+static void shell_run_install(fb_console_t *con, const char *arg) {
+    char name[SHELL_FS_PATH_BUF_LEN];
+    char path[SHELL_FS_PATH_BUF_LEN + 8];
+    const char *p = arg;
+
+    int tok = shell_next_token(&p, name, sizeof(name));
+    if (tok < 0 ||
+        (tok > 0 && shell_install_resolve(name, path, sizeof(path)) != 0)) {
+        fbcon_write(con, shell_fs_toolong_text);
+        return;
+    }
+
+    int64_t arc = exo_disk_acquire(SHELL_SRC_DEV, 0, 0);
+    if (arc == -EXO_ENODEV) {
+        fbcon_write(con, shell_install_nodev_text);
+        return;
+    }
+    if (arc != 0) {
+        fbcon_write(con, shell_install_busy_text);
+        fbcon_write(con, shell_fs_disk_busy_text);
+        shell_write_i64(con, arc);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    if (tok == 0) {
+        shell_install_list(con);
+        exo_disk_release(SHELL_SRC_DEV);
+        return;
+    }
+
+    /* Report a missing source volume as that, not as a mount error from
+     * somewhere in the middle of the copy. */
+    if (!shell_install_mount_src(con)) {
+        exo_disk_release(SHELL_SRC_DEV);
+        return;
+    }
+    exofs_unmount();
+
+    if (shell_firstboot_classify(shell_probe_system_volume()) ==
+        SHELL_FIRSTBOOT_UNFORMATTED) {
+        exo_disk_release(SHELL_SRC_DEV);
+        fbcon_write(con, shell_nosys_text);
+        fbcon_write(con, " (reboot to be offered a format)\n");
+        return;
+    }
+    arc = shell_disk_acquire_for(LIBOS_WAD_DISK_BASE_LBA);
+    if (arc != 0) {
+        exo_disk_release(SHELL_SRC_DEV);
+        fbcon_write(con, shell_fs_disk_busy_text);
+        shell_write_i64(con, arc);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    uint32_t chunk = SHELL_INSTALL_CHUNK;
+    uint8_t *buf = libos_heap_alloc(chunk);
+    if (buf == NULL) {
+        chunk = SHELL_INSTALL_CHUNK_SMALL;
+        buf = libos_heap_alloc(chunk);
+    }
+    int rc = -EXO_ENOMEM;
+    uint32_t copied = 0;
+    if (buf != NULL) {
+        fbcon_write(con, shell_install_copying_text);
+        fbcon_write(con, path);
+        fbcon_write(con, "\n");
+        shell_vol_t src = { SHELL_SRC_DEV, SHELL_SRC_BASE_LBA };
+        shell_vol_t dst = { SHELL_SYS_DEV, LIBOS_WAD_DISK_BASE_LBA };
+        rc = shell_install_copy(&src, &dst, path, buf, chunk, &copied);
+        libos_heap_free(buf);
+    }
+    exo_disk_release(SHELL_SYS_DEV);
+    exo_disk_release(SHELL_SRC_DEV);
+
+    if (rc != 0) {
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, rc);
+        fbcon_write(con, "\n");
+        return;
+    }
+    fbcon_write(con, shell_install_done_text);
+    fbcon_write(con, path);
+    fbcon_write(con, " (");
+    shell_write_u32(con, copied);
+    fbcon_write(con, shell_install_bytes_text);
 }
 
 /* `mkdir <path>` -- exofs_mkdir(), against `arg` resolved relative to
