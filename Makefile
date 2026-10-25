@@ -171,21 +171,24 @@ docker-run-debug: docker-build
 	'qemu-system-x86_64 -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide,index=0 $(QEMU_DISK2_ARGS) -m 256M -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 $(QEMU_USB_ARGS) -no-reboot -serial mon:stdio -s -S'
 
 # Boots on the HOST's qemu rather than in the container, which is the only
-# place a speaker exists -- swap `-audiodev none,id=snd0` below for
-# `-audiodev pipewire,id=snd0` (or pa/alsa/coreaudio) to actually hear SCRUM-210's
-# test tone. Not `sdl`: it drains the HDA ~8% fast and unevenly, which makes the
-# music's tempo wrong (docs/drivers/hda.md 12.12). Everything under docker-* keeps the null backend: it still runs
+# place a speaker exists. Video is `-display sdl` and audio is
+# `-audiodev alsa,id=snd0` (SCRUM-264; SCRUM-210's test tone is audible).
+# Not the `sdl` *audio* backend: it drains the HDA ~8% fast and unevenly,
+# which makes the music's tempo wrong (docs/drivers/hda.md 12.12).
+# Everything under docker-* keeps the null backend: it still runs
 # the full BDL DMA and completion-interrupt path, which is what the KUnit
 # suite asserts on, and headless Docker has no audio backend to hand.
+HOST_QEMU_AV_ARGS = -display sdl -audiodev alsa,id=snd0
+
 run: docker-build
-	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide,index=0 $(QEMU_DISK2_ARGS) -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 $(QEMU_USB_ARGS) -no-reboot -serial stdio
+	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide,index=0 $(QEMU_DISK2_ARGS) -device intel-hda -device hda-output,audiodev=snd0 $(HOST_QEMU_AV_ARGS) $(QEMU_USB_ARGS) -no-reboot -serial stdio
 
 # Host-qemu twin of docker-run-blank (SCRUM-234): same zeroed disk, but in a
 # real window on the host like `run`.
 run-blank: docker-build
 	rm -f build/exodoom_blank.img
 	truncate -s "$$(stat -c %s build/exodoom_disk.img)" build/exodoom_blank.img
-	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_blank.img,format=raw,if=ide,index=0 $(QEMU_DISK2_ARGS) -device intel-hda -device hda-output,audiodev=snd0 -audiodev none,id=snd0 $(QEMU_USB_ARGS) -no-reboot -serial stdio
+	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_blank.img,format=raw,if=ide,index=0 $(QEMU_DISK2_ARGS) -device intel-hda -device hda-output,audiodev=snd0 $(HOST_QEMU_AV_ARGS) $(QEMU_USB_ARGS) -no-reboot -serial stdio
 
 clean:
 	rm -rf build
