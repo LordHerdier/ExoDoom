@@ -119,12 +119,16 @@ static uint32_t voldemo_bump_launches(void)
     return n;
 }
 
+/* The volume slots exo_disk_extent (#37) hands out are on the system disk,
+ * block device 0 (SCRUM-244). */
+#define VOLDEMO_DEV 0u
+
 /* Try to read sector `lba` and report what the kernel said. A refusal is the
  * expected answer for everything except our own extent. */
 static void voldemo_probe(fb_console_t *con, const char *vol, const char *what,
                           uint32_t lba, void *buf)
 {
-    int64_t rc = exo_disk_read(lba, buf, 1);
+    int64_t rc = exo_disk_read(VOLDEMO_DEV, lba, buf, 1);
 
     printf("voldemo[%s] probe %s lba=%u rc=%d %s\n", vol, what, (unsigned)lba,
            (int)rc, rc < 0 ? "refused" : "READ-OK");
@@ -188,19 +192,19 @@ void libos_voldemo_main(void)
     write_u32(&con, ext.sectors);
     label(&con, " sectors\n");
 
-    rc = exo_disk_acquire(ext.base, ext.sectors);
+    rc = exo_disk_acquire(VOLDEMO_DEV, ext.base, ext.sectors);
     if (rc != 0)
         voldemo_halt(&con, "exo_disk_acquire failed: ", rc);
 
     label(&con, "fs       ");
-    if (exofs_mount(ext.base) == 0) {
+    if (exofs_mount(VOLDEMO_DEV, ext.base) == 0) {
         printf("voldemo[%s] mounted existing volume\n", name);
         value(&con, "mounted existing volume\n");
     } else {
-        int frc = exofs_format(ext.base, ext.sectors);
+        int frc = exofs_format(VOLDEMO_DEV, ext.base, ext.sectors);
         if (frc != 0)
             voldemo_halt(&con, "exofs_format failed: ", frc);
-        int mrc = exofs_mount(ext.base);
+        int mrc = exofs_mount(VOLDEMO_DEV, ext.base);
         if (mrc != 0)
             voldemo_halt(&con, "exofs_mount failed: ", mrc);
         printf("voldemo[%s] formatted new volume\n", name);
@@ -255,7 +259,7 @@ void libos_voldemo_main(void)
         voldemo_probe(&con, name, "shell-scratch", 8192, probe);
         voldemo_probe(&con, name, "program-volume", 16384, probe);
     }
-    rc = exo_disk_acquire(0, 0);
+    rc = exo_disk_acquire(VOLDEMO_DEV, 0, 0);
     printf("voldemo[%s] probe whole-disk rc=%d %s\n", name, (int)rc,
            rc < 0 ? "refused" : "GRANTED");
     fbcon_write(&con, "  ");
@@ -279,7 +283,7 @@ void libos_voldemo_main(void)
         if (exo_kbd_poll(&ev) > 0 && ev.pressed &&
             (ev.key == KEY_Q || ev.key == KEY_ESC)) {
             exofs_unmount();
-            exo_disk_release();
+            exo_disk_release(VOLDEMO_DEV);
             exo_syscall1(EXO_SYS_EXIT, 0);
             for (;;) { exo_yield(); }
         }

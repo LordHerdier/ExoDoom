@@ -180,6 +180,12 @@
 #define EXO_LAUNCH_APP_DOOM       1
 #define EXO_LAUNCH_APP_COUNT      2
 
+/* Device indices exo_diskstat (#31) will answer for: [0, this). Device 0 is
+ * reserved for the system disk and stays absent on a machine without one;
+ * other disks are numbered from 1 (SCRUM-244). Enumerate by asking every
+ * index, not by stopping at the first absent one. */
+#define EXO_DISK_MAX_DEVICES      4u
+
 /* Largest package exo_launch_pkg() will look at: the format's own worst case
  * (header + 192 code pages + 192 data pages; bss is not stored), so nothing
  * the loader could build is refused here. */
@@ -348,14 +354,14 @@ typedef struct {
     uint32_t page_count;    /* pages currently owned by this context        */
 } exo_ps_info_t;
 
-/* exo_diskstat(out) — #31 (SCRUM-202). Unscoped introspection, same family
- * as exo_memstat_t/exo_ps_info_t above: whether the one ATA drive this
- * kernel ever speaks to (src/ata.c) answered at boot, and its total 28-bit
- * LBA sector count (0 if it didn't). No ownership check -- same reasoning
- * as exo_memstat/exo_pslist, and it touches no hardware: both fields are
- * read from state ata_init() already latched at boot. */
+/* exo_diskstat(dev, out) — #31 (SCRUM-202, device SCRUM-244). Unscoped
+ * introspection, same family as exo_memstat_t/exo_ps_info_t above: whether
+ * block device `dev` exists, and its total 28-bit LBA sector count (0 if it
+ * doesn't). No ownership check -- same reasoning as exo_memstat/exo_pslist,
+ * and it touches no hardware: both fields are read from state the driver
+ * latched at boot. */
 typedef struct {
-    uint8_t  present;       /* 1 if ata_init() found a drive, else 0        */
+    uint8_t  present;       /* 1 if device `dev` exists, else 0             */
     uint8_t  reserved[3];   /* zeroed by the kernel                         */
     uint32_t total_sectors; /* 0 if !present                                */
 } exo_diskstat_t;
@@ -658,45 +664,53 @@ static inline int64_t exo_pslist(exo_ps_info_t *out, uint32_t max)
                         (uint64_t)max);
 }
 
-/* #24 — read `count` consecutive 512-byte sectors starting at 28-bit LBA
- * `lba` into `buf` (at least `count * 512` bytes). Returns `count` on
- * success, or -EXO_ENODEV (no drive), -EXO_EINVAL (count == 0 is NOT an
+/* #24 — read `count` consecutive 512-byte sectors of block device `dev`
+ * (0 = the system disk, SCRUM-244) starting at 28-bit LBA `lba` into `buf`
+ * (at least `count * 512` bytes). Returns `count` on success, or
+ * -EXO_ENODEV (no such device), -EXO_EINVAL (count == 0 is NOT an
  * error and returns 0; count over EXO_DISK_MAX_SECTORS or lba+count
  * overflowing 28-bit LBA space are), -EXO_EFAULT (buf outside the LibOS
- * window or not mapped writable), -EXO_EBUSY (caller does not hold the disk
- * binding -- see exo_disk_acquire, SCRUM-188) or -EXO_EIO (a sector faulted
- * partway through). */
-static inline int64_t exo_disk_read(uint32_t lba, void *buf, uint32_t count)
+ * window or not mapped writable), -EXO_EBUSY (caller does not hold a
+ * binding on this device -- see exo_disk_acquire, SCRUM-188) or -EXO_EIO (a
+ * sector faulted partway through). */
+static inline int64_t exo_disk_read(uint32_t dev, uint32_t lba, void *buf,
+                                    uint32_t count)
 {
-    return exo_syscall3(EXO_SYS_DISK_READ, (uint64_t)lba,
+    return exo_syscall4(EXO_SYS_DISK_READ, (uint64_t)dev, (uint64_t)lba,
                         (uint64_t)(uintptr_t)buf, (uint64_t)count);
 }
 
-/* #25 — write `count` consecutive 512-byte sectors starting at 28-bit LBA
- * `lba` from `buf`. Same return/error contract as exo_disk_read, with `buf`
- * checked readable rather than writable. */
-static inline int64_t exo_disk_write(uint32_t lba, const void *buf,
-                                     uint32_t count)
+/* #25 — write `count` consecutive 512-byte sectors of device `dev` starting
+ * at 28-bit LBA `lba` from `buf`. Same return/error contract as
+ * exo_disk_read, with `buf` checked readable rather than writable. */
+static inline int64_t exo_disk_write(uint32_t dev, uint32_t lba,
+                                     const void *buf, uint32_t count)
 {
-    return exo_syscall3(EXO_SYS_DISK_WRITE, (uint64_t)lba,
+    return exo_syscall4(EXO_SYS_DISK_WRITE, (uint64_t)dev, (uint64_t)lba,
                         (uint64_t)(uintptr_t)buf, (uint64_t)count);
 }
 
-/* #26 — bind sectors [base, base + count) to the caller (SCRUM-188, ranges
- * SCRUM-237). count == 0 (and base == 0) claims the whole device, which is
+/* #26 — bind sectors [base, base + count) of device `dev` to the caller
+ * (SCRUM-188, ranges SCRUM-237, device SCRUM-244). A caller may hold one
+ * extent on each device at once; extents of different devices never
+ * conflict. count == 0 (and base == 0) claims the whole device, which is
  * what the argument-less call did before ranges existed. Must succeed before
  * exo_disk_read/exo_disk_write will do anything for this caller, and those
  * then refuse any sector outside [base, base + count). Returns 0 (including a
  * re-acquire of the same extent), -EXO_EBUSY if the extent overlaps another
- * context's or the caller already holds a different one, -EXO_EINVAL for a
- * malformed extent, -EXO_ENOMEM if the extent table is full, or -EXO_ENODEV
- * if this machine has no drive. */
-static inline int64_t exo_disk_acquire(uint32_t base, uint32_t count)
+ * context's on this device or the caller already holds a different one of
+ * it, -EXO_EINVAL for a malformed extent, -EXO_EPERM if the caller has an
+ * assigned volume and this is not it, -EXO_ENOMEM if the extent table is
+ * full, or -EXO_ENODEV if there is no such device. */
+static inline int64_t exo_disk_acquire(uint32_t dev, uint32_t base,
+                                       uint32_t count)
 {
-    return exo_syscall2(EXO_SYS_DISK_ACQUIRE, (uint64_t)base, (uint64_t)count);
+    return exo_syscall3(EXO_SYS_DISK_ACQUIRE, (uint64_t)dev, (uint64_t)base,
+                        (uint64_t)count);
 }
 
-/* #27 — give the disk binding back (SCRUM-189). The voluntary counterpart to
+/* #27 — give the binding of device `dev` back (SCRUM-189, device SCRUM-244);
+ * any other device the caller holds stays held. The voluntary counterpart to
  * exo_disk_acquire, and the only way a LibOS can perform phase 2 of the
  * revocation protocol for this resource (docs/syscall_spec.md §3.6): without
  * it, `disk_binding_release()` is reachable from ring 0 only, so the disk
@@ -708,19 +722,24 @@ static inline int64_t exo_disk_acquire(uint32_t base, uint32_t count)
  * remember which one it was. Flush anything cached above this first; the
  * kernel does not know the binding meant anything (ExoFS calls
  * exofs_unmount() before exofs_bdev_release() for exactly this reason). */
-static inline int64_t exo_disk_release(void)
+static inline int64_t exo_disk_release(uint32_t dev)
 {
-    return exo_syscall0(EXO_SYS_DISK_RELEASE);
+    return exo_syscall1(EXO_SYS_DISK_RELEASE, (uint64_t)dev);
 }
 
-/* #31 — presence and total 28-bit LBA sector count of the one ATA drive
- * this kernel ever speaks to (SCRUM-202). No acquire needed first: unscoped
- * introspection like exo_memstat/exo_pslist, not a resource grant. Returns
- * 0 with *out filled, or -EXO_EFAULT if [out, out + sizeof(exo_diskstat_t))
- * is not entirely inside the LibOS window and mapped writable. */
-static inline int64_t exo_diskstat(exo_diskstat_t *out)
+/* #31 — presence and total 28-bit LBA sector count of block device `dev`
+ * (SCRUM-202, device SCRUM-244). No acquire needed first: unscoped
+ * introspection like exo_memstat/exo_pslist, not a resource grant. An absent
+ * device is not an error -- it reports present == 0 -- so the disks are
+ * enumerated by asking every dev below EXO_DISK_MAX_DEVICES (device 0 can be
+ * absent while others are present). Returns 0
+ * with *out filled, -EXO_EINVAL if dev >= EXO_DISK_MAX_DEVICES, or
+ * -EXO_EFAULT if [out, out + sizeof(exo_diskstat_t)) is not entirely inside
+ * the LibOS window and mapped writable. */
+static inline int64_t exo_diskstat(uint32_t dev, exo_diskstat_t *out)
 {
-    return exo_syscall1(EXO_SYS_DISK_STAT, (uint64_t)(uintptr_t)out);
+    return exo_syscall2(EXO_SYS_DISK_STAT, (uint64_t)dev,
+                        (uint64_t)(uintptr_t)out);
 }
 
 /* #37 — the sector extent this program's package asked for and the kernel

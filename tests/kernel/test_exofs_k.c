@@ -91,7 +91,7 @@ static int drive_present(void)
 
 int exofs_suite_init(void)
 {
-    exofs_bdev_acquire();
+    exofs_bdev_acquire(0);
     return 0;
 }
 
@@ -100,7 +100,7 @@ int exofs_suite_cleanup(void)
     /* Leave nothing mounted for the next suite, even if a test failed
      * partway through with a volume up. */
     exofs_unmount();
-    exofs_bdev_release();
+    exofs_bdev_release(0);
     return 0;
 }
 
@@ -110,8 +110,8 @@ int exofs_suite_cleanup(void)
 static int fresh_volume(void)
 {
     exofs_unmount();
-    if (exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS) != 0) return 0;
-    if (exofs_mount(EXOFS_TEST_BASE_LBA) != 0) return 0;
+    if (exofs_format(0, EXOFS_TEST_BASE_LBA, VOL_SECTORS) != 0) return 0;
+    if (exofs_mount(0, EXOFS_TEST_BASE_LBA) != 0) return 0;
     return 1;
 }
 
@@ -165,8 +165,8 @@ static void test_null_buffer_rejected(void)
     /* Rejected locally, before any syscall: count > 0 with no buffer is a
      * caller bug, and answering -EXO_EFAULT matches what the syscall itself
      * would have said. */
-    CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA, NULL, 1), -EXO_EFAULT);
-    CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA, NULL, 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA, NULL, 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA, NULL, 1), -EXO_EFAULT);
 }
 
 static void test_zero_count_is_a_noop(void)
@@ -174,8 +174,8 @@ static void test_zero_count_is_a_noop(void)
     /* Nothing to transfer, so the loop never runs and NULL is not a problem
      * — mirroring the syscall's own count == 0 contract
      * (docs/syscall_spec.md §3.2 #27). Runs with or without a drive. */
-    CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA, NULL, 0), 0);
-    CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA, NULL, 0), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA, NULL, 0), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA, NULL, 0), 0);
 }
 
 static void test_kernel_buffer_rejected(void)
@@ -187,7 +187,7 @@ static void test_kernel_buffer_rejected(void)
      * above exists to prevent, demonstrated deliberately. */
     uint8_t stack_buf[EXOFS_BLOCK_SIZE];
 
-    CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA, stack_buf, 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA, stack_buf, 1), -EXO_EFAULT);
 }
 
 /* ---- Round trip ---------------------------------------------------------
@@ -210,8 +210,8 @@ static void test_single_sector_round_trips(void)
         r[i] = 0;
     }
 
-    CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA, w, 1), 0);
-    CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA, r, 1), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA, w, 1), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA, r, 1), 0);
 
     for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) {
         if (r[i] != w[i]) {
@@ -254,8 +254,8 @@ static void test_transfer_larger_than_cap_is_chunked(void)
         r[i] = 0;
     }
 
-    CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA, w, count), 0);
-    CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA, r, count), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA, w, count), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA, r, count), 0);
 
     for (size_t i = 0; i < bytes; i++) {
         if (r[i] != w[i]) {
@@ -269,11 +269,11 @@ static void test_transfer_larger_than_cap_is_chunked(void)
     uint8_t *guard = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     if (guard != NULL) {
         for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) guard[i] = 0xA5;
-        CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA + count, guard, 1), 0);
+        CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA + count, guard, 1), 0);
 
         for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) guard[i] = 0;
-        CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA, w, count), 0);
-        CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA + count, guard, 1), 0);
+        CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA, w, count), 0);
+        CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA + count, guard, 1), 0);
         CU_ASSERT_EQUAL(guard[0], 0xA5);
         libos_heap_free(guard);
     }
@@ -292,9 +292,9 @@ static void test_acquire_is_idempotent(void)
     /* The suite already holds it; re-acquiring must not be punished, so a
      * caller can acquire unconditionally rather than tracking whether it
      * already did (SCRUM-188, docs/syscall_spec.md §3.5a). */
-    CU_ASSERT_EQUAL(exofs_bdev_acquire(), 0);
-    CU_ASSERT_EQUAL(exofs_bdev_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), syscall_current_context());
+    CU_ASSERT_EQUAL(exofs_bdev_acquire(0), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_acquire(0), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), syscall_current_context());
 }
 
 static void test_foreign_owner_blocks_transfers(void)
@@ -310,17 +310,17 @@ static void test_foreign_owner_blocks_transfers(void)
      * through the seam unchanged — -EXO_EBUSY, not a local code. Same
      * "another context" convention test_disk_binding_k.c and
      * test_syscall_disk_k.c use. */
-    disk_binding_release(me);
-    CU_ASSERT_EQUAL(disk_binding_acquire((page_owner_t)(PAGE_OWNER_LIBOS + 1)),
+    disk_binding_release(me, 0);
+    CU_ASSERT_EQUAL(disk_binding_acquire((page_owner_t)(PAGE_OWNER_LIBOS + 1), 0),
                     DISK_BIND_OK);
 
-    CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA, buf, 1), -EXO_EBUSY);
-    CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA, buf, 1), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA, buf, 1), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA, buf, 1), -EXO_EBUSY);
 
     /* Restore, so later tests in this suite still hold the binding. */
-    disk_binding_release((page_owner_t)(PAGE_OWNER_LIBOS + 1));
-    CU_ASSERT_EQUAL(exofs_bdev_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+    disk_binding_release((page_owner_t)(PAGE_OWNER_LIBOS + 1), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_acquire(0), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), me);
 
     libos_heap_free(buf);
 }
@@ -355,19 +355,19 @@ static int write_small_file(const char *path)
 static int bring_up_volume(uint32_t base)
 {
     exofs_unmount();
-    exofs_bdev_release();
-    int rc = exofs_bdev_acquire_extent(base, VOL_EXT_SECTORS);
+    exofs_bdev_release(0);
+    int rc = exofs_bdev_acquire_extent(0, base, VOL_EXT_SECTORS);
     if (rc != 0) return rc;
-    rc = exofs_format(base, VOL_EXT_SECTORS);
+    rc = exofs_format(0, base, VOL_EXT_SECTORS);
     if (rc != 0) return rc;
-    return exofs_mount(base);
+    return exofs_mount(0, base);
 }
 
 static void restore_whole_device(void)
 {
     exofs_unmount();
-    exofs_bdev_release();
-    exofs_bdev_acquire();
+    exofs_bdev_release(0);
+    exofs_bdev_acquire(0);
 }
 
 static void test_volumes_in_separate_extents_do_not_see_each_other(void)
@@ -386,9 +386,9 @@ static void test_volumes_in_separate_extents_do_not_see_each_other(void)
     exofs_unmount();
 
     /* Back to A: its file is still there and B's is not. */
-    exofs_bdev_release();
-    CU_ASSERT_EQUAL(exofs_bdev_acquire_extent(VOL_A_BASE, VOL_EXT_SECTORS), 0);
-    CU_ASSERT_EQUAL(exofs_mount(VOL_A_BASE), 0);
+    exofs_bdev_release(0);
+    CU_ASSERT_EQUAL(exofs_bdev_acquire_extent(0, VOL_A_BASE, VOL_EXT_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, VOL_A_BASE), 0);
     CU_ASSERT_EQUAL(exofs_stat("/only-in-a", &st), 0);
     CU_ASSERT_EQUAL(exofs_stat("/only-in-b", &st), -EXO_ENOENT);
 
@@ -405,12 +405,12 @@ static void test_exofs_cannot_reach_the_other_volume(void)
 
     /* Holding A's extent, ExoFS cannot mount B, and a failed mount must not
      * leave a half-mounted volume behind. */
-    CU_ASSERT_EQUAL(exofs_mount(VOL_B_BASE), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_mount(0, VOL_B_BASE), -EXO_EINVAL);
     CU_ASSERT_FALSE(exofs_is_mounted());
 
     /* Nor format it: refused at the first transfer outside the extent, so B's
      * superblock is whatever it was. */
-    CU_ASSERT_EQUAL(exofs_format(VOL_B_BASE, VOL_EXT_SECTORS), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_format(0, VOL_B_BASE, VOL_EXT_SECTORS), -EXO_EINVAL);
 
     /* The first sector past the extent is refused at the seam, whatever
      * ExoFS believes its geometry to be. (exofs_format() of an oversized
@@ -420,15 +420,15 @@ static void test_exofs_cannot_reach_the_other_volume(void)
     uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     CU_ASSERT_PTR_NOT_NULL(buf);
     if (buf) {
-        CU_ASSERT_EQUAL(exofs_bdev_write(VOL_A_BASE + VOL_EXT_SECTORS, buf, 1),
+        CU_ASSERT_EQUAL(exofs_bdev_write(0, VOL_A_BASE + VOL_EXT_SECTORS, buf, 1),
                         -EXO_EINVAL);
-        CU_ASSERT_EQUAL(exofs_bdev_read(VOL_A_BASE + VOL_EXT_SECTORS - 1, buf, 2),
+        CU_ASSERT_EQUAL(exofs_bdev_read(0, VOL_A_BASE + VOL_EXT_SECTORS - 1, buf, 2),
                         -EXO_EINVAL);
         libos_heap_free(buf);
     }
 
     /* And A is undamaged by all of that. */
-    CU_ASSERT_EQUAL(exofs_mount(VOL_A_BASE), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, VOL_A_BASE), 0);
     exofs_stat_t st;
     CU_ASSERT_EQUAL(exofs_stat("/mine", &st), 0);
 
@@ -444,11 +444,11 @@ static void test_another_context_cannot_take_an_overlapping_extent(void)
     CU_ASSERT_EQUAL(bring_up_volume(VOL_A_BASE), 0);
 
     /* Held by us; overlapping claims fail, disjoint ones coexist. */
-    CU_ASSERT_EQUAL(disk_binding_acquire_extent(other, VOL_A_BASE + 100, 10),
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(other, 0, VOL_A_BASE + 100, 10),
                     DISK_BIND_EBUSY);
-    CU_ASSERT_EQUAL(disk_binding_acquire_extent(other, VOL_B_BASE, VOL_EXT_SECTORS),
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(other, 0, VOL_B_BASE, VOL_EXT_SECTORS),
                     DISK_BIND_OK);
-    disk_binding_release(other);
+    disk_binding_release(other, 0);
 
     restore_whole_device();
 }
@@ -459,8 +459,8 @@ static void test_format_then_mount(void)
 {
     if (!drive_present()) return;
 
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, VOL_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
     CU_ASSERT_TRUE(exofs_is_mounted());
 
     exofs_geometry_t g;
@@ -501,7 +501,7 @@ static void test_mount_survives_remount(void)
     /* Mounting again reads the same superblock off the disk rather than
      * anything left in memory — which is the property SCRUM-190's
      * prebuilt image depends on entirely. */
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
 
     exofs_geometry_t second;
     CU_ASSERT_EQUAL(exofs_geometry(&second), 0);
@@ -531,15 +531,15 @@ static void test_mount_unformatted_region_rejected(void)
     for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) zero[i] = 0;
 
     exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_bdev_write(blank_lba, zero, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(blank_lba), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, blank_lba, zero, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, blank_lba), -EXO_EINVAL);
     CU_ASSERT_FALSE(exofs_is_mounted());
 
     /* And garbage that is not merely zero, in case "all zeros" were being
      * special-cased somewhere rather than the magic actually being read. */
     for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) zero[i] = (uint8_t)(i | 1u);
-    CU_ASSERT_EQUAL(exofs_bdev_write(blank_lba, zero, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(blank_lba), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, blank_lba, zero, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, blank_lba), -EXO_EINVAL);
     CU_ASSERT_FALSE(exofs_is_mounted());
 
     libos_heap_free(zero);
@@ -564,7 +564,7 @@ static void test_mount_inconsistent_geometry_rejected(void)
     CU_ASSERT_PTR_NOT_NULL(buf);
     if (buf == NULL) return;
 
-    CU_ASSERT_EQUAL(exofs_bdev_read(EXOFS_TEST_BASE_LBA, buf, 1), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, EXOFS_TEST_BASE_LBA, buf, 1), 0);
     exofs_super_t *sb = (exofs_super_t *)buf;
     CU_ASSERT_EQUAL(sb->magic, EXOFS_MAGIC);
 
@@ -574,26 +574,26 @@ static void test_mount_inconsistent_geometry_rejected(void)
 
     /* fat_blocks that does not match total_blocks. */
     sb->fat_blocks = good_fat + 1u;
-    CU_ASSERT_EQUAL(exofs_bdev_write(EXOFS_TEST_BASE_LBA, sb, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, EXOFS_TEST_BASE_LBA, sb, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), -EXO_EINVAL);
     sb->fat_blocks = good_fat;
 
     /* data_lba that does not follow the FAT. */
     sb->data_lba = good_data + 1u;
-    CU_ASSERT_EQUAL(exofs_bdev_write(EXOFS_TEST_BASE_LBA, sb, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, EXOFS_TEST_BASE_LBA, sb, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), -EXO_EINVAL);
     sb->data_lba = good_data;
 
     /* A version this build does not know. */
     sb->version = (uint16_t)(good_ver + 1u);
-    CU_ASSERT_EQUAL(exofs_bdev_write(EXOFS_TEST_BASE_LBA, sb, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, EXOFS_TEST_BASE_LBA, sb, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), -EXO_EINVAL);
     sb->version = good_ver;
 
     /* Restored, the same sector mounts again — proving the rejections above
      * were about the fields changed and not about the sector being touched. */
-    CU_ASSERT_EQUAL(exofs_bdev_write(EXOFS_TEST_BASE_LBA, sb, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, EXOFS_TEST_BASE_LBA, sb, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
     exofs_unmount();
 
     libos_heap_free(buf);
@@ -606,7 +606,7 @@ static void test_double_mount_rejected(void)
 
     /* One volume at a time (exofs.h). A second mount must not silently
      * leak the first volume's FAT allocation. */
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), -EXO_EBUSY);
     CU_ASSERT_TRUE(exofs_is_mounted());
 
     exofs_unmount();
@@ -615,9 +615,9 @@ static void test_double_mount_rejected(void)
 static void test_format_rejects_tiny_volume(void)
 {
     /* No drive needed: the size check is ahead of any transfer. */
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, 0), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, 1), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA,
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, 0), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, 1), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA,
                                  EXOFS_MIN_SECTORS - 1u), -EXO_EINVAL);
 }
 
@@ -697,7 +697,7 @@ static void test_fat_writeback_survives_remount(void)
     CU_ASSERT_EQUAL(exofs_sync(), 0);
     exofs_unmount();
 
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
     v = exofs_vol();
     CU_ASSERT_PTR_NOT_NULL(v);
     if (v == NULL) return;
@@ -1199,7 +1199,7 @@ static void test_chain_survives_remount(void)
 
     CU_ASSERT_EQUAL(exofs_sync(), 0);
     exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
 
     v = exofs_vol();
     CU_ASSERT_PTR_NOT_NULL(v);
@@ -1532,7 +1532,7 @@ static void test_names_survive_remount(void)
     CU_ASSERT_NOT_EQUAL(head_before, EXOFS_NO_BLOCK);
 
     exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
 
     v = exofs_vol();
     CU_ASSERT_PTR_NOT_NULL(v);
@@ -1849,7 +1849,7 @@ static void test_name_room_table_is_rebuilt_after_remount(void)
 
     CU_ASSERT_EQUAL(exofs_sync(), 0);
     exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
 
     v = exofs_vol();
     CU_ASSERT_PTR_NOT_NULL(v);
@@ -2188,7 +2188,7 @@ static void test_entries_survive_remount(void)
     CU_ASSERT_EQUAL(exofs_sync(), 0);
 
     exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
     v = exofs_vol();
     CU_ASSERT_PTR_NOT_NULL(v);
     if (v == NULL) return;
@@ -2409,8 +2409,8 @@ static void test_directory_walk_is_bounded_by_the_volume(void)
     if (!drive_present()) return;
 
     exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, 64u), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, 64u), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
 
     exofs_volume_t *v = exofs_vol();
     CU_ASSERT_PTR_NOT_NULL(v);
@@ -3060,7 +3060,7 @@ static void test_directories_survive_remount(void)
     CU_ASSERT_EQUAL(exofs_sync(), 0);
 
     exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
 
     int found = 0;
     CU_ASSERT_EQUAL(readdir_contains("/", "keep", &found), 0);
@@ -3110,7 +3110,7 @@ static void test_format_under_a_mount_refused(void)
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
     CU_ASSERT_TRUE(exofs_is_mounted());
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS),
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, VOL_SECTORS),
                     -EXO_EBUSY);
     CU_ASSERT_TRUE(exofs_is_mounted());
 
@@ -3609,8 +3609,8 @@ static void test_acceptance_round_trip(void)
 
     /* 1. Format and populate. */
     exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, VOL_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
 
     CU_ASSERT_EQUAL(exofs_mkdir("/subdir"), 0);
 
@@ -3628,7 +3628,7 @@ static void test_acceptance_round_trip(void)
     CU_ASSERT_FALSE(exofs_is_mounted());
 
     /* 3. Mount fresh and list the root. */
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
 
     int saw_file = 0, saw_dir = 0;
     exofs_dir_t d;

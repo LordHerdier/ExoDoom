@@ -51,7 +51,16 @@
  */
 
 /*
- * Acquire the disk binding for this context (#26, SCRUM-188).
+ * DEVICES. Every call names a block device (SCRUM-244): 0 is the system
+ * disk, and each further disk the kernel found is the next index
+ * (exo_diskstat, #31, enumerates them). A context may hold one extent on
+ * each device at once, so a volume on one disk and a volume on another can
+ * both be bound -- though only one is ever mounted (exofs.h), which is why a
+ * copy between them goes through a buffer.
+ */
+
+/*
+ * Acquire the whole of device `dev` for this context (#26, SCRUM-188).
  *
  * exo_disk_read/exo_disk_write answer -EXO_EBUSY to a caller that does not
  * hold the binding, whether nobody holds it or somebody else does, so this
@@ -60,9 +69,9 @@
  * unconditionally.
  *
  * Returns 0, -EXO_EBUSY (another context holds the disk) or -EXO_ENODEV
- * (this machine has no drive).
+ * (no such device).
  */
-int exofs_bdev_acquire(void);
+int exofs_bdev_acquire(uint32_t dev);
 
 /*
  * Same, for the sectors [base, base + count) only (SCRUM-237). The syscall
@@ -72,10 +81,11 @@ int exofs_bdev_acquire(void);
  * (count == 0). Extra errors: -EXO_EINVAL (malformed extent), -EXO_ENOMEM
  * (the kernel's extent table is full).
  */
-int exofs_bdev_acquire_extent(uint32_t base, uint32_t count);
+int exofs_bdev_acquire_extent(uint32_t dev, uint32_t base, uint32_t count);
 
 /*
- * Give the binding back (#27, SCRUM-189).
+ * Give the binding of device `dev` back (#27, SCRUM-189); other devices this
+ * context holds stay held.
  *
  * The counterpart to exofs_bdev_acquire, and the reason #27 exists at all:
  * disk_binding_release() lives in the kernel, so without a syscall in front
@@ -94,10 +104,11 @@ int exofs_bdev_acquire_extent(uint32_t base, uint32_t count);
  * volume whose allocation table disagrees with its directory entries.
  * Nothing here can enforce that -- this file knows LBAs, not volumes.
  */
-void exofs_bdev_release(void);
+void exofs_bdev_release(uint32_t dev);
 
 /*
- * Read/write `count` consecutive 512-byte sectors at absolute LBA `lba`.
+ * Read/write `count` consecutive 512-byte sectors at absolute LBA `lba` of
+ * device `dev`.
  *
  * `buf` must be at least count * EXOFS_BLOCK_SIZE bytes and must lie in the
  * LibOS VA window (see above). Returns 0 on success, or a negative EXO_E*.
@@ -112,8 +123,9 @@ void exofs_bdev_release(void);
  * split the transfer into capped chunks rather than rejecting it, so callers
  * can read a whole FAT in one call without restating the cap.
  */
-int exofs_bdev_read(uint32_t lba, void *buf, uint32_t count);
-int exofs_bdev_write(uint32_t lba, const void *buf, uint32_t count);
+int exofs_bdev_read(uint32_t dev, uint32_t lba, void *buf, uint32_t count);
+int exofs_bdev_write(uint32_t dev, uint32_t lba, const void *buf,
+                     uint32_t count);
 
 /*
  * Monotonic milliseconds since boot, for directory-entry timestamps

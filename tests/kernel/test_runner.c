@@ -84,10 +84,12 @@ void suite_libos_doom_tests(CU_pSuite s);
 void suite_doom_net_tests(CU_pSuite s);
 void suite_syscall_stat_tests(CU_pSuite s);
 void suite_ata_tests(CU_pSuite s);
+void suite_blkdev_tests(CU_pSuite s);
 void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
 void suite_exofs_tests(CU_pSuite s);
 void suite_exo_file_tests(CU_pSuite s);
+void suite_multidisk_tests(CU_pSuite s);
 void suite_doom_wad_disk_tests(CU_pSuite s);
 void suite_launch_multi_tests(CU_pSuite s);
 void suite_launch_pkg_tests(CU_pSuite s);
@@ -180,6 +182,8 @@ int exofs_suite_cleanup(void);
 /* exo_file_* sits on ExoFS, so the same binding requirement (SCRUM-44). */
 int exo_file_suite_init(void);
 int exo_file_suite_cleanup(void);
+int multidisk_suite_init(void);
+int multidisk_suite_cleanup(void);
 
 /* Same idea as context_launch_rebind_suite_cleanup (SCRUM-196): each test
  * here launches real contexts (with real code/data/stack pages) via the
@@ -559,6 +563,13 @@ int run_tests(void)
     s = CU_add_suite("ata", NULL, NULL);
     suite_ata_tests(s);
 
+    /* After "ata": the registry's second half checks what
+     * ata_register_blkdevs() registered against what ata_init() probes, and
+     * ahead of every suite that reaches a disk through the registry
+     * (SCRUM-244). */
+    s = CU_add_suite("blkdev", NULL, NULL);
+    suite_blkdev_tests(s);
+
     s = CU_add_suite("syscall_disk", syscall_disk_suite_init,
                      syscall_disk_suite_cleanup);
     suite_syscall_disk_tests(s);
@@ -577,6 +588,13 @@ int run_tests(void)
      * failure should be reported there first (SCRUM-44). */
     s = CU_add_suite("exo_file", exo_file_suite_init, exo_file_suite_cleanup);
     suite_exo_file_tests(s);
+
+    /* After "exofs" and "disk_binding": the two-drive acceptance suite
+     * (SCRUM-244) builds an ExoFS volume on each device, so a failure in
+     * either layer should be reported by its own suite first. */
+    s = CU_add_suite("multidisk", multidisk_suite_init,
+                     multidisk_suite_cleanup);
+    suite_multidisk_tests(s);
 
     /* After "exofs": doom_wad_disk_get() (src/doom_wad_disk.c) is ExoFS
      * plus a contiguous allocation and a cache on top, mounting the real

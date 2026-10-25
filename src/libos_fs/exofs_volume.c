@@ -101,7 +101,7 @@ int exofs_read_block(uint32_t blk, void *buf)
     if (blk >= v->total_blocks) return -EXO_EINVAL;
 
     v->stat_block_reads++;
-    return exofs_bdev_read(exofs_block_lba(v, blk), buf, 1);
+    return exofs_bdev_read(v->dev, exofs_block_lba(v, blk), buf, 1);
 }
 
 int exofs_write_block(uint32_t blk, const void *buf)
@@ -111,7 +111,7 @@ int exofs_write_block(uint32_t blk, const void *buf)
     if (blk >= v->total_blocks) return -EXO_EINVAL;
 
     v->stat_block_writes++;
-    return exofs_bdev_write(exofs_block_lba(v, blk), buf, 1);
+    return exofs_bdev_write(v->dev, exofs_block_lba(v, blk), buf, 1);
 }
 
 /* ---- FAT writeback ------------------------------------------------------ */
@@ -149,7 +149,7 @@ static int fat_flush(exofs_volume_t *v)
         const uint8_t *src =
             (const uint8_t *)v->fat + (size_t)i * EXOFS_BLOCK_SIZE;
 
-        int rc = exofs_bdev_write(v->fat_lba + i, src, run);
+        int rc = exofs_bdev_write(v->dev, v->fat_lba + i, src, run);
         if (rc < 0) return rc;
 
         /* Clear only after the write succeeded: a failed flush must leave
@@ -212,7 +212,7 @@ uint32_t exofs_region_sectors(uint32_t base_lba, uint32_t region_end_lba,
  * magic and refuses — which is the honest answer for a volume whose FAT was
  * only half written.
  */
-int exofs_format(uint32_t base_lba, uint32_t total_sectors)
+int exofs_format(uint32_t dev, uint32_t base_lba, uint32_t total_sectors)
 {
     /* Formatting under a live mount would leave that mount describing a
      * volume that no longer exists — its cached FAT, its geometry and its
@@ -235,7 +235,7 @@ int exofs_format(uint32_t base_lba, uint32_t total_sectors)
     /* 1. The FAT, every entry EXOFS_BLOCK_FREE (0) — which is why a zeroed
      *    buffer is the whole of it — except the root's own entry. */
     for (uint32_t i = 0; i < fat_blocks; i++) {
-        rc = exofs_bdev_write(fat_lba + i, zero, 1);
+        rc = exofs_bdev_write(dev, fat_lba + i, zero, 1);
         if (rc < 0) goto out;
     }
 
@@ -244,7 +244,7 @@ int exofs_format(uint32_t base_lba, uint32_t total_sectors)
     {
         exofs_fat_t *fat0 = (exofs_fat_t *)zero;
         fat0[0] = EXOFS_BLOCK_EOC;
-        rc = exofs_bdev_write(fat_lba, zero, 1);
+        rc = exofs_bdev_write(dev, fat_lba, zero, 1);
         if (rc < 0) goto out;
         fat0[0] = 0;                        /* back to all-zero for reuse */
     }
@@ -256,7 +256,7 @@ int exofs_format(uint32_t base_lba, uint32_t total_sectors)
      *    helper resolves a block index through the *mounted* volume, and
      *    format() runs with nothing mounted. It has the geometry in hand
      *    from compute_geometry() instead. */
-    rc = exofs_bdev_write(data_lba + EXOFS_ROOT_BLOCK, zero, 1);
+    rc = exofs_bdev_write(dev, data_lba + EXOFS_ROOT_BLOCK, zero, 1);
     if (rc < 0) goto out;
 
     /* 3. The superblock, last — see this function's header comment. */
@@ -272,7 +272,7 @@ int exofs_format(uint32_t base_lba, uint32_t total_sectors)
         sb->root_block   = EXOFS_ROOT_BLOCK;
         sb->name_head    = EXOFS_NO_BLOCK;   /* no names on a fresh volume */
 
-        rc = exofs_bdev_write(base_lba, sb, 1);
+        rc = exofs_bdev_write(dev, base_lba, sb, 1);
         if (rc < 0) goto out;
     }
 
@@ -288,7 +288,7 @@ int exofs_format(uint32_t base_lba, uint32_t total_sectors)
      * It has to be last: everything above is what makes the volume
      * mountable in the first place.
      */
-    rc = exofs_mount(base_lba);
+    rc = exofs_mount(dev, base_lba);
     if (rc < 0) goto out;
 
     rc = exofs_dir_init_root(&g_vol);
@@ -340,14 +340,14 @@ static int validate_super(const exofs_super_t *sb, uint32_t base_lba)
     return 0;
 }
 
-int exofs_mount(uint32_t base_lba)
+int exofs_mount(uint32_t dev, uint32_t base_lba)
 {
     if (g_vol.mounted) return -EXO_EBUSY;
 
     uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     if (buf == NULL) return -EXO_ENOMEM;
 
-    int rc = exofs_bdev_read(base_lba, buf, 1);
+    int rc = exofs_bdev_read(dev, base_lba, buf, 1);
     if (rc < 0) goto out_buf;
 
     const exofs_super_t *sb = (const exofs_super_t *)buf;
@@ -355,6 +355,7 @@ int exofs_mount(uint32_t base_lba)
     if (rc < 0) goto out_buf;
 
     memset(&g_vol, 0, sizeof(g_vol));
+    g_vol.dev          = dev;
     g_vol.base_lba     = base_lba;
     g_vol.fat_lba      = base_lba + 1u;
     g_vol.fat_blocks   = sb->fat_blocks;
@@ -385,7 +386,7 @@ int exofs_mount(uint32_t base_lba)
     g_vol.scratch = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     if (g_vol.scratch == NULL) { rc = -EXO_ENOMEM; goto out_partial; }
 
-    rc = exofs_bdev_read(g_vol.fat_lba, g_vol.fat, g_vol.fat_blocks);
+    rc = exofs_bdev_read(g_vol.dev, g_vol.fat_lba, g_vol.fat, g_vol.fat_blocks);
     if (rc < 0) goto out_partial;
 
     /* The root's FAT entry is the one thing format() writes that mount can
@@ -439,7 +440,7 @@ int exofs_super_update(exofs_volume_t *v)
     sb->root_block   = v->root_block;
     sb->name_head    = v->name_head;
 
-    return exofs_bdev_write(v->base_lba, sb, 1);
+    return exofs_bdev_write(v->dev, v->base_lba, sb, 1);
 }
 
 /* ---- Open-handle tracking ------------------------------------------------- */

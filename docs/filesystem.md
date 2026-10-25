@@ -79,7 +79,14 @@ order yields a *mountable* volume with a garbage FAT.
 
 ## 2. Geometry
 
-A volume starts at a caller-supplied base LBA, not at LBA 0:
+A volume lives on a caller-supplied **block device** and starts at a
+caller-supplied base LBA, not at LBA 0. The device (SCRUM-244) is the index
+the kernel's `exo_disk_*` syscalls take — 0 is reserved for the system disk,
+other disks are 1 and up (`exo_diskstat`, #31, enumerates them). `exofs_format(dev, base, sectors)` and
+`exofs_mount(dev, base)` take it, the mounted volume records it
+(`exofs_volume_t::dev`), and every transfer goes to it. It is **not** in the
+superblock: a volume does not know which disk it is carried on, so the same
+volume reads the same on a stick and on the system disk.
 
 ```
 base_lba + 0                    superblock (exactly one sector)
@@ -97,8 +104,8 @@ become an LBA with one addition.
 
 `exofs_format()` still takes the sector count from its caller — not because
 there is no disk-capacity syscall (`exo_diskstat`, #31,
-`docs/syscall_spec.md` §3.2, surfaces `ata_init()`'s IDENTIFY sector count via
-`ata_get_sector_count()`, SCRUM-202), but because several fixed-base-LBA
+`docs/syscall_spec.md` §3.2, surfaces each device's IDENTIFY sector count,
+SCRUM-202/244), but because several fixed-base-LBA
 volumes can share one disk (§2 above; the shell's scratch volume and the
 WAD's own, `src/doom_wad_disk.h`), so "the whole disk" is never the right
 size for one of them. `exofs_region_sectors()` (`src/libos_fs/exofs.h`,
@@ -106,7 +113,7 @@ SCRUM-203) is the caller-side computation — `min(next region's base,
 disk capacity) - this volume's base` — that the shell's `mkfs`/`disk`
 commands use instead of a hardcoded constant. The geometry derived from
 whatever sector count results is recorded in the superblock, so
-`exofs_mount()` needs only the base.
+`exofs_mount()` needs only the device and the base.
 
 ---
 
@@ -516,8 +523,15 @@ difference.
   The reference consumer is `src/libos_voldemo/`: one program, packaged twice
   with different slots, that formats on first launch, mounts thereafter, and
   probes the sectors it must not reach.
-- **Unmount before releasing the binding.** `exofs_bdev_release()`
-  (`exo_disk_release`, #27) drops the binding immediately; it cannot know a
+- **One volume at a time, even across devices.** A program may hold an extent
+  on each of several devices at once (SCRUM-244), but it still mounts one
+  volume, so copying a file between two volumes means: hold both, mount the
+  source, read the file into a `libos_heap_alloc()` buffer, unmount, mount
+  the destination, write. That is what `install` (SCRUM-233) does and what
+  `tests/kernel/test_multidisk_k.c`'s copy test asserts. Making the mount
+  state a handle instead of a static is the change that would lift this.
+- **Unmount before releasing the binding.** `exofs_bdev_release(dev)`
+  (`exo_disk_release`, #27) drops the binding on that device immediately; it cannot know a
   filesystem was mounted on top of it. The FAT is resident and written back
   a sector at a time as it changes (§1), so releasing with dirty FAT
   sectors still cached loses them silently, and the next holder of the disk

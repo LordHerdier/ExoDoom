@@ -84,7 +84,8 @@ Full guide: `docs/testing.md`. Debugging with GDB: `docs/debugging.md`.
 serial_init -> idt_init -> tss_init -> mmap_init/memory_init -> acpi_init -> page_alloc_init
   -> vmm_init -> syscall_init + every syscall_*_init
   -> pic_remap -> IRQ0 + spurious IRQ7/15 gates -> pit_init
-  -> pci_init -> hda_init -> ata_init -> usb_init -> rtc_init + syscall_rtc_init
+  -> pci_init -> hda_init -> ata_init + ata_register_blkdevs -> usb_init
+  -> syscall_disk_init -> rtc_init + syscall_rtc_init
   [-DTESTING]    serial_flush -> qemu_exit(run_tests())
   [normal boot]  fb + fbcon -> kbd_init -> sti -> launch the shell LibOS (ring 3)
 ```
@@ -126,7 +127,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_*.c/h` (one per area) |
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h`, `src/disk_binding.c/h` |
 | Resource revocation | `src/revoke.c/h` and the `*_revoke_*` primitives |
-| Disk (ATA PIO) | `src/ata.c/h`, `src/syscall_disk.c/h` |
+| Disk: ATA PIO (all four IDE positions), block-device registry (device 0 = system disk) | `src/ata.c/h`, `src/blkdev.c/h`, `src/syscall_disk.c/h` |
 | LibOS-space filesystem (ExoFS) + `exo_file_*` descriptor API | `src/libos_fs/` (`exo_file.c/h` for descriptors) — **not part of the kernel**; syscalls #9–16 are reserved, never bound |
 | Keyboard / mouse | `src/ps2.c/h`, `src/kbd_ring.c/h`, `src/ps2_mouse.c/h` |
 | Freestanding libc | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`, `src/fpconv.c/h`; header-only shims `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/*.h` |

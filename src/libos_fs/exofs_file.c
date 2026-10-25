@@ -369,7 +369,7 @@ int64_t exofs_read(exofs_file_t *f, void *buf, uint32_t n)
             uint32_t last;
             uint32_t run = contig_run(v, blk, cap, &last);
 
-            rc = exofs_bdev_read(exofs_block_lba(v, blk), block, run);
+            rc = exofs_bdev_read(v->dev, exofs_block_lba(v, blk), block, run);
             if (rc < 0) goto out;
             v->stat_block_reads += run;
 

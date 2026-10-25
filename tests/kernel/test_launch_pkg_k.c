@@ -534,7 +534,7 @@ static page_owner_t first_context_but(page_owner_t not_this)
 
 static void test_volume_request_assigns_a_fenced_extent(void)
 {
-    if (!disk_binding_present())
+    if (!disk_binding_present(0))
         return;
 
     uint64_t paddr = map_scratch();
@@ -558,7 +558,7 @@ static void test_volume_request_assigns_a_fenced_extent(void)
     CU_ASSERT_EQUAL(count, 64);
 
     /* The volume is fenced from other contexts while the child is alive... */
-    CU_ASSERT_EQUAL(disk_binding_acquire_extent(fg, base, 1), DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(fg, 0, base, 1), DISK_BIND_EBUSY);
     /* ...and a second package claiming the same slot is refused, with no
      * context row left behind. */
     context_info_t before[CONTEXT_MAX];
@@ -579,9 +579,9 @@ static void test_volume_request_assigns_a_fenced_extent(void)
     revoke_all_but(fg);
     CU_ASSERT_EQUAL(disk_binding_assignment_of(child, &base, &count),
                     DISK_BIND_EBUSY);
-    CU_ASSERT_EQUAL(disk_binding_acquire_extent(fg, exo_volume_slot_base(2), 64),
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(fg, 0, exo_volume_slot_base(2), 64),
                     DISK_BIND_OK);
-    disk_binding_release(fg);
+    disk_binding_release(fg, 0);
 
     context_switch_pending = 0;
     drop_foreground(fg);

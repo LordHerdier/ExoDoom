@@ -1,8 +1,9 @@
-# Driver: ATA (PIO, primary bus, master drive)
+# Driver: ATA (PIO, both legacy buses, master and slave)
 
-**Files:** `src/ata.c`, `src/ata.h` **Status:** ✅ Complete (SCRUM-102,
-multi-sector PIO SCRUM-190)
-**Last updated:** 19 Oct 2026
+**Files:** `src/ata.c`, `src/ata.h` (registers into `src/blkdev.c/h`)
+**Status:** ✅ Complete (SCRUM-102, multi-sector PIO SCRUM-190, four
+positions + block-device registration SCRUM-244)
+**Last updated:** 24 Oct 2026
 
 ---
 
@@ -20,10 +21,12 @@ multi-sector PIO SCRUM-190)
 
 ## 1. Purpose
 
-`ata.c` is the kernel's only path to persistent block storage: detect a
-drive and read/write individual 512-byte sectors by LBA. It has no
-filesystem knowledge and no syscall surface — those are separate, later
-tickets:
+`ata.c` is the kernel's path to IDE block storage: detect drives and
+read/write 512-byte sectors by LBA. It has no filesystem knowledge and no
+syscall surface. Since SCRUM-244 it also has no direct callers above it: it
+registers each disk it finds in the kernel block-device registry
+(`src/blkdev.h`), and the syscall layer reaches a disk only through that
+registry by device index (`docs/syscall_spec.md` §3.5a). The layers on top:
 
 - `exo_disk_read`/`exo_disk_write` (SCRUM-103) put a bounds-checked syscall
   boundary in front of this driver, the same way `exo_page_alloc` sits in
@@ -37,11 +40,21 @@ tickets:
 
 ## 2. Hardware background
 
-QEMU's `-drive if=ide` attaches to the **primary ATA bus** as the **master**
-drive — confirmed as the chosen interface on SCRUM-102 (2026-09-19), which
-rejected a SCSI/virtio-scsi HBA as unnecessary driver complexity for a
-QEMU-only demo. This driver only ever speaks to that one drive: no slave, no
-secondary bus.
+QEMU's `-drive if=ide` attaches to the legacy IDE buses — confirmed as the
+chosen interface on SCRUM-102 (2026-09-19), which rejected a SCSI/virtio-scsi
+HBA as unnecessary driver complexity for a QEMU-only demo. There are four
+positions, which QEMU numbers with `index=`:
+
+| Position (`index=`) | Bus       | Drive  | Command block | Control | Test boot attaches |
+| ------------------- | --------- | ------ | ------------- | ------- | ------------------ |
+| 0                   | primary   | master | `0x1F0`–`0x1F7` | `0x3F6` | `build/exodoom_disk.img` — device 0, the system disk |
+| 1                   | primary   | slave  | `0x1F0`–`0x1F7` | `0x3F6` | `build/exodoom_disk2.img` — device 1 (SCRUM-244) |
+| 2                   | secondary | master | `0x170`–`0x177` | `0x376` | the `-cdrom` ISO (ATAPI, skipped) |
+| 3                   | secondary | slave  | `0x170`–`0x177` | `0x376` | nothing |
+
+The `Makefile` pins the system disk to `index=0` on every QEMU line so the
+two drives cannot swap. Registers below are at offsets from the bus's
+command-block base (primary shown):
 
 | Port     | Register (read)  | Register (write)  |
 | -------- | ----------------- | ------------------ |
@@ -54,9 +67,12 @@ secondary bus.
 | `0x1F6`  | Drive/head         | Drive/head           |
 | `0x1F7`  | Status             | Command               |
 
-Drive/head register for a 28-bit LBA command: `0xE0 | ((lba >> 24) & 0xF)` —
-the `0xE0` selects LBA addressing mode and the primary/master drive (bit 4
-clear); the low nibble carries LBA bits 24-27.
+Drive/head register for a 28-bit LBA command: `0xE0 | ((lba >> 24) & 0xF)`
+for the master, `0xF0 | …` for the slave — `0xE0` selects LBA addressing
+mode, bit 4 (`0x10`) selects the slave; the low nibble carries LBA bits
+24-27. Master and slave share a bus's registers, so every command rewrites
+drive/head with its own drive's bit and then waits ~400 ns before polling,
+since the previous command may have been for the other drive.
 
 Status register bits this driver checks:
 
@@ -73,25 +89,48 @@ port. `ERR`/`DF` (error / drive fault) mean the command failed.
 
 ## 3. Detection (`ata_init`)
 
-Sends `IDENTIFY DEVICE` (command `0xEC`) to the primary master with a
-zeroed LBA/sector-count, then:
+`ata_init()` probes all four positions in order (`ata_probe()`). For each it
+selects the drive, waits ~400 ns, and:
 
-1. Reads status immediately. `0x00` means the bus is floating — no drive
-   wired at all — and `ata_init()` returns `ATA_ENODEV` rather than
-   treating it as an error to propagate loudly. This mirrors `DG_Init`'s
-   "report, don't halt" convention for a missing resource
-   (`docs/architecture.md` §7, `src/doom_wad.c`).
-2. Polls until `BSY` clears (`ata_wait_not_busy`).
-3. Polls until `DRQ` sets or `ERR`/`DF` sets (`ata_wait_drq`).
-4. Drains the 256-word IDENTIFY payload. Detection only needs proof that a
-   full response arrived intact — nothing here parses the model string,
-   serial number, or capacity fields out of it. A later ticket can extend
-   this if that data becomes useful (e.g. reporting real drive geometry).
+1. Reads status. `0x00` (QEMU's answer for an absent slave or an empty bus)
+   or `0xFF` (a floating bus on real hardware) means nothing is there, and
+   the position is marked absent — "report, don't halt", `DG_Init`'s
+   convention for a missing resource (`docs/architecture.md` §7).
+2. Sends `IDENTIFY DEVICE` (`0xEC`) with a zeroed LBA/sector-count, and
+   reads status again (`0x00` → absent).
+3. Polls until `BSY` clears (`ata_wait_not_busy`).
+4. **Checks for an ATAPI signature** (LBA mid/high = `0x14`/`0xEB`). A packet
+   device — the CD-ROM GRUB booted from, at QEMU's secondary master —
+   aborts `IDENTIFY DEVICE` and leaves that signature. It is checked
+   *before* waiting for DRQ, which an aborted command never raises; waiting
+   would only find `ERR` and make the CD-ROM look like a faulted disk rather
+   than not-a-disk. It is marked absent.
+5. Polls until `DRQ` sets or `ERR`/`DF` sets (`ata_wait_drq`).
+6. Drains the 256-word IDENTIFY payload, keeping word 47 (multiple-mode
+   block, §4) and words 60/61 (28-bit LBA sector count, reported by #31).
 
-Callers must call `ata_init()` once before `ata_read_sector`/
-`ata_write_sector`; behaviour before that is an unbounded hardware timeout,
-not a crash, but is still undefined in the sense that no drive has been
-selected into a known state yet.
+The return value is the **primary master's** result (`ATA_OK`, `ATA_ENODEV`,
+or a timeout/IO error), so callers that ask "is the system disk there?" are
+unchanged; `ata_drive_present(pos)`/`ata_drive_sector_count(pos)` answer for
+any position. `ata_init()` is safe to call again — the KUnit suites do — and
+only re-probes; it registers nothing.
+
+**Registration.** `kernel_main` calls `ata_register_blkdevs()` once, after
+`ata_init()`. The primary master goes in the registry's reserved system slot
+with `blkdev_register_system()` — block device 0 — and every other present
+position takes the next free slot from 1 up with `blkdev_register()`, in
+position order; the primary slave is device 1 on the test boot. With no
+primary master, device 0 stays empty instead of going to whichever disk was
+found next (`docs/syscall_spec.md` §3.5a has why). `syscall_disk_init()`
+follows, after `usb_init()`.
+
+**Empty positions are rejected without a long wait.** After the status
+check, the probe writes `0x55`/`0xAA` to the sector-count and LBA-low
+registers and reads them back. A drive that is there latches them; an empty
+position does not (QEMU reads an absent drive's registers as `0`, a floating
+bus reads `0xFF`). Without this, a floating bus that settles at something
+like `0x7F` or `0x80` — BSY apparently set — would make the BSY poll spin its
+whole `ATA_POLL_ITERS` budget (~10 s) for each empty position.
 
 ---
 
@@ -99,9 +138,16 @@ selected into a known state yet.
 
 `ata_read_sector(lba, buf)`/`ata_write_sector(lba, buf)` are thin,
 count-1 wrappers around `ata_read_sectors(lba, buf, count)`/
-`ata_write_sectors(lba, buf, count)` (SCRUM-190). Both do:
+`ata_write_sectors(lba, buf, count)` (SCRUM-190), which address the primary
+master; every other drive is reached only through the block-device ops
+`ata_register_blkdevs()` registers, which call the same code with the drive
+bound in. All of them do:
 
-1. Program drive/head (LBA mode, master, top 4 LBA bits), sector count, and
+1. Program drive/head (LBA mode, this drive's master/slave bit, top 4 LBA
+   bits) — waiting ~400 ns for the selection to settle only if that changed
+   which drive the bus has selected (`ata_select_drive()`; each of the four
+   alternate-status reads in the delay is a VM exit under KVM, so it is not
+   paid on every command to the drive already selected) — then sector count and
    the low/mid/high LBA bytes (`ata_select`) — **once**, for the whole run,
    not once per sector. Re-issuing the command block per sector would reset
    the drive's internal auto-incrementing LBA, which is exactly what
@@ -123,7 +169,7 @@ count-1 wrappers around `ata_read_sectors(lba, buf, count)`/
    minutes with interrupts off** (it looked like a hang). CI runs under TCG
    and cannot see this difference.
 
-**Multiple mode.** `ata_init()` reads IDENTIFY word 47 (bits 7:0, the most
+**Multiple mode.** `ata_init()` reads IDENTIFY word 47, per drive, (bits 7:0, the most
 sectors the drive moves per DRQ block) and issues `SET MULTIPLE MODE`
 (`0xC6`) with it; QEMU reports and accepts 16. With plain `READ SECTORS`
 the drive raises DRQ once per 512-byte sector, and each of those
@@ -189,11 +235,20 @@ under KVM it must be a string instruction or it dominates everything else.
 #define ATA_ETIMEOUT (-2)  /* BSY never cleared / DRQ never set      */
 #define ATA_EIO     (-3)   /* ERR bit set in the status register     */
 
-int ata_init(void);
+#define ATA_MAX_DRIVES 4   /* primary/secondary x master/slave         */
+
+int ata_init(void);                       /* probe all; primary master's rc */
+int ata_register_blkdevs(void);           /* once, from kernel_main         */
+int ata_drive_present(unsigned drive);
+uint32_t ata_drive_sector_count(unsigned drive);
+
+/* Primary master (the system disk). */
 int ata_read_sector(uint32_t lba, uint8_t *buf);
 int ata_write_sector(uint32_t lba, const uint8_t *buf);
 int ata_read_sectors(uint32_t lba, uint8_t *buf, uint32_t count);
 int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count);
+uint32_t ata_get_sector_count(void);
+uint32_t ata_multiple_block(void);
 ```
 
 `buf` must point to at least `count` (1 for the single-sector calls) * 512
@@ -231,13 +286,17 @@ attached to the primary bus:
   exercised in both directions, plus a single-sector read of the last one
   to prove the run landed at the right LBAs.
 
-**`docker-test`/`docker-ci` only** attach a scratch drive: the `Makefile`
-creates an 8 MB zeroed `build/ata_scratch.img` and passes
-`-drive file=...,format=raw,if=ide` to `qemu-system-x86_64`. This is
-throwaway test infrastructure, not the real FAT-formatted image —
-`docker-run`/`docker-run-kernel`/`docker-build` are unchanged and still
-boot with no disk attached, so `ata_init()` reports `ATA_ENODEV` there
-(logged on serial, boot continues — see `src/kernel.c`).
+Every QEMU line in the `Makefile` attaches `build/exodoom_disk.img` at
+`index=0` and the blank `build/exodoom_disk2.img` (8 MiB, created by
+`docker/scripts/build.sh` when missing) at `index=1` (SCRUM-244). A boot
+without a disk still soft-fails: `ata_init()` reports `ATA_ENODEV` (logged on
+serial, boot continues — see `src/kernel.c`).
+
+`tests/kernel/test_blkdev_k.c` (suite `blkdev`) checks registration against
+probing: one block device per present position, in position order; the
+primary master is device 0; the ATAPI CD-ROM at position 2 is **not**
+registered. `tests/kernel/test_multidisk_k.c` drives the second drive
+through the syscalls (`docs/syscall_spec.md` §3.5a).
 
 ---
 
@@ -250,7 +309,7 @@ drive, round-trip a sector) doesn't require. If a future ticket needs
 non-blocking disk I/O, this is the place that would grow an IRQ path.
 
 **Bounded iteration count, not a PIT-timed timeout.** `ata_wait_not_busy`/
-`ata_wait_drq` spin for up to `ATA_POLL_ITERS` (100,000) loop iterations
+`ata_wait_drq` spin for up to `ATA_POLL_ITERS` (10,000,000) loop iterations
 rather than consulting `kernel_get_ticks_ms()`. BSY/DRQ resolve in
 microseconds on real hardware and in QEMU; tying this to the PIT would add
 a cross-driver dependency (`ata.c` → `pit.c`) for a wait that's expected to
@@ -265,10 +324,19 @@ answer. Checking status immediately after issuing `IDENTIFY`, before the
 first poll loop, catches this cheaply and lets `ata_init()` return
 `ATA_ENODEV` promptly instead of `ATA_ETIMEOUT` after a full spin.
 
-**No slave/secondary-bus support.** The public API has no drive-select
-parameter by design — SCRUM-102's scope is exactly "detect drive, read/
-write 512-byte sectors" against the one drive QEMU's `-drive if=ide`
-attaches. Multi-drive support is not needed anywhere in the current
-roadmap (`docs/architecture.md` §10) and would be a straightforward
-extension (a drive-select byte threaded through the existing register
-layout) if that changes.
+**Four positions, one code path (SCRUM-244).** SCRUM-102 deliberately spoke
+to the primary master only. `install` (SCRUM-233) needs a second disk, so
+the port base, control port and drive-select bit became per-drive state
+(`ata_drive_t`) and every helper takes the drive. The unsuffixed calls kept
+their signatures as primary-master wrappers so ring-0 users of the system
+disk did not change.
+
+**Device 0 is the primary master or nothing.** Device numbers are not IDE
+positions, but slot 0 is reserved for the primary master: with only a slave
+attached, the slave is device 1 and device 0 is absent, so it can never be
+mistaken for the system disk. Nothing above this file depends on any other
+position-to-device mapping.
+
+**The CD-ROM is skipped, not driven.** Packet (ATAPI) devices take
+`PACKET` commands, not `READ SECTORS`, and this driver has no use for one,
+so the probe identifies it by signature and leaves it alone.
