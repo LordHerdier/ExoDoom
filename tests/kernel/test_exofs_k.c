@@ -3348,6 +3348,256 @@ static void test_hole_reads_as_zeros(void)
     exofs_unmount();
 }
 
+/* ---- Whole-block appends (SCRUM-233) -------------------------------------
+ *
+ * exofs_write() batches a whole-block append into runs of consecutive free
+ * blocks, claimed without zeroing and written with one transfer each.
+ * These pin what that must not change: content across a run that has to
+ * stop at an occupied block, the fall-back for overwrites and holes, a full
+ * volume, and that a block is written once rather than zeroed then written.
+ */
+
+/* Write `n` bytes of the pattern to a new file `path` in one call. */
+static int write_pattern_file(const char *path, uint32_t n, uint32_t seed)
+{
+    uint8_t *w = libos_heap_alloc(n);
+    if (w == NULL) return -EXO_ENOMEM;
+    fill_pattern(w, n, 0, seed);
+    exofs_file_t f;
+    int rc = exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC,
+                        &f);
+    if (rc == 0) {
+        int64_t got = exofs_write(&f, w, n);
+        int crc = exofs_close(&f);
+        rc = got != (int64_t)n ? -EXO_EIO : crc;
+    }
+    libos_heap_free(w);
+    return rc;
+}
+
+/* 1 if `path` holds exactly `n` bytes of the pattern. */
+static int file_has_pattern(const char *path, uint32_t n, uint32_t seed)
+{
+    uint8_t *r = libos_heap_alloc(n + 1u);
+    if (r == NULL) return 0;
+    exofs_file_t f;
+    int ok = 0;
+    if (exofs_open(path, EXOFS_O_READ, &f) == 0) {
+        ok = exofs_read(&f, r, n + 1u) == (int64_t)n &&
+             check_pattern(r, n, 0, seed);
+        exofs_close(&f);
+    }
+    libos_heap_free(r);
+    return ok;
+}
+
+/* Free space chopped into one-block gaps: the append's runs have to stop
+ * at every occupied block and carry on in the next gap, and the chain must
+ * still come out in file order. */
+static void test_append_across_fragmented_space(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_volume_t *v = exofs_vol();
+    char name[8] = "/f0";
+    for (uint32_t i = 0; i < 8u; i++) {
+        name[2] = (char)('0' + i);
+        CU_ASSERT_EQUAL(write_pattern_file(name, EXOFS_BLOCK_SIZE, i), 0);
+    }
+    for (uint32_t i = 0; i < 8u; i += 2u) {
+        name[2] = (char)('0' + i);
+        CU_ASSERT_EQUAL(exofs_unlink(name), 0);
+    }
+    uint32_t free_before = exofs_fat_free_count(v);
+
+    const uint32_t N = 40u * EXOFS_BLOCK_SIZE + 100u;
+    CU_ASSERT_EQUAL(write_pattern_file("/big.bin", N, 9), 0);
+    CU_ASSERT_TRUE(file_has_pattern("/big.bin", N, 9));
+
+    exofs_dirent_t e;
+    uint32_t len = 0;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, v->root_block, "big.bin", NULL, &e), 0);
+    CU_ASSERT_EQUAL(exofs_chain_len(v, e.first_block, &len), 0);
+    CU_ASSERT_EQUAL(len, 41u);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before - 41u);
+
+    /* The surviving neighbours were not touched. */
+    for (uint32_t i = 1; i < 8u; i += 2u) {
+        name[2] = (char)('0' + i);
+        CU_ASSERT_TRUE(file_has_pattern(name, EXOFS_BLOCK_SIZE, i));
+    }
+
+    /* Survives a remount, i.e. the FAT that reached the disk is right. */
+    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_TRUE(file_has_pattern("/big.bin", N, 9));
+    CU_ASSERT_EQUAL(exofs_unlink("/big.bin"), 0);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(exofs_vol()), free_before);
+    exofs_unmount();
+}
+
+/* Two appends that each end on a block boundary continue one chain, and a
+ * whole-block overwrite in the middle goes through the per-block path
+ * without growing it. */
+static void test_append_then_overwrite_whole_blocks(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    const uint32_t B = EXOFS_BLOCK_SIZE;
+    uint8_t *w = libos_heap_alloc(4u * B);
+    CU_ASSERT_PTR_NOT_NULL(w);
+    if (w == NULL) return;
+    fill_pattern(w, 4u * B, 0, 3);
+
+    exofs_file_t f;
+    CU_ASSERT_EQUAL(exofs_open("/ow.bin", EXOFS_O_READ | EXOFS_O_WRITE |
+                               EXOFS_O_CREATE, &f), 0);
+    CU_ASSERT_EQUAL(exofs_write(&f, w, 2u * B), (int64_t)(2u * B));
+    CU_ASSERT_EQUAL(exofs_write(&f, w + 2u * B, 2u * B), (int64_t)(2u * B));
+
+    /* Overwrite blocks 1..2 with the pattern under a different seed. */
+    uint8_t *o = libos_heap_alloc(2u * B);
+    CU_ASSERT_PTR_NOT_NULL(o);
+    if (o != NULL) {
+        fill_pattern(o, 2u * B, B, 77);
+        CU_ASSERT_EQUAL(exofs_seek(&f, B, EXOFS_SEEK_SET), (int64_t)B);
+        CU_ASSERT_EQUAL(exofs_write(&f, o, 2u * B), (int64_t)(2u * B));
+    }
+    CU_ASSERT_EQUAL(f.size, 4u * B);
+    CU_ASSERT_EQUAL(exofs_close(&f), 0);
+
+    exofs_volume_t *v = exofs_vol();
+    exofs_dirent_t e;
+    uint32_t len = 0;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, v->root_block, "ow.bin", NULL, &e), 0);
+    CU_ASSERT_EQUAL(exofs_chain_len(v, e.first_block, &len), 0);
+    CU_ASSERT_EQUAL(len, 4u);
+
+    uint8_t *r = libos_heap_alloc(4u * B);
+    CU_ASSERT_PTR_NOT_NULL(r);
+    if (r != NULL && o != NULL) {
+        CU_ASSERT_EQUAL(exofs_open("/ow.bin", EXOFS_O_READ, &f), 0);
+        CU_ASSERT_EQUAL(exofs_read(&f, r, 4u * B), (int64_t)(4u * B));
+        CU_ASSERT_EQUAL(exofs_close(&f), 0);
+        CU_ASSERT_TRUE(check_pattern(r, B, 0, 3));
+        CU_ASSERT_TRUE(check_pattern(r + B, 2u * B, B, 77));
+        CU_ASSERT_TRUE(check_pattern(r + 3u * B, B, 3u * B, 3));
+    }
+    libos_heap_free(r);
+    libos_heap_free(o);
+    libos_heap_free(w);
+    exofs_unmount();
+}
+
+/* A block-aligned whole-block write past the end leaves a hole, which the
+ * append path must not take (its blocks are not zeroed): the gap still
+ * reads as zeros. */
+static void test_aligned_write_past_end_keeps_hole_zero(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    const uint32_t B = EXOFS_BLOCK_SIZE;
+    uint8_t *w = libos_heap_alloc(2u * B);
+    uint8_t *r = libos_heap_alloc(5u * B);
+    CU_ASSERT_PTR_NOT_NULL(w);
+    CU_ASSERT_PTR_NOT_NULL(r);
+    if (w == NULL || r == NULL) return;
+    fill_pattern(w, 2u * B, 0, 11);
+
+    /* Dirty the free space first, so an unzeroed block would show. */
+    CU_ASSERT_EQUAL(write_pattern_file("/junk", 8u * B, 0xAA), 0);
+    CU_ASSERT_EQUAL(exofs_unlink("/junk"), 0);
+
+    exofs_file_t f;
+    CU_ASSERT_EQUAL(exofs_open("/gap.bin", EXOFS_O_READ | EXOFS_O_WRITE |
+                               EXOFS_O_CREATE, &f), 0);
+    CU_ASSERT_EQUAL(exofs_seek(&f, 3u * B, EXOFS_SEEK_SET), (int64_t)(3u * B));
+    CU_ASSERT_EQUAL(exofs_write(&f, w, 2u * B), (int64_t)(2u * B));
+    CU_ASSERT_EQUAL(exofs_seek(&f, 0, EXOFS_SEEK_SET), 0);
+    CU_ASSERT_EQUAL(exofs_read(&f, r, 5u * B), (int64_t)(5u * B));
+    CU_ASSERT_EQUAL(exofs_close(&f), 0);
+
+    uint32_t nonzero = 0;
+    for (uint32_t i = 0; i < 3u * B; i++) if (r[i] != 0) nonzero++;
+    CU_ASSERT_EQUAL(nonzero, 0u);
+    CU_ASSERT_EQUAL(memcmp(r + 3u * B, w, 2u * B), 0);
+
+    libos_heap_free(w);
+    libos_heap_free(r);
+    exofs_unmount();
+}
+
+/* Filling the volume: a short count, a size that matches what landed, and
+ * every block back after an unlink. */
+static void test_append_fills_volume(void)
+{
+    if (!drive_present()) return;
+    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, 64u), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
+    exofs_volume_t *v = exofs_vol();
+    if (v == NULL) return;
+
+    const uint32_t N = 64u * EXOFS_BLOCK_SIZE;
+    uint8_t *w = libos_heap_alloc(N);
+    CU_ASSERT_PTR_NOT_NULL(w);
+    if (w == NULL) { exofs_unmount(); return; }
+    fill_pattern(w, N, 0, 21);
+
+    uint32_t free_before = exofs_fat_free_count(v);
+    exofs_file_t f;
+    CU_ASSERT_EQUAL(exofs_open("/full.bin", EXOFS_O_WRITE | EXOFS_O_CREATE,
+                               &f), 0);
+    int64_t got = exofs_write(&f, w, N);
+    CU_ASSERT_TRUE(got > 0 && got < (int64_t)N);
+    CU_ASSERT_EQUAL(exofs_write(&f, w, EXOFS_BLOCK_SIZE), -EXO_ENOSPC);
+    CU_ASSERT_EQUAL(exofs_close(&f), 0);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), 0u);
+
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat("/full.bin", &st), 0);
+    CU_ASSERT_EQUAL((int64_t)st.size, got);
+    CU_ASSERT_TRUE(got > 0 && file_has_pattern("/full.bin", (uint32_t)got, 21));
+
+    CU_ASSERT_EQUAL(exofs_unlink("/full.bin"), 0);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
+
+    libos_heap_free(w);
+    exofs_unmount();
+}
+
+/* Each appended block reaches the disk once. The per-block path wrote it
+ * twice (zeroed on allocation, then the data), which is what made writing
+ * the IWAD from `install` take minutes. */
+static void test_append_writes_each_block_once(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_volume_t *v = exofs_vol();
+    exofs_file_t f;
+    CU_ASSERT_EQUAL(exofs_open("/once.bin", EXOFS_O_WRITE | EXOFS_O_CREATE,
+                               &f), 0);
+    uint32_t before = v->stat_block_writes;
+
+    const uint32_t N = 200u * EXOFS_BLOCK_SIZE;
+    uint8_t *w = libos_heap_alloc(N);
+    CU_ASSERT_PTR_NOT_NULL(w);
+    if (w != NULL) {
+        fill_pattern(w, N, 0, 4);
+        CU_ASSERT_EQUAL(exofs_write(&f, w, N), (int64_t)N);
+        CU_ASSERT_EQUAL(v->stat_block_writes - before, 200u);
+    }
+    CU_ASSERT_EQUAL(exofs_close(&f), 0);
+    CU_ASSERT_TRUE(file_has_pattern("/once.bin", N, 4));
+
+    libos_heap_free(w);
+    exofs_unmount();
+}
+
 static void test_append_and_truncate(void)
 {
     if (!drive_present()) return;
@@ -3812,6 +4062,16 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "seek and overwrite in place",
                 test_seek_and_overwrite);
     CU_add_test(s, "a hole reads as zeros", test_hole_reads_as_zeros);
+    CU_add_test(s, "append across fragmented free space",
+                test_append_across_fragmented_space);
+    CU_add_test(s, "append, then overwrite whole blocks",
+                test_append_then_overwrite_whole_blocks);
+    CU_add_test(s, "aligned write past the end keeps the hole zero",
+                test_aligned_write_past_end_keeps_hole_zero);
+    CU_add_test(s, "append fills the volume, then gives it all back",
+                test_append_fills_volume);
+    CU_add_test(s, "an appended block is written once",
+                test_append_writes_each_block_once);
     CU_add_test(s, "append and truncate", test_append_and_truncate);
     CU_add_test(s, "open error cases", test_open_errors);
     CU_add_test(s, "truncate/unlink refuse a still-open entry",

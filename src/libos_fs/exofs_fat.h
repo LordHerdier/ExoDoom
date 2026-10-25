@@ -67,6 +67,30 @@ int exofs_fat_set(exofs_volume_t *v, uint32_t blk, uint32_t val);
  */
 int exofs_fat_alloc(exofs_volume_t *v, uint32_t *out);
 
+/*
+ * Allocate a run of up to `max` blocks at consecutive block numbers, chained
+ * to each other in order (the last one end-of-chain), and report the first
+ * and how many. Starts where exofs_fat_alloc() would and stops at the first
+ * block that is not free, so *count is at least 1 and may be less than
+ * `max`. The run is claimed in the in-RAM FAT only; it is not linked to any
+ * chain.
+ *
+ * Unlike exofs_fat_alloc() this does NOT zero the blocks. It exists for
+ * exofs_write()'s whole-block append path (SCRUM-233), which writes every
+ * byte of every block in the run with one exofs_bdev_write() straight after
+ * this returns -- zeroing them first would double that write. The reason
+ * exofs_fat_alloc() zeroes (a claimed block must never expose a previous
+ * owner's bytes) still holds, because of ordering: the claim reaches the
+ * disk only when the FAT is next flushed, and the caller has written the
+ * data before then. A caller whose data write fails must give the run back
+ * with exofs_fat_free() before anything can flush the FAT.
+ *
+ * Returns 0, -EXO_ENOSPC if no block is free, or -EXO_EINVAL for a bad
+ * argument.
+ */
+int exofs_fat_alloc_run(exofs_volume_t *v, uint32_t max, uint32_t *first,
+                        uint32_t *count);
+
 /* Free a single block. Freeing an already-free block is -EXO_EINVAL rather
  * than a silent no-op: it means a chain was walked twice or a block was
  * double-owned, and both are worth hearing about. Freeing block 0 (the root

@@ -23,7 +23,9 @@
  *   HOLES ARE FREE. Seeking past the end and writing leaves a gap that
  *   reads as zeros, with no hole tracking anywhere: every block is zeroed
  *   when allocated (docs/filesystem.md §1.1), so unwritten bytes inside an
- *   allocated block are already zero.
+ *   allocated block are already zero. append_run()'s unzeroed blocks do
+ *   not break this: it only runs at the chain's end and writes every byte
+ *   of every block it claims (docs/filesystem.md §1.1).
  */
 
 #include "exofs.h"
@@ -59,6 +61,14 @@
  * than being chunked again inside exofs_bdev_read(); this file does not
  * include that header; see exofs_blockdev.h. */
 #define READ_BATCH_BLOCKS 128u
+
+/* exofs_write()'s counterpart to READ_BATCH_BLOCKS (SCRUM-233): how many
+ * whole blocks one append batches into a single exofs_bdev_write(), through
+ * an in-window scratch buffer for the same reason reads bounce. Before
+ * this, every appended block cost a zeroing write, a data write and a walk
+ * of the whole chain to find its tail -- over three minutes to write the
+ * 28 MB IWAD onto a volume from the shell's `install`, a few seconds now. */
+#define WRITE_BATCH_BLOCKS 128u
 
 /* ---- Chain navigation ---------------------------------------------------
  *
@@ -403,6 +413,71 @@ out:
     return (rc < 0) ? rc : (int64_t)done;
 }
 
+/*
+ * exofs_write()'s bulk path: when chain index `idx` is exactly one past the
+ * end of the file's chain (or the file has no chain and idx is 0), claim a
+ * run of consecutive blocks with exofs_fat_alloc_run(), write `src` into it
+ * with one exofs_bdev_write() through `scratch`, and only then link it onto
+ * the chain. Returns the number of whole blocks written, 0 if this is not
+ * such an append (the caller falls back to one block at a time, which
+ * handles overwrites and holes), or a negative error with nothing changed.
+ *
+ * Writing before linking, and giving the run back on a failed write, is
+ * what keeps exofs_fat_alloc_run()'s no-zeroing safe: see exofs_fat.h.
+ */
+static int append_run(exofs_volume_t *v, exofs_file_t *f, uint32_t idx,
+                      const uint8_t *src, uint32_t len, uint8_t *scratch,
+                      uint32_t batch_blocks)
+{
+    uint32_t tail = EXOFS_NO_BLOCK;
+    if (f->first_block == EXOFS_NO_BLOCK) {
+        if (idx != 0) return 0;
+    } else {
+        /* One walk to idx - 1, then one FAT lookup: idx is an append only
+         * when idx - 1 is the chain's last block. */
+        uint32_t next;
+        if (idx == 0) return 0;
+        int rc = block_at(v, f, idx - 1, &tail);
+        if (rc == -EXO_EINVAL) return 0;    /* a hole before idx */
+        if (rc < 0) return rc;
+        rc = exofs_fat_get(v, tail, &next);
+        if (rc < 0) return rc;
+        if (next != EXOFS_BLOCK_EOC) return 0;  /* block exists: overwrite */
+    }
+
+    uint32_t whole = len / EXOFS_BLOCK_SIZE;
+    uint32_t cap = whole < batch_blocks ? whole : batch_blocks;
+    uint32_t first, run;
+    int rc = exofs_fat_alloc_run(v, cap, &first, &run);
+    if (rc < 0) return rc;
+
+    memcpy(scratch, src, (size_t)run * EXOFS_BLOCK_SIZE);
+    rc = exofs_bdev_write(v->dev, exofs_block_lba(v, first), scratch, run);
+    if (rc < 0) {
+        for (uint32_t i = 0; i < run; i++) {
+            (void)exofs_fat_free(v, first + i);
+        }
+        return rc;
+    }
+    v->stat_block_writes += run;
+
+    if (tail == EXOFS_NO_BLOCK) {
+        f->first_block = first;
+        f->dirty = 1;
+    } else {
+        rc = exofs_fat_set(v, tail, first);
+        if (rc < 0) {
+            for (uint32_t i = 0; i < run; i++) {
+                (void)exofs_fat_free(v, first + i);
+            }
+            return rc;
+        }
+    }
+    f->cur_block = first + run - 1u;
+    f->cur_index = idx + run - 1u;
+    return (int)run;
+}
+
 int64_t exofs_write(exofs_file_t *f, const void *buf, uint32_t n)
 {
     exofs_volume_t *v = exofs_vol();
@@ -417,7 +492,12 @@ int64_t exofs_write(exofs_file_t *f, const void *buf, uint32_t n)
     /* A file's size is a uint32_t on disk, so refuse rather than wrap. */
     if (n > 0xFFFFFFFFu - f->pos) return -EXO_EFBIG;
 
-    uint8_t *block = libos_heap_alloc(EXOFS_BLOCK_SIZE);
+    /* Sized like exofs_read()'s scratch: a batch at most, one block for a
+     * small write. */
+    uint32_t want_blocks = n / EXOFS_BLOCK_SIZE + 1u;
+    uint32_t batch_blocks = want_blocks < WRITE_BATCH_BLOCKS
+                          ? want_blocks : WRITE_BATCH_BLOCKS;
+    uint8_t *block = libos_heap_alloc(batch_blocks * EXOFS_BLOCK_SIZE);
     if (block == NULL) return -EXO_ENOMEM;
 
     const uint8_t *src = (const uint8_t *)buf;
@@ -429,6 +509,23 @@ int64_t exofs_write(exofs_file_t *f, const void *buf, uint32_t n)
         uint32_t off = f->pos % EXOFS_BLOCK_SIZE;
         uint32_t put = EXOFS_BLOCK_SIZE - off;
         if (put > n - done) put = n - done;
+
+        if (off == 0 && n - done >= EXOFS_BLOCK_SIZE) {
+            rc = append_run(v, f, idx, src + done, n - done, block,
+                            batch_blocks);
+            if (rc < 0) goto out;
+            if (rc > 0) {
+                uint32_t bytes = (uint32_t)rc * EXOFS_BLOCK_SIZE;
+                done   += bytes;
+                f->pos += bytes;
+                if (f->pos > f->size) {
+                    f->size = f->pos;
+                    f->dirty = 1;
+                }
+                continue;
+            }
+            /* 0: not an append at the chain's end; one block at a time. */
+        }
 
         uint32_t blk;
         rc = ensure_block(v, f, idx, &blk);

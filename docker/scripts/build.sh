@@ -438,9 +438,10 @@ echo "[2c/7] Build shell LibOS (SCRUM-110)"
 #
 # SCRUM-263 adds src/shell/shell_help.c (help matching/formatting). It is
 # also compiled into the TESTING kernel further down, for
-# tests/kernel/test_shell_help_k.c.
+# tests/kernel/test_shell_help_k.c. SCRUM-233 adds src/shell/shell_install.c
+# (the `install` copy) the same way, for tests/kernel/test_shell_install_k.c.
 build_ring3_link_target shell src/shell "" "" \
-  src/shell/shell_main.c src/shell/shell_help.c \
+  src/shell/shell_main.c src/shell/shell_help.c src/shell/shell_install.c \
   src/fb.c src/fb_console.c src/libos_fb.c \
   src/stdlib.c src/stdio.c src/string.c src/ctype.c \
   src/errno.c src/fpconv.c src/libos_heap.c src/libos_page_alloc.c \
@@ -701,10 +702,13 @@ fi
 [[ -f build/usb.img ]] || truncate -s 16M build/usb.img
 
 # The second IDE drive behind every QEMU line's $(QEMU_DISK2_ARGS) (SCRUM-244):
-# block device 1, the install-stick stand-in. Blank and sparse; the multidisk
-# KUnit suite formats it, and SCRUM-233 puts packages on it. Created only when
-# missing, like usb.img above.
-[[ -f build/exodoom_disk2.img ]] || truncate -s 8M build/exodoom_disk2.img
+# block device 1, the install-stick stand-in. SCRUM-233: an ExoFS volume at
+# LBA 0 holding the IWAD and every package, which the shell's `install` copies
+# onto the system volume. Rewritten on every build (mkexofsimg truncates its
+# output), because the multidisk and shell_install KUnit suites reformat the
+# whole drive on a test boot; the next build puts the packages back.
+build/mkexofsimg build/exodoom_disk2.img "$WAD_PATH" "$wad_file" 0 \
+  "${pkg_args[@]}"
 
 echo "[3/7] Compile C sources"
 
@@ -939,6 +943,14 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   x86_64-elf-gcc -c src/shell/shell_help.c -o build/shell_help.o \
     "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
   objs+=("build/shell_help.o")
+
+  # The `install` copy (SCRUM-233), for tests/kernel/test_shell_install_k.c.
+  # Unlike shell_help.c it calls ExoFS, which the kernel already links
+  # (step [3a/7]).
+  echo "    CC shell_install.c (shell install)"
+  x86_64-elf-gcc -c src/shell/shell_install.c -o build/shell_install.o \
+    "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  objs+=("build/shell_install.o")
 
   echo "[3b5/7] Gate: ExoFS still builds as a ring-3 target (SCRUM-189)"
   # Step [3a/7] above (now unconditional, SCRUM-190) compiles ExoFS one way

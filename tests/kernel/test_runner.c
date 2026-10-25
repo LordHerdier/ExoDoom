@@ -90,6 +90,7 @@ void suite_disk_binding_tests(CU_pSuite s);
 void suite_exofs_tests(CU_pSuite s);
 void suite_exo_file_tests(CU_pSuite s);
 void suite_multidisk_tests(CU_pSuite s);
+void suite_shell_install_tests(CU_pSuite s);
 void suite_doom_wad_disk_tests(CU_pSuite s);
 void suite_launch_multi_tests(CU_pSuite s);
 void suite_launch_pkg_tests(CU_pSuite s);
@@ -184,6 +185,8 @@ int exo_file_suite_init(void);
 int exo_file_suite_cleanup(void);
 int multidisk_suite_init(void);
 int multidisk_suite_cleanup(void);
+int shell_install_suite_init(void);
+int shell_install_suite_cleanup(void);
 
 /* Same idea as context_launch_rebind_suite_cleanup (SCRUM-196): each test
  * here launches real contexts (with real code/data/stack pages) via the
@@ -595,6 +598,13 @@ int run_tests(void)
     s = CU_add_suite("multidisk", multidisk_suite_init,
                      multidisk_suite_cleanup);
     suite_multidisk_tests(s);
+
+    /* After "multidisk": `install` (SCRUM-233) is that suite's cross-device
+     * copy run in chunks, so a binding or two-drive failure shows up there
+     * first. */
+    s = CU_add_suite("shell_install", shell_install_suite_init,
+                     shell_install_suite_cleanup);
+    suite_shell_install_tests(s);
 
     /* After "exofs": doom_wad_disk_get() (src/doom_wad_disk.c) is ExoFS
      * plus a contiguous allocation and a cache on top, mounting the real
