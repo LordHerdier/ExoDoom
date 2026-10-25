@@ -135,6 +135,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | Vendored Doom engine (`libos_doom` ring-3 target) | `src/doom/`, `src/libos_doom/` |
 | doomgeneric platform layer | `src/doomgeneric_exo.c/h` |
 | Doom net stub / fatal-error path / mounted IWAD registry | `src/doom_net_stub.c`, `src/doom_panic.c/h`, `src/doom_wad.c/h`, `src/doom_wad_disk.c/h` |
+| Shell mount table + path router (`mount`/`umount`, pure logic, TESTING-kernel suite) | `src/shell/shell_mount.c/h` (used from `src/shell/shell_main.c`) |
 | LibOS apps | `src/shell/`, `src/libos_wad_viewer/`, `src/libos_clock/`, … |
 | Test framework | `src/kunit.h`, `tests/kernel/*.c`, `tests/kernel/kunit.c`, `tests/kernel/ring3_probe.s` |
 
