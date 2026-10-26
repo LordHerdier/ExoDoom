@@ -341,11 +341,14 @@ typedef struct {
     uint32_t pages;         /* pages it owns (page_count_owned)              */
     uint32_t fb_owner;      /* context holding the framebuffer binding, 0 if
                              * none -- equal to ctx_id when it holds it      */
-    uint32_t disk_base;     /* first sector of its assigned extent           */
-    uint32_t disk_sectors;  /* 0 if it has no assigned extent                */
+    uint32_t disk_base;     /* first sector of its private volume            */
+    uint32_t disk_sectors;  /* 0 if it has no private volume                 */
     uint32_t sound_voices;  /* mixer voices it started and that still hold
                              * a staging buffer                              */
     uint32_t sound_stream;  /* 1 if it holds the music stream                */
+    uint32_t prog_base;     /* first sector of the shared read-only program
+                             * volume it was assigned (SCRUM-267)            */
+    uint32_t prog_sectors;  /* 0 if it was not assigned the program volume   */
     uint32_t reserved;      /* zeroed by the kernel                          */
 } exo_grant_t;
 
@@ -405,6 +408,15 @@ typedef struct {
     uint32_t sectors; /* length in sectors, never 0                     */
 } exo_diskextent_t;
 
+/* #37 second argument (SCRUM-267): which of the caller's assigned volumes.
+ * ANY is what the call meant before there were two: the private volume if
+ * the caller has one, else the program volume. Name the role when a program
+ * can have both -- ANY would hand back the private one and a program that
+ * asked for "the program volume" would never notice. */
+#define EXO_DISK_EXTENT_ANY     0u
+#define EXO_DISK_EXTENT_PRIVATE 1u
+#define EXO_DISK_EXTENT_PROGRAM 2u
+
 /* EXO_PSLIST_MAX *is* CONTEXT_MAX (src/context.h) — included here rather than
  * restated as a separate literal, so the two can never drift the way they
  * did across SCRUM-193: that ticket raised VMM_MAX_ADDRESS_SPACES (and so
@@ -434,7 +446,7 @@ _Static_assert(sizeof(exo_diskstat_t)    ==  8, "exo_diskstat_t layout is ABI");
 _Static_assert(sizeof(exo_diskextent_t)  ==  8, "exo_diskextent_t layout is ABI");
 _Static_assert(sizeof(exo_rtc_time_t)    == 16, "exo_rtc_time_t layout is ABI");
 _Static_assert(sizeof(exo_resstat_t)     == 32, "exo_resstat_t layout is ABI");
-_Static_assert(sizeof(exo_grant_t)       == 32, "exo_grant_t layout is ABI");
+_Static_assert(sizeof(exo_grant_t)       == 40, "exo_grant_t layout is ABI");
 #endif /* __ASSEMBLER__ */
 
 #ifndef EXO_KERNEL
@@ -783,7 +795,19 @@ static inline int64_t exo_diskstat(uint32_t dev, exo_diskstat_t *out)
  * writable in the LibOS window. */
 static inline int64_t exo_disk_extent(exo_diskextent_t *out)
 {
-    return exo_syscall1(EXO_SYS_DISK_EXTENT, (uint64_t)(uintptr_t)out);
+    return exo_syscall2(EXO_SYS_DISK_EXTENT, (uint64_t)(uintptr_t)out,
+                        EXO_DISK_EXTENT_ANY);
+}
+
+/* #37 with a role (SCRUM-267): a package may be assigned a private volume
+ * (EXO_DISK_EXTENT_PRIVATE, the `--volume-slot` extent) and the shared
+ * read-only program volume (EXO_DISK_EXTENT_PROGRAM, `progvol`) at once, and
+ * exo_disk_extent() cannot say which it means. -EXO_ENOENT if the caller has
+ * no assignment of that kind, -EXO_EINVAL for an unknown role. */
+static inline int64_t exo_disk_extent_role(uint64_t role,
+                                           exo_diskextent_t *out)
+{
+    return exo_syscall2(EXO_SYS_DISK_EXTENT, (uint64_t)(uintptr_t)out, role);
 }
 
 /* #28 — queue `num_samples` bytes of 8-bit *unsigned* mono PCM at `buf`,

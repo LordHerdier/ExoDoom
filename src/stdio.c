@@ -1353,25 +1353,44 @@ int fprintf(FILE *stream, const char *fmt, ...)
 }
 
 /*
- * remove/rename: not implemented over ExoFS yet (SCRUM-106), and saying so is
- * the whole point.
+ * remove/rename: over the installed backend when it has the op (SCRUM-267:
+ * ExoFS, via exo_file_remove/exo_file_rename, SCRUM-106), EROFS otherwise, and
+ * saying so is the whole point.
  *
  * Both are reached only from the savegame rotation in m_misc.c/g_game.c, and
- * both already have callers that cope with failure. Returning 0 would claim a
- * file had been deleted or moved when nothing happened, which is exactly the
- * class of stub docs/libc_audit.md argues against.
+ * both already have callers that cope with failure. With nothing to ask,
+ * returning 0 would claim a file had been deleted or moved when nothing
+ * happened, which is exactly the class of stub docs/libc_audit.md argues
+ * against.
  */
 int remove(const char *path)
 {
-    (void)path;
+    if (stdio_backend != NULL && stdio_backend->remove != NULL) {
+        int rc = stdio_backend->remove(path);
+
+        if (rc < 0) {
+            errno = -rc;
+            return -1;
+        }
+        return 0;
+    }
+
     errno = EROFS;
     return -1;
 }
 
 int rename(const char *oldpath, const char *newpath)
 {
-    (void)oldpath;
-    (void)newpath;
+    if (stdio_backend != NULL && stdio_backend->rename != NULL) {
+        int rc = stdio_backend->rename(oldpath, newpath);
+
+        if (rc < 0) {
+            errno = -rc;
+            return -1;
+        }
+        return 0;
+    }
+
     errno = EROFS;
     return -1;
 }

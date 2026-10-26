@@ -51,6 +51,14 @@
 int dg_init_result(void);
 
 /*
+ * The private volume's outcome (SCRUM-267): DG_INIT_NOT_RUN before DG_Init(),
+ * then 0 if Doom's own volume is mounted (and is where fopen writes), or a
+ * negative -EXO_E* code if it could not be (no volume granted, not bindable,
+ * will not mount). Never fatal: Doom runs without saves.
+ */
+int dg_save_result(void);
+
+/*
  * Check that `name` is on the mounted volume and starts like a WAD
  * (SCRUM-75): opens it with fopen, reads the 12-byte header and reports on
  * serial. Returns DOOM_WAD_OK, DOOM_WAD_ENOENT (not there), DOOM_WAD_EINVAL

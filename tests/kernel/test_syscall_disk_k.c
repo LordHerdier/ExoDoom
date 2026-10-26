@@ -69,6 +69,11 @@ static int64_t do_disk_extent(uint64_t out)
     return exo_syscall_dispatch(EXO_SYS_DISK_EXTENT, out, 0, 0, 0, 0, 0);
 }
 
+static int64_t do_disk_extent_role(uint64_t out, uint64_t role)
+{
+    return exo_syscall_dispatch(EXO_SYS_DISK_EXTENT, out, role, 0, 0, 0, 0);
+}
+
 static int64_t do_disk_release(void)
 {
     return exo_syscall_dispatch(EXO_SYS_DISK_RELEASE, 0, 0, 0, 0, 0, 0); /* dev 0 */
@@ -511,8 +516,71 @@ static void test_disk_extent_reports_the_assignment(void)
     CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
 }
 
+/* SCRUM-267: a context assigned both a private volume and the read-only
+ * program volume can name either, and the kernel judges each transfer by the
+ * extent it falls in. UNMAPPED is the buffer throughout, so a transfer the
+ * access check lets through ends at -EXO_EFAULT before it touches a sector. */
+static void test_disk_extent_role_and_two_volumes(void)
+{
+    if (!drive_present())
+        return;
+
+    page_owner_t me = syscall_current_context();
+    const uint64_t PROG_LBA = TEST_LBA;   /* the "program volume" */
+
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p,
+                          EXO_PAGE_WRITE | EXO_PAGE_USER), 0);
+    exo_diskextent_t *e = (exo_diskextent_t *)(uintptr_t)SCRATCH;
+
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(me, PROG_LBA, 32), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(me, OTHER_VOLUME_LBA, 16),
+                    DISK_BIND_OK);
+
+    /* ANY keeps its old meaning (the private volume); the roles are exact. */
+    CU_ASSERT_EQUAL(do_disk_extent(SCRATCH), 0);
+    CU_ASSERT_EQUAL(e->base, OTHER_VOLUME_LBA);
+    CU_ASSERT_EQUAL(do_disk_extent_role(SCRATCH, EXO_DISK_EXTENT_PRIVATE), 0);
+    CU_ASSERT_EQUAL(e->base, OTHER_VOLUME_LBA);
+    CU_ASSERT_EQUAL(e->sectors, 16);
+    CU_ASSERT_EQUAL(do_disk_extent_role(SCRATCH, EXO_DISK_EXTENT_PROGRAM), 0);
+    CU_ASSERT_EQUAL(e->base, PROG_LBA);
+    CU_ASSERT_EQUAL(e->sectors, 32);
+    CU_ASSERT_EQUAL(do_disk_extent_role(SCRATCH, 3), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_extent_role(UNMAPPED, 3), -EXO_EFAULT);
+
+    /* Bind both, as Doom does. */
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(PROG_LBA, 32), 0);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(OTHER_VOLUME_LBA, 16), 0);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA + 64, 8), -EXO_EPERM);
+
+    CU_ASSERT_EQUAL(do_disk_read(PROG_LBA, UNMAPPED, 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_disk_read(OTHER_VOLUME_LBA, UNMAPPED, 1), -EXO_EFAULT);
+    /* Read-only for the program volume, writable for the private one. */
+    CU_ASSERT_EQUAL(do_disk_write(PROG_LBA, UNMAPPED, 1), -EXO_EROFS);
+    CU_ASSERT_EQUAL(do_disk_write(OTHER_VOLUME_LBA, UNMAPPED, 1), -EXO_EFAULT);
+    /* Outside both, and across the end of either, is out of range. */
+    CU_ASSERT_EQUAL(do_disk_read(0, UNMAPPED, 1), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_read(PROG_LBA + 31, UNMAPPED, 2), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_write(OTHER_VOLUME_LBA + 15, UNMAPPED, 2),
+                    -EXO_EINVAL);
+
+    do_disk_release();
+    disk_binding_forget(me);
+    CU_ASSERT_EQUAL(do_disk_extent_role(SCRATCH, EXO_DISK_EXTENT_PROGRAM),
+                    -EXO_ENOENT);
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+
+    CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+}
+
 void suite_syscall_disk_tests(CU_pSuite s)
 {
+    CU_add_test(s, "disk_extent role picks the volume, both bindable",
+               test_disk_extent_role_and_two_volumes);
     CU_add_test(s, "extent confines transfers",
                test_extent_confines_transfers);
     CU_add_test(s, "extent acquire arguments are validated",

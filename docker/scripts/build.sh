@@ -634,6 +634,7 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/libos_fs/exofs_path.c src/libos_fs/exofs_dir.c \
   src/libos_fs/exofs_file.c src/libos_fs/exofs_blockdev.c \
   src/libos_fs/exo_file.c src/libos_fs/exo_file_stdio.c \
+  src/libos_fs/exofs_attach.c \
   src/doom/*.c
 
 echo "[2g/7] Package ring-3 targets and write the disk image (SCRUM-230, SCRUM-231)"
@@ -683,8 +684,11 @@ package_ring3_target libos_top        src/libos_top        top.exo     fb,kbd
 package_ring3_target libos_hello      src/libos_hello      hello.exo   fb,kbd
 package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,kbd,wad \
   --params-len 16
+# SCRUM-267: Doom reads the IWAD off the program volume (progvol) and keeps
+# its savegames and config in a private volume of its own. The slot is
+# EXO_VOLUME_SLOT_DOOM in src/exo_volume.h: change both together.
 package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd,progvol \
-  --sound-voices 8
+  --sound-voices 8 --volume-slot 2 --volume-sectors 8192
 # SCRUM-237: one program, two packages, each requesting a private volume
 # (docs/architecture.md, src/exo_volume.h). Only the slot differs.
 package_ring3_target libos_voldemo    src/libos_voldemo    voldemoa.exo fb,disk,kbd \

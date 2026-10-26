@@ -80,6 +80,16 @@ exofs_vol_t *exo_file_volume(void);
 int exo_file_open(const char *path, uint32_t flags);
 
 /*
+ * exo_file_open() on `v` instead of the default volume (SCRUM-267), without
+ * touching the default: for a caller that reads from a second volume and
+ * must not have its notion of "the" volume change underneath it, which a
+ * set-open-restore sequence would do. Same results as exo_file_open();
+ * -EXO_EINVAL if `v` is NULL or not mounted. The descriptor keeps `v`, as
+ * any descriptor keeps the volume it was opened on.
+ */
+int exo_file_open_on(exofs_vol_t *v, const char *path, uint32_t flags);
+
+/*
  * Flush and close `fd`. The descriptor is free afterwards even if the flush
  * failed — there is nothing more a caller could do with it — and that flush
  * error is what gets returned. -EXO_EBADF for a descriptor that is not open,

@@ -200,9 +200,11 @@ void exo_file_reset_blobs(void);
  * the kernel link, does not drag ExoFS into all of them.
  * src/libos_fs/exo_file_stdio.c supplies the ExoFS one.
  *
- * open, read, seek and close are required; write and mkdir are optional. A
- * backend without write makes every write mode fail EROFS, which is how the
- * table stayed read-only until SCRUM-42.
+ * open, read, seek and close are required; write, mkdir, remove and rename
+ * are optional. A backend without write makes every write mode fail EROFS,
+ * which is how the table stayed read-only until SCRUM-42; one without remove
+ * or rename makes those fail EROFS too (SCRUM-267). Both take paths the same
+ * way open does and return 0 or a negative EXO_E* code.
  *
  * All of them return a negative EXO_E* code (numerically the errno value) on
  * failure; open returns a handle >= 0, read/write the byte count (read 0 at
@@ -224,6 +226,8 @@ typedef struct {
     int     (*close)(int handle);
     int64_t (*write)(int handle, const void *buf, size_t n);   /* optional */
     int     (*mkdir)(const char *path);                        /* optional */
+    int     (*remove)(const char *path);                       /* optional */
+    int     (*rename)(const char *oldpath, const char *newpath); /* optional */
 } exo_stdio_backend_t;
 
 /* Install (or, with NULL, remove) the backend. Streams already open keep the

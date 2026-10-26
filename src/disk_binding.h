@@ -101,9 +101,12 @@ int disk_binding_acquire(page_owner_t who, uint32_t dev);
  *                      marked for revocation if `who` has a mark pending.
  *   DISK_BIND_EBUSY    the extent overlaps another owner's on this device,
  *                      or `who` already holds a *different* extent of this
- *                      device (release first). An extent of another device
- *                      is no obstacle.
- *   DISK_BIND_EPERM    `who` has an assigned volume and this is not it
+ *                      device (release first) -- unless `who` has assigned
+ *                      volumes (SCRUM-267), in which case it may hold each
+ *                      of them at once, and only them. An extent of another
+ *                      device is no obstacle.
+ *   DISK_BIND_EPERM    `who` has an assigned volume and this is not one of
+ *                      its assigned volumes
  *   DISK_BIND_ENOSLOT  the table is full
  *   DISK_BIND_ENODEV   no such device
  *   DISK_BIND_ERANGE   malformed extent
@@ -127,7 +130,10 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
  * a volume stays private while its owner is between a release and the next
  * acquire. Returns DISK_BIND_OK, DISK_BIND_ERANGE (count == 0 or off the end
  * of the disk), DISK_BIND_EBUSY (overlaps another assignment or another
- * context's held extent, or `who` already has one), DISK_BIND_ENOSLOT, or DISK_BIND_ENODEV.
+ * context's held extent, or `who` already has a private volume, or the
+ * extent overlaps `who`'s own read-only program volume -- SCRUM-267 lets a
+ * context have one of each, and keeps the two disjoint), DISK_BIND_ENOSLOT,
+ * or DISK_BIND_ENODEV.
  */
 int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count);
 
@@ -143,15 +149,24 @@ int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count);
  *   - held read-only extents may overlap each other, but never a read-write
  *     extent (a reader would see the volume change under it).
  *
- * Errors: DISK_BIND_EBUSY (`who` already has an assignment),
+ * Errors: DISK_BIND_EBUSY (`who` already has a read-only assignment; a private
+ * volume alongside it is fine, SCRUM-267),
  * DISK_BIND_ERANGE, DISK_BIND_ENOSLOT, DISK_BIND_ENODEV.
  */
 int disk_binding_assign_ro(page_owner_t who, uint32_t base, uint32_t count);
 
 /* The extent assigned to `who`: DISK_BIND_OK with base and count filled, or
- * DISK_BIND_EBUSY if `who` has none. */
+ * DISK_BIND_EBUSY if `who` has none. A context with both kinds of assignment
+ * (SCRUM-267) gets its private volume; disk_binding_assignment_role() names
+ * one explicitly. */
 int disk_binding_assignment_of(page_owner_t who, uint32_t *base,
                                uint32_t *count);
+
+/* The private volume (`program` == 0) or the shared read-only program volume
+ * (`program` != 0) assigned to `who`. DISK_BIND_OK with base and count filled,
+ * or DISK_BIND_EBUSY if `who` has no assignment of that kind. */
+int disk_binding_assignment_role(page_owner_t who, int program,
+                                 uint32_t *base, uint32_t *count);
 
 /* Drop `who`'s assignment, if any (and nothing else -- a held extent is
  * released through disk_binding_release()). Called when the context is torn

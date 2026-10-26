@@ -95,6 +95,37 @@ static void test_disk_line_reports_the_extent_or_its_absence(void)
     CU_ASSERT_PTR_NOT_NULL(strstr(buf, "disk   asked for, none assigned\n"));
 }
 
+/* SCRUM-267: a context can hold a private volume and the read-only program
+ * volume at once (Doom). Neither may hide the other, and a context with only
+ * the program volume must not be described as having a "volume slot". */
+static void test_disk_line_names_both_volumes(void)
+{
+    exo_pkg_header_t h = mk_hdr(EXO_PKG_WANT_DISK | EXO_PKG_WANT_PROGRAM_RO, 0);
+    h.volume_slot = 2;
+    h.volume_sectors = 64;
+    exo_grant_t g = mk_grant(8, 100);
+    exo_resstat_t r = mk_res(8);
+    char buf[EXO_GRANT_TEXT_MAX];
+
+    g.disk_base = 4096;
+    g.disk_sectors = 64;
+    g.prog_base = 16384;
+    g.prog_sectors = 245760;
+    exo_grant_format(buf, sizeof(buf), &h, &g, &r, 0);
+    CU_ASSERT_PTR_NOT_NULL(strstr(buf,
+        "disk   volume slot 2, 64 sectors from 4096\n"
+        "         program volume (read-only), 245760 sectors from 16384\n"));
+
+    /* Program volume alone: no slot, and not "none assigned". */
+    g.disk_base = 0;
+    g.disk_sectors = 0;
+    exo_grant_format(buf, sizeof(buf), &h, &g, &r, 0);
+    CU_ASSERT_PTR_NOT_NULL(strstr(buf,
+        "disk   program volume (read-only), 245760 sectors from 16384\n"));
+    CU_ASSERT_PTR_NULL(strstr(buf, "volume slot"));
+    CU_ASSERT_PTR_NULL(strstr(buf, "none assigned"));
+}
+
 static void test_sound_line_caps_at_what_is_free(void)
 {
     exo_pkg_header_t h = mk_hdr(0, 4);
@@ -120,11 +151,14 @@ static void test_largest_numbers_fit_the_documented_maximum(void)
     exo_grant_t g = mk_grant(0xFFFFFFFFu, 0xFFFFFFFFu);
     g.disk_base = 0xFFFFFFFFu;
     g.disk_sectors = 0xFFFFFFFFu;
+    g.prog_base = 0xFFFFFFFFu;       /* both volumes: the longest disk line */
+    g.prog_sectors = 0xFFFFFFFFu;
     exo_resstat_t r = mk_res(0xFFFFFFFFu);
     char buf[EXO_GRANT_TEXT_MAX];
 
     size_t n = exo_grant_format(buf, sizeof(buf), &h, &g, &r, 0xFFFFFFFFu);
     CU_ASSERT_EQUAL(n, strlen(buf));
+    CU_ASSERT_TRUE(n < EXO_GRANT_TEXT_MAX);
     /* Nothing was cut: the last line is intact. */
     CU_ASSERT_PTR_NOT_NULL(strstr(buf, "voices available\n"));
     CU_ASSERT_PTR_NOT_NULL(strstr(buf, "4294967295"));
@@ -160,6 +194,8 @@ void suite_exo_grant_tests(CU_pSuite s)
                 test_framebuffer_line_follows_the_previous_holder);
     CU_add_test(s, "the disk line reports the extent or its absence",
                 test_disk_line_reports_the_extent_or_its_absence);
+    CU_add_test(s, "the disk line names a private and a program volume",
+                test_disk_line_names_both_volumes);
     CU_add_test(s, "the sound line caps at what is free",
                 test_sound_line_caps_at_what_is_free);
     CU_add_test(s, "the largest numbers fit EXO_GRANT_TEXT_MAX",

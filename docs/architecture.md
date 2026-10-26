@@ -780,8 +780,12 @@ Things the audit turned up that are worth knowing before touching this area:
   backend, or one without a write op, `fopen` for writing fails `EROFS`: a
   write that silently went nowhere would surface much later as a config that
   never persists or a savegame that reloads as garbage. libc `remove`/`rename`
-  still fail `EROFS`: `exo_file_remove`/`exo_file_rename` exist (SCRUM-106) but the
-  shim is not wired to them yet. Each stream buffers one 512-byte block
+  go through the same backend (SCRUM-267): the ExoFS one calls
+  `exo_file_remove`/`exo_file_rename` (SCRUM-106), and a backend without those
+  ops still fails them `EROFS`. A read-only `fopen` can also fall through to a
+  second, read-only volume (`exo_file_stdio_set_fallback`, `docs/filesystem.md`
+  §6d), which is how Doom reads the IWAD while writing only to its own volume.
+  Each stream buffers one 512-byte block
   of writes, flushed on full, `fflush`, `fclose`, `fseek` and `fread`; nothing
   is durable, and the file's size is not on disk, until `fclose`
   (`docs/filesystem.md` §6c, §6d). `mkdir`, `strdup`,
@@ -980,7 +984,9 @@ Details and error codes: `docs/syscall_spec.md` §3.2 #36.
   --volume-sectors M` on `tools/exopkg` sets them; `docker/scripts/build.sh`
   step [2f2/7] builds the `libos_voldemo` demo, packaged as `voldemoa.exo`
   and `voldemob.exo` (slots 0 and 1), and grows the disk image to cover the
-  slots. `docs/syscall_spec.md` §3.5a has the rules; SCRUM-233 (install) and SCRUM-234 (first boot, below) are the
+  slots. SCRUM-267 gives Doom the first real one (slot 2, with `progvol` as
+  well, so it holds the IWAD's volume and its own at once): `docs/filesystem.md`
+  §8 "Doom's volumes". `docs/syscall_spec.md` §3.5a has the rules; SCRUM-233 (install) and SCRUM-234 (first boot, below) are the
   two halves.
 - **First boot (SCRUM-234).** The shell probes this volume at startup and offers
   to format it when blank; `programs` lists the packages on it. See
