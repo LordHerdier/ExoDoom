@@ -1346,6 +1346,53 @@ static void test_name_length_limits(void)
 }
 
 /*
+ * SCRUM-222: path parsing, directory lookup/add and the name area all apply
+ * the same length rule (exofs_name_len_valid()), so a name is accepted or
+ * refused by all of them together -- never by one and not the next. Checked
+ * at the boundary from both the public API and each internal layer.
+ */
+static void test_name_length_rule_agrees_across_layers(void)
+{
+    CU_ASSERT_FALSE(exofs_name_len_valid(0));
+    CU_ASSERT_TRUE(exofs_name_len_valid(1));
+    CU_ASSERT_TRUE(exofs_name_len_valid(EXOFS_MAX_NAME));
+    CU_ASSERT_FALSE(exofs_name_len_valid(EXOFS_MAX_NAME + 1u));
+
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    /* "/" + name + NUL */
+    char path[EXOFS_MAX_NAME + 3];
+    char comp[EXOFS_MAX_NAME + 1];
+    exofs_path_iter_t it;
+
+    /* 255: every layer takes it. */
+    path[0] = '/';
+    make_name(path + 1, EXOFS_MAX_NAME, 3);
+    CU_ASSERT_EQUAL(exofs_path_validate(path), 0);
+    exofs_path_iter_init(&it, path);
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&it, comp), 1);
+    CU_ASSERT_EQUAL(exofs_mkdir(path), 0);
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, EXOFS_ROOT_BLOCK, path + 1,
+                                     NULL, NULL), 0);
+
+    /* 256: every layer refuses it, with the same error. */
+    make_name(path + 1, EXOFS_MAX_NAME + 1u, 3);
+    CU_ASSERT_EQUAL(exofs_path_validate(path), -EXO_EINVAL);
+    exofs_path_iter_init(&it, path);
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&it, comp), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_mkdir(path), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, EXOFS_ROOT_BLOCK, path + 1,
+                                     NULL, NULL), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_dir_add(v, EXOFS_ROOT_BLOCK, path + 1,
+                                  EXOFS_ATTR_DIRECTORY, EXOFS_NO_BLOCK, 0,
+                                  NULL), -EXO_EINVAL);
+
+    exofs_unmount();
+}
+
+/*
  * Two names that agree for their first 200 bytes must not be confused. The
  * case a length-capped or prefix-comparing implementation gets wrong, and
  * the reason make_name() builds content rather than padding.
@@ -4024,6 +4071,8 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "a name longer than cfat's 11-byte cap",
                 test_name_longer_than_cfat_limit);
     CU_add_test(s, "name length limits enforced", test_name_length_limits);
+    CU_add_test(s, "one name-length rule across layers",
+                test_name_length_rule_agrees_across_layers);
     CU_add_test(s, "long names with a common prefix stay distinct",
                 test_long_names_with_common_prefix_are_distinct);
     CU_add_test(s, "freed name records are reused",

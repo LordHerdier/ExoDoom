@@ -172,6 +172,15 @@ void exofs_fat_mark_dirty(exofs_volume_t *v, uint32_t idx);
  * why this is a rare, immediate write rather than something batched. */
 int exofs_super_update(exofs_volume_t *v);
 
+/* The one acceptance rule for a name's length, shared by every layer that
+ * takes a name in (path parsing, directory lookup/add, the name area).
+ * Each used to restate it; a bound changed in only some of them would leave
+ * a name that one ExoFS call accepts and the next rejects. */
+static inline int exofs_name_len_valid(size_t len)
+{
+    return len != 0 && len <= EXOFS_MAX_NAME;
+}
+
 /* ---- Open-handle tracking -------------------------------------------------
  *
  * See exofs_volume_t::open_ent_block for why this exists. Registering never
