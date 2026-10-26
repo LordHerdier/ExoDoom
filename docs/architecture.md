@@ -847,7 +847,7 @@ Two consequences worth knowing:
   its read-only binding for its lifetime (the mounted volume's FAT is resident,
   and `exofs_unmount` before release is the rule). Readers share, but a writer
   overlapping a reader is `-EXO_EBUSY`, and the shell binds read-write, so
-  `programs`/`run`/`install` report the volume busy until Doom exits.
+  `programs`/`run`/`install` report the volume busy until Doom exits. `exo_exit` releases the disk binding and any assigned volume (`src/syscall_exit.c`), so the volume is free the moment Doom quits, not at the next launch's reap.
 - **Sound and music no longer walk a flat WAD.** `doom_sound_pcm.c` and
   `src/libos_doom/doom_sound_music.c` get lumps from `doom_wad_lump()`
   (`src/doom_wad.h`): the installed source if there is one, else the mounted
