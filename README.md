@@ -290,7 +290,7 @@ for the user.
 | Paging, allocators, LibOS heap | `docs/memory.md` |
 | ExoFS, `install`, `mount` | `docs/filesystem.md` |
 | Writing a new LibOS program | `docs/libos-authoring.md` |
-| The client demo, beat by beat | `docs/demo.md` |
+| The client demo, beat by beat, and its narration | `docs/demo.md`, `docs/demo-narration.md` |
 | KUnit, writing and registering tests | `docs/testing.md` |
 | GDB and bare-metal debugging | `docs/debugging.md` |
 | Branches, commits, code style, CI checks | `docs/contributing.md` |
