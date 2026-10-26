@@ -35,8 +35,23 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* See test_exofs_k.c's LBA RANGE note before moving either. */
 #define EXOFS_TEST_BASE_LBA 8192u
+
+/* The volume the tests in this file are working on (SCRUM-265): set by
+ * whichever helper mounts, read by everything after. A slot is zeroed on
+ * unmount, so a stale pointer reads as "not mounted". */
+static exofs_vol_t *g_tv;
+#define TV_MOUNTED() (g_tv != NULL && g_tv->mounted)
+
+/* Mount the test volume and make it the descriptor API's default. */
+static int tv_mount(void)
+{
+    int rc = exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv);
+    if (rc == 0) exo_file_set_volume(g_tv);
+    return rc;
+}
+
+/* See test_exofs_k.c's LBA RANGE note before moving either. */
 #define VOL_SECTORS         8192u
 
 static int drive_present(void)
@@ -55,7 +70,7 @@ int exo_file_suite_cleanup(void)
     /* Descriptors before the volume: unmounting under an open descriptor
      * is the silent-size-loss case exo_file.h warns about. */
     exo_file_close_all();
-    exofs_unmount();
+    exofs_unmount(g_tv);
     exofs_bdev_release(0);
     return 0;
 }
@@ -66,16 +81,16 @@ int exo_file_suite_cleanup(void)
 static int fresh_volume(void)
 {
     exo_file_close_all();
-    exofs_unmount();
+    exofs_unmount(g_tv);
     if (exofs_format(0, EXOFS_TEST_BASE_LBA, VOL_SECTORS) != 0) return 0;
-    if (exofs_mount(0, EXOFS_TEST_BASE_LBA) != 0) return 0;
+    if (tv_mount() != 0) return 0;
     return 1;
 }
 
 static int remount(void)
 {
-    exofs_unmount();
-    return exofs_mount(0, EXOFS_TEST_BASE_LBA) == 0;
+    exofs_unmount(g_tv);
+    return tv_mount() == 0;
 }
 
 /* ---- Constants ---------------------------------------------------------- */
@@ -123,7 +138,7 @@ static void test_bad_descriptors(void)
     CU_ASSERT_EQUAL(exo_file_write(fd, &c, 1u), -EXO_EBADF);
     CU_ASSERT_EQUAL(exo_file_seek(fd, 0, EXO_FILE_SEEK_SET), -EXO_EBADF);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_table_full_and_slot_reuse(void)
@@ -149,7 +164,7 @@ static void test_table_full_and_slot_reuse(void)
     CU_ASSERT_EQUAL(exo_file_open("/f3", EXO_FILE_O_READ), 3);
 
     CU_ASSERT_EQUAL(exo_file_close_all(), 0);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_failed_open_consumes_no_descriptor(void)
@@ -164,13 +179,13 @@ static void test_failed_open_consumes_no_descriptor(void)
     CU_ASSERT_EQUAL(exo_file_open("/x", EXO_FILE_O_WRITE | EXO_FILE_O_CREATE),
                     0);
     CU_ASSERT_EQUAL(exo_file_close(0), 0);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_nothing_mounted(void)
 {
     exo_file_close_all();
-    exofs_unmount();
+    exofs_unmount(g_tv);
 
     uint32_t size;
     CU_ASSERT_EQUAL(exo_file_open("/a", EXO_FILE_O_READ), -EXO_EINVAL);
@@ -194,7 +209,7 @@ static void test_access_mode_is_enforced(void)
     CU_ASSERT_EQUAL(exo_file_write(fd, &c, 1u), -EXO_EACCES);
     CU_ASSERT_EQUAL(exo_file_close(fd), 0);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_seek(void)
@@ -221,7 +236,7 @@ static void test_seek(void)
     CU_ASSERT_EQUAL(exo_file_seek(fd, 0, EXO_FILE_SEEK_CUR), 10);
 
     CU_ASSERT_EQUAL(exo_file_close(fd), 0);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_truncate_and_append(void)
@@ -255,7 +270,7 @@ static void test_truncate_and_append(void)
     CU_ASSERT_EQUAL(exo_file_close(fd), 0);
     CU_ASSERT_STRING_EQUAL(back, "abcde");
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* ---- stat --------------------------------------------------------------- */
@@ -270,7 +285,7 @@ static void test_stat(void)
     CU_ASSERT_EQUAL(size, 123u);   /* untouched on failure */
     CU_ASSERT_EQUAL(exo_file_stat("/nope", NULL), -EXO_EINVAL);
 
-    CU_ASSERT_EQUAL(exofs_mkdir("/dir"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/dir"), 0);
     CU_ASSERT_EQUAL(exo_file_stat("/dir", &size), 0);
     CU_ASSERT_EQUAL(size, 0u);
 
@@ -280,7 +295,7 @@ static void test_stat(void)
     CU_ASSERT_EQUAL(exo_file_stat("/dir/f", &size), 0);
     CU_ASSERT_EQUAL(size, 5u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* ---- Durability --------------------------------------------------------- */
@@ -313,7 +328,7 @@ static void test_close_all_makes_sizes_durable(void)
     CU_ASSERT_EQUAL(exo_file_stat("/c", &size), 0);
     CU_ASSERT_EQUAL(size, 3u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -360,7 +375,7 @@ static void test_acceptance(void)
     CU_ASSERT_EQUAL(exo_file_close(fd), 0);
     CU_ASSERT_EQUAL(memcmp(back, out, sizeof(out)), 0);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 void suite_exo_file_tests(CU_pSuite s)

@@ -24,10 +24,14 @@
  * -EXO_ENFILE, by contrast, comes from ExoFS's own open-entry table
  * (EXOFS_MAX_OPEN_HANDLES) and is passed through as-is.
  *
- * NO MOUNT POLICY. These calls operate on whatever volume the program has
- * mounted with exofs_mount(). With nothing mounted, open and stat answer
- * ExoFS's -EXO_EINVAL. Choosing, formatting and mounting a volume is the
- * caller's decision, not this library's (docs/filesystem.md §8).
+ * NO MOUNT POLICY. The path-taking calls (open, stat) resolve against one
+ * *default volume*, which the caller names with exo_file_set_volume() after
+ * exofs_mount(). Descriptors remember the volume they were opened on, so
+ * changing the default later does not move an open file. With no default set
+ * (or a default that has been unmounted), open and stat answer ExoFS's
+ * -EXO_EINVAL. Choosing, formatting and mounting a volume is the caller's
+ * decision, not this library's (docs/filesystem.md §8). The default is not a
+ * mount table: paths are not routed between volumes here.
  *
  * DURABILITY. A file's size reaches the disk on close, not on every write
  * (exofs.h's note on exofs_file_t). **Close every descriptor — or call
@@ -35,9 +39,16 @@
  * survive and the size does not, and the file silently reads back short.
  *
  * ONE TABLE PER PROGRAM. The table is a static inside this program's copy of
- * src/libos_fs/, the same way ExoFS's mounted volume is. There is no
+ * src/libos_fs/, the same way ExoFS's volume pool is. There is no
  * threading and no locking, for the reasons exofs.h gives.
  */
+
+/* Set the volume exo_file_open() / exo_file_stat() resolve paths against.
+ * NULL clears it. Clear it (or replace it) when unmounting that volume. */
+void exo_file_set_volume(exofs_vol_t *v);
+
+/* The default volume, or NULL if none is set or it has been unmounted. */
+exofs_vol_t *exo_file_volume(void);
 
 /* Open flags. Aliases of ExoFS's, so they pass straight through; combine
  * them. One of EXO_FILE_O_READ / EXO_FILE_O_WRITE must be present. */

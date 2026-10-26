@@ -23,6 +23,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* The volume the tests in this file are working on (SCRUM-265): set by
+ * whichever helper mounts, read by everything after. A slot is zeroed on
+ * unmount, so a stale pointer reads as "not mounted". */
+static exofs_vol_t *g_tv;
+#define TV_MOUNTED() (g_tv != NULL && g_tv->mounted)
+
 static const shell_volref_t ROOT_VOL = { 0, 8192, 0, 65536, 1 };
 static const shell_volref_t STICK    = { 1, 0, 0, 0, 1 };
 static const shell_volref_t SLOT3    = { 0, 262144 + 3 * 8192, 262144 + 3 * 8192, 8192, 3 };
@@ -365,7 +371,7 @@ static int two_disks(void)
 
 static void teardown(void)
 {
-    exofs_unmount();
+    exofs_unmount(g_tv);
     exofs_bdev_release(DEV_STICK);
     exofs_bdev_release(DEV_SYS);
 }
@@ -399,11 +405,11 @@ static int setup(void)
 
 static int put(uint32_t dev, uint32_t base, const char *path, const char *text)
 {
-    int rc = exofs_mount(dev, base);
+    int rc = exofs_mount(dev, base, &g_tv);
     if (rc != 0)
         return rc;
     exofs_file_t f;
-    rc = exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f);
+    rc = exofs_open(g_tv, path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f);
     if (rc == 0) {
         uint32_t n = 0;
         while (text[n] != '\0')
@@ -412,7 +418,7 @@ static int put(uint32_t dev, uint32_t base, const char *path, const char *text)
             rc = -EXO_EIO;
         exofs_close(&f);
     }
-    exofs_unmount();
+    exofs_unmount(g_tv);
     return rc;
 }
 
@@ -423,12 +429,12 @@ static void test_route_and_read_second_disk(void)
     if (!setup())
         return;
 
-    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, 0), 0);
-    CU_ASSERT_EQUAL(exofs_mkdir("/dir"), 0);
-    exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_mount(DEV_SYS, SYS_BASE), 0);
-    CU_ASSERT_EQUAL(exofs_mkdir("/dir"), 0);
-    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, 0, &g_tv), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/dir"), 0);
+    exofs_unmount(g_tv);
+    CU_ASSERT_EQUAL(exofs_mount(DEV_SYS, SYS_BASE, &g_tv), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/dir"), 0);
+    exofs_unmount(g_tv);
     CU_ASSERT_EQUAL(put(DEV_STICK, 0, "/dir/hello", "from the stick"), 0);
     CU_ASSERT_EQUAL(put(DEV_SYS, SYS_BASE, "/dir/hello", "from the system"), 0);
 
@@ -453,12 +459,12 @@ static void test_route_and_read_second_disk(void)
                                           sizeof(inner), NULL), 0);
 
         char buf[32] = { 0 };
-        CU_ASSERT_EQUAL(exofs_mount(v.dev, v.base), 0);
+        CU_ASSERT_EQUAL(exofs_mount(v.dev, v.base, &g_tv), 0);
         exofs_file_t f;
-        CU_ASSERT_EQUAL(exofs_open(inner, EXOFS_O_READ, &f), 0);
+        CU_ASSERT_EQUAL(exofs_open(g_tv, inner, EXOFS_O_READ, &f), 0);
         int64_t n = exofs_read(&f, buf, sizeof(buf) - 1);
         exofs_close(&f);
-        exofs_unmount();
+        exofs_unmount(g_tv);
         CU_ASSERT(n > 0);
         CU_ASSERT_STRING_EQUAL(buf, cases[i].want);
     }
@@ -489,7 +495,7 @@ static void test_probe_formatted_vs_blank(void)
     CU_ASSERT_EQUAL(exofs_bdev_write(DEV_STICK, 0, sec, 1), 0);
     CU_ASSERT_EQUAL(exofs_bdev_read(DEV_STICK, 0, sec, 1), 0);
     CU_ASSERT_FALSE(shell_mount_sb_valid(sec));
-    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, 0), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, 0, &g_tv), -EXO_EINVAL);
 
     libos_heap_free(sec);
     teardown();
@@ -521,23 +527,23 @@ static void test_copy_between_different_names(void)
 
     char text[16] = { 0 };
     exofs_file_t f;
-    CU_ASSERT_EQUAL(exofs_mount(DEV_SYS, SYS_BASE), 0);
-    CU_ASSERT_EQUAL(exofs_open("/b.txt", EXOFS_O_READ, &f), 0);
+    CU_ASSERT_EQUAL(exofs_mount(DEV_SYS, SYS_BASE, &g_tv), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/b.txt", EXOFS_O_READ, &f), 0);
     CU_ASSERT_EQUAL(exofs_read(&f, text, sizeof(text) - 1), 7);
     exofs_close(&f);
     exofs_stat_t st;
-    CU_ASSERT_EQUAL(exofs_stat("/a.txt", &st), -EXO_ENOENT); /* not on sys */
-    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/a.txt", &st), -EXO_ENOENT); /* not on sys */
+    exofs_unmount(g_tv);
     CU_ASSERT_STRING_EQUAL(text, "payload");
 
     /* A source that is not there fails before the destination is touched. */
     CU_ASSERT_EQUAL(shell_copy_between(&stick, "/nope", &sys, "/keep", buf,
                                        256, &copied), -EXO_ENOENT);
     CU_ASSERT_EQUAL(copied, 0);
-    CU_ASSERT_EQUAL(exofs_mount(DEV_SYS, SYS_BASE), 0);
-    CU_ASSERT_EQUAL(exofs_stat("/keep", &st), 0);
+    CU_ASSERT_EQUAL(exofs_mount(DEV_SYS, SYS_BASE, &g_tv), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/keep", &st), 0);
     CU_ASSERT_EQUAL(st.size, 9);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 
     libos_heap_free(buf);
     teardown();

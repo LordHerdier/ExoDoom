@@ -35,8 +35,14 @@
  * one. */
 #define EXOFS_NAME_ROOM_UNKNOWN 0xFFFFu
 
-typedef struct exofs_volume {
+struct exofs_volume {
     int      mounted;
+
+    /* Bumped on every mount from a counter that never repeats, and copied into
+     * each exofs_file_t / exofs_dir_t opened on the volume, so a handle that
+     * outlived its unmount is recognised as stale (exofs_vol_live()) instead
+     * of reading whatever the slot holds next. */
+    uint32_t gen;
 
     /* Block device the volume lives on (SCRUM-244); every transfer below
      * goes to it. Not in the superblock: a volume does not know which
@@ -145,10 +151,13 @@ typedef struct exofs_volume {
      */
     uint32_t open_ent_block[EXOFS_MAX_OPEN_HANDLES];
     uint16_t open_ent_index[EXOFS_MAX_OPEN_HANDLES];
-} exofs_volume_t;
+};
 
-/* The one mounted volume, or NULL when nothing is mounted. */
-exofs_volume_t *exofs_vol(void);
+typedef struct exofs_volume exofs_volume_t;
+
+/* 1 when `v` is a mounted volume and is still the mount `gen` was taken
+ * from. NULL-safe. */
+int exofs_vol_live(const exofs_volume_t *v, uint32_t gen);
 
 /* Absolute LBA of data block `blk`. Valid only for blk < total_blocks; the
  * caller checks, because every caller already has a reason to know whether
@@ -160,8 +169,8 @@ uint32_t exofs_block_lba(const exofs_volume_t *v, uint32_t blk);
  * bytes and in the LibOS VA window. Returns 0, -EXO_EINVAL for a block index
  * past the end of the volume, or a device error.
  */
-int exofs_read_block(uint32_t blk, void *buf);
-int exofs_write_block(uint32_t blk, const void *buf);
+int exofs_read_block(exofs_volume_t *v, uint32_t blk, void *buf);
+int exofs_write_block(exofs_volume_t *v, uint32_t blk, const void *buf);
 
 /* Mark the FAT sector holding entry `idx` as needing writeback. Called by
  * whoever writes v->fat[idx]; separated from the write itself so a loop that

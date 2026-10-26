@@ -4,10 +4,9 @@
  *
  * `install <name>` copies one file from the source volume (the install
  * stick, block device 1) onto the system volume (LIBOS_WAD_DISK_BASE_LBA on
- * device 0), after which `programs` lists it and `run` launches it. ExoFS
- * mounts one volume at a time per program (docs/filesystem.md §8), so the
- * copy alternates: mount the source, read a chunk, unmount, mount the
- * destination, write it, unmount. Nothing here touches the framebuffer
+ * device 0), after which `programs` lists it and `run` launches it. The copy
+ * mounts source and destination together (docs/filesystem.md §8) and moves
+ * the file a chunk at a time between them. Nothing here touches the framebuffer
  * console or the disk binding, so the same TU links into the ring-3 shell
  * blob and, under TESTING=1, into the kernel for
  * tests/kernel/test_shell_install_k.c (docker/scripts/build.sh) -- the same
@@ -18,6 +17,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include "libos_fs/exofs.h"
 
 /* An ExoFS volume: which block device, and the LBA its superblock is at. */
 typedef struct {
@@ -63,6 +64,17 @@ int shell_install_copy(const shell_vol_t *src, const shell_vol_t *dst,
 int shell_copy_between(const shell_vol_t *src, const char *spath,
                        const shell_vol_t *dst, const char *dpath,
                        uint8_t *buf, uint32_t chunk, uint32_t *copied);
+
+/*
+ * shell_copy_between() over volumes the caller already has mounted (SCRUM-265),
+ * for a shell that keeps its mounts open: no mount or unmount happens here,
+ * and `src` and `dst` may be the same handle. Same contract and the same two
+ * rules (stat the source first; unlink a destination this call created if the
+ * copy fails).
+ */
+int shell_copy_vols(exofs_vol_t *src, const char *spath,
+                    exofs_vol_t *dst, const char *dpath,
+                    uint8_t *buf, uint32_t chunk, uint32_t *copied);
 
 /* 1 if a resolved path names a pattern (contains '*') rather than a file. */
 int shell_install_is_glob(const char *path);

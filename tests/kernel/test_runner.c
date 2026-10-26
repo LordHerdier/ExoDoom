@@ -91,6 +91,7 @@ void suite_exofs_tests(CU_pSuite s);
 void suite_exo_file_tests(CU_pSuite s);
 void suite_stdio_exofs_tests(CU_pSuite s);
 void suite_multidisk_tests(CU_pSuite s);
+void suite_exofs_multivol_tests(CU_pSuite s);
 void suite_shell_install_tests(CU_pSuite s);
 void suite_doom_wad_disk_tests(CU_pSuite s);
 void suite_launch_multi_tests(CU_pSuite s);
@@ -187,6 +188,8 @@ int exofs_suite_cleanup(void);
 int exo_file_suite_init(void);
 int exo_file_suite_cleanup(void);
 int multidisk_suite_init(void);
+int exofs_multivol_suite_init(void);
+int exofs_multivol_suite_cleanup(void);
 int multidisk_suite_cleanup(void);
 int shell_install_suite_init(void);
 int shell_mount_suite_init(void);
@@ -607,6 +610,13 @@ int run_tests(void)
     s = CU_add_suite("multidisk", multidisk_suite_init,
                      multidisk_suite_cleanup);
     suite_multidisk_tests(s);
+
+    /* After "multidisk": it shares that suite's two-drive fixture, and
+     * SCRUM-265's several-volumes-at-once checks build on the single-volume
+     * behaviour "exofs" has already covered. */
+    s = CU_add_suite("exofs_multivol", exofs_multivol_suite_init,
+                     exofs_multivol_suite_cleanup);
+    suite_exofs_multivol_tests(s);
 
     /* After "multidisk": `install` (SCRUM-233) is that suite's cross-device
      * copy run in chunks, so a binding or two-drive failure shows up there

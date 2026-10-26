@@ -72,7 +72,7 @@ static int efs_mkdir(const char *path)
     if (n == 1)
         return -EXO_EEXIST;   /* the root is always there */
 
-    return exofs_mkdir(abs);
+    return exofs_mkdir(exo_file_volume(), abs);
 }
 
 static int64_t efs_read(int handle, void *buf, size_t n)
