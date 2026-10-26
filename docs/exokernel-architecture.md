@@ -1087,7 +1087,7 @@ matter most. Beyond them:
 | Fault containment | A faulting program halts the machine | End the program and reclaim its resources through the `exo_exit` path |
 | Scheduling | Cooperative; a program that never yields keeps the CPU | Timer-driven preemption (SCRUM-127), which first needs the syscall path's single global stack slot replaced with per-CPU state (SCRUM-176) |
 | Vector state | Shared between SSE programs across a switch | `fxsave`/`fxrstor` in the context switch |
-| Doom config | Savegames work: Doom has a private writable volume (SCRUM-267) and the engine writes them there. Its settings file does not: the vendored engine compiles `M_SaveDefaults`/`M_LoadDefaults` out (`ORIGCODE` is undefined) | Patch the vendored `src/doom/m_config.c` to read and write the config; the volume is ready for it |
+| Doom config | Settings persist: Doom reads `.default.cfg` from its private volume at start and writes it on a menu quit (SCRUM-269) | Done; verify with a settings change across `make run-keep` boots |
 | USB input | USB keyboards are decoded but their events reach no program | Route each keyboard to a program (SCRUM-199) |
 | Disk speed | Polled PIO, one sector at a time across the bus | Bus-master DMA (SCRUM-241) |
 | Concurrent file systems in one program | One mounted volume per program | Handle-based volumes (in progress, SCRUM-265) |

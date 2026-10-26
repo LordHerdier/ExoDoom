@@ -497,6 +497,47 @@ static void test_fprintf_config_round_trip(void)
     teardown();
 }
 
+/* The exact loop LoadDefaultCollection (m_config.c) runs.  Must terminate
+ * and parse every line, including CRLF, a value with spaces and a trailing
+ * blank line. */
+static void test_config_load_loop(void)
+{
+    char defname[80], strparm[100];
+    int  lines = 0, spins = 0;
+    FILE *f;
+
+    if (!drive_present()) return;
+    CU_ASSERT_TRUE(setup());
+
+    f = fopen(".default.cfg", "w");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        fprintf(f, "screenblocks              9\n");
+        fprintf(f, "player_name               \"two words\"\r\n");
+        fprintf(f, "mouse_sensitivity         5\n\n");
+        fclose(f);
+    }
+    f = fopen(".default.cfg", "r");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        while (!feof(f) && spins++ < 20) {
+            if (fscanf(f, "%79s %99[^\n]\n", defname, strparm) != 2)
+                continue;
+            if (lines == 0) {
+                CU_ASSERT_EQUAL(strcmp(defname, "screenblocks"), 0);
+                CU_ASSERT_EQUAL(strcmp(strparm, "9"), 0);
+            } else if (lines == 1) {
+                CU_ASSERT_EQUAL(strcmp(strparm, "\"two words\"\r"), 0);
+            }
+            lines++;
+        }
+        CU_ASSERT_EQUAL(lines, 3);
+        CU_ASSERT_TRUE(spins < 20);
+        fclose(f);
+    }
+    teardown();
+}
+
 static void test_mkdir_over_exofs(void)
 {
     FILE *f;
@@ -1043,6 +1084,8 @@ void suite_stdio_exofs_tests(CU_pSuite s)
                 test_write_buffering_and_position);
     CU_add_test(s, "fprintf a config file and fscanf it back",
                 test_fprintf_config_round_trip);
+    CU_add_test(s, "m_config load loop terminates and parses lines",
+                test_config_load_loop);
     CU_add_test(s, "mkdir over ExoFS and a file inside it",
                 test_mkdir_over_exofs);
     CU_add_test(s, "savegame rotation: remove then rename over ExoFS",
