@@ -230,6 +230,9 @@ static void test_remove(void)
     CU_ASSERT_EQUAL(exo_file_close(fd), 0);
     CU_ASSERT_EQUAL(exo_file_remove("/busy"), 0);
 
+    /* A NULL path is rejected, not dereferenced. */
+    CU_ASSERT_EQUAL(exo_file_remove(NULL), -EXO_EINVAL);
+
     exofs_unmount(g_tv);
 }
 
@@ -265,6 +268,59 @@ static void test_rename(void)
     CU_ASSERT_TRUE(make_file("/other", 'o', 1u));
     CU_ASSERT_EQUAL(exo_file_rename("/other", "/d/moved"), -EXO_EEXIST);
     CU_ASSERT_EQUAL(exo_file_rename("/missing", "/z"), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exo_file_rename(NULL, "/z"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exo_file_rename("/other", NULL), -EXO_EINVAL);
+
+    exofs_unmount(g_tv);
+}
+
+/* The behaviours exo_file.h promises around open descriptors, directories
+ * and degenerate names. */
+static void test_rename_open_dirs_and_edge_cases(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    uint32_t size;
+    char back[16];
+
+    /* Same-directory rename: an open descriptor stays valid and its size
+     * lands under the new name when it is closed. */
+    int fd = exo_file_open("/a", EXO_FILE_O_READ | EXO_FILE_O_WRITE
+                                 | EXO_FILE_O_CREATE);
+    CU_ASSERT_TRUE(fd >= 0);
+    CU_ASSERT_EQUAL(exo_file_rename("/a", "/b"), 0);
+    CU_ASSERT_EQUAL(exo_file_write(fd, "hello", 5u), 5);
+    CU_ASSERT_EQUAL(exo_file_close(fd), 0);
+    CU_ASSERT_EQUAL(exo_file_stat("/a", &size), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exo_file_stat("/b", &size), 0);
+    CU_ASSERT_EQUAL(size, 5u);
+    fd = exo_file_open("/b", EXO_FILE_O_READ);
+    memset(back, 0, sizeof(back));
+    CU_ASSERT_EQUAL(exo_file_read(fd, back, 5u), 5);
+    CU_ASSERT_EQUAL(memcmp(back, "hello", 5u), 0);
+    CU_ASSERT_EQUAL(exo_file_close(fd), 0);
+
+    /* Moving an open file between directories is refused. */
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/d"), 0);
+    fd = exo_file_open("/b", EXO_FILE_O_READ);
+    CU_ASSERT_EQUAL(exo_file_rename("/b", "/d/b"), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exo_file_close(fd), 0);
+    CU_ASSERT_EQUAL(exo_file_rename("/b", "/d/b"), 0);
+
+    /* A directory moves with its contents. */
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/e"), 0);
+    CU_ASSERT_EQUAL(exo_file_rename("/d", "/e/d"), 0);
+    CU_ASSERT_EQUAL(exo_file_stat("/e/d/b", &size), 0);
+    CU_ASSERT_EQUAL(size, 5u);
+    CU_ASSERT_EQUAL(exo_file_stat("/d", &size), -EXO_ENOENT);
+
+    /* Into its own subtree, onto itself, and "." / ".." names. */
+    CU_ASSERT_EQUAL(exo_file_rename("/e", "/e/d/x"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exo_file_rename("/e/d/b", "/e/d/b"), 0);
+    CU_ASSERT_EQUAL(exo_file_stat("/e/d/b", &size), 0);
+    CU_ASSERT_EQUAL(exo_file_rename("/e/d/.", "/e/d/y"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exo_file_rename("/e/d/b", "/e/d/.."), -EXO_EINVAL);
 
     exofs_unmount(g_tv);
 }
@@ -466,6 +522,8 @@ void suite_exo_file_tests(CU_pSuite s)
     CU_add_test(s, "nothing mounted", test_nothing_mounted);
     CU_add_test(s, "remove", test_remove);
     CU_add_test(s, "rename", test_rename);
+    CU_add_test(s, "rename: open files, directories, edge cases",
+                test_rename_open_dirs_and_edge_cases);
     CU_add_test(s, "access mode is enforced", test_access_mode_is_enforced);
     CU_add_test(s, "seek", test_seek);
     CU_add_test(s, "truncate and append", test_truncate_and_append);
