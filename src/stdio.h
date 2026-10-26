@@ -62,6 +62,10 @@ int kvprintf(void (*emit)(int c, void *ctx), void *ctx,
  *     module the kernel mapped at LIBOS_WAD_VADDR -- 28 MB that is never
  *     copied, because there is nowhere to copy it to.
  *   - fread/fseek/ftell/feof are offset arithmetic over that window.
+ *
+ * (SCRUM-75: that is the default. A program that has mounted ExoFS installs
+ * a backend, exo_stdio_set_backend below, and the same calls then read real
+ * files; ring-3 Doom reads its IWAD that way and registers no blob.)
  *   - fopen() for WRITING FAILS, and that is deliberate. Doom writes a
  *     config file and savegames; a write that silently went nowhere would
  *     surface much later as a config that never persists or a savegame that

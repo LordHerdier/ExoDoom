@@ -7,12 +7,10 @@
  * here into one ring-3 image that the kernel embeds and the shell launches,
  * the same way src/libos_snake/ and src/libos_wad_viewer/ are.
  *
- * Modeled on src/libos_wad_viewer/libos_wad_viewer.c, which is the other
- * target that needs a WAD staged before launch: sys_launch_doom()
- * (src/syscall_launch.c) maps the multiboot WAD module into this address
- * space and patches g_doom_params (src/doomgeneric_exo.c) with its address
- * and length via libos_launch_patch_params(), which is where DG_Init picks
- * it up.
+ * Unlike src/libos_wad_viewer/libos_wad_viewer.c, nothing stages the WAD for
+ * it (SCRUM-75): the launcher grants the program volume read-only and
+ * DG_Init (src/doomgeneric_exo.c) mounts it, so the IWAD is read with
+ * ordinary fopen/fread like any file.
  *
  * ── What this file owes the link ──────────────────────────────────────
  *
@@ -43,12 +41,12 @@
  * point rather than looking up a symbol.
  *
  * That attribute is doing real work here rather than belt-and-braces. This
- * is the one ring-3 target whose source list does NOT lead with the file
- * defining its entry point: src/doomgeneric_exo.c goes first instead,
- * because libos_launch_patch_params() writes the WAD params through offset 0
- * of the .data blob and g_doom_params has to be what lives there. Two
- * offsets, two files, two mechanisms -- see the source-order comment on this
- * target's build_ring3_link_target() call in docker/scripts/build.sh.
+ * is a ring-3 target whose source list does NOT lead with the file defining
+ * its entry point: src/doomgeneric_exo.c goes first instead. That ordering
+ * was needed for g_doom_params (the WAD launch params, removed by SCRUM-75);
+ * it is kept, harmlessly, and .text.entry is what guarantees the entry
+ * point -- see the source-order comment on this target's
+ * build_ring3_link_target() call in docker/scripts/build.sh.
  */
 
 #include "exo_syscall.h"
