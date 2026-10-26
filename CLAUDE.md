@@ -151,7 +151,7 @@ area.
   → `docs/architecture.md` §9, `docs/memory.md` §7.
 - Compiled ring-3 targets are linked at the real LibOS addresses and need
   `.text.entry`, a first-global params struct and the entry TU linked first.
-  → `docs/architecture.md` §7 "LibOS launch conventions".
+  → `docs/libos-authoring.md` §4.
 - Never mix `__SSE2__` and `EXO_KERNEL` as the same condition: "not the kernel"
   does not mean "has SSE". → `docs/architecture.md` §7 "Linking the engine".
 - Kernel code is `-mno-sse` and kernel entry saves no XMM state, by design.
@@ -209,6 +209,7 @@ area.
 | Syscall ABI, ownership/revocation, address-space mapping, libc audit, sound | `docs/syscall_spec.md` |
 | Paging, allocators, LibOS heap | `docs/memory.md` |
 | ExoFS | `docs/filesystem.md` |
+| Writing a new LibOS program: conventions, build, packaging, worked example | `docs/libos-authoring.md` |
 | KUnit, writing and registering tests | `docs/testing.md` |
 | GDB and bare-metal debugging | `docs/debugging.md` |
 | Branches, commits, style, CI checks | `docs/contributing.md` |

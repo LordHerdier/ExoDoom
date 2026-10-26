@@ -752,7 +752,7 @@ the single argument-based launch syscall SCRUM-184 collapsed four per-app ones
 into), and the shell's `doom` command calls it. Doom then completes its whole
 startup — `W_Init` over the mounted WAD, `R_Init`, `P_Init`, `S_Init`,
 `HU_Init`, `ST_Init`, `I_InitGraphics` — and runs its tick loop. Page and
-stack sizing for the launch are in "LibOS launch conventions" above.
+stack sizing for the launch are in `docs/libos-authoring.md` §4.7–§4.8.
 
 Things the audit turned up that are worth knowing before touching this area:
 
@@ -1375,8 +1375,8 @@ The entire toolchain runs inside Docker. No host cross-compiler is required.
     function; `libos_doom` alone passes `-msse -msse2` via the `extra_cflags`
     parameter (§7).
 
-  Entry-point and params placement rules for all of them are in §7, "LibOS
-  launch conventions".
+  Entry-point and params placement rules for all of them are in
+  `docs/libos-authoring.md` §4.
 - **Toolchain fetches have more than one host.** Every `docker-*` target
   leads with the same `docker buildx build` of `docker/Dockerfile.build`, so a
   failure fetching the cross-toolchain sources fails all of them, with a
