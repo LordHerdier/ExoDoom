@@ -10,8 +10,12 @@
  * mounted a volume with exofs_mount() can fopen a file on it with no other
  * change -- which is how Doom's unmodified w_file_stdc.c reads the IWAD.
  *
- * Read-only: fopen refuses write modes whichever backend is installed
- * (EROFS, docs/architecture.md §7), so the backend only ever opens for read.
+ * Writing (SCRUM-42): fopen accepts r/w/a and their "+" forms through this
+ * backend, fwrite/fprintf/fflush write through exo_file_write, and mkdir
+ * creates a directory. A stream's writes are buffered a block at a time in
+ * src/stdio.c; **fclose (or fflush) every stream before exofs_unmount()**,
+ * or its unwritten tail is lost along with its length (exo_file.h,
+ * DURABILITY). remove/rename still fail EROFS until SCRUM-106.
  *
  * Paths: fopen's argument is looked up on the mounted volume. ExoFS wants an
  * absolute path and Doom builds "./name" or a bare name, so a relative path is

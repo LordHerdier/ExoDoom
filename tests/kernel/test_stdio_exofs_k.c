@@ -1,6 +1,6 @@
 /*
- * test_stdio_exofs_k.c — fopen/fread/fseek/ftell/fclose over ExoFS
- * (SCRUM-42, SCRUM-75).
+ * test_stdio_exofs_k.c — fopen/fread/fwrite/fseek/ftell/fflush/fclose/mkdir
+ * over ExoFS (SCRUM-42, SCRUM-75).
  *
  * Drives src/stdio.c with the backend from src/libos_fs/exo_file_stdio.c
  * installed, the way Doom's LibOS installs it after mounting its volume. The
@@ -14,6 +14,7 @@
 #include "errno.h"
 #include "string.h"
 #include "stdio.h"
+#include "sys/stat.h"
 
 #include "libos_fs/exofs.h"
 #include "libos_fs/exo_file.h"
@@ -158,9 +159,13 @@ static void test_missing_and_write_modes(void)
     CU_ASSERT_EQUAL(errno, ENOENT);
     CU_ASSERT_PTR_NULL(fopen("/", "r"));
 
+    /* "r+" never creates; a mode C99 does not define is EINVAL. */
     errno = 0;
-    CU_ASSERT_PTR_NULL(fopen("cfg.txt", "w"));
-    CU_ASSERT_EQUAL(errno, EROFS);
+    CU_ASSERT_PTR_NULL(fopen("nope.txt", "r+"));
+    CU_ASSERT_EQUAL(errno, ENOENT);
+    errno = 0;
+    CU_ASSERT_PTR_NULL(fopen("cfg.txt", "x"));
+    CU_ASSERT_EQUAL(errno, EINVAL);
     teardown();
 }
 
@@ -258,6 +263,417 @@ static void test_check_iwad(void)
     teardown();
 }
 
+
+/* ---- writing (SCRUM-42) -------------------------------------------------- */
+
+static uint32_t size_of(const char *path)
+{
+    uint32_t sz = 0xFFFFFFFFu;
+
+    CU_ASSERT_EQUAL(exo_file_stat(path, &sz), 0);
+    return sz;
+}
+
+/* Write len bytes of pattern() to `path` in `chunk`-byte fwrite calls. */
+static void write_pattern(const char *path, uint32_t len, uint32_t chunk)
+{
+    uint8_t  buf[FILE_LEN];
+    uint32_t i, off;
+    FILE    *f = fopen(path, "wb");
+
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f == NULL) return;
+    for (i = 0; i < len; i++) buf[i] = pattern(i);
+    for (off = 0; off < len; off += chunk) {
+        uint32_t n = len - off < chunk ? len - off : chunk;
+        CU_ASSERT_EQUAL(fwrite(buf + off, 1, n, f), (size_t)n);
+    }
+    CU_ASSERT_EQUAL(ftell(f), (long)len);
+    CU_ASSERT_EQUAL(fclose(f), 0);
+}
+
+static void check_pattern(const char *path, uint32_t len)
+{
+    uint8_t  back[FILE_LEN];
+    uint32_t i, bad = 0;
+    FILE    *f;
+
+    CU_ASSERT_EQUAL(size_of(path), len);
+    f = fopen(path, "rb");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f == NULL) return;
+    CU_ASSERT_EQUAL(fread(back, 1, FILE_LEN, f), (size_t)len);
+    for (i = 0; i < len; i++) if (back[i] != pattern(i)) bad++;
+    CU_ASSERT_EQUAL(bad, 0u);
+    fclose(f);
+}
+
+static void test_write_round_trip(void)
+{
+    static const uint32_t lens[] = { 1, 511, 512, 513, 1024, FILE_LEN };
+    unsigned i;
+
+    if (!drive_present()) return;
+    CU_ASSERT_TRUE(setup());
+
+    for (i = 0; i < sizeof lens / sizeof lens[0]; i++) {
+        write_pattern("/out.bin", lens[i], lens[i]);   /* one fwrite  */
+        check_pattern("/out.bin", lens[i]);
+        write_pattern("/out.bin", lens[i], 1);         /* byte at a time */
+        check_pattern("/out.bin", lens[i]);
+        write_pattern("/out.bin", lens[i], 100);       /* straddles blocks */
+        check_pattern("/out.bin", lens[i]);
+    }
+    teardown();
+}
+
+static void test_write_modes(void)
+{
+    char  line[64];
+    FILE *f;
+
+    if (!drive_present()) return;
+    CU_ASSERT_TRUE(setup());
+
+    /* "w" truncates what was there. */
+    f = fopen("data.bin", "w");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) fclose(f);
+    CU_ASSERT_EQUAL(size_of("/data.bin"), 0u);
+
+    /* "a" appends to the end, and ftell starts there. */
+    f = fopen("cfg.txt", "a");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        CU_ASSERT_EQUAL(ftell(f), 17L);
+        CU_ASSERT_EQUAL(fwrite("gamma 56\n", 1, 9, f), (size_t)9);
+        CU_ASSERT_EQUAL(fclose(f), 0);
+    }
+    CU_ASSERT_EQUAL(size_of("/cfg.txt"), 26u);
+    f = fopen("cfg.txt", "r");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        memset(line, 0, sizeof line);
+        CU_ASSERT_EQUAL(fread(line, 1, sizeof line, f), (size_t)26);
+        CU_ASSERT_EQUAL(memcmp(line, "alpha 12\nbeta 34\ngamma 56\n", 26), 0);
+        fclose(f);
+    }
+
+    /* "r+" overwrites in place without truncating. */
+    f = fopen("cfg.txt", "r+");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        CU_ASSERT_EQUAL(fwrite("ALPHA", 1, 5, f), (size_t)5);
+        CU_ASSERT_EQUAL(fseek(f, 0, SEEK_SET), 0);
+        memset(line, 0, sizeof line);
+        CU_ASSERT_EQUAL(fread(line, 1, 8, f), (size_t)8);
+        CU_ASSERT_EQUAL(memcmp(line, "ALPHA 12", 8), 0);
+        CU_ASSERT_EQUAL(fclose(f), 0);
+    }
+    CU_ASSERT_EQUAL(size_of("/cfg.txt"), 26u);
+
+    /* "w+" reads back what it wrote, with no seek-flush by the caller:
+     * the fread itself has to push the buffered bytes out. */
+    f = fopen("scratch.txt", "w+");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        CU_ASSERT_EQUAL(fwrite("hello", 1, 5, f), (size_t)5);
+        CU_ASSERT_EQUAL(fseek(f, 0, SEEK_SET), 0);
+        memset(line, 0, sizeof line);
+        CU_ASSERT_EQUAL(fread(line, 1, 5, f), (size_t)5);
+        CU_ASSERT_EQUAL(memcmp(line, "hello", 5), 0);
+        CU_ASSERT_EQUAL(fclose(f), 0);
+    }
+
+    /* A read-only stream refuses to write rather than faulting. */
+    f = fopen("cfg.txt", "r");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        errno = 0;
+        CU_ASSERT_EQUAL(fwrite("x", 1, 1, f), (size_t)0);
+        CU_ASSERT_EQUAL(errno, EBADF);
+        fclose(f);
+    }
+    teardown();
+}
+
+static void test_write_buffering_and_position(void)
+{
+    uint8_t  blk[600];
+    FILE    *f;
+
+    if (!drive_present()) return;
+    CU_ASSERT_TRUE(setup());
+
+    memset(blk, 'z', sizeof blk);
+    f = fopen("buf.bin", "wb");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        /* Sub-block writes stay in the stream: ftell counts them. */
+        CU_ASSERT_EQUAL(fwrite(blk, 1, 100, f), (size_t)100);
+        CU_ASSERT_EQUAL(ftell(f), 100L);
+        CU_ASSERT_EQUAL(fseek(f, 10, SEEK_SET), 0);
+        CU_ASSERT_EQUAL(ftell(f), 10L);
+        CU_ASSERT_EQUAL(fseek(f, 0, SEEK_END), 0);
+        CU_ASSERT_EQUAL(ftell(f), 100L);
+        /* One call larger than a block goes through whole. */
+        CU_ASSERT_EQUAL(fwrite(blk, 1, sizeof blk, f), sizeof blk);
+        CU_ASSERT_EQUAL(ftell(f), 700L);
+        CU_ASSERT_EQUAL(fflush(f), 0);
+        CU_ASSERT_EQUAL(fflush(NULL), 0);
+        CU_ASSERT_EQUAL(fclose(f), 0);
+    }
+    CU_ASSERT_EQUAL(size_of("/buf.bin"), 700u);
+
+    /* fwrite counts whole elements. */
+    f = fopen("buf.bin", "wb");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        CU_ASSERT_EQUAL(fwrite(blk, 4, 25, f), (size_t)25);
+        CU_ASSERT_EQUAL(fclose(f), 0);
+    }
+    CU_ASSERT_EQUAL(size_of("/buf.bin"), 100u);
+    teardown();
+}
+
+static void test_fprintf_config_round_trip(void)
+{
+    char  name[32];
+    int   val = 0;
+    char  longstr[700];
+    FILE *f;
+
+    if (!drive_present()) return;
+    CU_ASSERT_TRUE(setup());
+
+    /* The M_SaveDefaults shape: "name   value\n" lines. */
+    f = fopen("default.cfg", "w");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        CU_ASSERT_EQUAL(fprintf(f, "%s ", "screenblocks"), 13);
+        CU_ASSERT_EQUAL(fprintf(f, "%i\n", 10), 3);
+        CU_ASSERT_EQUAL(fprintf(f, "%s 0x%x\n", "mouse", 0x1f), 11);
+        CU_ASSERT_EQUAL(fclose(f), 0);
+    }
+    f = fopen("default.cfg", "r");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        CU_ASSERT_EQUAL(fscanf(f, "%31s %d", name, &val), 2);
+        CU_ASSERT_EQUAL(strcmp(name, "screenblocks"), 0);
+        CU_ASSERT_EQUAL(val, 10);
+        fclose(f);
+    }
+
+    /* A line that does not fit the stream's block is refused, not cut. */
+    memset(longstr, 'q', sizeof longstr - 1);
+    longstr[sizeof longstr - 1] = '\0';
+    f = fopen("default.cfg", "w");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        errno = 0;
+        CU_ASSERT_EQUAL(fprintf(f, "%s", longstr), -1);
+        CU_ASSERT_EQUAL(errno, EFBIG);
+        fclose(f);
+    }
+    CU_ASSERT_EQUAL(size_of("/default.cfg"), 0u);
+    teardown();
+}
+
+static void test_mkdir_over_exofs(void)
+{
+    FILE *f;
+
+    if (!drive_present()) return;
+    CU_ASSERT_TRUE(setup());
+
+    CU_ASSERT_EQUAL(mkdir("saves", 0755), 0);
+    errno = 0;
+    CU_ASSERT_EQUAL(mkdir("saves", 0755), -1);
+    CU_ASSERT_EQUAL(errno, EEXIST);
+    errno = 0;
+    CU_ASSERT_EQUAL(mkdir("./saves/", 0755), -1);     /* same directory */
+    CU_ASSERT_EQUAL(errno, EEXIST);
+    errno = 0;
+    CU_ASSERT_EQUAL(mkdir("./", 0755), -1);           /* the root */
+    CU_ASSERT_EQUAL(errno, EEXIST);
+
+    f = fopen("saves/doomsav0.dsg", "wb");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        CU_ASSERT_EQUAL(fwrite("x", 1, 1, f), (size_t)1);
+        CU_ASSERT_EQUAL(fclose(f), 0);
+    }
+    CU_ASSERT_EQUAL(size_of("/saves/doomsav0.dsg"), 1u);
+    teardown();
+}
+
+/* A backend with no write op: every write mode stays EROFS, which is how
+ * the table behaved before SCRUM-42. */
+static int ro_open(const char *path, unsigned flags)
+{
+    (void)path; (void)flags;
+    return -ENOENT;
+}
+static int64_t ro_read(int h, void *b, size_t n) { (void)h; (void)b; (void)n; return -EIO; }
+static int64_t ro_seek(int h, int64_t o, int w)  { (void)h; (void)o; (void)w; return -EIO; }
+static int ro_close(int h)                       { (void)h; return 0; }
+
+static void test_backend_without_write_is_read_only(void)
+{
+    static const exo_stdio_backend_t ro = {
+        ro_open, ro_read, ro_seek, ro_close, NULL, NULL,
+    };
+
+    exo_stdio_set_backend(&ro);
+    errno = 0;
+    CU_ASSERT_PTR_NULL(fopen("a", "w"));
+    CU_ASSERT_EQUAL(errno, EROFS);
+    errno = 0;
+    CU_ASSERT_PTR_NULL(fopen("a", "r+"));
+    CU_ASSERT_EQUAL(errno, EROFS);
+    errno = 0;
+    CU_ASSERT_EQUAL(mkdir("d", 0755), -1);
+    CU_ASSERT_EQUAL(errno, EROFS);
+    errno = 0;
+    CU_ASSERT_PTR_NULL(fopen("a", "r"));              /* reading still goes through */
+    CU_ASSERT_EQUAL(errno, ENOENT);
+    exo_stdio_set_backend(NULL);
+}
+
+
+/* ---- fwrite error and EOF bookkeeping (code review of SCRUM-42) ----------
+ *
+ * An in-memory backend with a write budget, so a full volume can be
+ * simulated without filling one: it accepts `mem_limit` more bytes (a prefix
+ * of a larger write included) and then answers -ENOSPC. -1 is unlimited. */
+
+static uint8_t mem[4096];
+static size_t  mem_pos, mem_len;
+static long    mem_limit;
+
+static int mem_open(const char *path, unsigned flags)
+{
+    (void)path;
+    mem_pos = 0;
+    if (flags & EXO_STDIO_TRUNC) mem_len = 0;
+    return 1;
+}
+static int64_t mem_read(int h, void *b, size_t n)
+{
+    (void)h;
+    if (n > mem_len - mem_pos) n = mem_len - mem_pos;
+    memcpy(b, mem + mem_pos, n);
+    mem_pos += n;
+    return (int64_t)n;
+}
+static int64_t mem_seek(int h, int64_t off, int whence)
+{
+    (void)h;
+    if (whence == SEEK_END) off += (int64_t)mem_len;
+    else if (whence == SEEK_CUR) off += (int64_t)mem_pos;
+    mem_pos = (size_t)off;
+    return off;
+}
+static int64_t mem_write(int h, const void *b, size_t n)
+{
+    (void)h;
+    if (mem_limit == 0) return -ENOSPC;
+    if (mem_limit > 0 && n > (size_t)mem_limit) n = (size_t)mem_limit;
+    memcpy(mem + mem_pos, b, n);
+    mem_pos += n;
+    if (mem_pos > mem_len) mem_len = mem_pos;
+    if (mem_limit > 0) mem_limit -= (long)n;
+    return (int64_t)n;
+}
+static int mem_close(int h) { (void)h; return 0; }
+
+static const exo_stdio_backend_t mem_backend = {
+    mem_open, mem_read, mem_seek, mem_close, mem_write, NULL,
+};
+
+static void mem_reset(long limit)
+{
+    mem_pos = mem_len = 0;
+    mem_limit = limit;
+    exo_stdio_set_backend(&mem_backend);
+}
+
+static void test_failed_flush_keeps_pos_within_size(void)
+{
+    uint8_t buf[16];
+    FILE   *f;
+    unsigned i;
+    size_t  put = 0;
+
+    mem_reset(0);                                    /* every write fails */
+    f = fopen("a", "w+");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        for (i = 0; i < 512; i++)                    /* the 512th fills the block */
+            put += fwrite("q", 1, 1, f);
+        CU_ASSERT_EQUAL(put, (size_t)511);           /* the lost byte is not counted */
+        CU_ASSERT_EQUAL(errno, ENOSPC);
+
+        /* pos must not be past size: fread would see a huge `avail`. */
+        CU_ASSERT_EQUAL(fread(buf, 1, sizeof buf, f), (size_t)0);
+        CU_ASSERT_EQUAL(fseek(f, 0, SEEK_END), 0);
+        CU_ASSERT_EQUAL(ftell(f), 512L);
+        fclose(f);
+    }
+    exo_stdio_set_backend(NULL);
+}
+
+static void test_partial_direct_write_counts_the_prefix(void)
+{
+    static uint8_t big[2000];
+    FILE *f;
+
+    memset(big, 'b', sizeof big);
+    mem_reset(700);                                  /* room for 700 bytes */
+    f = fopen("a", "wb");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        errno = 0;
+        CU_ASSERT_EQUAL(fwrite(big, 1, sizeof big, f), (size_t)700);
+        CU_ASSERT_EQUAL(errno, ENOSPC);
+        CU_ASSERT_EQUAL(ftell(f), 700L);             /* follows the file */
+        CU_ASSERT_EQUAL(mem_len, (size_t)700);
+        CU_ASSERT_EQUAL(fseek(f, 0, SEEK_END), 0);
+        CU_ASSERT_EQUAL(ftell(f), 700L);
+
+        /* Whole elements: 700 / 300 is two, not 2.33. */
+        mem_reset(700);
+        fclose(f);
+        f = fopen("a", "wb");
+        CU_ASSERT_PTR_NOT_NULL(f);
+        if (f != NULL) {
+            CU_ASSERT_EQUAL(fwrite(big, 300, 6, f), (size_t)2);
+            fclose(f);
+        }
+    }
+    exo_stdio_set_backend(NULL);
+}
+
+static void test_fwrite_clears_eof(void)
+{
+    uint8_t buf[8];
+    FILE   *f;
+
+    mem_reset(-1);
+    f = fopen("a", "w+");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        CU_ASSERT_EQUAL(fread(buf, 1, sizeof buf, f), (size_t)0);
+        CU_ASSERT_TRUE(feof(f) != 0);
+        CU_ASSERT_EQUAL(fwrite("hello", 1, 5, f), (size_t)5);
+        CU_ASSERT_FALSE(feof(f));
+        CU_ASSERT_EQUAL(fseek(f, 0, SEEK_SET), 0);
+        CU_ASSERT_EQUAL(fread(buf, 1, sizeof buf, f), (size_t)5);
+        fclose(f);
+    }
+    exo_stdio_set_backend(NULL);
+}
+
 void suite_stdio_exofs_tests(CU_pSuite s)
 {
     CU_add_test(s, "dg_check_iwad reads the header off ExoFS", test_check_iwad);
@@ -265,7 +681,7 @@ void suite_stdio_exofs_tests(CU_pSuite s)
     CU_add_test(s, "fseek then fread at random offsets",
                 test_seek_and_random_read);
     CU_add_test(s, "relative, ./ and absolute paths", test_path_forms);
-    CU_add_test(s, "missing file ENOENT, write mode EROFS",
+    CU_add_test(s, "missing file ENOENT, bad mode EINVAL",
                 test_missing_and_write_modes);
     CU_add_test(s, "fscanf reads a config line off ExoFS",
                 test_fscanf_from_file);
@@ -273,4 +689,22 @@ void suite_stdio_exofs_tests(CU_pSuite s)
                 test_table_full_and_close_frees_descriptor);
     CU_add_test(s, "removing the backend restores blob lookup",
                 test_remove_restores_blob_behaviour);
+    CU_add_test(s, "fwrite round trip across block boundaries",
+                test_write_round_trip);
+    CU_add_test(s, "fopen modes w, a, r+, w+ and read-only streams",
+                test_write_modes);
+    CU_add_test(s, "write buffering, ftell/fseek/fflush with pending bytes",
+                test_write_buffering_and_position);
+    CU_add_test(s, "fprintf a config file and fscanf it back",
+                test_fprintf_config_round_trip);
+    CU_add_test(s, "mkdir over ExoFS and a file inside it",
+                test_mkdir_over_exofs);
+    CU_add_test(s, "a backend without write stays read-only",
+                test_backend_without_write_is_read_only);
+    CU_add_test(s, "failed flush leaves pos within size",
+                test_failed_flush_keeps_pos_within_size);
+    CU_add_test(s, "partial write on a full volume counts the prefix",
+                test_partial_direct_write_counts_the_prefix);
+    CU_add_test(s, "fwrite clears a pending EOF",
+                test_fwrite_clears_eof);
 }

@@ -705,12 +705,22 @@ int sprintf(char *str, const char *fmt, ...)
  * fread/fseek/ftell over a blob are pointer arithmetic; nothing is copied,
  * which matters when the blob is a 28 MB IWAD and the heap is a few MB.
  *
- * What there is NOT is a writable file. fopen("w") fails, and it fails
- * rather than pretending: Doom writes a config file and savegames, and a
- * successful-looking write that goes nowhere would surface later as a config
- * that never persists or a savegame that reloads as garbage. Returning NULL
- * puts the failure at the open, where M_SaveDefaults and P_SaveGame already
- * handle it.
+ * A BACKEND stream (exo_stdio_set_backend, stdio.h) is a real file. It can be
+ * written only if the backend supplies a write op; otherwise, and with no
+ * backend at all, fopen("w") fails, and it fails rather than pretending:
+ * Doom writes a config file and savegames, and a successful-looking write
+ * that goes nowhere would surface later as a config that never persists or a
+ * savegame that reloads as garbage. Returning NULL puts the failure at the
+ * open, where M_SaveDefaults and P_SaveGame already handle it.
+ *
+ * Writes are buffered, one block per stream. That is not an optimisation:
+ * ExoFS caches no data blocks (docs/filesystem.md sec4), so p_saveg.c's
+ * one-byte fwrite()s would each cost a read-modify-write of a sector over
+ * ATA PIO. The buffer holds the bytes in [pos - wlen, pos) and is flushed
+ * when full, and on fflush, fclose, fseek and any fread. Nothing is durable
+ * until fclose/fflush: ExoFS also defers the file's size to close
+ * (docs/filesystem.md sec6c), so a stream left open across exofs_unmount()
+ * loses its tail as well as its length.
  */
 
 #define EXO_FILE_MAX 8
@@ -720,6 +730,12 @@ int sprintf(char *str, const char *fmt, ...)
 #define FFLAG_READ    0x04
 #define FFLAG_EOF     0x08
 #define FFLAG_ERR     0x10
+#define FFLAG_WRITE   0x20
+#define FFLAG_APPEND  0x40
+
+/* One ExoFS block (EXOFS_BLOCK_SIZE). Not included here: stdio.c is linked
+ * into the kernel and every ring-3 target and must not depend on libos_fs. */
+#define WBUF_SIZE 512
 
 struct _exo_file {
     const unsigned char *data; /* blob base; NULL for a console stream */
@@ -728,6 +744,8 @@ struct _exo_file {
     unsigned             flags;
     const exo_stdio_backend_t *be; /* NULL for a blob or console stream  */
     int                  handle;   /* the backend's handle, when be != NULL */
+    size_t               wlen;     /* bytes buffered for write, ending at pos */
+    unsigned char        wbuf[WBUF_SIZE];
 };
 
 /*
@@ -840,7 +858,7 @@ static blob_t *find_blob(const char *path)
  * test stay the same bookkeeping the blob streams use; the backend's own
  * position is only touched when bytes are actually read.
  */
-static FILE *open_backend(const char *path)
+static FILE *open_backend(const char *path, unsigned open_flags)
 {
     const exo_stdio_backend_t *be = stdio_backend;
     unsigned i;
@@ -856,7 +874,7 @@ static FILE *open_backend(const char *path)
         return NULL;
     }
 
-    h = be->open(path);
+    h = be->open(path, open_flags);
     if (h < 0) {
         errno = -h;
         return NULL;
@@ -871,10 +889,19 @@ static FILE *open_backend(const char *path)
 
     file_table[i].data   = NULL;
     file_table[i].size   = (size_t)size;
-    file_table[i].pos    = 0;
-    file_table[i].flags  = FFLAG_INUSE | FFLAG_READ;
+    /* An append stream starts at the end, so ftell reports where the next
+     * byte lands; the backend itself seeks to the end on every write. */
+    file_table[i].pos    = (open_flags & EXO_STDIO_APPEND) ? (size_t)size : 0;
+    file_table[i].flags  = FFLAG_INUSE;
+    if (open_flags & EXO_STDIO_READ)
+        file_table[i].flags |= FFLAG_READ;
+    if (open_flags & EXO_STDIO_WRITE)
+        file_table[i].flags |= FFLAG_WRITE;
+    if (open_flags & EXO_STDIO_APPEND)
+        file_table[i].flags |= FFLAG_APPEND;
     file_table[i].be     = be;
     file_table[i].handle = h;
+    file_table[i].wlen   = 0;
     return &file_table[i];
 }
 
@@ -904,25 +931,106 @@ static int64_t stream_read(FILE *stream, void *buf, size_t n)
     return (int64_t)done;
 }
 
+/* Write `n` bytes at absolute offset `at`. Returns 0, or -1 with errno set
+ * and FFLAG_ERR on the stream. A short backend write is retried; zero
+ * progress is an error, not a loop. *written (if given) is how many bytes
+ * reached the file, which on a failure can be more than none: a full volume
+ * accepts a prefix and then reports ENOSPC, and the caller's position has to
+ * follow what the file really holds. */
+static int backend_write(FILE *stream, const void *buf, size_t n, size_t at,
+                         size_t *written)
+{
+    const exo_stdio_backend_t *be = stream->be;
+    size_t done = 0;
+
+    if (written != NULL)
+        *written = 0;
+    if (be->seek(stream->handle, (int64_t)at, SEEK_SET) < 0) {
+        errno = EIO;
+        stream->flags |= FFLAG_ERR;
+        return -1;
+    }
+    while (done < n) {
+        int64_t put = be->write(stream->handle,
+                                (const char *)buf + done, n - done);
+        if (put <= 0) {
+            errno = put < 0 ? (int)-put : EIO;
+            stream->flags |= FFLAG_ERR;
+            return -1;
+        }
+        done += (size_t)put;
+        if (written != NULL)
+            *written = done;
+    }
+    return 0;
+}
+
+/* Push the stream's buffered bytes to the backend. The buffer is dropped
+ * either way: after a failed write there is no state a retry could trust. */
+static int flush_wbuf(FILE *stream)
+{
+    size_t n = stream->wlen;
+
+    if (n == 0)
+        return 0;
+    stream->wlen = 0;
+    return backend_write(stream, stream->wbuf, n, stream->pos - n, NULL);
+}
+
+/* Parse an fopen mode into EXO_STDIO_* flags. 0 for a mode C99 does not
+ * define; the 'b' may sit before or after the '+'. */
+static unsigned parse_mode(const char *mode)
+{
+    unsigned f;
+    int      plus = 0;
+    const char *m;
+
+    switch (mode[0]) {
+    case 'r': f = EXO_STDIO_READ; break;
+    case 'w': f = EXO_STDIO_WRITE | EXO_STDIO_CREATE | EXO_STDIO_TRUNC; break;
+    case 'a': f = EXO_STDIO_WRITE | EXO_STDIO_CREATE | EXO_STDIO_APPEND; break;
+    default:  return 0;
+    }
+    for (m = mode + 1; *m != '\0'; m++) {
+        if (*m == '+')
+            plus = 1;
+        else if (*m != 'b')
+            return 0;
+    }
+    if (plus)
+        f |= EXO_STDIO_READ | EXO_STDIO_WRITE;
+    return f;
+}
+
 FILE *fopen(const char *path, const char *mode)
 {
     blob_t  *blob;
     unsigned i;
+    unsigned open_flags;
 
     if (path == NULL || mode == NULL) {
         errno = EINVAL;
         return NULL;
     }
 
-    /* Any mode that can write is refused. See the block comment above: a
-     * write that silently goes nowhere is worse than a failed open. */
-    if (mode[0] != 'r') {
-        errno = EROFS;
+    open_flags = parse_mode(mode);
+    if (open_flags == 0) {
+        errno = EINVAL;
         return NULL;
     }
 
+    /* A mode that can write needs a backend that can. Without one it is
+     * refused: see the block comment above, a write that silently goes
+     * nowhere is worse than a failed open. */
+    if (open_flags & EXO_STDIO_WRITE) {
+        if (stdio_backend == NULL || stdio_backend->write == NULL) {
+            errno = EROFS;
+            return NULL;
+        }
+    }
+
     if (stdio_backend != NULL)
-        return open_backend(path);
+        return open_backend(path, open_flags);
 
     blob = find_blob(path);
     if (blob == NULL) {
@@ -946,6 +1054,8 @@ FILE *fopen(const char *path, const char *mode)
 
 int fclose(FILE *stream)
 {
+    int ret = 0;
+
     if (stream == NULL || (stream->flags & FFLAG_INUSE) == 0)
         return EOF;
 
@@ -954,8 +1064,20 @@ int fclose(FILE *stream)
     if (stream->flags & FFLAG_CONSOLE)
         return 0;
 
-    if (stream->be != NULL)
-        stream->be->close(stream->handle);
+    /* The backend close runs even when the flush failed: the handle is
+     * gone either way, and ExoFS's close is what writes the file's size. */
+    if (stream->be != NULL) {
+        int bad  = flush_wbuf(stream) < 0;
+        int rc   = stream->be->close(stream->handle);
+        int werr = (stream->flags & FFLAG_WRITE) != 0;
+
+        if (rc < 0 && werr) {
+            errno = -rc;
+            bad = 1;
+        }
+        if (bad)
+            ret = EOF;
+    }
 
     stream->flags = 0;
     stream->be    = NULL;
@@ -963,8 +1085,9 @@ int fclose(FILE *stream)
     stream->data  = NULL;
     stream->size  = 0;
     stream->pos   = 0;
+    stream->wlen  = 0;
 
-    return 0;
+    return ret;
 }
 
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
@@ -974,6 +1097,10 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
     size_t got;
 
     if (ptr == NULL || stream == NULL || (stream->flags & FFLAG_READ) == 0)
+        return 0;
+
+    /* A "+" stream may have bytes the file has not seen yet. */
+    if (stream->wlen != 0 && flush_wbuf(stream) < 0)
         return 0;
 
     /* size * nmemb can overflow; checking the division form avoids
@@ -1017,23 +1144,81 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
     const char *p = ptr;
     size_t      total;
     size_t      i;
+    size_t      left;
 
     if (ptr == NULL || stream == NULL || size == 0 || nmemb == 0)
         return 0;
     if (nmemb > (size_t)-1 / size)
         return 0;
 
-    /* Only the console accepts writes. A blob is a read-only view of memory
-     * the kernel mapped without VMM_WRITE, so writing through it would fault
-     * rather than merely fail. */
-    if ((stream->flags & FFLAG_CONSOLE) == 0)
-        return 0;
-
     total = size * nmemb;
-    for (i = 0; i < total; i++)
-        putchar((unsigned char)p[i]);
 
-    return nmemb;
+    if (stream->flags & FFLAG_CONSOLE) {
+        for (i = 0; i < total; i++)
+            putchar((unsigned char)p[i]);
+        return nmemb;
+    }
+
+    /* A blob is a read-only view of memory the kernel mapped without
+     * VMM_WRITE, so writing through it would fault rather than merely fail.
+     * Only a backend stream opened for writing gets here. */
+    if (stream->be == NULL || (stream->flags & FFLAG_WRITE) == 0) {
+        errno = EBADF;
+        return 0;
+    }
+
+    /* Under "a" every write lands at the end. Bytes already buffered are
+     * contiguous with it, so only an empty buffer needs the position moved. */
+    if ((stream->flags & FFLAG_APPEND) && stream->wlen == 0)
+        stream->pos = stream->size;
+
+    left = total;
+    while (left != 0) {
+        size_t n;
+
+        if (stream->wlen == 0 && left >= WBUF_SIZE) {
+            /* Whole blocks straight through: no copy, and ExoFS can batch an
+             * aligned append (docs/filesystem.md sec6c). */
+            if (backend_write(stream, p, left, stream->pos, &n) < 0) {
+                /* A prefix may have landed before the error. Count it, so
+                 * pos, size and fwrite's return agree with the file. */
+                stream->pos += n;
+                if (stream->pos > stream->size)
+                    stream->size = stream->pos;
+                left -= n;
+                break;
+            }
+            stream->pos += n;
+        } else {
+            size_t room = WBUF_SIZE - stream->wlen;
+
+            n = left < room ? left : room;
+            memcpy(stream->wbuf + stream->wlen, p, n);
+            stream->wlen += n;
+            stream->pos  += n;
+            /* pos is already past the block, which is what flush_wbuf's
+             * pos - wlen expects. size moves with it BEFORE the flush: a
+             * failed flush drops these bytes (they are not counted as
+             * written) but must not leave pos > size, which fread would
+             * turn into a huge `avail`. */
+            if (stream->pos > stream->size)
+                stream->size = stream->pos;
+            if (stream->wlen == WBUF_SIZE && flush_wbuf(stream) < 0)
+                break;
+        }
+        if (stream->pos > stream->size)
+            stream->size = stream->pos;
+        left -= n;
+        p    += n;
+    }
+
+    /* New bytes past the old end are readable data, so an earlier EOF from an
+     * fread on this "+" stream no longer holds. */
+    if (left != total)
+        stream->flags &= ~(unsigned)FFLAG_EOF;
+
+    /* Whole elements only, like fread. */
+    return (total - left) / size;
 }
 
 int fseek(FILE *stream, long offset, int whence)
@@ -1041,10 +1226,14 @@ int fseek(FILE *stream, long offset, int whence)
     long base;
     long target;
 
-    if (stream == NULL || (stream->flags & FFLAG_READ) == 0) {
+    if (stream == NULL ||
+        (stream->flags & (FFLAG_READ | FFLAG_WRITE)) == 0) {
         errno = EBADF;
         return -1;
     }
+
+    if (stream->wlen != 0 && flush_wbuf(stream) < 0)
+        return -1;
 
     switch (whence) {
     case SEEK_SET: base = 0; break;
@@ -1058,9 +1247,9 @@ int fseek(FILE *stream, long offset, int whence)
     target = base + offset;
 
     /* Seeking past the end is legal for a real file (it creates a hole on
-     * the next write); here there is nothing to write, so it is refused --
-     * which is also what stops a subsequent fread from computing a negative
-     * `avail`. */
+     * the next write); it is refused here, which is also what stops a
+     * subsequent fread from computing a negative `avail`. No caller needs a
+     * sparse file: Doom writes its saves front to back. */
     if (target < 0 || (size_t)target > stream->size) {
         errno = EINVAL;
         return -1;
@@ -1076,7 +1265,8 @@ int fseek(FILE *stream, long offset, int whence)
 
 long ftell(FILE *stream)
 {
-    if (stream == NULL || (stream->flags & FFLAG_READ) == 0) {
+    if (stream == NULL ||
+        (stream->flags & (FFLAG_READ | FFLAG_WRITE)) == 0) {
         errno = EBADF;
         return -1L;
     }
@@ -1094,26 +1284,60 @@ int feof(FILE *stream)
 
 int fflush(FILE *stream)
 {
-    /* Nothing is buffered on this side: the kernel build writes each byte
-     * straight to the UART, and the ring-3 build's buffering lives inside
-     * one printf call and is already flushed when that call returns. The
-     * serial_flush() below is the UART's own FIFO, which is a different
-     * thing and does matter -- src/serial.c buffers there. */
-    (void)stream;
+    int ret = 0;
+
+    /* The console is not buffered on this side: the kernel build writes each
+     * byte straight to the UART, and the ring-3 build's buffering lives
+     * inside one printf call and is already flushed when that call returns.
+     * The serial_flush() below is the UART's own FIFO, which is a different
+     * thing and does matter -- src/serial.c buffers there. A backend stream
+     * does hold bytes (see the FILE block comment), and those go out here.
+     * That is the stream's tail only: the file's size reaches the disk on
+     * fclose. */
+    if (stream == NULL) {
+        unsigned i;
+
+        for (i = 0; i < EXO_FILE_MAX; i++) {
+            if ((file_table[i].flags & FFLAG_INUSE) &&
+                file_table[i].wlen != 0 && flush_wbuf(&file_table[i]) < 0)
+                ret = EOF;
+        }
+    } else if (stream->wlen != 0 && flush_wbuf(stream) < 0) {
+        ret = EOF;
+    }
 #ifdef EXO_KERNEL
     serial_flush();
 #endif
-    return 0;
+    return ret;
 }
 
 int vfprintf(FILE *stream, const char *fmt, va_list ap)
 {
-    /* Everything that is not the console is read-only, so a formatted write
-     * to it produces nothing and reports nothing written. */
-    if (stream == NULL || (stream->flags & FFLAG_CONSOLE) == 0)
+    char buf[WBUF_SIZE];
+    int  n;
+
+    if (stream == NULL)
+        return 0;
+    if (stream->flags & FFLAG_CONSOLE)
+        return vprintf(fmt, ap);
+
+    /* Anything else that cannot be written to produces nothing and reports
+     * nothing written. */
+    if ((stream->flags & FFLAG_WRITE) == 0)
         return 0;
 
-    return vprintf(fmt, ap);
+    /* One formatted call is at most one block. Doom's config lines are a
+     * name and a value; a line that does not fit is an error, not a quietly
+     * shortened line in a file that is read back later. */
+    n = vsnprintf(buf, sizeof buf, fmt, ap);
+    if (n < 0 || (size_t)n >= sizeof buf) {
+        errno = EFBIG;
+        stream->flags |= FFLAG_ERR;
+        return -1;
+    }
+    if (n != 0 && fwrite(buf, 1, (size_t)n, stream) != (size_t)n)
+        return -1;
+    return n;
 }
 
 int fprintf(FILE *stream, const char *fmt, ...)
@@ -1129,7 +1353,8 @@ int fprintf(FILE *stream, const char *fmt, ...)
 }
 
 /*
- * remove/rename: there is no filesystem, and saying so is the whole point.
+ * remove/rename: not implemented over ExoFS yet (SCRUM-106), and saying so is
+ * the whole point.
  *
  * Both are reached only from the savegame rotation in m_misc.c/g_game.c, and
  * both already have callers that cope with failure. Returning 0 would claim a
@@ -1152,10 +1377,12 @@ int rename(const char *oldpath, const char *newpath)
 }
 
 /*
- * mkdir lives here rather than in a file of its own because it is the same
- * answer as remove/rename above, for the same reason -- there is no
- * filesystem -- and grouping the three makes that one fact obvious instead
- * of repeated.  It is declared in <sys/stat.h>, not <stdio.h>.
+ * mkdir lives here rather than in a file of its own because, with no backend
+ * (or one without a mkdir op), it is the same answer as remove/rename above
+ * for the same reason -- there is no filesystem to ask -- and grouping the
+ * three makes that one fact obvious instead of repeated. With a backend that
+ * has one (SCRUM-42: ExoFS) it creates the directory.  It is declared in
+ * <sys/stat.h>, not <stdio.h>.
  *
  * Returning -1/EROFS rather than docs/libc_audit.md sec6's suggested "no-op
  * returning 0": m_misc.c's M_MakeDirectory is called before writing a config
@@ -1166,8 +1393,18 @@ int rename(const char *oldpath, const char *newpath)
  */
 int mkdir(const char *path, mode_t mode)
 {
-    (void)path;
     (void)mode;
+
+    if (stdio_backend != NULL && stdio_backend->mkdir != NULL) {
+        int rc = stdio_backend->mkdir(path);
+
+        if (rc < 0) {
+            errno = -rc;
+            return -1;
+        }
+        return 0;
+    }
+
     errno = EROFS;
     return -1;
 }
