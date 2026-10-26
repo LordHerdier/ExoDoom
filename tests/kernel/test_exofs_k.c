@@ -622,6 +622,44 @@ static void test_format_rejects_tiny_volume(void)
 }
 
 /*
+ * format() sizes the FAT and mount() insists on exactly that size back
+ * (SCRUM-221), so the two have to agree at every size, and the sizes most
+ * likely to expose a rounding disagreement are the ones where total_blocks
+ * sits on or just past a multiple of EXOFS_FAT_PER_BLOCK -- where one more
+ * data block costs a whole extra FAT sector. Each row's expected
+ * total_blocks is worked by hand from 1 + ceil(T / 128) + T <= sectors, so
+ * a geometry change shows up here as a number, not just as a failed mount.
+ */
+static void test_format_mounts_at_fat_boundaries(void)
+{
+    if (!drive_present()) return;
+
+    static const struct { uint32_t sectors, total_blocks; } rows[] = {
+        { EXOFS_MIN_SECTORS, 6u },   /* 1 + 1 + 6                         */
+        { 130u, 128u },              /* one FAT sector, exactly full      */
+        { 131u, 128u },              /* 129 would need a 2nd FAT sector   */
+        { 132u, 129u },              /* ...which now fits                 */
+        { 259u, 256u },              /* two FAT sectors, exactly full     */
+        { 260u, 256u },
+        { 261u, 257u },
+    };
+
+    for (uint32_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        exofs_unmount();
+        CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, rows[i].sectors),
+                        0);
+        CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
+
+        exofs_geometry_t g;
+        CU_ASSERT_EQUAL(exofs_geometry(&g), 0);
+        CU_ASSERT_EQUAL(g.total_blocks, rows[i].total_blocks);
+        CU_ASSERT_TRUE(1u + g.fat_blocks + g.total_blocks <= rows[i].sectors);
+    }
+
+    exofs_unmount();
+}
+
+/*
  * exofs_region_sectors() (SCRUM-203) -- pure arithmetic, no drive needed:
  * how many sectors a volume at base_lba may claim before the next fixed
  * region (region_end_lba) or the disk's own reported capacity, whichever
@@ -3941,6 +3979,8 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "double mount rejected", test_double_mount_rejected);
     CU_add_test(s, "format rejects a tiny volume",
                 test_format_rejects_tiny_volume);
+    CU_add_test(s, "format then mount agree at FAT-sector boundaries",
+                test_format_mounts_at_fat_boundaries);
     CU_add_test(s, "region_sectors: disk bigger than region",
                 test_region_sectors_disk_bigger_than_region);
     CU_add_test(s, "region_sectors: disk ends inside region",
