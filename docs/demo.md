@@ -8,8 +8,8 @@ dashboard.**
 
 Each beat lists what to type, what appears and how long it takes.
 `make demo-rehearse` runs the whole sequence unattended and checks it, so run
-that before every presentation. The words to say at each beat are SCRUM-239's
-narration and are kept separate.
+that before every presentation. What to *say* at each beat (beat 8 of the
+client's list) is `docs/demo-narration.md`.
 
 ---
 

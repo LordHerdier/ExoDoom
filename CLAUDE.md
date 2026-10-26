@@ -217,7 +217,7 @@ area.
 | libc per-function audit | `docs/libc_audit.md` |
 | Drivers (IDT, PIC, PIT, serial, keyboard, framebuffer, ATA, PCI, ACPI, RTC, HDA, speaker, USB) | `docs/drivers/*.md` |
 | Measured frame times, syscall latency, launch latency, memory per context | `docs/performance.md` |
-| The client demo: the beat-by-beat script, and its unattended rehearsal | `docs/demo.md` |
+| The client demo: the beat-by-beat script, its unattended rehearsal, and what to say at each beat | `docs/demo.md`, `docs/demo-narration.md` |
 
 **New architectural facts go into the doc that owns the subsystem, integrated
 into its existing section — not appended here.** If you find yourself writing
