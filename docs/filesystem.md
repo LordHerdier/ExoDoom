@@ -798,6 +798,17 @@ directory is `.`, which Doom joins into `./.savegame/`). `mount disk0:vol5 <dir>
 from the shell browses them while Doom is not running; while it is, the slot
 reads as in use.
 
+**Saves outlive a boot, not a build.** The slot is on the disk image, so it
+persists exactly as long as that image does, and most of the make targets
+replace it: `run`, `docker-run*` and `docker-test` go through `docker-build`,
+which recreates `build/exodoom_disk.img` (`mkexofsimg` opens its output
+`"w+b"`), and `run-blank` boots a separate `build/exodoom_blank.img` that it
+re-zeroes on every call. A save made under one is not on the other, and a
+rebuild loses it. To carry saves from one boot to the next, boot the image
+without rebuilding: `make run-keep` (the built image) or
+`make run-keep DISK_IMG=build/exodoom_blank.img` (the image `run-blank` left).
+Delete the image, or `make clean`, to start from empty slots again.
+
 **Config is not saved, and that is the engine's doing.** `M_SaveDefaults` and
 `M_LoadDefaults` do their work inside `#if ORIGCODE` in the vendored
 `src/doom/m_config.c`, and `ORIGCODE` is `#undef`'d (`src/doom/config.h`), so
