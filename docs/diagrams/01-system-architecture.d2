@@ -1,0 +1,163 @@
+# 01 System architecture: who runs where, and what each layer owns.
+# Sources: src/kernel.c, src/exo_syscall.h, src/context.h, src/libos_launch.h,
+#          src/shell/, src/libos_*/, src/libos_fs/, src/doomgeneric_exo.c
+...@style
+grid-columns: 1
+grid-gap: 14
+
+title: "ExoDoom: system architecture\nA bare-metal x86-64 exokernel. The kernel multiplexes hardware and enforces ownership; files, the shell and Doom itself are library OS code in ring 3." {
+  class: note
+  style.font-size: 18
+  style.italic: false
+  style.font-color: "#111827"
+}
+
+ring3: "RING 3  ·  LibOS programs, each in its own address space" {
+  class: zone
+  grid-columns: 3
+  style.stroke: "#0F8B7A"
+  style.font-color: "#0F8B7A"
+
+  programs: "Programs" {
+    class: u
+    style.fill: "#F4FBF9"
+    grid-columns: 2
+    shell: "shell\nboot-launched,\nlaunches the rest" {class: u}
+    doom: "doom\nFreedoom 2 via\ndoomgeneric" {class: doom}
+    topapp: "top\nlive resource\nmonitor" {class: u}
+    wadview: "wadview\nWAD flats +\nautomap" {class: u}
+    voldemo: "voldemoa / b\nper-program disk\nvolumes" {class: u}
+    snake: "snake" {class: u}
+    clock: "clock\nCMOS wall time" {class: u}
+    more: "…\nany .exo package" {class: u; style.stroke-dash: 3}
+  }
+
+  runtime: "LibOS runtime (policy lives here)" {
+    class: u
+    style.fill: "#F4FBF9"
+    grid-columns: 2
+    exofs: "ExoFS\nfiles over\nexo_disk_*" {class: u}
+    libc: "libc shim\nstdio · stdlib ·\nstring · fixed-point math" {class: u}
+    heap: "Heap + page allocator\nover exo_page_alloc / map" {class: u}
+    fbmap: "Framebuffer map\nexo_fb_acquire +\nexo_page_map" {class: u}
+  }
+
+  doomstack: "Inside Doom" {
+    class: doom
+    style.fill: "#FFF8EE"
+    grid-columns: 1
+    engine: "Doom engine\nvendored doomgeneric, unmodified" {class: doom}
+    platform: "Platform layer, 6 functions\nDG_Init · DG_DrawFrame\nDG_SleepMs · DG_GetTicksMs\nDG_GetKey · DG_SetWindowTitle" {class: doom}
+    sound: "Sound + music modules\nPCM sfx, speaker fallback,\nMUS/MIDI → OPL3 synth" {class: doom}
+  }
+}
+
+gate: "syscall / sysretq  ·  41 numbers (#0–#40, #9–#16 reserved and never bound)  ·  pointer arguments validated against the LibOS window" {
+  class: gate
+}
+
+ring0: "RING 0  ·  the exokernel (freestanding C + x86-64 assembly, no libc)" {
+  class: zone
+  grid-columns: 2
+  style.stroke: "#4F46E5"
+  style.font-color: "#4F46E5"
+
+  own: "Ownership and secure binding" {
+    class: k
+    style.fill: "#F5F5FE"
+    grid-columns: 3
+    pages: "Page owner table\nFREE · KERNEL · context id" {class: k}
+    fbs: "Per-context virtual\nframebuffer (RAM shadow)" {class: k}
+    disk: "Disk extent table\nper owner, per device" {class: k}
+    snd: "Sound voices (shared)\n+ music stream (bound)" {class: k}
+    rev: "Reclamation\nexo_exit and relaunch free\neverything a context held" {class: warn}
+    comp: "Compositor\ncopies foreground shadow\nto the real framebuffer" {class: k}
+  }
+
+  drivers: "Drivers" {
+    class: k
+    style.fill: "#F5F5FE"
+    grid-columns: 5
+    pit: "PIT\n1 kHz" {class: k}
+    ps2: "PS/2 kbd\n+ mouse" {class: k}
+    usb: "UHCI +\nHID kbd (polled)" {class: k}
+    ata: "ATA PIO +\nblock registry" {class: k}
+    hda: "Intel HDA\n+ PCM mixer" {class: k}
+    spk: "PC speaker" {class: k}
+    rtc: "CMOS RTC" {class: k}
+    ser: "COM1 serial" {class: k}
+    pci: "PCI" {class: k}
+    acpi: "ACPI tables\n(read-only)" {class: k}
+  }
+
+  mem: "Memory" {
+    class: k
+    style.fill: "#F5F5FE"
+    grid-columns: 4
+    mmap: "Multiboot 2\nmemory map" {class: k}
+    pmm: "Bitmap page allocator\n(4 KiB pages)" {class: k}
+    heap0: "Bump allocator →\nkernel heap" {class: k}
+    vmm: "4-level page tables\nper-LibOS PML4" {class: k}
+  }
+
+  sched: "Contexts" {
+    class: k
+    style.fill: "#F5F5FE"
+    grid-columns: 4
+    ctx: "Context table\n(15 slots)" {class: k}
+    sw: "Context switch\nCR3 swap + iretq" {class: k}
+    launch: "Image loader\nexo_launch / exo_launch_pkg" {class: k}
+    yield: "Round-robin policy\nexo_yield · Ctrl+Tab" {class: k}
+  }
+
+  irq: "Interrupts and faults" {
+    class: k
+    style.fill: "#F5F5FE"
+    grid-columns: 4
+    idt: "IDT · TSS\n256 gates" {class: k}
+    pic: "8259 PIC\nremapped to 0x20–0x2F" {class: k}
+    fault: "#PF / #GP reports\nwith live page walk" {class: k}
+    dispatch: "Syscall dispatch\ntable of 41 handlers" {class: k}
+  }
+
+  inv: "Kernel invariants\nsupervisor-only mappings · one CPU, IF clear for the whole syscall\nbuilt -mno-sse, so no XMM state is saved on entry" {
+    class: note
+    style.font-size: 15
+    style.font-color: "#3730A3"
+    style.stroke: "#C7D2FE"
+    style.stroke-dash: 3
+    style.italic: false
+  }
+}
+
+irqband: "↑ IRQs  ·  ↓ port I/O · MMIO · DMA (drivers are the only code that touches hardware; ring-3 in/out raises #GP)" {class: gate; style.fill: "#4B5563"; style.font-size: 14}
+
+hw: "HARDWARE  ·  QEMU x86-64, 256 MiB, VESA framebuffer from GRUB (Multiboot 2)" {
+  class: zone
+  style.stroke: "#5B6B7F"
+  style.font-color: "#5B6B7F"
+  grid-columns: 10
+  a: "8254 PIT\n+ speaker gate" {class: hw}
+  b: "8042 PS/2" {class: hw}
+  c: "UHCI USB" {class: hw}
+  d: "IDE disks" {class: hw}
+  e: "Intel HDA" {class: hw}
+  f: "CMOS RTC" {class: hw}
+  g: "VESA\nframebuffer" {class: hw}
+  h: "16550 UART" {class: hw}
+  i: "PCI bus" {class: hw}
+  j: "ACPI / firmware\ntables" {class: hw}
+}
+
+legend: "Key" {
+  class: note
+  style.font-size: 14
+  style.italic: false
+  grid-columns: 6
+  l1: "ring 3 LibOS" {class: u}
+  l2: "Doom" {class: doom}
+  l3: "ring 0 kernel" {class: k}
+  l4: "refusal / reclaim" {class: warn}
+  l5: "boundary" {class: gate}
+  l6: "hardware" {class: hw}
+}

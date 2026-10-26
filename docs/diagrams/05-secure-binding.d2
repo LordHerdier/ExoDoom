@@ -1,0 +1,93 @@
+# 05 Secure binding: how the kernel tracks, checks and takes back every resource.
+# Sources: src/page_alloc.c/h, src/syscall_mem.c, src/fb_shadow.c, src/fb_binding.c,
+#          src/fb_compositor.c, src/disk_binding.c, src/syscall_disk.c,
+#          src/syscall_sound.c, src/syscall_exit.c, src/revoke.c,
+#          docs/syscall_spec.md sections 3.3 - 3.7
+...@style
+grid-columns: 1
+grid-gap: 14
+
+title: "ExoDoom: secure binding\nThe kernel records who owns each resource and checks it on every use. It never decides what a LibOS does with what it owns." {
+  class: note
+  style.font-size: 18
+  style.italic: false
+  style.font-color: "#111827"
+}
+
+idea: "" {
+  style.fill: transparent
+  style.stroke: transparent
+  grid-rows: 1
+  grid-columns: 3
+  grid-gap: 10
+  i1: "1  BIND\nA resource syscall tags the resource\nwith the caller's context id" {class: u; style.font-size: 16}
+  i2: "2  ENFORCE\nEvery later use is checked against that tag;\nanother context's use is refused" {class: k; style.font-size: 16}
+  i3: "3  RECLAIM\nThe kernel can take it back: on exit,\non relaunch, or by revocation" {class: warn; style.font-size: 16}
+}
+
+table: "Five kinds of resource, one rule" {
+  class: zone
+  style.stroke: "#4F46E5"
+  style.font-color: "#4F46E5"
+  grid-rows: 6
+  grid-columns: 6
+  grid-gap: 6
+
+  h1: "Resource" {class: gate}
+  h2: "Bound by" {class: gate}
+  h3: "Kernel's record" {class: gate}
+  h4: "Checked on" {class: gate}
+  h5: "Refused with" {class: gate}
+  h6: "Taken back by" {class: gate}
+
+  p1: "Physical page\n(4 KiB)" {class: hw}
+  p2: "exo_page_alloc  #0" {class: k}
+  p3: "Owner table, one entry per page\nFREE 0 · KERNEL 1 · context id\ntop bit = revocation mark" {class: k}
+  p4: "exo_page_map / unmap / free\nowner must be the caller and\nvaddr inside the 64–128 TiB window" {class: k}
+  p5: "-EXO_EPERM not the owner\n-EXO_EINVAL misaligned or\ndouble free" {class: warn}
+  p6: "reclaim_pages_owned()\nfree also unmaps the caller's\nstale mappings of that page" {class: k}
+
+  f1: "Framebuffer" {class: hw}
+  f2: "exo_fb_acquire  #4" {class: k}
+  f3: "Per-context virtual framebuffer:\nprivate RAM, same geometry\nas the real one (fb_shadow.c)" {class: k}
+  f4: "Real framebuffer range is refused to\nevery LibOS (fb_binding_check_map).\nOnly the compositor writes it." {class: k}
+  f5: "-EXO_EPERM on mapping the\nreal range · -EXO_ENOMEM ·\n-EXO_ENODEV (no framebuffer)" {class: warn}
+  f6: "fb_shadow_release()\nthe compositor shows the\nforeground context's shadow" {class: k}
+
+  d1: "Disk sectors" {class: hw}
+  d2: "exo_disk_acquire  #26\nor a volume slot assigned\nfrom the package manifest (#36)" {class: k}
+  d3: "Extent table per device:\nnon-overlapping ranges,\none extent per owner per device" {class: k}
+  d4: "exo_disk_read / write  #24 #25\nholder of that device, and the\nwhole range inside its extent" {class: k}
+  d5: "-EXO_EBUSY no binding\n-EXO_EINVAL outside the extent\n-EXO_EROFS read-only volume" {class: warn}
+  d6: "disk_binding_reclaim()\nand disk_binding_forget()" {class: k}
+
+  s1: "Sound voice\n(8 mixer voices)" {class: hw}
+  s2: "exo_sound_pcm  #28" {class: k}
+  s3: "The voice row holds the\nstarting context. The device\nitself is shared, not bound." {class: k}
+  s4: "exo_sound_pcm_stop / params\nonly on one's own voice;\nDoom priority picks who yields" {class: k}
+  s5: "-EXO_EPERM another's voice\n-EXO_EBUSY every voice is at\nleast as important" {class: warn}
+  s6: "syscall_sound_release()\nvoices and any PC speaker tone" {class: k}
+
+  m1: "Music stream\n(12-page ring)" {class: hw}
+  m2: "exo_sound_stream_write  #32\nfirst writer binds it" {class: k}
+  m3: "One holder at a time" {class: k}
+  m4: "stream write / stop\nonly by the holder" {class: k}
+  m5: "-EXO_EBUSY write\n-EXO_EPERM stop" {class: warn}
+  m6: "syscall_sound_release()" {class: k}
+}
+
+revoke: "Revocation: the kernel may ask for a resource back  ·  src/revoke.c" {
+  class: zone
+  style.stroke: "#C62828"
+  style.font-color: "#C62828"
+  direction: right
+  r1: "revoke_request(ctx, res)\nmark: \"I want this back\"\nowner and mappings unchanged" {class: k}
+  r2: "The LibOS returns it\nthe ordinary way\n(exo_page_free, release …)" {class: u}
+  r3: "revoke_force(ctx, res)\nthe kernel takes what is left.\nScoped to that one context." {class: warn}
+  r4: "revoke_all(ctx)\nsweeps pages, shadow, framebuffer\nbinding, disk extents, mappings" {class: warn}
+  r1 -> r2: "asks" {class: flow}
+  r2 -> r3: "if it does not" {class: flow; style.stroke-dash: 4}
+  r3 -> r4: "on teardown" {class: flow}
+}
+
+note: "Policy today is deliberately trivial: nothing asks on the boot path. exo_exit frees a context's resources directly; exo_launch and exo_launch_pkg call revoke_all() on the previous instance of an app." {class: note; style.font-size: 15}
