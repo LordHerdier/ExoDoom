@@ -107,6 +107,7 @@
 #include "libos_fs/exofs.h"
 #include "exo_volume.h"
 #include "ps2.h"
+#include "shell/shell_err.h"
 #include "shell/shell_firstboot.h"
 #include "shell/shell_help.h"
 #include "shell/shell_install.h"
@@ -178,7 +179,6 @@ static char shell_about_text[] = "ExoDoom shell LibOS\n";
 static char shell_unknown_prefix[] = "unknown command: ";
 static char shell_unknown_suffix[] = " (type 'help')\n";
 static char shell_help_nomatch_text[] = "help: no commands match '";
-static char shell_run_fail_text[] = "run: launch failed: err=";
 /* Admission lines (SCRUM-232). Deliberate wording: "needs N pages, M free" is
  * the demo line -- the kernel reported, the launcher decided. */
 static char shell_admit_refused_text[] = "run: refused: ";
@@ -196,8 +196,6 @@ static char shell_admit_oom_tail_text[] =
 static char shell_admit_fb_text[] = "run: framebuffer is held; taking it over\n";
 static char shell_memstat_fail_text[] = "memstat: query failed\n";
 static char shell_pslist_fail_text[] = "pslist: query failed\n";
-static char shell_fs_disk_busy_text[] = "disk busy: err=";
-static char shell_fs_mount_fail_text[] = "mount failed (run mkfs?): err=";
 static char shell_fs_ok_text[] = "ok\n";
 /* First boot (SCRUM-234). */
 static char shell_nosys_text[] = "no system volume";
@@ -206,14 +204,12 @@ static char shell_firstboot_skip_text[] =
     "not formatted: program commands will fail until the system volume exists\n";
 static char shell_firstboot_done_text[] =
     "system volume formatted; no programs installed\n";
-static char shell_firstboot_probe_text[] = "system volume: cannot check it: err=";
 static char shell_programs_none_text[] = "no programs installed\n";
 static char shell_run_nosuch_text[] = "run: no such program: ";
 static char shell_run_hint_text[] = "installed programs:\n";
 static char shell_install_nodev_text[] = "install: no source disk\n";
 static char shell_install_novol_text[] = "install: source disk has no volume\n";
 static char shell_install_empty_text[] = "install: source disk is empty\n";
-static char shell_install_busy_text[] = "install: ";
 static char shell_install_copying_text[] = "installing ";
 static char shell_install_done_text[] = "installed ";
 static char shell_install_bytes_text[] = " bytes)\n";
@@ -223,7 +219,6 @@ static char shell_install_toplevel_text[] =
     "install: wildcards only match files at the top of the install disk\n";
 static char shell_install_of_text[] = " of ";
 static char shell_install_files_text[] = " files\n";
-static char shell_fs_err_prefix[] = "error: err=";
 static char shell_fs_no_room_text[] = "mkfs: no room for shell volume on this disk\n";
 static char shell_ls_dir_suffix[] = "/\n";
 static char shell_ls_file_prefix[] = "  ";
@@ -271,6 +266,7 @@ static void shell_print_prompt(fb_console_t *con);
 static void shell_run_command(fb_console_t *con, const char *line);
 static void shell_write_u32(fb_console_t *con, uint32_t v);
 static void shell_write_i64(fb_console_t *con, int64_t v);
+static void shell_err_report(fb_console_t *con, shell_op_t op, int64_t err);
 static void shell_run_memstat(fb_console_t *con, const char *arg);
 static void shell_run_pslist(fb_console_t *con, const char *arg);
 static int shell_cmd_match(const char *line, const char *cmd, const char **rest);
@@ -792,7 +788,7 @@ static void shell_write_u32(fb_console_t *con, uint32_t v) {
 }
 
 /* Decimal, signed -- for printing a negative EXO_E* error code alongside
- * shell_fs_err_prefix/shell_fs_disk_busy_text/shell_fs_mount_fail_text.
+ * shell_err_report().
  * INT64_MIN is never reached here (every EXO_E* code is a tiny negative
  * int), so negating it unconditionally is safe. */
 static void shell_write_i64(fb_console_t *con, int64_t v) {
@@ -809,6 +805,26 @@ static void shell_write_i64(fb_console_t *con, int64_t v) {
         u /= 10;
     } while (u != 0);
     fbcon_write(con, &buf[i]);
+}
+
+/* Print "<lead>: <sentence>" for a failed `op` (SCRUM-271). The numeric code
+ * follows only when shell_err_text() had no sentence of its own for it, so
+ * an unmapped failure stays greppable. */
+static void shell_err_report(fb_console_t *con, shell_op_t op, int64_t err) {
+    int mapped = 0;
+    const char *lead = shell_err_lead(op);
+    const char *text = shell_err_text(op, err, &mapped);
+    if (lead != NULL) {
+        fbcon_write(con, lead);
+        fbcon_write(con, ": ");
+    }
+    fbcon_write(con, text);
+    if (!mapped) {
+        fbcon_write(con, " (err=");
+        shell_write_i64(con, err);
+        fbcon_write(con, ")");
+    }
+    fbcon_write(con, "\n");
 }
 
 /*
@@ -1093,17 +1109,13 @@ static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
                                           const shell_volref_t *v) {
     int64_t rc = exo_disk_acquire(v->dev, v->extent_base, v->extent_count);
     if (rc != 0) {
-        fbcon_write(con, shell_fs_disk_busy_text);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_DISK, rc);
         return 0;
     }
 
     int mrc = exofs_mount(v->dev, v->base, &shell_cur_vol);
     if (mrc != 0) {
-        fbcon_write(con, shell_fs_mount_fail_text);
-        shell_write_i64(con, mrc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_MOUNT, mrc);
         exo_disk_release(v->dev);
         return 0;
     }
@@ -1432,9 +1444,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         int rc0 = exofs_opendir(shell_cur_vol, "/", &dir);
         if (rc0 != 0) {
             shell_fs_release();
-            fbcon_write(con, shell_fs_err_prefix);
-            shell_write_i64(con, rc0);
-            fbcon_write(con, "\n");
+            shell_err_report(con, SHELL_OP_FS, rc0);
             return;
         }
         int best = 0;
@@ -1489,9 +1499,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
     int rc = exofs_stat(shell_cur_vol, path, &st);
     if (rc != 0) {
         shell_fs_release();
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
 
@@ -1499,9 +1507,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
      * disk reads on it: a wrong-sized file is a bad argument, not ENOMEM. */
     if (st.size == 0 || st.size > EXO_LAUNCH_PKG_MAX_LEN) {
         shell_fs_release();
-        fbcon_write(con, shell_run_fail_text);
-        shell_write_i64(con, -EXO_EINVAL);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_RUN, -EXO_EINVAL);
         return;
     }
 
@@ -1512,9 +1518,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
     uint8_t *pkg = libos_heap_alloc(st.size);
     if (pkg == NULL) {
         shell_fs_release();
-        fbcon_write(con, shell_run_fail_text);
-        shell_write_i64(con, -EXO_ENOMEM);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_RUN, -EXO_ENOMEM);
         return;
     }
 
@@ -1536,9 +1540,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
 
     if (rc != 0 || have != st.size) {
         libos_heap_free(pkg);
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc != 0 ? rc : -EXO_EIO);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc != 0 ? rc : -EXO_EIO);
         return;
     }
 
@@ -1591,9 +1593,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         shell_write_u32(con, exo_resstat(&res) == 0 ? res.free_pages : 0);
         fbcon_write(con, shell_admit_oom_tail_text);
     } else {
-        fbcon_write(con, shell_run_fail_text);
-        shell_write_i64(con, lrc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_RUN, lrc);
     }
 }
 
@@ -1612,9 +1612,7 @@ static int shell_format_volume(fb_console_t *con, uint32_t base_lba,
                                uint32_t region_end_lba) {
     int64_t rc = shell_disk_acquire_for(base_lba);
     if (rc != 0) {
-        fbcon_write(con, shell_fs_disk_busy_text);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_DISK, rc);
         return 0;
     }
 
@@ -1634,9 +1632,7 @@ static int shell_format_volume(fb_console_t *con, uint32_t base_lba,
     exo_disk_release(SHELL_SYS_DEV);
 
     if (frc != 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, frc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, frc);
         return 0;
     }
     return 1;
@@ -1678,9 +1674,7 @@ static void shell_firstboot_check(fb_console_t *con) {
         return;
     }
     if (state == SHELL_FIRSTBOOT_ERROR) {
-        fbcon_write(con, shell_firstboot_probe_text);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_PROBE, rc);
         return;
     }
 
@@ -1758,9 +1752,7 @@ static void shell_run_programs(fb_console_t *con, const char *arg) {
     rc = exofs_opendir(shell_cur_vol, "/", &dir);
     if (rc != 0) {
         shell_fs_release();
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
 
@@ -1782,9 +1774,7 @@ static int shell_install_mount_src(fb_console_t *con) {
         return 0;
     }
     if (rc != 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return 0;
     }
     return 1;
@@ -1801,9 +1791,7 @@ static void shell_install_list(fb_console_t *con) {
     int rc = exofs_opendir(shell_cur_vol, "/", &dir);
     if (rc != 0) {
         exofs_unmount(shell_cur_vol);
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
     int found = 0;
@@ -1859,10 +1847,7 @@ static void shell_run_install(fb_console_t *con, const char *arg) {
         return;
     }
     if (arc != 0) {
-        fbcon_write(con, shell_install_busy_text);
-        fbcon_write(con, shell_fs_disk_busy_text);
-        shell_write_i64(con, arc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_INSTALL, arc);
         return;
     }
 
@@ -1890,9 +1875,7 @@ static void shell_run_install(fb_console_t *con, const char *arg) {
     arc = shell_disk_acquire_for(LIBOS_WAD_DISK_BASE_LBA);
     if (arc != 0) {
         exo_disk_release(SHELL_SRC_DEV);
-        fbcon_write(con, shell_fs_disk_busy_text);
-        shell_write_i64(con, arc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_DISK, arc);
         return;
     }
 
@@ -1944,9 +1927,7 @@ static void shell_run_install(fb_console_t *con, const char *arg) {
         int crc = shell_install_copy(&src, &dst, one, buf, chunk, &copied);
         if (crc != 0) {
             /* One bad file does not stop the rest of a pattern. */
-            fbcon_write(con, shell_fs_err_prefix);
-            shell_write_i64(con, crc);
-            fbcon_write(con, "\n");
+            shell_err_report(con, SHELL_OP_FS, crc);
             continue;
         }
         ok++;
@@ -1969,9 +1950,7 @@ static void shell_run_install(fb_console_t *con, const char *arg) {
     } else if (rc == -EXO_EINVAL && glob) {
         fbcon_write(con, shell_install_toplevel_text);
     } else if (rc != 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
     } else if (glob && count > 0) {
         fbcon_write(con, shell_install_done_text);
         shell_write_u32(con, ok);
@@ -2000,9 +1979,7 @@ static void shell_run_mkdir(fb_console_t *con, const char *arg) {
     shell_fs_release();
 
     if (rc != 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
     fbcon_write(con, shell_fs_ok_text);
@@ -2026,9 +2003,7 @@ static void shell_run_ls(fb_console_t *con, const char *arg) {
     int rc = exofs_opendir(shell_cur_vol, rt.inner, &dir);
     if (rc != 0) {
         shell_fs_release();
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
 
@@ -2089,9 +2064,7 @@ static void shell_run_cat(fb_console_t *con, const char *arg) {
         : exofs_open(shell_cur_vol, rt.inner, EXOFS_O_READ, &f);
     if (orc != 0) {
         shell_fs_release();
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, orc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, orc);
         return;
     }
 
@@ -2104,9 +2077,7 @@ static void shell_run_cat(fb_console_t *con, const char *arg) {
         exofs_close(&f);
         shell_fs_release();
         if (wrc < 0) {
-            fbcon_write(con, shell_fs_err_prefix);
-            shell_write_i64(con, wrc);
-            fbcon_write(con, "\n");
+            shell_err_report(con, SHELL_OP_FS, wrc);
             return;
         }
         fbcon_write(con, shell_fs_ok_text);
@@ -2117,9 +2088,7 @@ static void shell_run_cat(fb_console_t *con, const char *arg) {
     for (;;) {
         int64_t got = exofs_read(&f, buf, sizeof(buf));
         if (got < 0) {
-            fbcon_write(con, shell_fs_err_prefix);
-            shell_write_i64(con, got);
-            fbcon_write(con, "\n");
+            shell_err_report(con, SHELL_OP_FS, got);
             break;
         }
         if (got == 0) {
@@ -2165,9 +2134,7 @@ static void shell_run_rm(fb_console_t *con, const char *arg) {
     shell_fs_release();
 
     if (rc != 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
     fbcon_write(con, shell_fs_ok_text);
@@ -2212,9 +2179,7 @@ static int shell_fs_copy_or_move(fb_console_t *con, const shell_route_t *src,
         }
     }
     if (arc != 0) {
-        fbcon_write(con, shell_fs_disk_busy_text);
-        shell_write_i64(con, arc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_DISK, arc);
         return 1;
     }
 
@@ -2277,9 +2242,7 @@ static void shell_run_cp(fb_console_t *con, const char *arg) {
         return;
     }
     if (rc != 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
     fbcon_write(con, shell_fs_ok_text);
@@ -2369,9 +2332,7 @@ static void shell_run_mv(fb_console_t *con, const char *arg) {
     }
 
     if (rc != 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
     fbcon_write(con, shell_fs_ok_text);
@@ -2404,9 +2365,7 @@ static void shell_run_touch(fb_console_t *con, const char *arg) {
     shell_fs_release();
 
     if (rc != 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
     fbcon_write(con, shell_fs_ok_text);
@@ -2436,9 +2395,7 @@ static void shell_run_cd(fb_console_t *con, const char *arg) {
     shell_fs_release();
 
     if (rc != 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
 
@@ -2687,17 +2644,13 @@ static void shell_run_mount(fb_console_t *con, const char *arg) {
         return;
     }
     if (empty < 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, empty);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, empty);
         return;
     }
 
     int rc = shell_mount_add(&shell_mounts, rt.abs, &vi->ref);
     if (rc != 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
     fbcon_write(con, shell_fs_ok_text);
@@ -2800,9 +2753,7 @@ static void shell_run_dd_read(fb_console_t *con, const char *rest) {
                         &f);
     if (rc != 0) {
         shell_fs_release();
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
 
@@ -2822,9 +2773,7 @@ static void shell_run_dd_read(fb_console_t *con, const char *rest) {
     shell_fs_release();
 
     if (rc != 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
     fbcon_write(con, shell_fs_ok_text);
@@ -2873,9 +2822,7 @@ static void shell_run_dd_write(fb_console_t *con, const char *rest) {
     int rc = exofs_open(shell_cur_vol, path, EXOFS_O_READ, &f);
     if (rc != 0) {
         shell_fs_release();
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
 
@@ -2915,9 +2862,7 @@ static void shell_run_dd_write(fb_console_t *con, const char *rest) {
     shell_fs_release();
 
     if (rc != 0) {
-        fbcon_write(con, shell_fs_err_prefix);
-        shell_write_i64(con, rc);
-        fbcon_write(con, "\n");
+        shell_err_report(con, SHELL_OP_FS, rc);
         return;
     }
     fbcon_write(con, shell_fs_ok_text);
