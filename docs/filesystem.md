@@ -554,7 +554,7 @@ mount starts with stale slots occupied. `exo_file_close_all()` exists for
 exactly that point. Call it before `exofs_unmount()`.
 
 **No mount policy, one default volume.** The path-taking calls
-(`exo_file_open`, `exo_file_stat`, and `mkdir` through the stdio backend) take
+(`exo_file_open`, `exo_file_stat`, `exo_file_remove`, `exo_file_rename`, and `mkdir` through the stdio backend) take
 no volume, so they resolve against the one the program named with
 `exo_file_set_volume()` after mounting. An open descriptor keeps the volume it
 was opened on, so changing the default does not move it. A default that has
@@ -572,8 +572,13 @@ byte. **`fclose` is the durability point**: `fflush` pushes the bytes out but
 the directory entry (size, chain head) is only rewritten by `exo_file_close`
 (§6c Durability), so close every `FILE` before `exofs_unmount()`.
 
-`remove`/`rename` are not here yet. They are SCRUM-106, over `exofs_unlink`
-and `exofs_rename` (§1.4).
+**`exo_file_remove` / `exo_file_rename`** (SCRUM-106) are one-line wrappers
+over `exofs_unlink` and `exofs_rename` (§1.4) on the default volume; errors
+pass through unchanged. Remove refuses a directory (`-EXO_EISDIR`) and an open
+file (`-EXO_EBUSY`), so close first. Rename never replaces (`-EXO_EEXIST`;
+remove the target first) and never copies data; within a directory an open
+descriptor stays valid. libc `remove()`/`rename()` on the `FILE*` shim are not
+wired up.
 
 ---
 
@@ -830,10 +835,10 @@ volumes, and the two-path copy.
 | `exofs_path.c/.h` | Path parsing and resolution (§7). |
 | `exofs_dir.c/.h` | `mkdir`/`rmdir`/`opendir`/`readdir`, `rename` (§1.4), and the `.`/`..` bootstrap (§6b). |
 | `exofs_file.c` | `open`/`read`/`write`/`seek`/`stat`/`unlink` (§6c). |
-| `exo_file.c/.h` | The descriptor table over `exofs_file.c`: `exo_file_open`/`close`/`read`/`write`/`seek`/`stat`/`close_all`, and the default volume they resolve paths against, `exo_file_set_volume` (§6d, SCRUM-44, SCRUM-265). |
+| `exo_file.c/.h` | The descriptor table over `exofs_file.c`: `exo_file_open`/`close`/`read`/`write`/`seek`/`stat`/`remove`/`rename`/`close_all`, and the default volume they resolve paths against, `exo_file_set_volume` (§6d, SCRUM-44, SCRUM-265). |
 | `tests/kernel/test_exofs_multivol_k.c` | Several volumes mounted at once: interleaved I/O, the pool limit, the same volume twice, stale handles, and a copy between two mounted volumes. |
 | `tests/kernel/test_exofs_k.c` | The whole suite, 105 tests, ending in the ticket's end-to-end acceptance path. |
-| `tests/kernel/test_exo_file_k.c` | The `exo_file` suite: descriptor errors, the access/seek/truncate/append pass-throughs, durability across a remount, and SCRUM-44's acceptance path. |
+| `tests/kernel/test_exo_file_k.c` | The `exo_file` suite: descriptor errors, the access/seek/truncate/append pass-throughs, durability across a remount, remove/rename (SCRUM-106), and SCRUM-44's acceptance path. |
 
 ### Building it
 
