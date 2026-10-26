@@ -1,4 +1,4 @@
-.PHONY: docker-build docker-run docker-run-kernel docker-run-blank run-blank run-keep docker-test docker-build-doom docker-link-doom clean
+.PHONY: docker-build docker-run docker-run-kernel docker-run-blank run-blank run-keep docker-test docker-build-doom docker-link-doom demo-rehearse clean
 
 DEBUG ?= 0
 # AUDIO_PROFILE=1 compiles in the MUSPROF/HDAPROF serial timing reports
@@ -189,6 +189,13 @@ run-blank: docker-build
 	rm -f build/exodoom_blank.img
 	truncate -s "$$(stat -c %s build/exodoom_disk.img)" build/exodoom_blank.img
 	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_blank.img,format=raw,if=ide,index=0 $(QEMU_DISK2_ARGS) -device intel-hda -device hda-output,audiodev=snd0 $(HOST_QEMU_AV_ARGS) $(QEMU_USB_ARGS) -no-reboot -serial stdio
+
+# Rehearse the client demo unattended (SCRUM-121, docs/demo.md): run-blank's
+# machine, but headless and driven over QMP; screenshots and serial land in
+# build/demo/. Fails if any of tools/demo/demo.script's `expect` lines does
+# not hold.
+demo-rehearse: docker-build
+	DEMO_QEMU_DEVICES='$(QEMU_DISK2_ARGS) $(QEMU_USB_ARGS)' tools/demo/rehearse.sh
 
 # Boot an existing disk image as it is, so what a program wrote survives
 # (SCRUM-267: Doom's savegames live in its volume slot on the image).
