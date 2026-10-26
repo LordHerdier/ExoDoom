@@ -467,7 +467,7 @@ pass-through rather than a translation table.
 | `EXO_EFBIG` | 27 | File too large | not yet — reserved for `exo_file_write` |
 | `EXO_ENOSPC` | 28 | Volume full | no syscall — LibOS ExoFS / `exo_file_write` |
 | `EXO_ESPIPE` | 29 | Seek on a non-seekable descriptor | not yet — reserved for `exo_file_seek` |
-| `EXO_EROFS` | 30 | Write attempted on a read-only filesystem | not yet — reserved for `exo_file_write` (e.g. a memory-mapped WAD reader, §4.1) |
+| `EXO_EROFS` | 30 | Write attempted on a read-only filesystem or binding | `exo_disk_write` (#25) into an extent bound read-only (§3.5a "Read-only program volume", SCRUM-75); also `fopen` for writing in the libc shim |
 | `EXO_ENOSYS` | 38 | Syscall number not implemented, or out of range | `exo_syscall_dispatch` (`src/syscall.c`) for every unbound number — #9–16, which are reserved and stay unbound (§3.2) |
 
 **"0 on success" is the default, not a universal rule.** Several bound
@@ -969,6 +969,20 @@ no *other* context may bind anything overlapping it (`-EXO_EBUSY`), whether
 or not the owner currently holds it. So a volume stays private across the
 owner's release/re-acquire, and a program cannot gain access to someone
 else's sectors by asking for them — only by being packaged with the slot.
+### Read-only program volume (SCRUM-75)
+
+A manifest can instead ask for the **program volume** (`EXO_PKG_WANT_PROGRAM_RO`,
+`progvol` in `exopkg`; needs `EXO_PKG_WANT_DISK`, excludes a private volume).
+The launcher assigns `[LIBOS_WAD_DISK_BASE_LBA, EXO_VOLUME_REGION_BASE_LBA)`
+via `disk_binding_assign_ro()`, so the program reads files `install` put there
+(Doom reads its IWAD this way). It differs from a private volume in three ways:
+the assignment is **read-only** (`exo_disk_write` → `-EXO_EROFS`, checked before
+the buffer), it grants **no exclusivity** (the shell still binds those sectors
+read-write), and **read-only holders may overlap each other** but never a
+read-write extent — either order is `-EXO_EBUSY`. `exo_disk_extent` (#37)
+reports it like any assignment. Consequence: while such a program holds the
+volume, the shell's `programs`/`run`/`install` find it busy.
+
 The program learns its extent from `exo_disk_extent` (#37). A second package
 claiming a slot that a live context already holds -- or whose sectors another
 context currently holds, a whole-device claim included -- is refused at launch

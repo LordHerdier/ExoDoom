@@ -1,6 +1,7 @@
 #include "kunit.h"
 
 #include "context.h"
+#include "disk_binding.h"
 #include "exo_syscall.h"
 #include "fb_binding.h"
 #include "fb_shadow.h"
@@ -51,6 +52,36 @@ static void test_exit_reclaims_pages_and_framebuffer(void)
     if (shadow_rc == FB_SHADOW_OK) {
         CU_ASSERT_NOT_EQUAL(fb_shadow_lookup(owner, &shadow_phys), 0);
     }
+}
+
+/* SCRUM-75: exiting while holding the program volume read-only must free it
+ * for everyone else at once -- not at the next launch's reap. */
+static void test_exit_releases_disk_binding_and_assignment(void)
+{
+    page_owner_t owner = syscall_current_context();
+    uint32_t base, count;
+
+    if (!disk_binding_present(0))
+        return;
+
+    disk_binding_init();
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(owner, 5000, 64), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(owner, 0, 5000, 64),
+                    DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(
+        exo_syscall_dispatch(EXO_SYS_EXIT, 0, 0, 0, 0, 0, 0), 0);
+
+    CU_ASSERT_EQUAL(disk_binding_extent_of(owner, 0, &base, &count),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assignment_of(owner, &base, &count),
+                    DISK_BIND_EBUSY);
+    /* A writer (the shell) can now take the sectors. */
+    page_owner_t other = (page_owner_t)(owner + 1);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(other, 0, 5000, 64),
+                    DISK_BIND_OK);
+    disk_binding_release(other, 0);
+    disk_binding_init();
 }
 
 static void test_exit_does_not_reclaim_kernel_page(void)
@@ -126,6 +157,8 @@ void suite_syscall_exit_tests(CU_pSuite s)
                 test_exit_handler_is_bound);
     CU_add_test(s, "exit reclaims pages and framebuffer",
                 test_exit_reclaims_pages_and_framebuffer);
+    CU_add_test(s, "exit releases disk binding and assignment",
+                test_exit_releases_disk_binding_and_assignment);
     CU_add_test(s, "exit preserves kernel pages",
                 test_exit_does_not_reclaim_kernel_page);
     CU_add_test(s, "exit blocks outgoing context from round-robin",

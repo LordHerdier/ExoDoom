@@ -541,8 +541,123 @@ static void test_assign_refuses_a_volume_someone_else_holds(void)
                     DISK_BIND_OK);
 }
 
+/* ── Read-only program-volume grant (SCRUM-75) ──────────────────────────── */
+
+static void test_ro_assignment_binds_only_that_extent_read_only(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+    /* Exactly the assigned extent, like a private volume. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 5000, 32),
+                    DISK_BIND_EPERM);
+    CU_ASSERT_EQUAL(disk_binding_acquire(PAGE_OWNER_LIBOS, 0), DISK_BIND_EPERM);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+
+    /* Reads are in range; writes are refused as read-only, and a write
+     * outside the extent is still just out of range. */
+    CU_ASSERT_EQUAL(disk_binding_check_range(PAGE_OWNER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_write(PAGE_OWNER_LIBOS, 0, 5000, 1),
+                    DISK_BIND_EROFS);
+    CU_ASSERT_EQUAL(disk_binding_check_write(PAGE_OWNER_LIBOS, 0, 6000, 1),
+                    DISK_BIND_ERANGE);
+
+    /* The syscall maps it to -EXO_EROFS, ahead of the buffer check. */
+    CU_ASSERT_EQUAL(do_disk_write(5000, 0, 1), -EXO_EROFS);
+    CU_ASSERT_EQUAL(do_disk_write(6000, 0, 1), -EXO_EINVAL);
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+}
+
+static void test_rw_holder_is_unaffected_by_check_write(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_write(PAGE_OWNER_LIBOS, 0, 5000, 1),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_write(OTHER_LIBOS, 0, 5000, 1),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+}
+
+static void test_ro_holders_share_but_never_with_a_writer(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(OTHER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);   /* no exclusivity among readers */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);   /* two readers at once */
+
+    /* A writer (a context with no assignment) overlapping a reader: busy. */
+    page_owner_t writer = (page_owner_t)(PAGE_OWNER_LIBOS + 2);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(writer, 0, 5010, 4),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+    disk_binding_release(OTHER_LIBOS, 0);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(writer, 0, 5010, 4),
+                    DISK_BIND_OK);
+    /* ...and a reader against a writer's held extent: busy too. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(writer, 0);
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+    disk_binding_forget(OTHER_LIBOS);
+}
+
+static void test_ro_assignment_does_not_fence_others_out(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+    /* The shell must still be able to bind the program volume writable. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_write(OTHER_LIBOS, 0, 5000, 1),
+                    DISK_BIND_OK);
+    disk_binding_release(OTHER_LIBOS, 0);
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+
+    /* One assignment per context, and a bad range is rejected. */
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 9000, 8),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(OTHER_LIBOS, 5000, 0),
+                    DISK_BIND_ERANGE);
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+}
+
+static void test_ro_assignment_refuses_a_private_volume_overlap(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(OTHER_LIBOS, 5000, 64), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 5010, 100),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 6000, 100),
+                    DISK_BIND_OK);   /* disjoint is fine */
+    disk_binding_forget(OTHER_LIBOS);
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+}
+
 void suite_disk_binding_tests(CU_pSuite s)
 {
+    CU_add_test(s, "read-only assignment refuses a private volume overlap",
+                test_ro_assignment_refuses_a_private_volume_overlap);
+    CU_add_test(s, "read-only assignment binds one extent, read-only",
+                test_ro_assignment_binds_only_that_extent_read_only);
+    CU_add_test(s, "read-write holder is unaffected by check_write",
+                test_rw_holder_is_unaffected_by_check_write);
+    CU_add_test(s, "read-only holders share, never with a writer",
+                test_ro_holders_share_but_never_with_a_writer);
+    CU_add_test(s, "read-only assignment does not fence others out",
+                test_ro_assignment_does_not_fence_others_out);
     CU_add_test(s, "revoke pending is per owner",
                 test_revoke_pending_is_per_owner);
     CU_add_test(s, "owner is free with several holders",

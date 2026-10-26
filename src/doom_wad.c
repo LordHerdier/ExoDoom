@@ -84,6 +84,27 @@ int doom_wad_mount(const void *data, uint32_t size)
     return DOOM_WAD_OK;
 }
 
+static doom_lump_source_fn lump_source;
+
+void doom_wad_set_lump_source(doom_lump_source_fn fn)
+{
+    lump_source = fn;
+}
+
+const uint8_t *doom_wad_lump(const char *name, uint32_t *size)
+{
+    if (name == NULL || size == NULL) {
+        return NULL;
+    }
+    if (lump_source != NULL) {
+        return lump_source(name, size);
+    }
+    if (!mounted) {
+        return NULL;
+    }
+    return wad_find_lump(&g_mounted.wad, name, size);
+}
+
 const doom_wad_t *doom_wad_mounted(void)
 {
     return mounted ? &g_mounted : (const doom_wad_t *)0;

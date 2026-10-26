@@ -59,6 +59,13 @@
 #define EXO_PKG_WANT_WAD         (1u << 3) /* mount the IWAD and patch the program's
                                             * first .data global (params_len must be
                                             * sizeof(libos_wad_params_t), 16), SCRUM-232 */
+#define EXO_PKG_WANT_PROGRAM_RO  (1u << 4) /* may bind the program volume (the one
+                                            * `install` writes packages and the IWAD
+                                            * to) read-only: exo_disk_acquire of the
+                                            * extent exo_disk_extent (#37) reports,
+                                            * reads only (SCRUM-75). Needs
+                                            * EXO_PKG_WANT_DISK; excludes a private
+                                            * volume of its own. */
 
 /* Negative sentinel returns for exo_pkg_pack()/exo_pkg_parse(). Deliberately
  * NOT src/exo_errno.h's -EXO_E* space: that header is kernel/LibOS-only and
@@ -101,7 +108,7 @@
  * v1 parser never silently accepts a request it does not understand. */
 #define EXO_PKG_WANT_ALL (EXO_PKG_WANT_FRAMEBUFFER | EXO_PKG_WANT_DISK | \
                           EXO_PKG_WANT_KEYBOARD | \
-                          EXO_PKG_WANT_WAD)
+                          EXO_PKG_WANT_WAD | EXO_PKG_WANT_PROGRAM_RO)
 
 typedef struct {
     uint32_t magic;   /* EXO_PKG_MAGIC */
@@ -226,6 +233,15 @@ static inline int exo_pkg_check_header(const exo_pkg_header_t *hdr) {
         if (hdr->volume_slot >= EXO_VOLUME_MAX_SLOTS)
             return EXO_PKG_EINVAL;
         if (hdr->volume_sectors > EXO_VOLUME_SLOT_SECTORS)
+            return EXO_PKG_EINVAL;
+    }
+
+    /* One assignment per program (src/disk_binding.h): a private volume and
+     * the program volume are alternatives, and either is a disk resource. */
+    if (hdr->want_flags & EXO_PKG_WANT_PROGRAM_RO) {
+        if (!(hdr->want_flags & EXO_PKG_WANT_DISK))
+            return EXO_PKG_EINVAL;
+        if (hdr->volume_sectors != 0)
             return EXO_PKG_EINVAL;
     }
 

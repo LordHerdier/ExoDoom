@@ -107,6 +107,22 @@ static int64_t check_disk_access(uint32_t dev, uint64_t lba, uint64_t count)
     }
 }
 
+/* check_disk_access() for a write: a read-only binding (SCRUM-75) is the
+ * program volume shared with other contexts, so a write into it is
+ * -EXO_EROFS, distinct from -EXO_EINVAL (outside the extent) and -EXO_EBUSY
+ * (nothing held). */
+static int64_t check_disk_write_access(uint32_t dev, uint64_t lba,
+                                       uint64_t count)
+{
+    switch (disk_binding_check_write(syscall_current_context(), dev, lba,
+                                     count)) {
+    case DISK_BIND_OK:     return 0;
+    case DISK_BIND_ERANGE: return -EXO_EINVAL;
+    case DISK_BIND_EROFS:  return -EXO_EROFS;
+    default:                return -EXO_EBUSY;
+    }
+}
+
 /* #24 -- read `count` sectors of device `dev` starting at `lba` into `buf`. */
 static int64_t sys_disk_read(uint64_t dev, uint64_t lba, uint64_t buf,
                              uint64_t count, uint64_t a5, uint64_t a6)
@@ -151,7 +167,7 @@ static int64_t sys_disk_write(uint64_t dev, uint64_t lba, uint64_t buf,
     if (bd == NULL)
         return -EXO_ENODEV;
 
-    v = check_disk_access((uint32_t)dev, lba, count);
+    v = check_disk_write_access((uint32_t)dev, lba, count);
     if (v < 0)
         return v;
 

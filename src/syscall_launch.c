@@ -32,6 +32,11 @@
  *                       where "the multiboot WAD module" in some of the
  *                       comments below still refers to.
  *
+ *   LAUNCH_PROGRAM_RO   assign the program volume to the new context,
+ *                       read-only (SCRUM-75), so it can read files off it
+ *                       itself. Doom reads its IWAD that way; it is
+ *                       what replaced LAUNCH_NEEDS_WAD's preload for it.
+ *
  *   LAUNCH_RELEASES_FB  release whoever currently holds the framebuffer
  *                       binding before entering.
  *
@@ -91,6 +96,9 @@ extern const uint8_t _binary_libos_doom_data_bin_end[];
 
 #define LAUNCH_NEEDS_WAD    (1u << 0)
 #define LAUNCH_RELEASES_FB  (1u << 1)
+#define LAUNCH_PROGRAM_RO   (1u << 2) /* assign the program volume read-only
+                                       * (SCRUM-75; EXO_PKG_WANT_PROGRAM_RO
+                                       * for #36) */
 
 typedef struct {
     const uint8_t *code_start;
@@ -121,7 +129,7 @@ static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
         _binary_libos_doom_data_bin_start,
         _binary_libos_doom_data_bin_end,
         LIBOS_DOOM_BSS_LEN,
-        LAUNCH_NEEDS_WAD | LAUNCH_RELEASES_FB,
+        LAUNCH_PROGRAM_RO | LAUNCH_RELEASES_FB,
     },
 };
 
@@ -396,6 +404,18 @@ static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
         return -EXO_ENOMEM;
     }
 
+    if (app->flags & LAUNCH_PROGRAM_RO) {
+        int arc = disk_binding_assign_ro(id, LIBOS_WAD_DISK_BASE_LBA,
+                                         EXO_VOLUME_REGION_BASE_LBA -
+                                             LIBOS_WAD_DISK_BASE_LBA);
+        if (arc != DISK_BIND_OK) {
+            revoke_all(id);
+            context_destroy(id);
+            return arc == DISK_BIND_EBUSY ? -EXO_EBUSY
+                 : arc == DISK_BIND_ENODEV ? -EXO_ENODEV : -EXO_EINVAL;
+        }
+    }
+
     if (app->flags & LAUNCH_NEEDS_WAD) {
         int64_t wrc = launch_attach_wad(id, &launch_img, wad_paddr, wad_size);
         if (wrc != 0) {
@@ -522,15 +542,22 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
      * may bind (SCRUM-237). Done after the image exists but before the
      * program runs, and undone with the context if it cannot be granted --
      * another running program already holds that slot, say. */
+    int arc = DISK_BIND_OK;
     if (hdr.volume_sectors != 0) {
-        int arc = disk_binding_assign(id, exo_volume_slot_base(hdr.volume_slot),
-                                      hdr.volume_sectors);
-        if (arc != DISK_BIND_OK) {
-            revoke_all(id);
-            context_destroy(id);
-            return arc == DISK_BIND_EBUSY ? -EXO_EBUSY
-                 : arc == DISK_BIND_ENODEV ? -EXO_ENODEV : -EXO_EINVAL;
-        }
+        arc = disk_binding_assign(id, exo_volume_slot_base(hdr.volume_slot),
+                                  hdr.volume_sectors);
+    } else if (hdr.want_flags & EXO_PKG_WANT_PROGRAM_RO) {
+        /* SCRUM-75: the program volume, read-only -- the extent the shell
+         * binds read-write (shell_main.c shell_disk_acquire_for()). */
+        arc = disk_binding_assign_ro(id, LIBOS_WAD_DISK_BASE_LBA,
+                                     EXO_VOLUME_REGION_BASE_LBA -
+                                         LIBOS_WAD_DISK_BASE_LBA);
+    }
+    if (arc != DISK_BIND_OK) {
+        revoke_all(id);
+        context_destroy(id);
+        return arc == DISK_BIND_EBUSY ? -EXO_EBUSY
+             : arc == DISK_BIND_ENODEV ? -EXO_ENODEV : -EXO_EINVAL;
     }
 
     if (wants_wad) {

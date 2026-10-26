@@ -89,6 +89,7 @@ void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
 void suite_exofs_tests(CU_pSuite s);
 void suite_exo_file_tests(CU_pSuite s);
+void suite_stdio_exofs_tests(CU_pSuite s);
 void suite_multidisk_tests(CU_pSuite s);
 void suite_shell_install_tests(CU_pSuite s);
 void suite_doom_wad_disk_tests(CU_pSuite s);
@@ -595,6 +596,10 @@ int run_tests(void)
      * failure should be reported there first (SCRUM-44). */
     s = CU_add_suite("exo_file", exo_file_suite_init, exo_file_suite_cleanup);
     suite_exo_file_tests(s);
+
+    /* fopen/fread over ExoFS (SCRUM-42/75): same volume fixture as exo_file. */
+    s = CU_add_suite("stdio_exofs", exo_file_suite_init, exo_file_suite_cleanup);
+    suite_stdio_exofs_tests(s);
 
     /* After "exofs" and "disk_binding": the two-drive acceptance suite
      * (SCRUM-244) builds an ExoFS volume on each device, so a failure in

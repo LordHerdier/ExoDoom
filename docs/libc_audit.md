@@ -11,7 +11,7 @@
 > | 25 `MISSING` (23 functions + `stdout`/`stderr`) | **0** |
 > | `printf` had no precision (§3.1) | precision, length modifiers, `%X`/`%o`/`%f`, `%n`, `*` width |
 > | 8 functions called with no prototype (§3.2) | all declared; `strncmp`/`strrchr`/`strstr`/`strdup` implemented |
-> | no `FILE*` | memory-mapped reader over registered blobs (`exo_file_register_blob`) |
+> | no `FILE*` | `fopen` over a pluggable backend: ExoFS when mounted (`exo_file_stdio_install`), else registered blobs (`exo_file_register_blob`) |
 >
 > `docker/scripts/link-doom.sh` (`make docker-link-doom`, run by CI) is the
 > gate that keeps it true: it compiles the shim as a ring-3 LibOS target,

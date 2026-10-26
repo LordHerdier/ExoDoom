@@ -38,9 +38,9 @@ typedef struct {
  *     under this name onto build/exodoom_disk.img's ExoFS volume;
  *   - src/syscall_launch.c's LAUNCH_NEEDS_WAD path opens this same name
  *     (absolute path "/" + this) when mounting that volume at launch time;
- *   - src/doomgeneric_exo.c's DOOM_IWAD_BLOB_NAME is this value, because
- *     Doom's D_FindIWAD() -> fopen() has to find the blob DG_Init registers
- *     under the name it actually searches for.
+ *   - src/doomgeneric_exo.c's DOOM_IWAD_NAME is this value, because
+ *     Doom's D_FindIWAD() -> fopen() has to find the file on the program
+ *     volume under the name it actually searches for (SCRUM-75).
  *
  * One #define here rather than three independent string literals is what
  * build.sh's own build-time consistency check (step [1b/7]) can verify
