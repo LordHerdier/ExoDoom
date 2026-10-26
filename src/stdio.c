@@ -996,6 +996,10 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
             stream->flags |= FFLAG_ERR;
             return 0;
         }
+        /* The size was fixed at fopen, so a backend that returns less than
+         * what is left means the file changed underneath: an error, not EOF. */
+        if ((size_t)r < got)
+            stream->flags |= FFLAG_ERR;
         got = (size_t)r;
     }
     stream->pos += got;

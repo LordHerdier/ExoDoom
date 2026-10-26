@@ -242,6 +242,13 @@ int disk_binding_assign_ro(page_owner_t who, uint32_t base, uint32_t count)
         count > DISK_BIND_LBA_LIMIT - base)
         return DISK_BIND_ERANGE;
 
+    /* Readers may share, but never with a private read-write volume: refuse
+     * here rather than let the launched program's acquire fail later. */
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        if (assigned[i].owner != PAGE_OWNER_FREE && !assigned[i].read_only &&
+            overlap(base, count, assigned[i].base, assigned[i].count))
+            return DISK_BIND_EBUSY;
+
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++) {
         if (assigned[i].owner == PAGE_OWNER_FREE) {
             assigned[i].owner     = who;

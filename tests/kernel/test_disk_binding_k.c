@@ -634,8 +634,22 @@ static void test_ro_assignment_does_not_fence_others_out(void)
     disk_binding_forget(PAGE_OWNER_LIBOS);
 }
 
+static void test_ro_assignment_refuses_a_private_volume_overlap(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(OTHER_LIBOS, 5000, 64), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 5010, 100),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 6000, 100),
+                    DISK_BIND_OK);   /* disjoint is fine */
+    disk_binding_forget(OTHER_LIBOS);
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+}
+
 void suite_disk_binding_tests(CU_pSuite s)
 {
+    CU_add_test(s, "read-only assignment refuses a private volume overlap",
+                test_ro_assignment_refuses_a_private_volume_overlap);
     CU_add_test(s, "read-only assignment binds one extent, read-only",
                 test_ro_assignment_binds_only_that_extent_read_only);
     CU_add_test(s, "read-write holder is unaffected by check_write",

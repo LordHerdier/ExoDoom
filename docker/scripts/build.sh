@@ -52,7 +52,7 @@ fi
 # -- The IWAD filename is spelled in two places; assert they agree --------
 #
 # LIBOS_WAD_FILE_NAME (src/libos_wad_params.h) is the one #define
-# src/doomgeneric_exo.c's DOOM_IWAD_BLOB_NAME and src/syscall_launch.c's
+# src/doomgeneric_exo.c's DOOM_IWAD_NAME and src/syscall_launch.c's
 # ExoFS open both now source their copy of this name from (SCRUM-190) --
 # see that header's own comment for the three places that have to agree.
 # Before SCRUM-190 a third spelling (src/grub.cfg's module2 line) had to
@@ -579,12 +579,9 @@ echo "[2f/7] Build Doom LibOS (SCRUM-66)"
 # point, per build_ring3_link_target()'s $5.. doc. This one leads with
 # src/doomgeneric_exo.c instead, and the difference is deliberate:
 #
-#   .data offset 0 -- libos_launch_patch_params() (src/libos_launch.c) writes
-#     the WAD address/length through img.data_paddrs[0], i.e. offset 0 of the
-#     .data blob, which is the first .data global of the first object on this
-#     command line. That global has to be g_doom_params (src/doomgeneric_exo.c),
-#     because DG_Init() is what reads it. Its own comment in that file states
-#     both halves of the requirement.
+#   .data offset 0 -- no longer load-bearing (SCRUM-75): g_doom_params, the
+#     WAD launch params this ordering used to protect, is gone; the order is
+#     kept only so the .text.entry arrangement below stays unchanged.
 #
 #   .text offset 0 -- libos_build_image() enters at the base of the code blob.
 #     libos_doom_main() gets there via __attribute__((section(".text.entry")))

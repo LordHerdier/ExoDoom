@@ -20,6 +20,8 @@ static int efs_open(const char *path)
     abs[n++] = '/';
     while (*path == '/')
         path++;
+    if (*path == '\0')
+        return -EXO_ENOENT;   /* "" or "/" names no file; not the root dir */
     for (; *path != '\0'; path++) {
         if (n + 1 >= sizeof abs)
             return -EXO_EINVAL;

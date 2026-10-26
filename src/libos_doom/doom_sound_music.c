@@ -343,9 +343,10 @@ void doom_music_play(void *handle, int looping, uint32_t now_ms)
     if (handle != &g_song || !g_song_open || g_dead)
         return;
 
-    /* Looked up per song, not cached: g_genmidi points into the mounted WAD's
-     * lump, and a cache would outlive an unmount or a remount.  It is a
-     * directory lookup and a header check, once per level. */
+    /* Looked up per song, not cached: g_genmidi points into the lump
+     * doom_wad_lump() returned (the engine's PU_STATIC cache in ring 3, the
+     * mounted WAD in kernel tests), and a cache here would outlive a remount.
+     * It is a name lookup and a header check, once per level. */
     uint32_t gm_size = 0;
     const uint8_t *gm = doom_wad_lump("GENMIDI", &gm_size);
 

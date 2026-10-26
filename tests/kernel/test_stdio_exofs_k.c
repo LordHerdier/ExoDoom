@@ -154,6 +154,11 @@ static void test_missing_and_write_modes(void)
     CU_ASSERT_EQUAL(errno, ENOENT);
 
     errno = 0;
+    CU_ASSERT_PTR_NULL(fopen("", "r"));      /* not the root directory */
+    CU_ASSERT_EQUAL(errno, ENOENT);
+    CU_ASSERT_PTR_NULL(fopen("/", "r"));
+
+    errno = 0;
     CU_ASSERT_PTR_NULL(fopen("cfg.txt", "w"));
     CU_ASSERT_EQUAL(errno, EROFS);
     teardown();
