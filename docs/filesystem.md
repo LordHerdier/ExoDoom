@@ -802,8 +802,9 @@ program's (`docs/syscall_spec.md` §3.5a).
   both are stored as paths. `cp` within a volume is as before.
 - Between volumes, `cp` and `mv` use
   `shell_copy_vols()` (the two-path form of `install`'s copy, §8 "Install"):
-  chunked, both volumes mounted for the whole copy (`shell_copy_vols()`),
-  destination removed on failure. This needs both volumes bound at once, and the binding is one extent per owner per device, so
+  chunked, both volumes mounted for the whole copy, destination removed on
+  failure. This needs both volumes bound at once, and the binding is one
+  extent per owner per device, so
   **a copy between two volumes of the same disk is refused**; between
   different disks it works.
 - `mkfs`, `run`, `programs`, `install`, `dd` and first boot keep their fixed
