@@ -66,6 +66,19 @@
 int fb_shadow_acquire(page_owner_t who, exo_fb_info_t *info_out);
 
 /*
+ * fb_shadow_acquire(), then overwrite the buffer with whatever the real
+ * framebuffer shows right now (SCRUM-192), so the first frame composited
+ * for `who` is the current screen rather than black. Same return codes.
+ *
+ * Only correct while what is on screen belongs to no other context: it
+ * copies those pixels into memory `who` will map. kernel_main() uses it
+ * exactly once, for the boot shell, while the screen still holds the
+ * kernel's own boot console. Anywhere else it would hand one LibOS another's
+ * frame, so every other launch keeps fb_shadow_acquire()'s zeroed buffer.
+ */
+int fb_shadow_seed_from_screen(page_owner_t who);
+
+/*
  * Drop `who`'s directory entry and free the underlying pages (SCRUM-187) —
  * see this header's own top comment. A no-op if `who` never acquired one, so
  * exit and revocation paths can call it unconditionally.

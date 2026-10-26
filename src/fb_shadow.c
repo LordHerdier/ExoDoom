@@ -1,5 +1,6 @@
 #include "fb_shadow.h"
 #include "fb_binding.h"
+#include "fb_copy.h"
 #include "page_alloc.h"
 #include "vmm.h"
 #include "string.h"
@@ -37,7 +38,10 @@ static fb_shadow_slot_t *find_free_slot(void) {
     return NULL;
 }
 
-int fb_shadow_acquire(page_owner_t who, exo_fb_info_t *info_out) {
+/* `zero` is 0 only for fb_shadow_seed_from_screen(), which overwrites the
+ * whole buffer straight afterwards. */
+static int shadow_acquire(page_owner_t who, exo_fb_info_t *info_out,
+                          int zero) {
     const fb_geometry_t *geom = fb_binding_geometry();
     if (geom == NULL) {
         return FB_SHADOW_ENODEV;
@@ -68,7 +72,9 @@ int fb_shadow_acquire(page_owner_t who, exo_fb_info_t *info_out) {
             return FB_SHADOW_ENOMEM;
         }
 
-        memset(base, 0, (size_t)page_count * PAGE_SIZE);
+        if (zero) {
+            fb_zero_bytes(base, (size_t)page_count * PAGE_SIZE);
+        }
 
         slot->present    = 1;
         slot->who        = who;
@@ -85,6 +91,27 @@ int fb_shadow_acquire(page_owner_t who, exo_fb_info_t *info_out) {
     info_out->reserved[1] = 0;
     info_out->reserved[2] = 0;
 
+    return FB_SHADOW_OK;
+}
+
+int fb_shadow_acquire(page_owner_t who, exo_fb_info_t *info_out) {
+    return shadow_acquire(who, info_out, 1);
+}
+
+int fb_shadow_seed_from_screen(page_owner_t who) {
+    exo_fb_info_t info;
+    int rc = shadow_acquire(who, &info, 0);
+    if (rc != FB_SHADOW_OK) {
+        return rc;
+    }
+
+    /* Non-NULL: fb_shadow_acquire() just succeeded off the same geometry. */
+    const fb_geometry_t *geom = fb_binding_geometry();
+    uint64_t fb_bytes = (uint64_t)geom->pitch * (uint64_t)geom->height;
+
+    fb_copy_bytes((void *)(uintptr_t)info.phys_addr,
+                  (const void *)(uintptr_t)geom->phys_addr,
+                  (size_t)fb_bytes);
     return FB_SHADOW_OK;
 }
 
