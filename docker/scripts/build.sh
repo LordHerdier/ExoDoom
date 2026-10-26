@@ -52,7 +52,7 @@ fi
 # -- The IWAD filename is spelled in two places; assert they agree --------
 #
 # LIBOS_WAD_FILE_NAME (src/libos_wad_params.h) is the one #define
-# src/doomgeneric_exo.c's DOOM_IWAD_BLOB_NAME and src/syscall_launch.c's
+# src/doomgeneric_exo.c's DOOM_IWAD_NAME and src/syscall_launch.c's
 # ExoFS open both now source their copy of this name from (SCRUM-190) --
 # see that header's own comment for the three places that have to agree.
 # Before SCRUM-190 a third spelling (src/grub.cfg's module2 line) had to
@@ -587,12 +587,9 @@ echo "[2f/7] Build Doom LibOS (SCRUM-66)"
 # point, per build_ring3_link_target()'s $5.. doc. This one leads with
 # src/doomgeneric_exo.c instead, and the difference is deliberate:
 #
-#   .data offset 0 -- libos_launch_patch_params() (src/libos_launch.c) writes
-#     the WAD address/length through img.data_paddrs[0], i.e. offset 0 of the
-#     .data blob, which is the first .data global of the first object on this
-#     command line. That global has to be g_doom_params (src/doomgeneric_exo.c),
-#     because DG_Init() is what reads it. Its own comment in that file states
-#     both halves of the requirement.
+#   .data offset 0 -- no longer load-bearing (SCRUM-75): g_doom_params, the
+#     WAD launch params this ordering used to protect, is gone; the order is
+#     kept only so the .text.entry arrangement below stays unchanged.
 #
 #   .text offset 0 -- libos_build_image() enters at the base of the code blob.
 #     libos_doom_main() gets there via __attribute__((section(".text.entry")))
@@ -622,6 +619,11 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/libos_doom/doom_opl.c src/nuked_opl3/opl3.c \
   src/libos_doom/doom_sound_music.c \
   src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c \
+  src/libos_fs/exofs_volume.c src/libos_fs/exofs_fat.c \
+  src/libos_fs/exofs_name.c src/libos_fs/exofs_dirent.c \
+  src/libos_fs/exofs_path.c src/libos_fs/exofs_dir.c \
+  src/libos_fs/exofs_file.c src/libos_fs/exofs_blockdev.c \
+  src/libos_fs/exo_file.c src/libos_fs/exo_file_stdio.c \
   src/doom/*.c
 
 echo "[2g/7] Package ring-3 targets and write the disk image (SCRUM-230, SCRUM-231)"
@@ -670,8 +672,8 @@ package_ring3_target libos_clock      src/libos_clock      clock.exo   fb,kbd
 package_ring3_target libos_top        src/libos_top        top.exo     fb,kbd
 package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,kbd,wad \
   --params-len 16
-package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd,wad \
-  --params-len 16 --sound-voices 8
+package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd,progvol \
+  --sound-voices 8
 # SCRUM-237: one program, two packages, each requesting a private volume
 # (docs/architecture.md, src/exo_volume.h). Only the slot differs.
 package_ring3_target libos_voldemo    src/libos_voldemo    voldemoa.exo fb,disk,kbd \
@@ -995,7 +997,7 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   #
   # Objects go to a scratch dir and are never added to $objs: the kernel
   # image links the -DEXO_KERNEL build, not this one.
-  exofs_r3_allowed="libos_heap_alloc libos_heap_free memcmp memcpy memset strlen"
+  exofs_r3_allowed="exo_stdio_set_backend libos_heap_alloc libos_heap_free memcmp memcpy memset strlen"
   rm -rf build/exofs_ring3 && mkdir -p build/exofs_ring3
   _compile_exofs_ring3_one() {
     local c="$1" o="$2"
@@ -1013,11 +1015,13 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     exit 1
   }
 
-  # nm -u lists undefined symbols. exofs_* ones resolve within the library
-  # itself once all the objects are linked together, so drop them and judge
-  # what is left.
+  # nm -u lists undefined symbols. exofs_* and exo_file_* ones resolve within
+  # the library itself once all the objects are linked together, so drop them
+  # and judge what is left. exo_stdio_set_backend (src/stdio.c, the libc shim)
+  # is what src/libos_fs/exo_file_stdio.c plugs into (SCRUM-42/75).
   exofs_r3_undef=$(x86_64-elf-nm -u build/exofs_ring3/*.o \
-                   | awk '{ print $2 }' | sort -u | grep -v '^exofs_' || true)
+                   | awk '{ print $2 }' | sort -u \
+                   | grep -v -e '^exofs_' -e '^exo_file_' || true)
   exofs_r3_bad=""
   for sym in ${exofs_r3_undef}; do
     case " ${exofs_r3_allowed} " in

@@ -134,7 +134,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | Fixed-point trigonometry | `src/fixed_math.c/h` |
 | Vendored Doom engine (`libos_doom` ring-3 target) | `src/doom/`, `src/libos_doom/` |
 | doomgeneric platform layer | `src/doomgeneric_exo.c/h` |
-| Doom net stub / fatal-error path / mounted IWAD registry | `src/doom_net_stub.c`, `src/doom_panic.c/h`, `src/doom_wad.c/h`, `src/doom_wad_disk.c/h` |
+| Doom net stub / fatal-error path / mounted IWAD registry (kernel tests; ring-3 Doom reads the IWAD via FILE* over ExoFS) | `src/doom_net_stub.c`, `src/doom_panic.c/h`, `src/doom_wad.c/h`, `src/doom_wad_disk.c/h` |
 | Shell mount table + path router (`mount`/`umount`, pure logic, TESTING-kernel suite) | `src/shell/shell_mount.c/h` (used from `src/shell/shell_main.c`) |
 | LibOS apps | `src/shell/`, `src/libos_wad_viewer/`, `src/libos_clock/`, … |
 | Test framework | `src/kunit.h`, `tests/kernel/*.c`, `tests/kernel/kunit.c`, `tests/kernel/ring3_probe.s` |
@@ -191,7 +191,8 @@ area.
 - ExoFS is LibOS code over `exo_disk_*`; disk buffers come from
   `libos_heap_alloc()`, never `malloc()`; unmount before releasing the disk;
   write ordering is load-bearing. → `docs/filesystem.md` §1, §8, "Pitfalls".
-- `fopen` is a read-only blob reader; writes fail (`EROFS`) on purpose.
+- `fopen` is read-only; writes fail (`EROFS`) on purpose. Its source is a
+  pluggable backend: ExoFS in ring-3 Doom, the blob table elsewhere.
   → `docs/architecture.md` §7, `docs/libc_audit.md`.
 - Doom's net layer is two booleans; flipping `drone` silently freezes the
   game; `FEATURE_MULTIPLAYER` must stay undefined. → `docs/architecture.md` §7

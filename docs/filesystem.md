@@ -480,8 +480,9 @@ is help nobody asked for.
 
 `exofs.h` hands out caller-allocated `exofs_file_t` handles and has no
 descriptor table on purpose. `exo_file.c` (SCRUM-44) is that table, the layer
-a libc-style caller sits on. It is the API the `FILE*` shim (SCRUM-42) will
-use. Like the rest of this directory it is **LibOS code, not a syscall**:
+a libc-style caller sits on. The `FILE*` shim (SCRUM-42, `src/libos_fs/exo_file_stdio.c`) is built on it:
+`exo_file_stdio_install()` points `fopen`/`fread`/`fseek` at it, which is how
+Doom reads the IWAD (`docs/architecture.md` §7). Like the rest of this directory it is **LibOS code, not a syscall**:
 dispatcher numbers #9–16 were once reserved for kernel file syscalls and are
 now permanently unbound (`docs/syscall_spec.md` §3.2, §4).
 

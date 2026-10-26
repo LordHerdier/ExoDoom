@@ -1,6 +1,7 @@
 #pragma once
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /*
  * Freestanding stdio stub (SCRUM-20).
@@ -61,6 +62,10 @@ int kvprintf(void (*emit)(int c, void *ctx), void *ctx,
  *     module the kernel mapped at LIBOS_WAD_VADDR -- 28 MB that is never
  *     copied, because there is nowhere to copy it to.
  *   - fread/fseek/ftell/feof are offset arithmetic over that window.
+ *
+ * (SCRUM-75: that is the default. A program that has mounted ExoFS installs
+ * a backend, exo_stdio_set_backend below, and the same calls then read real
+ * files; ring-3 Doom reads its IWAD that way and registers no blob.)
  *   - fopen() for WRITING FAILS, and that is deliberate. Doom writes a
  *     config file and savegames; a write that silently went nowhere would
  *     surface much later as a config that never persists or a savegame that
@@ -175,3 +180,36 @@ int exo_file_register_blob(const char *name, const void *data, size_t size);
 /* Forget every registered blob. For tests, which register a series of them
  * and must not leave one behind for the next suite. */
 void exo_file_reset_blobs(void);
+
+/*
+ * ---------------------------------------------------------------------------
+ * exo_stdio_set_backend -- NOT a standard stdio function (SCRUM-75/42).
+ * ---------------------------------------------------------------------------
+ *
+ * Where a real file comes from. A program that has mounted a filesystem
+ * installs a backend, and fopen("r") then opens through it instead of
+ * looking in the blob table; a name the backend does not have fails with
+ * the errno its open reported, it does not fall back to a blob. With no
+ * backend installed (the default, and every program that does not link a
+ * filesystem) fopen behaves exactly as it always has.
+ *
+ * The backend is a table of functions rather than a direct call into
+ * src/libos_fs/exo_file.h so that src/stdio.c, which every ring-3 target and
+ * the kernel link, does not drag ExoFS into all of them.
+ * src/libos_fs/exo_file_stdio.c supplies the ExoFS one.
+ *
+ * All four return a negative EXO_E* code (numerically the errno value) on
+ * failure; open returns a handle >= 0, read the byte count (0 at end of
+ * file), seek the new absolute position, close 0.
+ */
+typedef struct {
+    int     (*open)(const char *path);
+    int64_t (*read)(int handle, void *buf, size_t n);
+    int64_t (*seek)(int handle, int64_t off, int whence);
+    int     (*close)(int handle);
+} exo_stdio_backend_t;
+
+/* Install (or, with NULL, remove) the backend. Streams already open keep the
+ * backend they were opened with. */
+void exo_stdio_set_backend(const exo_stdio_backend_t *backend);
+

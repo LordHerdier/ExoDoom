@@ -726,6 +726,8 @@ struct _exo_file {
     size_t               size;
     size_t               pos;
     unsigned             flags;
+    const exo_stdio_backend_t *be; /* NULL for a blob or console stream  */
+    int                  handle;   /* the backend's handle, when be != NULL */
 };
 
 /*
@@ -741,6 +743,13 @@ typedef struct {
     const unsigned char *data;
     size_t               size;
 } blob_t;
+
+static const exo_stdio_backend_t *stdio_backend;
+
+void exo_stdio_set_backend(const exo_stdio_backend_t *backend)
+{
+    stdio_backend = backend;
+}
 
 static blob_t   blobs[EXO_FILE_MAX];
 static unsigned blob_count;
@@ -825,6 +834,76 @@ static blob_t *find_blob(const char *path)
     return NULL;
 }
 
+/*
+ * Open `path` through the installed backend. The stream's size is found once
+ * here (seek to the end and back) so fseek(SEEK_END) and fread's end-of-file
+ * test stay the same bookkeeping the blob streams use; the backend's own
+ * position is only touched when bytes are actually read.
+ */
+static FILE *open_backend(const char *path)
+{
+    const exo_stdio_backend_t *be = stdio_backend;
+    unsigned i;
+    int      h;
+    int64_t  size;
+
+    for (i = 0; i < EXO_FILE_MAX; i++) {
+        if ((file_table[i].flags & FFLAG_INUSE) == 0)
+            break;
+    }
+    if (i == EXO_FILE_MAX) {
+        errno = EMFILE;
+        return NULL;
+    }
+
+    h = be->open(path);
+    if (h < 0) {
+        errno = -h;
+        return NULL;
+    }
+
+    size = be->seek(h, 0, SEEK_END);
+    if (size < 0 || be->seek(h, 0, SEEK_SET) < 0) {
+        be->close(h);
+        errno = size < 0 ? (int)-size : EIO;
+        return NULL;
+    }
+
+    file_table[i].data   = NULL;
+    file_table[i].size   = (size_t)size;
+    file_table[i].pos    = 0;
+    file_table[i].flags  = FFLAG_INUSE | FFLAG_READ;
+    file_table[i].be     = be;
+    file_table[i].handle = h;
+    return &file_table[i];
+}
+
+/* Copy `n` bytes at the stream's position into `buf`; returns the count
+ * actually read, or -1 on a backend error. The caller has already clamped
+ * `n` to what is left in the file. */
+static int64_t stream_read(FILE *stream, void *buf, size_t n)
+{
+    size_t done = 0;
+
+    if (stream->be == NULL) {
+        memcpy(buf, stream->data + stream->pos, n);
+        return (int64_t)n;
+    }
+
+    if (stream->be->seek(stream->handle, (int64_t)stream->pos, SEEK_SET) < 0)
+        return -1;
+    while (done < n) {
+        int64_t got = stream->be->read(stream->handle,
+                                       (char *)buf + done, n - done);
+        if (got < 0)
+            return -1;
+        if (got == 0)
+            break;
+        done += (size_t)got;
+    }
+    return (int64_t)done;
+}
+
 FILE *fopen(const char *path, const char *mode)
 {
     blob_t  *blob;
@@ -841,6 +920,9 @@ FILE *fopen(const char *path, const char *mode)
         errno = EROFS;
         return NULL;
     }
+
+    if (stdio_backend != NULL)
+        return open_backend(path);
 
     blob = find_blob(path);
     if (blob == NULL) {
@@ -872,7 +954,12 @@ int fclose(FILE *stream)
     if (stream->flags & FFLAG_CONSOLE)
         return 0;
 
+    if (stream->be != NULL)
+        stream->be->close(stream->handle);
+
     stream->flags = 0;
+    stream->be    = NULL;
+    stream->handle = 0;
     stream->data  = NULL;
     stream->size  = 0;
     stream->pos   = 0;
@@ -902,7 +989,19 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
     avail = stream->size - stream->pos;
     got   = want < avail ? want : avail;
 
-    memcpy(ptr, stream->data + stream->pos, got);
+    {
+        int64_t r = stream_read(stream, ptr, got);
+
+        if (r < 0) {
+            stream->flags |= FFLAG_ERR;
+            return 0;
+        }
+        /* The size was fixed at fopen, so a backend that returns less than
+         * what is left means the file changed underneath: an error, not EOF. */
+        if ((size_t)r < got)
+            stream->flags |= FFLAG_ERR;
+        got = (size_t)r;
+    }
     stream->pos += got;
 
     if (got < want)
@@ -1568,7 +1667,15 @@ int fscanf(FILE *stream, const char *fmt, ...)
 
     avail = stream->size - stream->pos;
     n = avail < sizeof buf - 1 ? avail : sizeof buf - 1;
-    memcpy(buf, stream->data + stream->pos, n);
+    {
+        int64_t r = stream_read(stream, buf, n);
+
+        if (r < 0) {
+            stream->flags |= FFLAG_ERR;
+            return EOF;
+        }
+        n = (size_t)r;
+    }
     buf[n] = '\0';
 
     va_start(ap, fmt);

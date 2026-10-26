@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "context.h"
+#include "disk_binding.h"
 #include "exo_syscall.h"
 #include "fb_binding.h"
 #include "fb_shadow.h"
@@ -99,6 +100,14 @@ static int64_t sys_exit(uint64_t code, uint64_t a2, uint64_t a3,
      * whoever runs next. Tones are bounded (SOUND_TONE_MAX_MS) regardless,
      * but that bound is seconds, not "now". */
     syscall_sound_release(owner);
+    /* SCRUM-75: the disk too. A program that exits holding an extent (Doom
+     * holds the program volume for its whole run) must not leave it bound,
+     * or the shell finds the volume busy until the row is reaped by the next
+     * launch -- which itself needs the volume to read the package. The
+     * assigned volume lapses with it; the id is not reused while the row
+     * lives, and revoke_all() repeats both harmlessly when it is reaped. */
+    (void)disk_binding_reclaim(owner);
+    disk_binding_forget(owner);
     (void)reclaim_pages_owned(owner);
 
     /* SCRUM-178: hand off to whatever else is ready, exactly like
