@@ -283,6 +283,7 @@ for the user.
 
 | Topic | Doc |
 |---|---|
+| Overview for readers new to the project: architecture, syscall table, isolation guarantees, design rationale | `docs/exokernel-architecture.md` |
 | System design, boot sequence, LibOS/Doom path, build, roadmap | `docs/architecture.md` |
 | Syscall ABI, ownership and revocation, sound | `docs/syscall_spec.md` |
 | Paging, allocators, LibOS heap | `docs/memory.md` |
