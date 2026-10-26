@@ -222,28 +222,71 @@ static void test_empty_layout_is_fullscreen(void)
     fb_shadow_release(NO_PANE);
 }
 
-/* A shadow bigger than its pane (acquired first, pane assigned later) is
- * clipped to the pane rather than spilling past it. */
-static void test_oversized_shadow_is_clipped_to_the_pane(void)
+/* A shadow cannot be given a pane of another size: the buffer would not
+ * match it. The context stays full-screen. */
+static void test_pane_of_another_size_is_refused(void)
 {
     install_screen(0x00);
     fb_layout_reset();
 
     exo_fb_info_t info;
     CU_ASSERT_EQUAL(fb_shadow_acquire(PANE_LEFT, &info), FB_SHADOW_OK);
-    uint8_t *buf = (uint8_t *)(uintptr_t)info.phys_addr;
-    for (uint32_t i = 0; i < info.pitch * info.height; i++)
-        buf[i] = 0x55;
 
     fb_rect_t r = { 0, 0, 4, 4 };
-    CU_ASSERT_EQUAL(fb_layout_set(PANE_LEFT, &r), FB_LAYOUT_OK);
+    CU_ASSERT_EQUAL(fb_layout_set(PANE_LEFT, &r), FB_LAYOUT_EBUSY);
+    CU_ASSERT_EQUAL(fb_layout_count(), 0);
+
+    fb_shadow_release(PANE_LEFT);
+}
+
+/* A mode change that shrinks the screen below a stored pane must not make
+ * the compositor write past the new aperture. */
+static void test_pane_is_clipped_to_a_shrunken_screen(void)
+{
+    install_screen(0x00);
+    fb_layout_reset();
+
+    make_pane(PANE_LEFT, 8, 4, 8, 4, 0x77);
+
+    fb_geometry_t g = {
+        .phys_addr = (uint64_t)(uintptr_t)screen,
+        .width = 12, .height = 6, .pitch = SCR_PITCH, .bpp = SCR_BPP,
+    };
+    CU_ASSERT_EQUAL(fb_binding_init(&g), FB_BIND_OK);
+
+    /* Guard bytes: the 12x6 screen's pixels beyond column 11 and row 5 are
+     * outside what the compositor may touch. */
+    for (uint32_t i = 0; i < SCR_PITCH * SCR_H; i++)
+        screen[i] = 0x00;
 
     context_set_current(PANE_LEFT);
     fb_compositor_tick();
 
-    CU_ASSERT_EQUAL(px(3, 3), 0x55);
-    CU_ASSERT_EQUAL(px(4, 0), 0x00);
-    CU_ASSERT_EQUAL(px(0, 4), 0x00);
+    CU_ASSERT_EQUAL(px(11, 5), 0x77);
+    CU_ASSERT_EQUAL(px(12, 5), 0x00);
+    CU_ASSERT_EQUAL(px(11, 6), 0x00);
+
+    fb_shadow_release(PANE_LEFT);
+}
+
+/* A seeded pane starts from the screen's pixels under it, not black. */
+static void test_seeded_pane_starts_from_the_screen(void)
+{
+    install_screen(0x00);
+    fb_layout_reset();
+    for (uint32_t y = 0; y < SCR_H; y++)
+        for (uint32_t x = 0; x < SCR_W; x++)
+            screen[y * SCR_PITCH + x * BPP_BYTES] = (uint8_t)(y * 16 + x);
+
+    fb_rect_t r = { 2, 1, 4, 3 };
+    CU_ASSERT_EQUAL(fb_layout_set(PANE_LEFT, &r), FB_LAYOUT_OK);
+    CU_ASSERT_EQUAL(fb_shadow_seed_from_screen(PANE_LEFT), FB_SHADOW_OK);
+
+    fb_shadow_info_t info;
+    CU_ASSERT_EQUAL(fb_shadow_lookup_info(PANE_LEFT, &info), 0);
+    const uint8_t *buf = (const uint8_t *)(uintptr_t)info.phys_base;
+    CU_ASSERT_EQUAL(buf[0], (uint8_t)(1 * 16 + 2));
+    CU_ASSERT_EQUAL(buf[2 * info.pitch + 3 * BPP_BYTES], (uint8_t)(3 * 16 + 5));
 
     fb_shadow_release(PANE_LEFT);
 }
@@ -280,7 +323,11 @@ void suite_fb_compositor_tests(CU_pSuite s)
                 test_context_without_a_pane_is_fullscreen);
     CU_add_test(s, "empty layout is fullscreen",
                 test_empty_layout_is_fullscreen);
-    CU_add_test(s, "oversized shadow is clipped to the pane",
-                test_oversized_shadow_is_clipped_to_the_pane);
+    CU_add_test(s, "pane of another size is refused",
+                test_pane_of_another_size_is_refused);
+    CU_add_test(s, "pane is clipped to a shrunken screen",
+                test_pane_is_clipped_to_a_shrunken_screen);
+    CU_add_test(s, "seeded pane starts from the screen",
+                test_seeded_pane_starts_from_the_screen);
     CU_add_test(s, "dropped pane is cleared", test_dropped_pane_is_cleared);
 }

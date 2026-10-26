@@ -502,7 +502,7 @@ keeps a zeroed buffer, or it would see another context's pixels.
 several contexts at once. `src/fb_layout.c` is a small kernel-owned table of
 panes, each a context id plus a rect in real-screen pixels
 (`fb_layout_set/get/clear`, up to `FB_LAYOUT_MAX_PANES`; panes may overlap and
-draw in slot order). It is a kernel table rather than a launch parameter
+draw in slot order, so depth follows slot index, not assignment time). It is a kernel table rather than a launch parameter
 because a split has to be changeable at runtime, and because a launch-time
 parameter would have to fit #36, which only accepts the WAD params struct.
 A context with a pane gets a shadow buffer exactly the pane's size, tightly
@@ -511,13 +511,16 @@ the pane's width/height/pitch and Doom's nearest-neighbour scaler fills it
 unchanged. `fb_compositor_tick()` then has two modes: if the layout is empty,
 or `context_current()` has no pane, it does the full-screen copy it always did
 (the shell and wadview are unaffected, and the shell is the way back out of a
-split); otherwise it copies every pane's rows to its rect, clearing the
-background once whenever the table changes. The copy is per-row
+split); otherwise it copies every pane's rows to its rect on a change to the table
+(after clearing the background) and only the running context's pane on
+every other tick, clipped to the current screen geometry. The copy is per-row
 `fb_copy_bytes`, so it moves the same bytes as one full-screen copy and the
 kernel does no per-pixel scaling. `fb_shadow_release()` drops the pane, so
 `exo_exit` and revocation take a context out of the split. Not done: a pane
-must be assigned *before* the context's `exo_fb_acquire` (an existing buffer is
-clipped, not resized -- live resize needs Doom to rebuild its scale tables),
+must be assigned *before* the context's `exo_fb_acquire` (a pane may then move
+but `fb_layout_set` refuses a size change with `FB_LAYOUT_EBUSY` -- live
+resize needs Doom to rebuild its scale tables), and `context_destroy()` also
+drops the pane so a reused id cannot inherit one,
 and nothing user-facing assigns panes yet, so the split is exercised from tests
 (`test_fb_layout_k.c`, `test_fb_compositor_k.c`). Only the running context
 draws, so a pane that is not current shows its last frame until it is switched

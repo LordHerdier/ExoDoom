@@ -1,5 +1,6 @@
 #include "fb_layout.h"
 #include "fb_binding.h"
+#include "fb_shadow.h"
 
 #include <stddef.h>
 
@@ -33,6 +34,14 @@ int fb_layout_set(page_owner_t who, const fb_rect_t *rect) {
     if ((uint64_t)rect->x + rect->w > geom->width ||
         (uint64_t)rect->y + rect->h > geom->height) {
         return FB_LAYOUT_EINVAL;
+    }
+
+    /* The shadow was sized when it was acquired and cannot be resized, so a
+     * pane of another size would be silently clipped or padded. */
+    fb_shadow_info_t shadow;
+    if (fb_shadow_lookup_info(who, &shadow) == 0 &&
+        (shadow.width != rect->w || shadow.height != rect->h)) {
+        return FB_LAYOUT_EBUSY;
     }
 
     fb_layout_slot_t *slot = find_slot(who);

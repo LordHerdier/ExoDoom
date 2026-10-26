@@ -223,18 +223,20 @@ static void test_shadow_is_pane_sized(void)
     fb_shadow_release(PANE_B);
 }
 
-/* A re-acquire reports the buffer that exists, even if the pane has moved. */
+/* A re-acquire reports the buffer that exists; the pane may move but not
+ * resize once it has one. */
 static void test_reacquire_keeps_the_original_size(void)
 {
     install_test_fb();
     fb_layout_reset();
 
-    fb_rect_t r1 = { 0, 0, 16, 8 }, r2 = { 0, 0, 32, 16 };
+    fb_rect_t r1 = { 0, 0, 16, 8 }, r2 = { 8, 4, 16, 8 }, r3 = { 0, 0, 32, 16 };
     CU_ASSERT_EQUAL(fb_layout_set(PANE_A, &r1), FB_LAYOUT_OK);
 
     exo_fb_info_t first, second;
     CU_ASSERT_EQUAL(fb_shadow_acquire(PANE_A, &first), FB_SHADOW_OK);
     CU_ASSERT_EQUAL(fb_layout_set(PANE_A, &r2), FB_LAYOUT_OK);
+    CU_ASSERT_EQUAL(fb_layout_set(PANE_A, &r3), FB_LAYOUT_EBUSY);
     CU_ASSERT_EQUAL(fb_shadow_acquire(PANE_A, &second), FB_SHADOW_OK);
 
     CU_ASSERT_EQUAL(second.phys_addr, first.phys_addr);

@@ -124,12 +124,33 @@ int fb_shadow_acquire(page_owner_t who, exo_fb_info_t *info_out) {
 }
 
 int fb_shadow_seed_from_screen(page_owner_t who) {
-    /* A pane-sized buffer cannot hold the whole screen: seed it as an
-     * ordinary zeroed acquire instead (SCRUM-197). */
+    /* A pane-sized buffer cannot hold the whole screen: seed it with the
+     * screen's own pixels under the pane instead (SCRUM-197), so a split
+     * context has no black first frame either. */
     fb_rect_t pane;
     if (fb_layout_get(who, &pane) == 0) {
         exo_fb_info_t info;
-        return shadow_acquire(who, &info, 1);
+        int rc = shadow_acquire(who, &info, 1);
+        const fb_geometry_t *g = fb_binding_geometry();
+        if (rc != FB_SHADOW_OK || g == NULL ||
+            pane.x >= g->width || pane.y >= g->height) {
+            return rc;
+        }
+
+        uint32_t bytes_pp = (uint32_t)(g->bpp / 8u);
+        uint32_t w = info.width  < g->width  - pane.x ? info.width  : g->width  - pane.x;
+        uint32_t h = info.height < g->height - pane.y ? info.height : g->height - pane.y;
+
+        uint8_t       *dst = (uint8_t *)(uintptr_t)info.phys_addr;
+        const uint8_t *src = (const uint8_t *)(uintptr_t)g->phys_addr +
+                             (size_t)pane.y * g->pitch +
+                             (size_t)pane.x * bytes_pp;
+        for (uint32_t y = 0; y < h; y++) {
+            fb_copy_bytes(dst, src, (size_t)w * bytes_pp);
+            dst += info.pitch;
+            src += g->pitch;
+        }
+        return FB_SHADOW_OK;
     }
 
     exo_fb_info_t info;

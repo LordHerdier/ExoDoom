@@ -26,8 +26,11 @@ static void composite_fullscreen(const fb_geometry_t *geom, page_owner_t who) {
                   (size_t)fb_bytes);
 }
 
-/* Split path (SCRUM-197): every pane in the layout table, one row at a time. */
-static void composite_panes(const fb_geometry_t *geom) {
+/* Split path (SCRUM-197): the panes in the layout table, one row at a time.
+ * `only` restricts the pass to one context's pane; PAGE_OWNER_FREE means all.
+ * Only the running context draws, so after a full pass the other panes
+ * already hold their latest frame. */
+static void composite_panes(const fb_geometry_t *geom, page_owner_t only) {
     uint32_t bytes_pp = (uint32_t)(geom->bpp / 8u);
 
     for (int i = 0; ; i++) {
@@ -36,6 +39,18 @@ static void composite_panes(const fb_geometry_t *geom) {
         if (fb_layout_pane(i, &who, &rect) != 0) {
             break;
         }
+        if (only != PAGE_OWNER_FREE && who != only) {
+            continue;
+        }
+
+        /* fb_layout_set() validated the rect against the geometry of the
+         * day; fb_binding_init() can republish a smaller one since. Clip to
+         * the screen as it is now rather than write past the aperture. */
+        if (rect.x >= geom->width || rect.y >= geom->height) {
+            continue;
+        }
+        if (rect.w > geom->width - rect.x)  rect.w = geom->width - rect.x;
+        if (rect.h > geom->height - rect.y) rect.h = geom->height - rect.y;
 
         /* A context that has not called exo_fb_acquire yet shows as the
          * cleared background until it does. */
@@ -93,9 +108,11 @@ void fb_compositor_tick(void) {
                       (size_t)geom->pitch * (size_t)geom->height);
         was_split = 1;
         last_generation = generation;
+        composite_panes(geom, PAGE_OWNER_FREE);
+        return;
     }
 
-    composite_panes(geom);
+    composite_panes(geom, current);
 }
 
 void fb_compositor_service(void) {

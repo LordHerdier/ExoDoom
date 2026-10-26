@@ -26,18 +26,26 @@
  *   - fb_compositor_tick() walks the table and blits every pane.
  *
  * Because the shadow is sized when it is first acquired, a pane has to be
- * assigned BEFORE the context's exo_fb_acquire. Assigning one afterwards is
- * allowed but does not resize the existing buffer; the compositor clips to
- * the smaller of the two. Live resize is a separate story.
+ * assigned BEFORE the context's exo_fb_acquire. Once the context holds a
+ * shadow its pane may still move, but not change size: fb_layout_set()
+ * refuses with FB_LAYOUT_EBUSY rather than leave a buffer that does not
+ * match its pane. Live resize is a separate story.
+ *
+ * Concurrency: the table has no lock. Its writers (exo_exit, revocation,
+ * context_destroy) and its reader (fb_compositor_tick, from syscall
+ * dispatch) all run with IF clear, so they cannot interleave on one CPU. A
+ * future caller that can run with interrupts enabled needs a lock first.
  *
  * A context with no pane is not part of the split: the compositor falls
  * back to showing context_current() full-screen when that context has none,
  * so the shell, wadview and friends are unaffected and the shell stays
  * reachable.
  *
- * Panes may overlap; they are drawn in slot order, so a later-assigned pane
- * lands on top of an earlier one (re-setting a context's pane keeps its
- * slot, and with it its depth).
+ * Panes may overlap; they are drawn in slot order, lowest slot first, so the
+ * higher slot lands on top. A free slot is reused first-fit, so depth follows
+ * slot index and NOT assignment time: clear a low pane and assign a new one
+ * and the new pane takes the low slot, underneath the others. (Re-setting a
+ * context's pane keeps its slot, and with it its depth.)
  *
  * Like fb_shadow.h this module is ABI-agnostic: it speaks FB_LAYOUT_*
  * status codes, and nothing exposes it to ring 3 yet.
@@ -57,12 +65,15 @@ typedef struct {
 #define FB_LAYOUT_OK       0
 #define FB_LAYOUT_EINVAL (-1)  /* no framebuffer, empty rect, or off-screen   */
 #define FB_LAYOUT_ENOSPC (-2)  /* FB_LAYOUT_MAX_PANES panes already assigned  */
+#define FB_LAYOUT_EBUSY  (-3)  /* owner already holds a shadow of another size */
 
 /*
  * Give `who` the pane `rect`, or move it if it already has one. Validated
  * against fb_binding_geometry(): the rect must be non-empty and lie wholly
  * on the published screen, and the framebuffer must be a whole number of
- * bytes per pixel. FB_LAYOUT_EINVAL otherwise (nothing changes).
+ * bytes per pixel. FB_LAYOUT_EINVAL otherwise (nothing changes). If `who`
+ * already holds a virtual framebuffer, the rect must have that buffer's
+ * width and height: FB_LAYOUT_EBUSY otherwise (nothing changes).
  */
 int fb_layout_set(page_owner_t who, const fb_rect_t *rect);
 
