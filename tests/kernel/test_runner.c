@@ -70,6 +70,8 @@ void suite_syscall_yield_tests(CU_pSuite s);
 void suite_shell_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
 void suite_fb_shadow_tests(CU_pSuite s);
+void suite_fb_layout_tests(CU_pSuite s);
+void suite_fb_compositor_tests(CU_pSuite s);
 void suite_fixed_math_tests(CU_pSuite s);
 void suite_doom_panic_tests(CU_pSuite s);
 void suite_dg_init_tests(CU_pSuite s);
@@ -215,6 +217,14 @@ int fb_binding_suite_cleanup(void);
  * (SCRUM-112). */
 int fb_shadow_suite_init(void);
 int fb_shadow_suite_cleanup(void);
+
+/* The split-screen suites (SCRUM-197) swap in synthetic geometries too, and
+ * the compositor one borrows a page for a RAM "screen" and sets
+ * context_current(); each restores all of it. */
+int fb_layout_suite_init(void);
+int fb_layout_suite_cleanup(void);
+int fb_compositor_suite_init(void);
+int fb_compositor_suite_cleanup(void);
 
 /* Same idea for the revocation suite: it borrows the framebuffer and allocates
  * pages under a second context id, and must leave neither behind (SCRUM-156). */
@@ -415,6 +425,14 @@ int run_tests(void)
     s = CU_add_suite("fb_shadow", fb_shadow_suite_init,
                      fb_shadow_suite_cleanup);
     suite_fb_shadow_tests(s);
+
+    s = CU_add_suite("fb_layout", fb_layout_suite_init,
+                     fb_layout_suite_cleanup);
+    suite_fb_layout_tests(s);
+
+    s = CU_add_suite("fb_compositor", fb_compositor_suite_init,
+                     fb_compositor_suite_cleanup);
+    suite_fb_compositor_tests(s);
 
     s = CU_add_suite("vmm", NULL, NULL);
     suite_vmm_tests(s);
