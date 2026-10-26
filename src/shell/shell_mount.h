@@ -2,10 +2,11 @@
  * shell_mount.h — the shell's mount table and path router (SCRUM-266).
  *
  * `mount disk1:vol1 /mnt/x` makes the volume on the right of the colon
- * reachable under /mnt/x. ExoFS can mount only one volume at a time
- * (docs/filesystem.md §8), so this is not a filesystem-level mount: it is a
- * table of (directory, volume) pairs, and the shell mounts whichever volume
- * a path routes to for the length of one command. Everything here is pure
+ * reachable under /mnt/x. ExoFS can hold several volumes mounted
+ * (docs/filesystem.md §8) but does not route paths between them, so this is
+ * not a filesystem-level mount: it is a table of (directory, volume) pairs,
+ * and the shell mounts whichever volume(s) a path routes to for the length of
+ * one command. Everything here is pure
  * string and table logic -- no framebuffer console, no syscalls, no libc --
  * so the same TU links into the ring-3 shell blob and, under TESTING=1, into
  * the kernel for tests/kernel/test_shell_mount_k.c (docker/scripts/build.sh),

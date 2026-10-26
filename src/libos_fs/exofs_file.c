@@ -201,14 +201,16 @@ static int flush_metadata(exofs_volume_t *v, exofs_file_t *f)
 
 int exofs_fflush(exofs_file_t *f)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL || f == NULL) return -EXO_EINVAL;
+    if (f == NULL) return -EXO_EINVAL;
     if (!f->open) return -EXO_EBADF;
+
+    exofs_volume_t *v = f->vol;
+    if (!exofs_vol_live(v, f->vol_gen)) return -EXO_EBADF;
 
     int rc = flush_metadata(v, f);
     if (rc < 0) return rc;
 
-    return exofs_sync();
+    return exofs_sync(v);
 }
 
 int exofs_close(exofs_file_t *f)
@@ -216,21 +218,25 @@ int exofs_close(exofs_file_t *f)
     if (f == NULL) return -EXO_EINVAL;
     if (!f->open) return 0;
 
+    /* The volume may have been unmounted under the handle; exofs_fflush()
+     * then reports -EXO_EBADF, and there is no open-handle table left to
+     * clear. */
     int rc = exofs_fflush(f);
     f->open = 0;
 
-    exofs_volume_t *v = exofs_vol();
-    if (v != NULL) exofs_handle_unregister(v, f->ent_block, f->ent_index);
+    if (exofs_vol_live(f->vol, f->vol_gen)) {
+        exofs_handle_unregister(f->vol, f->ent_block, f->ent_index);
+    }
 
     return rc;
 }
 
 /* ---- Open --------------------------------------------------------------- */
 
-int exofs_open(const char *path, uint32_t flags, exofs_file_t *out)
+int exofs_open(exofs_vol_t *v, const char *path, uint32_t flags,
+               exofs_file_t *out)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL || out == NULL) return -EXO_EINVAL;
+    if (v == NULL || !v->mounted || out == NULL) return -EXO_EINVAL;
 
     /* A handle that can do neither is a caller bug, not a no-op handle. */
     if ((flags & (EXOFS_O_READ | EXOFS_O_WRITE)) == 0) return -EXO_EINVAL;
@@ -278,6 +284,8 @@ int exofs_open(const char *path, uint32_t flags, exofs_file_t *out)
 
     memset(out, 0, sizeof(*out));
     out->open        = 1;
+    out->vol         = v;
+    out->vol_gen     = v->gen;
     out->flags       = flags;
     out->ent_block   = ref.block;
     out->ent_index   = ref.index;
@@ -308,7 +316,7 @@ int exofs_open(const char *path, uint32_t flags, exofs_file_t *out)
         rc = flush_metadata(v, out);
         if (rc < 0) goto fail_registered;
 
-        rc = exofs_sync();
+        rc = exofs_sync(v);
         if (rc < 0) goto fail_registered;
     }
 
@@ -329,9 +337,11 @@ fail_registered:
 
 int64_t exofs_read(exofs_file_t *f, void *buf, uint32_t n)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL || f == NULL || buf == NULL) return -EXO_EINVAL;
+    if (f == NULL || buf == NULL) return -EXO_EINVAL;
     if (!f->open) return -EXO_EBADF;
+
+    exofs_volume_t *v = f->vol;
+    if (!exofs_vol_live(v, f->vol_gen)) return -EXO_EBADF;
     if (!(f->flags & EXOFS_O_READ)) return -EXO_EACCES;
 
     if (f->pos >= f->size || n == 0) return 0;
@@ -398,7 +408,7 @@ int64_t exofs_read(exofs_file_t *f, void *buf, uint32_t n)
         uint32_t take = EXOFS_BLOCK_SIZE - off;
         if (take > n - done) take = n - done;
 
-        rc = exofs_read_block(blk, block);
+        rc = exofs_read_block(v, blk, block);
         if (rc < 0) goto out;
 
         memcpy(dst + done, block + off, take);
@@ -480,9 +490,11 @@ static int append_run(exofs_volume_t *v, exofs_file_t *f, uint32_t idx,
 
 int64_t exofs_write(exofs_file_t *f, const void *buf, uint32_t n)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL || f == NULL || buf == NULL) return -EXO_EINVAL;
+    if (f == NULL || buf == NULL) return -EXO_EINVAL;
     if (!f->open) return -EXO_EBADF;
+
+    exofs_volume_t *v = f->vol;
+    if (!exofs_vol_live(v, f->vol_gen)) return -EXO_EBADF;
     if (!(f->flags & EXOFS_O_WRITE)) return -EXO_EACCES;
 
     if (n == 0) return 0;
@@ -535,12 +547,12 @@ int64_t exofs_write(exofs_file_t *f, const void *buf, uint32_t n)
             /* Whole block: no need to read what is about to be replaced. */
             memcpy(block, src + done, put);
         } else {
-            rc = exofs_read_block(blk, block);
+            rc = exofs_read_block(v, blk, block);
             if (rc < 0) goto out;
             memcpy(block + off, src + done, put);
         }
 
-        rc = exofs_write_block(blk, block);
+        rc = exofs_write_block(v, blk, block);
         if (rc < 0) goto out;
 
         done   += put;
@@ -569,6 +581,7 @@ int64_t exofs_seek(exofs_file_t *f, int64_t off, uint32_t whence)
 {
     if (f == NULL) return -EXO_EINVAL;
     if (!f->open) return -EXO_EBADF;
+    if (!exofs_vol_live(f->vol, f->vol_gen)) return -EXO_EBADF;
 
     int64_t base;
     switch (whence) {
@@ -588,10 +601,9 @@ int64_t exofs_seek(exofs_file_t *f, int64_t off, uint32_t whence)
 
 /* ---- stat / unlink ------------------------------------------------------ */
 
-int exofs_stat(const char *path, exofs_stat_t *out)
+int exofs_stat(exofs_vol_t *v, const char *path, exofs_stat_t *out)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL || out == NULL) return -EXO_EINVAL;
+    if (v == NULL || !v->mounted || out == NULL) return -EXO_EINVAL;
 
     exofs_dirent_t e;
     int rc = exofs_path_resolve(v, path, NULL, &e);
@@ -616,10 +628,9 @@ int exofs_stat(const char *path, exofs_stat_t *out)
     return 0;
 }
 
-int exofs_unlink(const char *path)
+int exofs_unlink(exofs_vol_t *v, const char *path)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL) return -EXO_EINVAL;
+    if (v == NULL || !v->mounted) return -EXO_EINVAL;
 
     exofs_entry_ref_t ref;
     exofs_dirent_t e;
@@ -652,5 +663,5 @@ int exofs_unlink(const char *path)
         if (rc < 0) return rc;
     }
 
-    return exofs_sync();
+    return exofs_sync(v);
 }

@@ -155,10 +155,9 @@ int exofs_dir_destroy(exofs_volume_t *v, uint32_t head)
 
 /* ---- Public API --------------------------------------------------------- */
 
-int exofs_mkdir(const char *path)
+int exofs_mkdir(exofs_vol_t *v, const char *path)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL) return -EXO_EINVAL;
+    if (v == NULL || !v->mounted) return -EXO_EINVAL;
 
     exofs_dirent_t parent;
     char leaf[EXOFS_MAX_NAME + 1];
@@ -169,13 +168,12 @@ int exofs_mkdir(const char *path)
     rc = exofs_dir_create(v, parent.first_block, leaf, NULL);
     if (rc < 0) return rc;
 
-    return exofs_sync();
+    return exofs_sync(v);
 }
 
-int exofs_rmdir(const char *path)
+int exofs_rmdir(exofs_vol_t *v, const char *path)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL) return -EXO_EINVAL;
+    if (v == NULL || !v->mounted) return -EXO_EINVAL;
 
     exofs_entry_ref_t ref;
     exofs_dirent_t e;
@@ -231,7 +229,7 @@ int exofs_rmdir(const char *path)
     rc = exofs_dir_destroy(v, e.first_block);
     if (rc < 0) return rc;
 
-    return exofs_sync();
+    return exofs_sync(v);
 }
 
 /* ---- Rename (SCRUM-240) ------------------------------------------------- */
@@ -270,10 +268,9 @@ static int is_dot_name(const char *name)
            (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'));
 }
 
-int exofs_rename(const char *old_path, const char *new_path)
+int exofs_rename(exofs_vol_t *v, const char *old_path, const char *new_path)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL) return -EXO_EINVAL;
+    if (v == NULL || !v->mounted) return -EXO_EINVAL;
 
     exofs_entry_ref_t ref;
     exofs_dirent_t e;
@@ -301,7 +298,7 @@ int exofs_rename(const char *old_path, const char *new_path)
         rc = exofs_dir_rename_entry(v, old_parent.first_block, &ref,
                                     new_leaf);
         if (rc < 0) return rc;
-        return exofs_sync();
+        return exofs_sync(v);
     }
 
     /* Moving the slot would leave an open handle flushing its size into
@@ -336,13 +333,12 @@ int exofs_rename(const char *old_path, const char *new_path)
         if (rc < 0) return rc;
     }
 
-    return exofs_sync();
+    return exofs_sync(v);
 }
 
-int exofs_opendir(const char *path, exofs_dir_t *out)
+int exofs_opendir(exofs_vol_t *v, const char *path, exofs_dir_t *out)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL || out == NULL) return -EXO_EINVAL;
+    if (v == NULL || !v->mounted || out == NULL) return -EXO_EINVAL;
 
     exofs_dirent_t e;
     int rc = exofs_path_resolve(v, path, NULL, &e);
@@ -352,6 +348,8 @@ int exofs_opendir(const char *path, exofs_dir_t *out)
 
     memset(out, 0, sizeof(*out));
     out->open  = 1;
+    out->vol     = v;
+    out->vol_gen = v->gen;
     out->head  = e.first_block;
     out->block = e.first_block;
     out->index = 0;
@@ -362,9 +360,11 @@ int exofs_opendir(const char *path, exofs_dir_t *out)
 
 int exofs_readdir(exofs_dir_t *d, exofs_dirinfo_t *out)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL || d == NULL || out == NULL) return -EXO_EINVAL;
+    if (d == NULL || out == NULL) return -EXO_EINVAL;
     if (!d->open) return -EXO_EBADF;
+
+    exofs_volume_t *v = d->vol;
+    if (!exofs_vol_live(v, d->vol_gen)) return -EXO_EBADF;
 
     /* exofs.h keeps exofs_dir_t's fields flat so the public header need not
      * include the internal ones; this is where the two meet. */

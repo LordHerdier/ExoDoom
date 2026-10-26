@@ -291,7 +291,8 @@ static int shell_split_two(const char *rest, char *a, size_t alen,
 static int shell_next_token(const char **p, char *out, size_t out_len);
 static int shell_parse_u32(const char *s, uint32_t *out);
 static int shell_write_all(exofs_file_t *f, const void *buf, uint32_t n);
-static int shell_fs_copy_file(const char *src, const char *dst);
+static int shell_fs_copy_file(exofs_vol_t *v, const char *src,
+                              const char *dst);
 static void shell_run_mkfs(fb_console_t *con, const char *arg);
 static void shell_run_mkdir(fb_console_t *con, const char *arg);
 static void shell_run_ls(fb_console_t *con, const char *arg);
@@ -986,14 +987,15 @@ static int shell_write_all(exofs_file_t *f, const void *buf, uint32_t n) {
  * copy. The check compares directory-entry refs, not path text, so aliases
  * like "a", "./a" and "/dir/../a" are all caught. The truncating reopen
  * only happens once the two are known to differ. */
-static int shell_fs_copy_file(const char *src, const char *dst) {
+static int shell_fs_copy_file(exofs_vol_t *v, const char *src,
+                              const char *dst) {
     exofs_file_t fsrc, fdst;
 
-    int rc = exofs_open(src, EXOFS_O_READ, &fsrc);
+    int rc = exofs_open(v, src, EXOFS_O_READ, &fsrc);
     if (rc != 0) {
         return rc;
     }
-    rc = exofs_open(dst, EXOFS_O_WRITE | EXOFS_O_CREATE, &fdst);
+    rc = exofs_open(v, dst, EXOFS_O_WRITE | EXOFS_O_CREATE, &fdst);
     if (rc != 0) {
         exofs_close(&fsrc);
         return rc;
@@ -1005,7 +1007,7 @@ static int shell_fs_copy_file(const char *src, const char *dst) {
         exofs_close(&fsrc);
         return -EXO_EEXIST;
     }
-    rc = exofs_open(dst, EXOFS_O_WRITE | EXOFS_O_TRUNC, &fdst);
+    rc = exofs_open(v, dst, EXOFS_O_WRITE | EXOFS_O_TRUNC, &fdst);
     if (rc != 0) {
         exofs_close(&fsrc);
         return rc;
@@ -1071,6 +1073,13 @@ static shell_volref_t shell_sys_volref(uint32_t base_lba) {
  * any disk now, not only the system disk. */
 static uint32_t shell_fs_held_dev;
 
+/* The volume shell_fs_acquire_and_mount_vol() last mounted: what a command's
+ * exofs_* calls run against until shell_fs_release() unmounts it. Several
+ * volumes can now be mounted together (SCRUM-265) -- `cp`/`mv` across disks
+ * mounts two for one copy -- but the common command still works on exactly
+ * one, so it is kept here rather than threaded through every helper. */
+static exofs_vol_t *shell_cur_vol;
+
 /* Acquire the extent `v` lives in and mount it. Prints its own diagnostic
  * and returns 0 on failure so each caller can just return. */
 static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
@@ -1083,7 +1092,7 @@ static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
         return 0;
     }
 
-    int mrc = exofs_mount(v->dev, v->base);
+    int mrc = exofs_mount(v->dev, v->base, &shell_cur_vol);
     if (mrc != 0) {
         fbcon_write(con, shell_fs_mount_fail_text);
         shell_write_i64(con, mrc);
@@ -1108,7 +1117,8 @@ static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba) {
 }
 
 static void shell_fs_release(void) {
-    exofs_unmount();
+    exofs_unmount(shell_cur_vol);
+    shell_cur_vol = NULL;
     exo_disk_release(shell_fs_held_dev);
     shell_fs_held_dev = SHELL_SYS_DEV;
 }
@@ -1119,7 +1129,7 @@ static void shell_fs_release(void) {
  * directory, and every path-taking filesystem command routes through
  * shell_route_arg() to learn which volume its path is on. See
  * src/shell/shell_mount.h for the table and docs/filesystem.md "Mounts" for
- * why the shell swaps volumes per command rather than ExoFS holding several.
+ * how a command mounts the volumes it routes to (SCRUM-265: several at once).
  */
 
 /* Where a volume might be. The system disk has a fixed layout
@@ -1407,7 +1417,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
     }
 
     exofs_stat_t st;
-    int rc = exofs_stat(path, &st);
+    int rc = exofs_stat(shell_cur_vol, path, &st);
     if (rc != 0) {
         shell_fs_release();
         fbcon_write(con, shell_fs_err_prefix);
@@ -1440,7 +1450,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
     }
 
     exofs_file_t f;
-    rc = exofs_open(path, EXOFS_O_READ, &f);
+    rc = exofs_open(shell_cur_vol, path, EXOFS_O_READ, &f);
     uint32_t have = 0;
     if (rc == 0) {
         while (have < st.size) {
@@ -1579,9 +1589,10 @@ static int shell_probe_system_volume(void) {
     if (arc != 0) {
         return (int)arc;
     }
-    int mrc = exofs_mount(SHELL_SYS_DEV, LIBOS_WAD_DISK_BASE_LBA);
+    exofs_vol_t *pv = NULL;
+    int mrc = exofs_mount(SHELL_SYS_DEV, LIBOS_WAD_DISK_BASE_LBA, &pv);
     if (mrc == 0) {
-        exofs_unmount();
+        exofs_unmount(pv);
     }
     exo_disk_release(SHELL_SYS_DEV);
     return mrc;
@@ -1648,7 +1659,7 @@ static void shell_run_programs(fb_console_t *con, const char *arg) {
     }
 
     exofs_dir_t dir;
-    rc = exofs_opendir("/", &dir);
+    rc = exofs_opendir(shell_cur_vol, "/", &dir);
     if (rc != 0) {
         shell_fs_release();
         fbcon_write(con, shell_fs_err_prefix);
@@ -1690,7 +1701,7 @@ static void shell_run_programs(fb_console_t *con, const char *arg) {
 /* Mount the install disk's volume, or say why not. The caller holds the
  * device-1 binding; on success the volume is left mounted. */
 static int shell_install_mount_src(fb_console_t *con) {
-    int rc = exofs_mount(SHELL_SRC_DEV, SHELL_SRC_BASE_LBA);
+    int rc = exofs_mount(SHELL_SRC_DEV, SHELL_SRC_BASE_LBA, &shell_cur_vol);
     if (shell_firstboot_classify(rc) == SHELL_FIRSTBOOT_UNFORMATTED) {
         fbcon_write(con, shell_install_novol_text);
         return 0;
@@ -1712,9 +1723,9 @@ static void shell_install_list(fb_console_t *con) {
         return;
     }
     exofs_dir_t dir;
-    int rc = exofs_opendir("/", &dir);
+    int rc = exofs_opendir(shell_cur_vol, "/", &dir);
     if (rc != 0) {
-        exofs_unmount();
+        exofs_unmount(shell_cur_vol);
         fbcon_write(con, shell_fs_err_prefix);
         shell_write_i64(con, rc);
         fbcon_write(con, "\n");
@@ -1735,7 +1746,7 @@ static void shell_install_list(fb_console_t *con) {
         fbcon_write(con, "\n");
     }
     exofs_closedir(&dir);
-    exofs_unmount();
+    exofs_unmount(shell_cur_vol);
     if (!found) {
         fbcon_write(con, shell_install_empty_text);
     }
@@ -1744,9 +1755,9 @@ static void shell_install_list(fb_console_t *con) {
 /* `install [name]` -- SCRUM-233. Holds both disks for the whole copy (one
  * extent per owner per device, docs/syscall_spec.md §3.5a): the install
  * disk whole, and the system disk's program volume exactly as `run` binds
- * it. shell_install_copy() does the mounting and always returns with
- * nothing mounted, so the releases below never drop a binding under a
- * mounted volume (docs/filesystem.md §8). */
+ * it. shell_install_copy() mounts source and destination together for the
+ * copy and always returns with nothing mounted, so the releases below never
+ * drop a binding under a mounted volume (docs/filesystem.md §8). */
 static void shell_run_install(fb_console_t *con, const char *arg) {
     char name[SHELL_FS_PATH_BUF_LEN];
     char path[SHELL_FS_PATH_BUF_LEN + 8];
@@ -1792,7 +1803,7 @@ static void shell_run_install(fb_console_t *con, const char *arg) {
         exo_disk_release(SHELL_SRC_DEV);
         return;
     }
-    exofs_unmount();
+    exofs_unmount(shell_cur_vol);
 
     if (shell_firstboot_classify(shell_probe_system_volume()) ==
         SHELL_FIRSTBOOT_UNFORMATTED) {
@@ -1910,7 +1921,7 @@ static void shell_run_mkdir(fb_console_t *con, const char *arg) {
     if (!shell_fs_acquire_and_mount_vol(con, &rt.vol)) {
         return;
     }
-    int rc = exofs_mkdir(rt.inner);
+    int rc = exofs_mkdir(shell_cur_vol, rt.inner);
     shell_fs_release();
 
     if (rc != 0) {
@@ -1937,7 +1948,7 @@ static void shell_run_ls(fb_console_t *con, const char *arg) {
     }
 
     exofs_dir_t dir;
-    int rc = exofs_opendir(rt.inner, &dir);
+    int rc = exofs_opendir(shell_cur_vol, rt.inner, &dir);
     if (rc != 0) {
         shell_fs_release();
         fbcon_write(con, shell_fs_err_prefix);
@@ -1999,8 +2010,8 @@ static void shell_run_cat(fb_console_t *con, const char *arg) {
 
     exofs_file_t f;
     int orc = writing
-        ? exofs_open(rt.inner, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f)
-        : exofs_open(rt.inner, EXOFS_O_READ, &f);
+        ? exofs_open(shell_cur_vol, rt.inner, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f)
+        : exofs_open(shell_cur_vol, rt.inner, EXOFS_O_READ, &f);
     if (orc != 0) {
         shell_fs_release();
         fbcon_write(con, shell_fs_err_prefix);
@@ -2072,9 +2083,9 @@ static void shell_run_rm(fb_console_t *con, const char *arg) {
         return;
     }
 
-    int rc = exofs_unlink(rt.inner);
+    int rc = exofs_unlink(shell_cur_vol, rt.inner);
     if (rc == -EXO_EISDIR) {
-        rc = exofs_rmdir(rt.inner);
+        rc = exofs_rmdir(shell_cur_vol, rt.inner);
     }
     shell_fs_release();
 
@@ -2089,9 +2100,9 @@ static void shell_run_rm(fb_console_t *con, const char *arg) {
 
 /*
  * The copy behind `cp` and `mv` (`remove_src` set): within one volume,
- * shell_fs_copy_file(); across two, the chunked alternate-mount copy
- * `install` uses (shell_copy_between()), which needs both volumes bound at
- * once. The disk binding is one extent per device, so two volumes of the
+ * shell_fs_copy_file(); across two, the chunked copy `install` uses
+ * (shell_copy_vols()) with both volumes mounted for its whole length, which
+ * needs both bound at once. The disk binding is one extent per device, so two volumes of the
  * same disk cannot be -- that is refused here, before anything is touched.
  * A refusal or a failed acquire is reported here and returns 1, so the
  * caller neither prints "error" nor "ok" on top; otherwise returns the first
@@ -2103,9 +2114,9 @@ static int shell_fs_copy_or_move(fb_console_t *con, const shell_route_t *src,
         if (!shell_fs_acquire_and_mount_vol(con, &src->vol)) {
             return 1;
         }
-        int rc = shell_fs_copy_file(src->inner, dst->inner);
+        int rc = shell_fs_copy_file(shell_cur_vol, src->inner, dst->inner);
         if (rc == 0 && remove_src) {
-            rc = exofs_unlink(src->inner);
+            rc = exofs_unlink(shell_cur_vol, src->inner);
         }
         shell_fs_release();
         return rc;
@@ -2140,17 +2151,20 @@ static int shell_fs_copy_or_move(fb_console_t *con, const shell_route_t *src,
     }
     int rc = -EXO_ENOMEM;
     if (buf != NULL) {
-        shell_vol_t sv = { src->vol.dev, src->vol.base };
-        shell_vol_t dv = { dst->vol.dev, dst->vol.base };
-        rc = shell_copy_between(&sv, src->inner, &dv, dst->inner, buf, chunk,
-                                NULL);
-        if (rc == 0 && remove_src) {
-            rc = exofs_mount(sv.dev, sv.base);
-            if (rc == 0) {
-                rc = exofs_unlink(src->inner);
-                exofs_unmount();
+        exofs_vol_t *sv = NULL, *dv = NULL;
+        rc = exofs_mount(src->vol.dev, src->vol.base, &sv);
+        if (rc == 0) {
+            rc = exofs_mount(dst->vol.dev, dst->vol.base, &dv);
+        }
+        if (rc == 0) {
+            rc = shell_copy_vols(sv, src->inner, dv, dst->inner, buf, chunk,
+                                 NULL);
+            if (rc == 0 && remove_src) {
+                rc = exofs_unlink(sv, src->inner);
             }
         }
+        exofs_unmount(dv);
+        exofs_unmount(sv);
         libos_heap_free(buf);
     }
     exo_disk_release(src->vol.dev);
@@ -2203,20 +2217,21 @@ static void shell_run_cp(fb_console_t *con, const char *arg) {
  * mv it replaces -- and is only tried file-onto-file; a directory on either
  * side keeps -EXO_EEXIST.
  */
-static int shell_fs_rename(const char *src, const char *dst) {
-    int rc = exofs_rename(src, dst);
+static int shell_fs_rename(exofs_vol_t *v, const char *src, const char *dst) {
+    int rc = exofs_rename(v, src, dst);
     if (rc != -EXO_EEXIST) {
         return rc;
     }
     exofs_stat_t st;
-    if (exofs_stat(src, &st) != 0 || (st.attributes & EXOFS_ATTR_DIRECTORY)) {
+    if (exofs_stat(v, src, &st) != 0 ||
+        (st.attributes & EXOFS_ATTR_DIRECTORY)) {
         return rc;
     }
-    int urc = exofs_unlink(dst);
+    int urc = exofs_unlink(v, dst);
     if (urc != 0) {
         return urc == -EXO_EISDIR ? rc : urc;
     }
-    return exofs_rename(src, dst);
+    return exofs_rename(v, src, dst);
 }
 
 /* `mv <src> <dst>`. Within one volume, shell_fs_rename(): a re-link, so
@@ -2259,7 +2274,7 @@ static void shell_run_mv(fb_console_t *con, const char *arg) {
         if (!shell_fs_acquire_and_mount_vol(con, &src.vol)) {
             return;
         }
-        rc = shell_fs_rename(src.inner, dst.inner);
+        rc = shell_fs_rename(shell_cur_vol, src.inner, dst.inner);
         shell_fs_release();
         if (rc == -EXO_EEXIST) {
             fbcon_write(con, shell_mv_exists_text);
@@ -2305,7 +2320,7 @@ static void shell_run_touch(fb_console_t *con, const char *arg) {
         return;
     }
     exofs_file_t f;
-    int rc = exofs_open(rt.inner, EXOFS_O_WRITE | EXOFS_O_CREATE, &f);
+    int rc = exofs_open(shell_cur_vol, rt.inner, EXOFS_O_WRITE | EXOFS_O_CREATE, &f);
     if (rc == 0) {
         exofs_close(&f);
     }
@@ -2337,7 +2352,7 @@ static void shell_run_cd(fb_console_t *con, const char *arg) {
         return;
     }
     exofs_dir_t dir;
-    int rc = exofs_opendir(rt.inner, &dir);
+    int rc = exofs_opendir(shell_cur_vol, rt.inner, &dir);
     if (rc == 0) {
         exofs_closedir(&dir);
     }
@@ -2491,7 +2506,7 @@ static int shell_dir_is_empty(fb_console_t *con, const shell_volref_t *v,
         return 2;
     }
     exofs_dir_t dir;
-    int rc = exofs_opendir(path, &dir);
+    int rc = exofs_opendir(shell_cur_vol, path, &dir);
     if (rc == 0) {
         rc = 1;
         for (;;) {
@@ -2704,7 +2719,7 @@ static void shell_run_dd_read(fb_console_t *con, const char *rest) {
     }
 
     exofs_file_t f;
-    int rc = exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC,
+    int rc = exofs_open(shell_cur_vol, path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC,
                         &f);
     if (rc != 0) {
         shell_fs_release();
@@ -2778,7 +2793,7 @@ static void shell_run_dd_write(fb_console_t *con, const char *rest) {
     }
 
     exofs_file_t f;
-    int rc = exofs_open(path, EXOFS_O_READ, &f);
+    int rc = exofs_open(shell_cur_vol, path, EXOFS_O_READ, &f);
     if (rc != 0) {
         shell_fs_release();
         fbcon_write(con, shell_fs_err_prefix);

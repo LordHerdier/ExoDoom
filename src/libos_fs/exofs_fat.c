@@ -88,7 +88,7 @@ int exofs_fat_alloc(exofs_volume_t *v, uint32_t *out)
     if (v->scratch == NULL) return -EXO_EINVAL;
     memset(v->scratch, 0, EXOFS_BLOCK_SIZE);
 
-    rc = exofs_write_block(blk, v->scratch);
+    rc = exofs_write_block(v, blk, v->scratch);
     if (rc < 0) return rc;
 
     v->fat[blk] = EXOFS_BLOCK_EOC;

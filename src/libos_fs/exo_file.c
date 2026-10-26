@@ -11,6 +11,7 @@
 #include "exo_file.h"
 
 #include "exo_errno.h"
+#include "exofs_internal.h"
 
 #include <stddef.h>
 
@@ -18,6 +19,23 @@
  * clears and a zeroed static starts as — no separate in-use flag to keep in
  * step with it. */
 static exofs_file_t g_fds[EXO_FILE_MAX_FDS];
+
+/* The volume path-taking calls resolve against, and the mount it was set
+ * from. The generation makes a default that outlived its unmount read as
+ * "none" rather than silently naming whatever volume took the slot next. */
+static exofs_vol_t *g_default_vol;
+static uint32_t     g_default_gen;
+
+void exo_file_set_volume(exofs_vol_t *v)
+{
+    g_default_vol = v;
+    g_default_gen = v != NULL ? v->gen : 0;
+}
+
+exofs_vol_t *exo_file_volume(void)
+{
+    return exofs_vol_live(g_default_vol, g_default_gen) ? g_default_vol : NULL;
+}
 
 static exofs_file_t *fd_handle(int fd)
 {
@@ -33,7 +51,7 @@ int exo_file_open(const char *path, uint32_t flags)
 
         /* exofs_open() only marks the handle open on success, so a failure
          * leaves the slot free with no cleanup here. */
-        int rc = exofs_open(path, flags, &g_fds[fd]);
+        int rc = exofs_open(exo_file_volume(), path, flags, &g_fds[fd]);
         if (rc < 0) return rc;
         return fd;
     }
@@ -73,7 +91,7 @@ int exo_file_stat(const char *path, uint32_t *size_out)
     if (size_out == NULL) return -EXO_EINVAL;
 
     exofs_stat_t st;
-    int rc = exofs_stat(path, &st);
+    int rc = exofs_stat(exo_file_volume(), path, &st);
     if (rc < 0) return rc;
 
     *size_out = st.size;

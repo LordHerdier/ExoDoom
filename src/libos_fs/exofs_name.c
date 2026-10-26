@@ -396,7 +396,7 @@ int exofs_name_alloc(exofs_volume_t *v, const char *name, uint32_t len,
         rc = exofs_fat_alloc(v, &first);
         if (rc < 0) goto out;
 
-        rc = exofs_sync();
+        rc = exofs_sync(v);
         if (rc < 0) goto out;
 
         v->name_head = first;
@@ -421,14 +421,14 @@ int exofs_name_alloc(exofs_volume_t *v, const char *name, uint32_t len,
     uint32_t blk = v->name_head;
     for (uint32_t pos = 0; pos <= v->total_blocks; pos++) {
         if (!room_rules_out(v, pos, need)) {
-            rc = exofs_read_block(blk, buf);
+            rc = exofs_read_block(v, blk, buf);
             if (rc < 0) goto out;
 
             uint16_t off;
             rc = place_in_block(buf, need, &off);
             if (rc == 0) {
                 memcpy(buf + off, name, len);
-                rc = exofs_write_block(blk, buf);
+                rc = exofs_write_block(v, blk, buf);
                 if (rc < 0) goto out;   /* disk unchanged, so is the table */
 
                 room_note(v, pos, buf);
@@ -477,13 +477,13 @@ out:
  * bad name_off would have memcpy reading from the middle of another record,
  * or past the end of the block.
  */
-static int load_record(uint32_t blk, uint16_t off,
+static int load_record(exofs_volume_t *v, uint32_t blk, uint16_t off,
                        uint8_t *buf, uint16_t *cap_out, int *free_out)
 {
     if (off < EXOFS_NAME_HDR_SIZE)     return -EXO_EINVAL;
     if (off > EXOFS_BLOCK_SIZE)        return -EXO_EINVAL;
 
-    int rc = exofs_read_block(blk, buf);
+    int rc = exofs_read_block(v, blk, buf);
     if (rc < 0) return rc;
 
     uint16_t h   = hdr_read(buf, (uint16_t)(off - EXOFS_NAME_HDR_SIZE));
@@ -508,7 +508,7 @@ int exofs_name_read(exofs_volume_t *v, uint32_t blk, uint16_t off,
     if (buf == NULL) return -EXO_ENOMEM;
 
     uint16_t cap; int is_free;
-    int rc = load_record(blk, off, buf, &cap, &is_free);
+    int rc = load_record(v, blk, off, buf, &cap, &is_free);
     if (rc < 0) goto out;
 
     if (is_free || len > cap) { rc = -EXO_EINVAL; goto out; }
@@ -537,7 +537,7 @@ int exofs_name_equals(exofs_volume_t *v, uint32_t blk, uint16_t off,
     if (buf == NULL) return -EXO_ENOMEM;
 
     uint16_t cap; int is_free;
-    int rc = load_record(blk, off, buf, &cap, &is_free);
+    int rc = load_record(v, blk, off, buf, &cap, &is_free);
     if (rc < 0) goto out;
 
     if (is_free || len > cap) { rc = -EXO_EINVAL; goto out; }
@@ -557,7 +557,7 @@ int exofs_name_free(exofs_volume_t *v, uint32_t blk, uint16_t off)
     if (buf == NULL) return -EXO_ENOMEM;
 
     uint16_t cap; int is_free;
-    int rc = load_record(blk, off, buf, &cap, &is_free);
+    int rc = load_record(v, blk, off, buf, &cap, &is_free);
     if (rc < 0) goto out;
 
     /* Freeing an already-free record means two dirents referenced it, or one
@@ -571,7 +571,7 @@ int exofs_name_free(exofs_volume_t *v, uint32_t blk, uint16_t off)
     rc = coalesce_block(buf);
     if (rc < 0) goto out;
 
-    rc = exofs_write_block(blk, buf);
+    rc = exofs_write_block(v, blk, buf);
     if (rc < 0) goto out;
 
     /* The block has room it did not have a moment ago, and the room table

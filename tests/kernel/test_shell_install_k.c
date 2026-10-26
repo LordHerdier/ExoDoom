@@ -23,11 +23,18 @@
 #include "string.h"
 
 #include "libos_fs/exofs.h"
+#include "libos_fs/exofs_internal.h"
 #include "libos_fs/exofs_blockdev.h"
 #include "shell/shell_install.h"
 
 #include <stdint.h>
 #include <stddef.h>
+
+/* The volume the tests in this file are working on (SCRUM-265): set by
+ * whichever helper mounts, read by everything after. A slot is zeroed on
+ * unmount, so a stale pointer reads as "not mounted". */
+static exofs_vol_t *g_tv;
+#define TV_MOUNTED() (g_tv != NULL && g_tv->mounted)
 
 #define DEV_SYS   0u
 #define DEV_STICK 1u
@@ -61,18 +68,18 @@ static void fill(uint8_t *p, uint32_t len, uint8_t seed)
 static int put_file(const shell_vol_t *v, const char *path,
                     const uint8_t *src, uint32_t len)
 {
-    int rc = exofs_mount(v->dev, v->base);
+    int rc = exofs_mount(v->dev, v->base, &g_tv);
     if (rc != 0)
         return rc;
     exofs_file_t f;
-    rc = exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f);
+    rc = exofs_open(g_tv, path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f);
     if (rc == 0) {
         int64_t n = len ? exofs_write(&f, src, len) : 0;
         if (n != (int64_t)len)
             rc = -EXO_EIO;
         exofs_close(&f);
     }
-    exofs_unmount();
+    exofs_unmount(g_tv);
     return rc;
 }
 
@@ -81,27 +88,27 @@ static int put_file(const shell_vol_t *v, const char *path,
 static int64_t get_file(const shell_vol_t *v, const char *path, uint8_t *dst,
                         uint32_t cap)
 {
-    int rc = exofs_mount(v->dev, v->base);
+    int rc = exofs_mount(v->dev, v->base, &g_tv);
     if (rc != 0)
         return rc;
     exofs_file_t f;
-    int64_t n = exofs_open(path, EXOFS_O_READ, &f);
+    int64_t n = exofs_open(g_tv, path, EXOFS_O_READ, &f);
     if (n == 0) {
         n = exofs_read(&f, dst, cap);
         exofs_close(&f);
     }
-    exofs_unmount();
+    exofs_unmount(g_tv);
     return n;
 }
 
 static int stat_on(const shell_vol_t *v, const char *path)
 {
-    int rc = exofs_mount(v->dev, v->base);
+    int rc = exofs_mount(v->dev, v->base, &g_tv);
     if (rc != 0)
         return rc;
     exofs_stat_t st;
-    rc = exofs_stat(path, &st);
-    exofs_unmount();
+    rc = exofs_stat(g_tv, path, &st);
+    exofs_unmount(g_tv);
     return rc;
 }
 
@@ -111,7 +118,7 @@ static int setup(uint32_t sys_sectors)
 {
     if (!two_disks())
         return 0;
-    exofs_unmount();
+    exofs_unmount(g_tv);
     exofs_bdev_release(DEV_STICK);
     exofs_bdev_release(DEV_SYS);
     int ok = exofs_bdev_acquire(DEV_STICK) == 0 &&
@@ -125,7 +132,7 @@ static int setup(uint32_t sys_sectors)
 
 static void teardown(void)
 {
-    exofs_unmount();
+    exofs_unmount(g_tv);
     exofs_bdev_release(DEV_STICK);
     exofs_bdev_release(DEV_SYS);
 }
@@ -220,7 +227,7 @@ static void test_copy_multi_chunk(void)
     CU_ASSERT_EQUAL(shell_install_copy(&stick, &sysvol, "/pkg.exo", buf, CHUNK,
                                        &copied), 0);
     CU_ASSERT_EQUAL(copied, FILE_LEN);
-    CU_ASSERT_FALSE(exofs_is_mounted());
+    CU_ASSERT_FALSE(TV_MOUNTED());
 
     memset(got, 0, FILE_LEN);
     CU_ASSERT_EQUAL(get_file(&sysvol, "/pkg.exo", got, FILE_LEN),
@@ -323,7 +330,7 @@ static void test_missing_source_touches_nothing(void)
     CU_ASSERT_EQUAL(copied, 0);
     CU_ASSERT_EQUAL(shell_install_copy(&stick, &sysvol, "/nope.exo", buf,
                                        CHUNK, NULL), -EXO_ENOENT);
-    CU_ASSERT_FALSE(exofs_is_mounted());
+    CU_ASSERT_FALSE(TV_MOUNTED());
     CU_ASSERT_EQUAL(stat_on(&sysvol, "/nope.exo"), -EXO_ENOENT);
     CU_ASSERT_EQUAL(get_file(&sysvol, "/kept.exo", got, FILE_LEN),
                     (int64_t)FILE_LEN);
@@ -352,7 +359,7 @@ static void test_enospc_removes_partial(void)
 
     CU_ASSERT_EQUAL(shell_install_copy(&stick, &sysvol, "/big.exo", buf, CHUNK,
                                        NULL), -EXO_ENOSPC);
-    CU_ASSERT_FALSE(exofs_is_mounted());
+    CU_ASSERT_FALSE(TV_MOUNTED());
     CU_ASSERT_EQUAL(stat_on(&sysvol, "/big.exo"), -EXO_ENOENT);
 
     uint32_t copied = 0;
@@ -374,9 +381,9 @@ static void test_directory_refused(void)
     CU_ASSERT(buf != NULL);
     if (buf == NULL)
         goto out;
-    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, STICK_VOL_BASE), 0);
-    CU_ASSERT_EQUAL(exofs_mkdir("/games"), 0);
-    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, STICK_VOL_BASE, &g_tv), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/games"), 0);
+    exofs_unmount(g_tv);
 
     CU_ASSERT_EQUAL(shell_install_copy(&stick, &sysvol, "/games", buf, CHUNK,
                                        NULL), -EXO_EISDIR);
@@ -430,9 +437,9 @@ static void test_matches_lists_files(void)
     CU_ASSERT_EQUAL(put_file(&stick, "/a.exo", &byte, 1), 0);
     CU_ASSERT_EQUAL(put_file(&stick, "/b.exo", &byte, 1), 0);
     CU_ASSERT_EQUAL(put_file(&stick, "/c.wad", &byte, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, STICK_VOL_BASE), 0);
-    CU_ASSERT_EQUAL(exofs_mkdir("/dir.exo"), 0);   /* never a match */
-    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, STICK_VOL_BASE, &g_tv), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/dir.exo"), 0);   /* never a match */
+    exofs_unmount(g_tv);
 
     char *names = libos_heap_alloc(8u * STRIDE);
     CU_ASSERT(names != NULL);
@@ -445,7 +452,7 @@ static void test_matches_lists_files(void)
     CU_ASSERT_EQUAL(count, 2u);
     CU_ASSERT_STRING_EQUAL(names, "/a.exo");
     CU_ASSERT_STRING_EQUAL(names + STRIDE, "/b.exo");
-    CU_ASSERT_FALSE(exofs_is_mounted());
+    CU_ASSERT_FALSE(TV_MOUNTED());
 
     CU_ASSERT_EQUAL(shell_install_matches(&stick, "/*.*", names, STRIDE, 8u,
                                           &count), 0);
@@ -477,7 +484,7 @@ static void test_matches_limits(void)
     uint32_t count = 0;
     CU_ASSERT_EQUAL(shell_install_matches(&stick, "/*.exo", names, STRIDE, 2u,
                                           &count), -EXO_ENOSPC);
-    CU_ASSERT_FALSE(exofs_is_mounted());
+    CU_ASSERT_FALSE(TV_MOUNTED());
     CU_ASSERT_EQUAL(shell_install_matches(&stick, "/games/*.exo", names,
                                           STRIDE, 8u, &count), -EXO_EINVAL);
     CU_ASSERT_EQUAL(count, 0u);

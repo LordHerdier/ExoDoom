@@ -28,18 +28,30 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* The one mounted volume. See exofs.h's "one volume at a time" note for why
- * this is a static and not a handle the caller carries. */
-static exofs_volume_t g_vol;
+/* The mounted volumes (SCRUM-265). A slot is free exactly when its `mounted`
+ * is 0. exofs_mount() hands a caller a pointer into this table; the caller
+ * never sees the struct, only the opaque exofs_vol_t. */
+static exofs_volume_t g_pool[EXOFS_MAX_VOLUMES];
 
-exofs_volume_t *exofs_vol(void)
+/* Never reused, so a handle that outlives its unmount cannot match whatever
+ * volume the slot holds next (exofs_vol_live()). */
+static uint32_t g_next_gen;
+
+/* The slot holding (dev, base_lba), or NULL. */
+static exofs_volume_t *find_mounted(uint32_t dev, uint32_t base_lba)
 {
-    return g_vol.mounted ? &g_vol : NULL;
+    for (uint32_t i = 0; i < EXOFS_MAX_VOLUMES; i++) {
+        if (g_pool[i].mounted && g_pool[i].dev == dev &&
+            g_pool[i].base_lba == base_lba) {
+            return &g_pool[i];
+        }
+    }
+    return NULL;
 }
 
-int exofs_is_mounted(void)
+int exofs_vol_live(const exofs_volume_t *v, uint32_t gen)
 {
-    return g_vol.mounted;
+    return v != NULL && v->mounted && v->gen == gen;
 }
 
 /* ---- Geometry -----------------------------------------------------------
@@ -104,20 +116,18 @@ uint32_t exofs_block_lba(const exofs_volume_t *v, uint32_t blk)
     return v->data_lba + blk;
 }
 
-int exofs_read_block(uint32_t blk, void *buf)
+int exofs_read_block(exofs_volume_t *v, uint32_t blk, void *buf)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL) return -EXO_EINVAL;
+    if (v == NULL || !v->mounted) return -EXO_EINVAL;
     if (blk >= v->total_blocks) return -EXO_EINVAL;
 
     v->stat_block_reads++;
     return exofs_bdev_read(v->dev, exofs_block_lba(v, blk), buf, 1);
 }
 
-int exofs_write_block(uint32_t blk, const void *buf)
+int exofs_write_block(exofs_volume_t *v, uint32_t blk, const void *buf)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL) return -EXO_EINVAL;
+    if (v == NULL || !v->mounted) return -EXO_EINVAL;
     if (blk >= v->total_blocks) return -EXO_EINVAL;
 
     v->stat_block_writes++;
@@ -176,31 +186,37 @@ static int fat_flush(exofs_volume_t *v)
     return 0;
 }
 
-int exofs_sync(void)
+int exofs_sync(exofs_vol_t *v)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL) return -EXO_EINVAL;
+    if (v == NULL || !v->mounted) return -EXO_EINVAL;
 
     return fat_flush(v);
 }
 
 /* ---- Teardown ----------------------------------------------------------- */
 
-static void release_volume(void)
+static void release_volume(exofs_volume_t *v)
 {
-    libos_heap_free(g_vol.fat);
-    libos_heap_free(g_vol.fat_dirty);
-    libos_heap_free(g_vol.scratch);
-    libos_heap_free(g_vol.name_room);   /* NULL if no name was stored */
-    memset(&g_vol, 0, sizeof(g_vol));
+    libos_heap_free(v->fat);
+    libos_heap_free(v->fat_dirty);
+    libos_heap_free(v->scratch);
+    libos_heap_free(v->name_room);   /* NULL if no name was stored */
+    memset(v, 0, sizeof(*v));
 }
 
-void exofs_unmount(void)
+void exofs_unmount(exofs_vol_t *v)
 {
-    if (!g_vol.mounted) return;
+    if (v == NULL || !v->mounted) return;
 
-    (void)fat_flush(&g_vol);   /* see exofs.h on why the status is dropped */
-    release_volume();
+    (void)fat_flush(v);   /* see exofs.h on why the status is dropped */
+    release_volume(v);
+}
+
+void exofs_unmount_all(void)
+{
+    for (uint32_t i = 0; i < EXOFS_MAX_VOLUMES; i++) {
+        exofs_unmount(&g_pool[i]);
+    }
 }
 
 /* ---- Capacity --------------------------------------------------------- */
@@ -226,8 +242,9 @@ int exofs_format(uint32_t dev, uint32_t base_lba, uint32_t total_sectors)
 {
     /* Formatting under a live mount would leave that mount describing a
      * volume that no longer exists — its cached FAT, its geometry and its
-     * name-chain head all stale. Refuse rather than corrupt. */
-    if (g_vol.mounted) return -EXO_EBUSY;
+     * name-chain head all stale. Refuse rather than corrupt. Only a mount of
+     * *this* volume matters; others are untouched by it. */
+    if (find_mounted(dev, base_lba) != NULL) return -EXO_EBUSY;
 
     uint32_t total_blocks = 0, fat_blocks = 0;
     int rc = compute_geometry(total_sectors, &total_blocks, &fat_blocks);
@@ -263,8 +280,8 @@ int exofs_format(uint32_t dev, uint32_t base_lba, uint32_t total_sectors)
      *    written at the end of this function — see step 4.
      *
      *    exofs_bdev_write() directly rather than exofs_write_block(): that
-     *    helper resolves a block index through the *mounted* volume, and
-     *    format() runs with nothing mounted. It has the geometry in hand
+     *    helper resolves a block index through a *mounted* volume, and
+     *    format() has not mounted this one yet. It has the geometry in hand
      *    from compute_geometry() instead. */
     rc = exofs_bdev_write(dev, data_lba + EXOFS_ROOT_BLOCK, zero, 1);
     if (rc < 0) goto out;
@@ -298,15 +315,16 @@ int exofs_format(uint32_t dev, uint32_t base_lba, uint32_t total_sectors)
      * It has to be last: everything above is what makes the volume
      * mountable in the first place.
      */
-    rc = exofs_mount(dev, base_lba);
+    exofs_vol_t *v = NULL;
+    rc = exofs_mount(dev, base_lba, &v);
     if (rc < 0) goto out;
 
-    rc = exofs_dir_init_root(&g_vol);
-    if (rc == 0) rc = fat_flush(&g_vol);
+    rc = exofs_dir_init_root(v);
+    if (rc == 0) rc = fat_flush(v);
 
     /* Unmount unconditionally: format's contract is that it leaves nothing
      * mounted, whether or not the bootstrap succeeded. */
-    exofs_unmount();
+    exofs_unmount(v);
 
 out:
     libos_heap_free(zero);
@@ -348,9 +366,19 @@ static int validate_super(const exofs_super_t *sb, uint32_t base_lba)
     return 0;
 }
 
-int exofs_mount(uint32_t dev, uint32_t base_lba)
+int exofs_mount(uint32_t dev, uint32_t base_lba, exofs_vol_t **out)
 {
-    if (g_vol.mounted) return -EXO_EBUSY;
+    if (out == NULL) return -EXO_EINVAL;
+
+    /* Two resident copies of one volume's FAT would each write back over the
+     * other. */
+    if (find_mounted(dev, base_lba) != NULL) return -EXO_EBUSY;
+
+    exofs_volume_t *v = NULL;
+    for (uint32_t i = 0; i < EXOFS_MAX_VOLUMES; i++) {
+        if (!g_pool[i].mounted) { v = &g_pool[i]; break; }
+    }
+    if (v == NULL) return -EXO_ENFILE;
 
     uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     if (buf == NULL) return -EXO_ENOMEM;
@@ -362,61 +390,60 @@ int exofs_mount(uint32_t dev, uint32_t base_lba)
     rc = validate_super(sb, base_lba);
     if (rc < 0) goto out_buf;
 
-    memset(&g_vol, 0, sizeof(g_vol));
-    g_vol.dev          = dev;
-    g_vol.base_lba     = base_lba;
-    g_vol.fat_lba      = base_lba + 1u;
-    g_vol.fat_blocks   = sb->fat_blocks;
-    g_vol.data_lba     = sb->data_lba;
-    g_vol.total_blocks = sb->total_blocks;
-    g_vol.root_block   = sb->root_block;
-    g_vol.name_head    = sb->name_head;
+    memset(v, 0, sizeof(*v));
+    v->dev          = dev;
+    v->base_lba     = base_lba;
+    v->fat_lba      = base_lba + 1u;
+    v->fat_blocks   = sb->fat_blocks;
+    v->data_lba     = sb->data_lba;
+    v->total_blocks = sb->total_blocks;
+    v->root_block   = sb->root_block;
+    v->name_head    = sb->name_head;
 
     /* 0 is a real block number (the root), so the open-handle table's empty
      * marker has to be set explicitly rather than relying on the memset
      * above. */
     for (uint32_t i = 0; i < EXOFS_MAX_OPEN_HANDLES; i++) {
-        g_vol.open_ent_block[i] = EXOFS_NO_BLOCK;
+        v->open_ent_block[i] = EXOFS_NO_BLOCK;
     }
 
     /* Sized to whole sectors, not to the entry count: the FAT is read with
      * one sector-granular transfer and the last sector is usually only
      * partly used. See exofs_internal.h's note on this field. */
-    size_t fat_bytes = (size_t)g_vol.fat_blocks * EXOFS_BLOCK_SIZE;
-    g_vol.fat = libos_heap_alloc(fat_bytes);
-    if (g_vol.fat == NULL) { rc = -EXO_ENOMEM; goto out_partial; }
+    size_t fat_bytes = (size_t)v->fat_blocks * EXOFS_BLOCK_SIZE;
+    v->fat = libos_heap_alloc(fat_bytes);
+    if (v->fat == NULL) { rc = -EXO_ENOMEM; goto out_partial; }
 
-    g_vol.fat_dirty_bytes = (g_vol.fat_blocks + 7u) / 8u;
-    g_vol.fat_dirty = libos_heap_alloc(g_vol.fat_dirty_bytes);
-    if (g_vol.fat_dirty == NULL) { rc = -EXO_ENOMEM; goto out_partial; }
-    memset(g_vol.fat_dirty, 0, g_vol.fat_dirty_bytes);
+    v->fat_dirty_bytes = (v->fat_blocks + 7u) / 8u;
+    v->fat_dirty = libos_heap_alloc(v->fat_dirty_bytes);
+    if (v->fat_dirty == NULL) { rc = -EXO_ENOMEM; goto out_partial; }
+    memset(v->fat_dirty, 0, v->fat_dirty_bytes);
 
-    g_vol.scratch = libos_heap_alloc(EXOFS_BLOCK_SIZE);
-    if (g_vol.scratch == NULL) { rc = -EXO_ENOMEM; goto out_partial; }
+    v->scratch = libos_heap_alloc(EXOFS_BLOCK_SIZE);
+    if (v->scratch == NULL) { rc = -EXO_ENOMEM; goto out_partial; }
 
-    rc = exofs_bdev_read(g_vol.dev, g_vol.fat_lba, g_vol.fat, g_vol.fat_blocks);
+    rc = exofs_bdev_read(v->dev, v->fat_lba, v->fat, v->fat_blocks);
     if (rc < 0) goto out_partial;
 
     /* The root's FAT entry is the one thing format() writes that mount can
      * cross-check, and a volume whose root chain is free is not one any
      * traversal could survive. */
-    if (g_vol.fat[EXOFS_ROOT_BLOCK] == EXOFS_BLOCK_FREE) {
+    if (v->fat[EXOFS_ROOT_BLOCK] == EXOFS_BLOCK_FREE) {
         rc = -EXO_EINVAL;
         goto out_partial;
     }
 
-    g_vol.mounted = 1;
+    v->gen     = ++g_next_gen;
+    v->mounted = 1;
+    *out = v;
     rc = 0;
     goto out_buf;
 
 out_partial:
-    /* Not release_volume(): that one asserts a mounted volume's invariants
-     * by zeroing the whole struct, which is right here too, but the
-     * mounted flag was never set so unmount() must not be the path. */
-    libos_heap_free(g_vol.fat);
-    libos_heap_free(g_vol.fat_dirty);
-    libos_heap_free(g_vol.scratch);
-    memset(&g_vol, 0, sizeof(g_vol));
+    /* Not exofs_unmount(): the mounted flag was never set, and there is
+     * nothing to flush. release_volume() frees whatever was allocated and
+     * zeroes the slot, which is what makes it free again. */
+    release_volume(v);
 
 out_buf:
     libos_heap_free(buf);
@@ -494,10 +521,9 @@ void exofs_handle_unregister(exofs_volume_t *v, uint32_t block, uint16_t index)
     }
 }
 
-int exofs_geometry(exofs_geometry_t *out)
+int exofs_geometry(exofs_vol_t *v, exofs_geometry_t *out)
 {
-    exofs_volume_t *v = exofs_vol();
-    if (v == NULL || out == NULL) return -EXO_EINVAL;
+    if (v == NULL || !v->mounted || out == NULL) return -EXO_EINVAL;
 
     out->base_lba     = v->base_lba;
     out->total_blocks = v->total_blocks;

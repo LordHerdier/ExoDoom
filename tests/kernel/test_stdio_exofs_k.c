@@ -26,6 +26,21 @@
 #include <stddef.h>
 
 #define EXOFS_TEST_BASE_LBA 8192u
+
+/* The volume the tests in this file are working on (SCRUM-265): set by
+ * whichever helper mounts, read by everything after. A slot is zeroed on
+ * unmount, so a stale pointer reads as "not mounted". */
+static exofs_vol_t *g_tv;
+#define TV_MOUNTED() (g_tv != NULL && g_tv->mounted)
+
+/* Mount the test volume and make it the descriptor API's default. */
+static int tv_mount(void)
+{
+    int rc = exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv);
+    if (rc == 0) exo_file_set_volume(g_tv);
+    return rc;
+}
+
 #define VOL_SECTORS         8192u
 
 #define FILE_LEN 3000u   /* spans several ExoFS blocks */
@@ -51,9 +66,9 @@ static int setup(void)
 
     exo_file_stdio_remove();
     exo_file_close_all();
-    exofs_unmount();
+    exofs_unmount(g_tv);
     if (exofs_format(0, EXOFS_TEST_BASE_LBA, VOL_SECTORS) != 0) return 0;
-    if (exofs_mount(0, EXOFS_TEST_BASE_LBA) != 0) return 0;
+    if (tv_mount() != 0) return 0;
 
     for (i = 0; i < FILE_LEN; i++) buf[i] = pattern(i);
     fd = exo_file_open("/data.bin", EXO_FILE_O_WRITE | EXO_FILE_O_CREATE);
@@ -75,7 +90,7 @@ static void teardown(void)
 {
     exo_file_stdio_remove();
     exo_file_close_all();
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_read_whole_file(void)
