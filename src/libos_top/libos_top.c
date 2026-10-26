@@ -1,5 +1,5 @@
 /*
- * libos_dashboard.c — live resource dashboard LibOS (SCRUM-236), ring 3.
+ * libos_top.c — live resource dashboard LibOS (SCRUM-236), ring 3.
  *
  * Redraws about four times a second, in place: the console is cleared once
  * at start and every later frame rewrites each line padded to the full row
@@ -35,7 +35,7 @@
 #include <stdint.h>
 
 __attribute__((section(".text.entry")))
-void libos_dashboard_main(void);
+void libos_top_main(void);
 
 /* .data, not .rodata -- see libos_clock.c's comment on the empty-.data
  * objcopy error. */
@@ -256,7 +256,7 @@ static void dash_exit_or_yield(void)
 }
 
 __attribute__((section(".text.entry")))
-void libos_dashboard_main(void)
+void libos_top_main(void)
 {
     libos_fb_t libfb;
     if (libos_fb_map(&libfb) != 0 || libfb.vaddr == NULL) {

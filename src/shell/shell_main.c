@@ -312,7 +312,7 @@ static void shell_run_clear(fb_console_t *con, const char *arg);
 static void shell_run_about(fb_console_t *con, const char *arg);
 static void shell_run_wadview(fb_console_t *con, const char *arg);
 static void shell_run_clock(fb_console_t *con, const char *arg);
-static void shell_run_dashboard(fb_console_t *con, const char *arg);
+static void shell_run_top(fb_console_t *con, const char *arg);
 static void shell_run_snake(fb_console_t *con, const char *arg);
 static void shell_run_doom(fb_console_t *con, const char *arg);
 static void shell_print_usage(fb_console_t *con, const char *name);
@@ -497,10 +497,6 @@ static const shell_cmd_t shell_cmds[] = {
         "usage: cp <src> <dst>\n"
         "     Creates or truncates <dst>; refuses when <src> and <dst> are the same file\n" },
       shell_run_cp, 1 },
-    { { "dashboard", SHELL_GRP_APPS, "Live resource dashboard (Ctrl+Tab returns to the shell)",
-        "usage: dashboard\n"
-        "     Same as `run dashboard.exo`; pages, contexts, bindings and sound voices\n" },
-      shell_run_dashboard, 0 },
     { { "dd", SHELL_GRP_DISK, "Raw sector copy between the disk and a file",
         "usage: dd read <lba> <count> <path>\n"
         "       dd write <path> <lba>\n"
@@ -580,6 +576,10 @@ static const shell_cmd_t shell_cmds[] = {
         "usage: snake\n"
         "     Same as `run snake.exo`\n" },
       shell_run_snake, 0 },
+    { { "top", SHELL_GRP_APPS, "Live resource dashboard (Ctrl+Tab returns to the shell)",
+        "usage: top\n"
+        "     Same as `run top.exo`; pages, contexts, bindings and sound voices\n" },
+      shell_run_top, 0 },
     { { "touch", SHELL_GRP_FS, "Create an empty file if it does not exist",
         "usage: touch <path>\n" },
       shell_run_touch, 1 },
@@ -726,11 +726,11 @@ static void shell_run_clock(fb_console_t *con, const char *arg) {
     shell_run_run(con, "clock.exo");
 }
 
-static void shell_run_dashboard(fb_console_t *con, const char *arg) {
+static void shell_run_top(fb_console_t *con, const char *arg) {
     (void)arg;
-    /* `run dashboard.exo` (SCRUM-236). Like the clock it never yields on its
+    /* `run top.exo` (SCRUM-236). Like the clock it never yields on its
      * own, so control comes back via Ctrl+Tab. */
-    shell_run_run(con, "dashboard.exo");
+    shell_run_run(con, "top.exo");
 }
 
 static void shell_run_snake(fb_console_t *con, const char *arg) {

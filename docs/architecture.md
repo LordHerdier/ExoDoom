@@ -1062,9 +1062,9 @@ Details and error codes: `docs/syscall_spec.md` §3.2 #36.
   (`ring3_embed=0`), and the shell's `snake`/`clock` commands are `run
   snake.exo`/`run clock.exo`. The kernel half is asserted by the
   `launch_pkg` suite; the boot half is a manual `make docker-run-kernel` check.
-- **Resource dashboard (SCRUM-236).** `src/libos_dashboard/libos_dashboard.c`,
-  shipped as `dashboard.exo` (`ring3_embed=0`, like the clock) and started by the
-  shell's `dashboard`. Redraws ~4 Hz from #22/#23/#31/#38/#39 and #5; no syscall
+- **Resource dashboard (SCRUM-236).** `src/libos_top/libos_top.c`,
+  shipped as `top.exo` (`ring3_embed=0`, like the clock) and started by the
+  shell's `top` command. Redraws ~4 Hz from #22/#23/#31/#38/#39 and #5; no syscall
   was added. It is a full-screen app you Ctrl+Tab to: the kernel runs one context
   at a time and the compositor shows only `context_current()`, so showing it
   beside a running program needs the preemptive scheduling of SCRUM-127/176.

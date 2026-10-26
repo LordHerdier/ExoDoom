@@ -423,7 +423,7 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 
 **Introspection leaks a global view.** #22, #23, #38 and #39 are deliberately
 unscoped: any caller can read every context's pages, bindings and sound voices.
-That is fine for a demo and is what the `dashboard` LibOS (SCRUM-236) is built
+That is fine for a demo and is what the `top` LibOS (SCRUM-236) is built
 on, but it means these calls are not what a normally unprivileged program would
 get; a real isolation boundary would scope or gate them.
 
