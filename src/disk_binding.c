@@ -33,6 +33,8 @@ typedef struct {
     uint32_t     base;
     uint32_t     count;   /* real length, never 0                           */
     int          revoke_marked; /* the kernel has asked `owner` to let go   */
+    int          read_only;     /* SCRUM-75: reads only; may be shared with
+                                 * other read-only holders                  */
 } disk_extent_t;
 
 static disk_extent_t extents[DISK_BIND_MAX_EXTENTS];
@@ -49,6 +51,7 @@ static void clear_slot(disk_extent_t *e)
     e->base          = 0;
     e->count         = 0;
     e->revoke_marked = 0;
+    e->read_only     = 0;
 }
 
 static disk_extent_t *find(page_owner_t who, uint32_t dev)
@@ -141,9 +144,11 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
     disk_extent_t *own = find_assigned(who);
     if (own && (own->dev != dev || own->base != base || own->count != count))
         return DISK_BIND_EPERM;
+    /* A read-only assignment grants no exclusivity, so it keeps nobody out. */
+    int ro = own != NULL && own->read_only;
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
         if (assigned[i].owner != PAGE_OWNER_FREE && assigned[i].owner != who &&
-            assigned[i].dev == dev &&
+            !assigned[i].read_only && assigned[i].dev == dev &&
             overlap(base, count, assigned[i].base, assigned[i].count))
             return DISK_BIND_EBUSY;
 
@@ -164,7 +169,8 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
                 free_slot = e;
             continue;
         }
-        if (e->dev == dev && overlap(base, count, e->base, e->count))
+        if (e->dev == dev && overlap(base, count, e->base, e->count) &&
+            !(ro && e->read_only))
             return DISK_BIND_EBUSY;
     }
 
@@ -183,6 +189,7 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
     free_slot->base          = base;
     free_slot->count         = count;
     free_slot->revoke_marked = marked;
+    free_slot->read_only     = ro;
 
     return DISK_BIND_OK;
 }
@@ -202,7 +209,8 @@ int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count)
         if (assigned[i].owner == PAGE_OWNER_FREE) {
             if (!free_slot)
                 free_slot = &assigned[i];
-        } else if (overlap(base, count, assigned[i].base, assigned[i].count)) {
+        } else if (!assigned[i].read_only &&
+                   overlap(base, count, assigned[i].base, assigned[i].count)) {
             return DISK_BIND_EBUSY;
         }
     }
@@ -222,6 +230,29 @@ int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count)
     free_slot->base  = base;
     free_slot->count = count;
     return DISK_BIND_OK;
+}
+
+int disk_binding_assign_ro(page_owner_t who, uint32_t base, uint32_t count)
+{
+    if (!disk_binding_present(0))
+        return DISK_BIND_ENODEV;
+    if (who == PAGE_OWNER_FREE || find_assigned(who))
+        return DISK_BIND_EBUSY;
+    if (count == 0 || base >= DISK_BIND_LBA_LIMIT ||
+        count > DISK_BIND_LBA_LIMIT - base)
+        return DISK_BIND_ERANGE;
+
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++) {
+        if (assigned[i].owner == PAGE_OWNER_FREE) {
+            assigned[i].owner     = who;
+            assigned[i].dev       = 0;
+            assigned[i].base      = base;
+            assigned[i].count     = count;
+            assigned[i].read_only = 1;
+            return DISK_BIND_OK;
+        }
+    }
+    return DISK_BIND_ENOSLOT;
 }
 
 int disk_binding_assignment_of(page_owner_t who, uint32_t *base,
@@ -267,6 +298,16 @@ int disk_binding_check_range(page_owner_t who, uint32_t dev, uint64_t lba,
         return DISK_BIND_ERANGE;
 
     return DISK_BIND_OK;
+}
+
+int disk_binding_check_write(page_owner_t who, uint32_t dev, uint64_t lba,
+                             uint64_t count)
+{
+    int rc = disk_binding_check_range(who, dev, lba, count);
+    if (rc != DISK_BIND_OK)
+        return rc;
+
+    return find(who, dev)->read_only ? DISK_BIND_EROFS : DISK_BIND_OK;
 }
 
 void disk_binding_release(page_owner_t who, uint32_t dev)

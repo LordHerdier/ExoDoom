@@ -20,7 +20,8 @@
  *
  * usage: exopkg <out.exo> <code.bin> <data.bin> <bss-len> <want> [options]
  *        exopkg --check <package.exo>
- *   <want> is a comma-separated list of: fb, disk, kbd, wad, or "none".
+ *   <want> is a comma-separated list of: fb, disk, kbd, wad, progvol, or "none".
+ *   "progvol" (SCRUM-75) asks for read-only access to the program volume.
  *   "wad" (SCRUM-232) asks the kernel to map the IWAD and patch the first
  *   .data global; it needs --params-len 16.
  *   options (SCRUM-231; each defaults to the derived value described above):
@@ -99,6 +100,8 @@ static int parse_want(const char *s, uint32_t *out)
             want |= EXO_PKG_WANT_KEYBOARD;
         else if (strcmp(tok, "wad") == 0)
             want |= EXO_PKG_WANT_WAD;
+        else if (strcmp(tok, "progvol") == 0)
+            want |= EXO_PKG_WANT_PROGRAM_RO;
         else if (strcmp(tok, "none") != 0)
             return -1;
     }
@@ -195,7 +198,7 @@ int main(int argc, char **argv)
 
     uint32_t want;
     if (parse_want(argv[5], &want) != 0) {
-        fprintf(stderr, "exopkg: invalid <want> '%s' (fb,disk,kbd,wad or none)\n",
+        fprintf(stderr, "exopkg: invalid <want> '%s' (fb,disk,kbd,wad,progvol or none)\n",
                 argv[5]);
         return 1;
     }

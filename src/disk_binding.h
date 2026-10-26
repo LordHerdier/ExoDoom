@@ -56,6 +56,7 @@
 
 #define DISK_BIND_EPERM  (-5)   /* the caller has an assigned extent and this
                                  * is not it                                */
+#define DISK_BIND_EROFS  (-6)   /* the caller's extent is read-only (SCRUM-75) */
 
 /* Most extents held at once, across every device. */
 #define DISK_BIND_MAX_EXTENTS 8
@@ -130,6 +131,23 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
  */
 int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count);
 
+/*
+ * Like disk_binding_assign(), but the extent is read-only and shared
+ * (SCRUM-75). `who` may acquire exactly this extent, and what it acquires is
+ * a read-only binding: disk_binding_check_write() answers DISK_BIND_EROFS for
+ * it. Two things differ from a private volume, because this one is the
+ * *program* volume that other contexts (the shell) also use:
+ *
+ *   - it grants no exclusivity: other contexts may still acquire sectors in
+ *     it, and other read-only assignees may be assigned the same sectors;
+ *   - held read-only extents may overlap each other, but never a read-write
+ *     extent (a reader would see the volume change under it).
+ *
+ * Errors: DISK_BIND_EBUSY (`who` already has an assignment),
+ * DISK_BIND_ERANGE, DISK_BIND_ENOSLOT, DISK_BIND_ENODEV.
+ */
+int disk_binding_assign_ro(page_owner_t who, uint32_t base, uint32_t count);
+
 /* The extent assigned to `who`: DISK_BIND_OK with base and count filled, or
  * DISK_BIND_EBUSY if `who` has none. */
 int disk_binding_assignment_of(page_owner_t who, uint32_t *base,
@@ -155,6 +173,14 @@ int disk_binding_extent_of(page_owner_t who, uint32_t dev, uint32_t *base,
  * exo_disk_read/exo_disk_write call.
  */
 int disk_binding_check_range(page_owner_t who, uint32_t dev, uint64_t lba,
+                             uint64_t count);
+
+/*
+ * disk_binding_check_range() for a transfer that writes: the same answers,
+ * plus DISK_BIND_EROFS when the range is in the caller's extent but the
+ * extent is read-only (SCRUM-75). exo_disk_write calls this one.
+ */
+int disk_binding_check_write(page_owner_t who, uint32_t dev, uint64_t lba,
                              uint64_t count);
 
 /*
