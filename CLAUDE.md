@@ -204,6 +204,7 @@ area.
 
 | Topic | Doc |
 |---|---|
+| Client-facing overview: architecture, syscall table, isolation guarantees, design rationale | `docs/exokernel-architecture.md` |
 | System design, boot sequence, subsystems, LibOS/Doom path, build, sprint status | `docs/architecture.md` |
 | Syscall ABI, ownership/revocation, address-space mapping, libc audit, sound | `docs/syscall_spec.md` |
 | Paging, allocators, LibOS heap | `docs/memory.md` |
