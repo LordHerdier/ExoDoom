@@ -60,10 +60,11 @@
  * then acquires and mounts the same way. `mkfs`, `run`, `programs`,
  * `install` and `dd` keep their fixed volumes.
  *
- * `mv` is copy-then-delete, not a real rename -- ExoFS has no rename() yet
- * (a follow-up ticket covers adding one). `cd`/`pwd` are the one piece of
- * state ExoFS deliberately has none of (docs/filesystem.md §7: "a shell
- * that wants a cd keeps the state itself"): shell_cwd below, resolved
+ * `mv` within one volume is exofs_rename() (SCRUM-240): files and
+ * directories alike, nothing copied. Between volumes there is no entry to
+ * re-link, so it is `cp`'s copy and then a delete. `cd`/`pwd` are the one
+ * piece of state ExoFS deliberately has none of (docs/filesystem.md §7: "a
+ * shell that wants a cd keeps the state itself"): shell_cwd below, resolved
  * against by shell_resolve_path() for every other path-taking command.
  *
  * SCRUM-111: the idle loop below used to call exo_yield() once per
@@ -250,6 +251,9 @@ static char shell_fs_mountpoint_text[] =
     "error: that is a mount point (umount it first)\n";
 static char shell_cp_samedisk_text[] =
     "error: cannot copy between two volumes of the same disk\n";
+static char shell_mv_exists_text[] = "error: destination already exists\n";
+static char shell_mv_busy_text[] =
+    "error: busy (the current directory or a mount point is inside it)\n";
 
 /* ExoFS itself has no notion of a working directory by design
  * (docs/filesystem.md §7) -- this is that state, kept here instead. Always
@@ -551,9 +555,14 @@ static const shell_cmd_t shell_cmds[] = {
         "     <dir>         An existing, empty directory; the volume's files appear under it\n"
         "                   until `umount <dir>` or a reboot. Read/write.\n" },
       shell_run_mount, 1 },
-    { { "mv", SHELL_GRP_FS, "Move a file (copy, then delete)",
+    { { "mv", SHELL_GRP_FS, "Move or rename a file or directory",
         "usage: mv <src> <dst>\n"
-        "     Not atomic: copies <src> to <dst>, then deletes <src>\n" },
+        "     Same volume: renames in place, nothing is copied. Replaces an\n"
+        "     existing file <dst>; refuses an existing directory. The\n"
+        "     replace is not atomic: if the rename then fails (disk full,\n"
+        "     device error), <dst> is already gone and <src> stays put.\n"
+        "     Between volumes: copies <src> to <dst>, then deletes <src>\n"
+        "     (files only)\n" },
       shell_run_mv, 1 },
     { { "programs", SHELL_GRP_APPS, "List installed programs",
         "usage: programs\n"
@@ -2189,11 +2198,35 @@ static void shell_run_cp(fb_console_t *con, const char *arg) {
     fbcon_write(con, shell_fs_ok_text);
 }
 
-/* `mv <src> <dst>` -- copy then delete the source (this file's own top
- * comment on why: ExoFS has no rename() yet). Not atomic and files only --
- * exofs_unlink() on a directory source just answers -EXO_EISDIR, which
- * surfaces as this command's ordinary error path rather than a special
- * case. */
+/*
+ * exofs_rename(), plus the overwrite `mv` has always done onto an existing
+ * *file*: exofs_rename() never replaces, so the target is unlinked first and
+ * the rename retried. That pair is not atomic: if the retry fails, the
+ * target is already gone and the source stays where it was (the `mv` help
+ * says so). The open-handle -EXO_EBUSY cannot be that failure: the shell
+ * mounts a fresh volume per command, so nothing here holds a handle. Only
+ * tried file-onto-file; a directory on either side keeps -EXO_EEXIST.
+ */
+static int shell_fs_rename(const char *src, const char *dst) {
+    int rc = exofs_rename(src, dst);
+    if (rc != -EXO_EEXIST) {
+        return rc;
+    }
+    exofs_stat_t st;
+    if (exofs_stat(src, &st) != 0 || (st.attributes & EXOFS_ATTR_DIRECTORY)) {
+        return rc;
+    }
+    int urc = exofs_unlink(dst);
+    if (urc != 0) {
+        return urc == -EXO_EISDIR ? rc : urc;
+    }
+    return exofs_rename(src, dst);
+}
+
+/* `mv <src> <dst>`. Within one volume, shell_fs_rename(): a re-link, so
+ * directories move too and nothing is copied. Between volumes there is no
+ * entry to re-link, so it is `cp`'s copy and then a delete -- files only,
+ * since exofs_unlink() on a directory source answers -EXO_EISDIR. */
 static void shell_run_mv(fb_console_t *con, const char *arg) {
     char src_raw[SHELL_FS_PATH_BUF_LEN], dst_raw[SHELL_FS_PATH_BUF_LEN];
     int split = shell_split_two(arg, src_raw, sizeof(src_raw),
@@ -2217,15 +2250,36 @@ static void shell_run_mv(fb_console_t *con, const char *arg) {
         return;
     }
 
-    int rc = shell_fs_copy_or_move(con, &src, &dst, 1);
-    if (rc > 0) {
-        return;
+    int rc;
+    if (shell_same_vol(&src.vol, &dst.vol)) {
+        /* The mount table and shell_cwd both hold paths, so moving a
+         * directory that holds either would leave them naming something
+         * that is no longer there. Same rule `umount` applies. */
+        if (shell_mount_has_below(&shell_mounts, src.abs) ||
+            shell_mount_path_within(shell_cwd, src.abs)) {
+            fbcon_write(con, shell_mv_busy_text);
+            return;
+        }
+        if (!shell_fs_acquire_and_mount_vol(con, &src.vol)) {
+            return;
+        }
+        rc = shell_fs_rename(src.inner, dst.inner);
+        shell_fs_release();
+        if (rc == -EXO_EEXIST) {
+            fbcon_write(con, shell_mv_exists_text);
+            return;
+        }
+    } else {
+        rc = shell_fs_copy_or_move(con, &src, &dst, 1);
+        if (rc > 0) {
+            return;
+        }
+        if (rc == -EXO_EEXIST) {
+            fbcon_write(con, shell_fs_same_text);
+            return;
+        }
     }
 
-    if (rc == -EXO_EEXIST) {
-        fbcon_write(con, shell_fs_same_text);
-        return;
-    }
     if (rc != 0) {
         fbcon_write(con, shell_fs_err_prefix);
         shell_write_i64(con, rc);
