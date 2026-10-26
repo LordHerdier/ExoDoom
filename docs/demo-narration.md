@@ -200,9 +200,10 @@ shows whichever one is in front, and Ctrl+Tab changes which one that is."
 **Point at.** The `doom` row: `3086` pages, `16384+245760`, `music yes`.
 
 **If asked.**
-- *What if a program crashes?* Today a crash in any program halts the whole
-  machine. The clean-up path for a crashed program is not built yet. A program
-  that exits normally, as Snake did, is fully reclaimed.
+- *What if a program crashes?* Today a crash in any program stops the whole
+  machine. The bad access is still refused, so isolation holds, but nothing
+  runs afterwards: the clean-up path for a crashed program is not built yet.
+  A program that exits normally, as Snake did, is fully reclaimed.
 - *What if a program hangs?* Switching is cooperative. A program that never
   calls the kernel keeps the processor, and Ctrl+Tab takes effect at its next
   call. Pre-emptive switching is planned (SCRUM-127).
@@ -240,6 +241,6 @@ When the system changes, check these before the next presentation.
 | The voldemo copies differ only in volume slot | `package_ring3_target libos_voldemo` lines in `docker/scripts/build.sh` |
 | Private framebuffer per program, composited about 60 times a second | `docs/exokernel-architecture.md` §6–§7 |
 | Exit reclaims everything; revocation is mark, return, take, and nothing outside the tests triggers it on a running program | `docs/syscall_spec.md` §3.3 "Revocation", §3.6; `docs/exokernel-architecture.md` §6 |
-| A ring-3 fault halts the machine | `page_fault_handler()` in `src/fault.c` |
+| A faulting program stops the machine, with the access still refused | `docs/exokernel-architecture.md` §6 "What is not guaranteed"; `page_fault_handler()` in `src/fault.c` |
 | No pre-emption | `docs/exokernel-architecture.md` §6 "What is not guaranteed" |
 | Kernel image is about 935 KiB | `docs/exokernel-architecture.md` §1 |
