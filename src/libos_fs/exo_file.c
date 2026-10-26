@@ -98,6 +98,16 @@ int exo_file_stat(const char *path, uint32_t *size_out)
     return 0;
 }
 
+int exo_file_remove(const char *path)
+{
+    return exofs_unlink(exo_file_volume(), path);
+}
+
+int exo_file_rename(const char *old_path, const char *new_path)
+{
+    return exofs_rename(exo_file_volume(), old_path, new_path);
+}
+
 int exo_file_close_all(void)
 {
     int first = 0;
