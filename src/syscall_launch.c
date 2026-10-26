@@ -134,11 +134,62 @@ static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
 };
 
 /*
+ * The one context #36 has built under EXO_LAUNCH_HOLD and not yet entered
+ * (SCRUM-235). One slot, not a table: the only caller is the shell's `run`,
+ * which holds, reads the grant and starts in one go.
+ *
+ * A hold is kept BLOCKED, not READY, until #40: context_next_ready() (what
+ * exo_yield and Ctrl+Tab use) skips BLOCKED rows, so nothing can enter the
+ * program before its launcher has read the grant and the framebuffer release
+ * has happened. The slot also remembers who built it. Only that context may
+ * start it (#40) or replace it; another caller's launch leaves it alone, and
+ * another caller's HOLD is refused with -EXO_EBUSY while the slot is taken,
+ * rather than silently destroying a launch that is in progress.
+ */
+static struct {
+    page_owner_t id;          /* PAGE_OWNER_FREE when nothing is held */
+    page_owner_t owner;       /* the context that built it */
+    int          release_fb;  /* the manifest's EXO_PKG_WANT_FRAMEBUFFER */
+} held;
+
+/* A hold is only still a hold while its context is the BLOCKED, never-run
+ * row it was built as. If its row is gone the slot is stale and its id may by
+ * now belong to another context, which must not be torn down on the strength
+ * of an old hold. */
+static int launch_held_is_live(void)
+{
+    if (held.id == PAGE_OWNER_FREE) {
+        return 0;
+    }
+    context_t *c = context_lookup(held.id);
+    return c != NULL && c->state == CONTEXT_STATE_BLOCKED;
+}
+
+/* Drop the caller's own unstarted hold, so an abandoned `run` cannot strand a
+ * context row and its pages. Someone else's hold is left alone; a stale slot
+ * is just forgotten. */
+static void launch_drop_held(void)
+{
+    if (!launch_held_is_live()) {
+        held.id = PAGE_OWNER_FREE;
+        return;
+    }
+    if (held.owner != syscall_current_context()) {
+        return;
+    }
+    revoke_all(held.id);
+    context_destroy(held.id);
+    held.id = PAGE_OWNER_FREE;
+}
+
+/*
  * Shared by #21 and #36: both create a context row, and both would exhaust
  * CONTEXT_MAX if an exited app's row were never reclaimed.
  */
 static void launch_reclaim_exited(void)
 {
+    launch_drop_held();
+
     /*
      * Reclaim any exited-but-not-yet-destroyed context row before creating
      * another one. exo_exit() (src/syscall_exit.c, SCRUM-155/178) already
@@ -163,7 +214,8 @@ static void launch_reclaim_exited(void)
     context_info_t live[CONTEXT_MAX];
     uint32_t live_count = context_list(live, CONTEXT_MAX);
     for (uint32_t i = 0; i < live_count; i++) {
-        if (live[i].state == CONTEXT_STATE_BLOCKED) {
+        if (live[i].state == CONTEXT_STATE_BLOCKED &&
+            !(launch_held_is_live() && live[i].id == held.id)) {
             revoke_all(live[i].id);
             context_destroy(live[i].id);
         }
@@ -179,6 +231,37 @@ static void launch_reclaim_exited(void)
  * ever takes effect. Introduced by SCRUM-66 for Doom; shared by #21 and #36
  * (SCRUM-230), which is safe for the same reason. */
 static libos_image_t launch_img;
+
+/* The framebuffer half of a launch whose manifest asks for the binding.
+ * Shared by launch_enter() and #40 so the two cannot drift. */
+static void launch_release_fb(void)
+{
+    /* Whoever currently holds the framebuffer binding -- the shell, from
+     * its own libos_fb_map() call at startup (src/shell/shell_main.c),
+     * on a first launch; some other still-live app, once more than one
+     * instance can be running at once (SCRUM-196) -- must give it up
+     * before this one can exo_fb_acquire() it (exclusive,
+     * src/fb_binding.c, SCRUM-154). fb_binding_owner()
+     * rather than assuming the caller: the caller is always the shell,
+     * but the *holder* is not, once a second launch runs. Only the
+     * binding is released, not the holder's own already-established page
+     * table mapping (fb_binding_release() never touches page tables), so
+     * the shell keeps rendering to its existing framebuffer pointer
+     * uninterrupted once it is switched back to. Callers run it only once
+     * the switch is armed: every failure path before that leaves whoever
+     * holds the binding untouched.
+     *
+     * KNOWN GAP: this displaces the holder whoever the
+     * caller is -- the shell displacing a still-running Snake is the
+     * designed case (SCRUM-196), so "caller must be the holder" is not
+     * available. #21 always had this reach; #36 only adds that the
+     * package, not a kernel table, supplies the flag. SCRUM-232's
+     * admission check does not close it: it reports a held framebuffer
+     * (exo_resstat.fb_held) so the launcher can say it is taking it over,
+     * but telling a launcher from an arbitrary LibOS is still open.
+     */
+    fb_binding_release(fb_binding_owner());
+}
 
 /*
  * The part of a launch that does not care where the image's bytes came from
@@ -214,31 +297,7 @@ static int64_t launch_enter(page_owner_t id, const libos_image_t *img,
     }
 
     if (release_fb) {
-        /* Whoever currently holds the framebuffer binding -- the shell, from
-         * its own libos_fb_map() call at startup (src/shell/shell_main.c),
-         * on a first launch; some other still-live app, once more than one
-         * instance can be running at once (SCRUM-196) -- must give it up
-         * before this one can exo_fb_acquire() it (exclusive,
-         * src/fb_binding.c, SCRUM-154). fb_binding_owner()
-         * rather than assuming the caller: the caller is always the shell,
-         * but the *holder* is not, once a second launch runs. Only the
-         * binding is released, not the holder's own already-established page
-         * table mapping (fb_binding_release() never touches page tables), so
-         * the shell keeps rendering to its existing framebuffer pointer
-         * uninterrupted once it is switched back to. Done last, after the
-         * switch is armed: every failure path above leaves whoever holds the
-         * binding untouched.
-         *
-         * KNOWN GAP: this displaces the holder whoever the
-         * caller is -- the shell displacing a still-running Snake is the
-         * designed case (SCRUM-196), so "caller must be the holder" is not
-         * available. #21 always had this reach; #36 only adds that the
-         * package, not a kernel table, supplies the flag. SCRUM-232's
-         * admission check does not close it: it reports a held framebuffer
-         * (exo_resstat.fb_held) so the launcher can say it is taking it over,
-         * but telling a launcher from an arbitrary LibOS is still open.
-         */
-        fb_binding_release(fb_binding_owner());
+        launch_release_fb();
     }
 
     return 0;
@@ -395,11 +454,16 @@ _Static_assert(EXO_LAUNCH_PKG_MAX_LEN ==
  * a header field from caller memory. Only code/data bytes are read from the
  * buffer again, and libos_build_image() copies them exactly once.
  */
-static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t a3,
+static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
                               uint64_t a4, uint64_t a5, uint64_t a6)
 {
-    (void)a3; (void)a4; (void)a5; (void)a6;
+    (void)a4; (void)a5; (void)a6;
 
+    /* Shape first, like the length: a flag this kernel does not know is a
+     * caller that expects behavior it will not get. */
+    if ((flags & ~(uint64_t)EXO_LAUNCH_HOLD) != 0) {
+        return -EXO_EINVAL;
+    }
     if (len < sizeof(exo_pkg_header_t) || len > EXO_LAUNCH_PKG_MAX_LEN) {
         return -EXO_EINVAL;
     }
@@ -432,6 +496,13 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t a3,
     }
 
     launch_reclaim_exited();
+
+    /* The caller's own earlier hold is gone by now, so a live one is another
+     * context's launch in progress: do not destroy it, and do not start a
+     * second. Before anything is allocated, like the checks below. */
+    if ((flags & EXO_LAUNCH_HOLD) && launch_held_is_live()) {
+        return -EXO_EBUSY;
+    }
 
     /* Looked up before anything is allocated, same ordering as #21: a
      * missing or unreadable WAD fails without a context row or a page taken. */
@@ -501,11 +572,68 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t a3,
 
     /* The manifest, not a table flag, says whether this program wants the
      * framebuffer: the same release #21 does for Snake/Doom/the viewer. */
-    return launch_enter(id, &launch_img, (hdr.want_flags & EXO_PKG_WANT_FRAMEBUFFER) != 0);
+    int release_fb = (hdr.want_flags & EXO_PKG_WANT_FRAMEBUFFER) != 0;
+
+    if (flags & EXO_LAUNCH_HOLD) {
+        /* Built and primed, not entered (SCRUM-235): the launcher reads the
+         * grant with #39 and then calls #40. Nothing is released yet --
+         * the framebuffer binding moves in #40, after the switch is armed,
+         * so a hold that is never started displaces nobody. */
+        context_prime_irq(id, launch_img.entry_vaddr, launch_img.stack_top_vaddr);
+        context_set_state(id, CONTEXT_STATE_BLOCKED);
+        held.id = id;
+        held.owner = syscall_current_context();
+        held.release_fb = release_fb;
+        return (int64_t)id;
+    }
+
+    return launch_enter(id, &launch_img, release_fb);
+}
+
+/* #40 -- enter the context #36 built under EXO_LAUNCH_HOLD (SCRUM-235).
+ * The other half of launch_enter(): same switch, same framebuffer release
+ * after it, but the image already exists. Like #21/#36, control does not
+ * come back until something switches back to the caller.
+ *   -EXO_ENOENT   `ctx` is not the held context
+ *   -EXO_EPERM    the hold was built by another context
+ *   -EXO_EINVAL   the switch could not be armed; the held context is gone */
+static int64_t sys_launch_start(uint64_t ctx, uint64_t a2, uint64_t a3,
+                                uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+
+    if (!launch_held_is_live() || ctx != held.id) {
+        return -EXO_ENOENT;
+    }
+    /* Only the launcher that built it may enter it: the entry displaces the
+     * framebuffer holder when the manifest asks (the known gap above). */
+    if (held.owner != syscall_current_context()) {
+        return -EXO_EPERM;
+    }
+
+    page_owner_t id = held.id;
+    int release_fb = held.release_fb;
+    held.id = PAGE_OWNER_FREE;
+
+    /* context_switch_request() only enters a READY row. */
+    context_set_state(id, CONTEXT_STATE_READY);
+    if (context_switch_request(id) != CONTEXT_OK) {
+        /* revoke_all() frees the image's pages and the volume extent the
+         * way launch_drop_held() does; the image struct is long gone. */
+        revoke_all(id);
+        disk_binding_forget(id);
+        context_destroy(id);
+        return -EXO_EINVAL;
+    }
+    if (release_fb) {
+        launch_release_fb();
+    }
+    return 0;
 }
 
 void syscall_launch_init(void)
 {
     exo_syscall_register(EXO_SYS_LAUNCH, sys_launch);
     exo_syscall_register(EXO_SYS_LAUNCH_PKG, sys_launch_pkg);
+    exo_syscall_register(EXO_SYS_LAUNCH_START, sys_launch_start);
 }
