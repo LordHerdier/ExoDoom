@@ -234,6 +234,111 @@ int exofs_rmdir(const char *path)
     return exofs_sync();
 }
 
+/* ---- Rename (SCRUM-240) ------------------------------------------------- */
+
+/*
+ * Whether the directory `head` is `ancestor` or lies anywhere beneath it,
+ * found by climbing ".." from `head` to the root. That climb is only as
+ * long as the tree is deep, where searching down from `ancestor` would be
+ * as big as its subtree. ".." being a real entry (exofs_dir.h) is what makes
+ * the climb possible at all. Bounded like every other walk here, so a
+ * corrupt ".." loop is -EXO_EIO rather than a hang.
+ */
+static int dir_is_within(exofs_volume_t *v, uint32_t head, uint32_t ancestor,
+                         int *out)
+{
+    uint32_t cur = head;
+
+    for (uint32_t steps = 0; steps <= v->total_blocks; steps++) {
+        if (cur == ancestor)       { *out = 1; return 0; }
+        if (cur == v->root_block)  { *out = 0; return 0; }
+
+        exofs_dirent_t up;
+        int rc = exofs_dir_lookup(v, cur, "..", NULL, &up);
+        if (rc < 0) return rc;
+        cur = up.first_block;
+    }
+
+    return -EXO_EIO;
+}
+
+/* By hand, not strcmp(): ExoFS links into ring-3 targets whose libc shim
+ * has no strcmp (build.sh's ring-3 symbol gate). */
+static int is_dot_name(const char *name)
+{
+    return name[0] == '.' &&
+           (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'));
+}
+
+int exofs_rename(const char *old_path, const char *new_path)
+{
+    exofs_volume_t *v = exofs_vol();
+    if (v == NULL) return -EXO_EINVAL;
+
+    exofs_entry_ref_t ref;
+    exofs_dirent_t e;
+    int rc = exofs_path_resolve(v, old_path, &ref, &e);
+    if (rc < 0) return rc;
+
+    /* The root has no slot in any parent to move (exofs_path.c). */
+    if (ref.block == EXOFS_NO_BLOCK) return -EXO_EBUSY;
+
+    exofs_dirent_t old_parent, new_parent;
+    char old_leaf[EXOFS_MAX_NAME + 1];
+    char new_leaf[EXOFS_MAX_NAME + 1];
+
+    rc = exofs_path_resolve_parent(v, old_path, &old_parent, old_leaf);
+    if (rc < 0) return rc;
+    rc = exofs_path_resolve_parent(v, new_path, &new_parent, new_leaf);
+    if (rc < 0) return rc;
+
+    /* A "." or ".." slot is not the entry that names the directory -- see
+     * exofs_rmdir() for what acting on one would break -- and making a new
+     * one would shadow the real thing. */
+    if (is_dot_name(old_leaf) || is_dot_name(new_leaf)) return -EXO_EINVAL;
+
+    if (old_parent.first_block == new_parent.first_block) {
+        rc = exofs_dir_rename_entry(v, old_parent.first_block, &ref,
+                                    new_leaf);
+        if (rc < 0) return rc;
+        return exofs_sync();
+    }
+
+    /* Moving the slot would leave an open handle flushing its size into
+     * wherever the entry used to be (exofs_volume_t::open_ent_block). */
+    if (exofs_handle_is_open(v, ref.block, ref.index)) return -EXO_EBUSY;
+
+    int is_dir = (e.attributes & EXOFS_ATTR_DIRECTORY) != 0;
+
+    /* A directory moved under itself would be unreachable from the root,
+     * along with everything in it. */
+    if (is_dir) {
+        int inside = 0;
+        rc = dir_is_within(v, new_parent.first_block, e.first_block, &inside);
+        if (rc < 0) return rc;
+        if (inside) return -EXO_EINVAL;
+    }
+
+    rc = exofs_dir_move(v, &ref, new_parent.first_block, new_leaf, NULL);
+    if (rc < 0) return rc;
+
+    /* Last, once the move has landed: a directory's ".." has to name its
+     * new parent, or "/new/dir/.." would still resolve to the old one --
+     * the obligation exofs_dir.h puts on whatever first moves a directory. */
+    if (is_dir) {
+        exofs_entry_ref_t up_ref;
+        exofs_dirent_t up;
+        rc = exofs_dir_lookup(v, e.first_block, "..", &up_ref, &up);
+        if (rc < 0) return rc;
+
+        up.first_block = new_parent.first_block;
+        rc = exofs_dirent_write(v, &up_ref, &up);
+        if (rc < 0) return rc;
+    }
+
+    return exofs_sync();
+}
+
 int exofs_opendir(const char *path, exofs_dir_t *out)
 {
     exofs_volume_t *v = exofs_vol();

@@ -151,6 +151,31 @@ int exofs_mkdir(const char *path);
  */
 int exofs_rmdir(const char *path);
 
+/*
+ * Rename or move `old_path` to `new_path` (SCRUM-240). Works for files and
+ * directories, empty or not, and never copies data: the directory entry is
+ * re-linked and its chain stays where it is.
+ *
+ * Within one directory this is a single slot write, so it is atomic, and an
+ * open handle on the file keeps working. Between directories it is two slot
+ * writes -- unlink, then link (docs/filesystem.md §1.4) -- and a moved
+ * directory's ".." is repointed at its new parent.
+ *
+ * `new_path` must not exist: there is no replace-on-rename here, the caller
+ * removes the target first if that is what it wants. Renaming an entry to
+ * itself (or to an alias of its own path) succeeds and does nothing.
+ *
+ * Returns 0, -EXO_ENOENT if `old_path` or a parent of `new_path` is
+ * missing, -EXO_EEXIST if `new_path` names a different entry,
+ * -EXO_ENOTDIR if a parent component is not a directory, -EXO_EBUSY for the
+ * root, or to move an entry between directories while a handle has it open
+ * (the handle remembers the slot it would no longer be in), -EXO_EINVAL for
+ * a malformed path, an over-long name, either last component being "." or
+ * "..", or moving a directory into itself or its own subtree, -EXO_ENOSPC,
+ * or a device error.
+ */
+int exofs_rename(const char *old_path, const char *new_path);
+
 /* One entry, as reported by exofs_readdir(). */
 typedef struct exofs_dirinfo {
     char     name[EXOFS_MAX_NAME + 1];

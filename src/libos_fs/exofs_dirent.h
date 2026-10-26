@@ -118,6 +118,37 @@ int exofs_dir_add(exofs_volume_t *v, uint32_t dir_head, const char *name,
  */
 int exofs_dir_remove(exofs_volume_t *v, const exofs_entry_ref_t *ref);
 
+/*
+ * Rename the entry at `ref`, which lives in the directory at `dir_head`, to
+ * `name` -- in place, without moving it (SCRUM-240).
+ *
+ * The slot, its data chain and everything else in it stay put; only the
+ * name reference changes, in one slot write. So an open handle on the entry
+ * (which remembers its slot, not its name) stays valid. Returns 0 -- also
+ * when `name` already names this very entry -- -EXO_EEXIST if it names a
+ * different one, -EXO_EINVAL for an empty or over-long name, -EXO_ENOSPC, or
+ * a device error.
+ */
+int exofs_dir_rename_entry(exofs_volume_t *v, uint32_t dir_head,
+                           const exofs_entry_ref_t *ref, const char *name);
+
+/*
+ * Move the entry at `from` into the directory at `to_head` under `name`
+ * (SCRUM-240), leaving its data/directory chain where it is. `to_out`
+ * receives its new slot (may be NULL).
+ *
+ * Everything that can fail for want of space -- a slot in the destination,
+ * extending that directory, the new name record -- is settled before either
+ * slot is written, so -EXO_ENOSPC and -EXO_EEXIST leave both directories
+ * untouched. docs/filesystem.md §1.4 has the write order and why.
+ *
+ * Does NOT fix a moved directory's "..": the entry is all this layer knows
+ * about. exofs_rename() does that.
+ */
+int exofs_dir_move(exofs_volume_t *v, const exofs_entry_ref_t *from,
+                   uint32_t to_head, const char *name,
+                   exofs_entry_ref_t *to_out);
+
 /* Fill `out` with the synthetic entry describing the root directory.
  *
  * The root has no entry in any parent — it is where the tree starts — so

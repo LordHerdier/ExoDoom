@@ -3915,6 +3915,257 @@ static void test_acceptance_round_trip(void)
     exofs_unmount();
 }
 
+/* ---- Rename (SCRUM-240) -------------------------------------------------
+ *
+ * exofs_rename() re-links a directory entry; it never copies. So beyond
+ * "the bytes are still there", these check that the entry kept its data
+ * chain (first_block) and, within one directory, its slot -- which
+ * exofs_stat() does not report, hence the internal resolver.
+ */
+
+static int resolve_entry(const char *path, exofs_entry_ref_t *ref,
+                         exofs_dirent_t *out)
+{
+    return exofs_path_resolve(exofs_vol(), path, ref, out);
+}
+
+static void test_rename_file_in_place(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+    exofs_volume_t *v = exofs_vol();
+
+    CU_ASSERT_EQUAL(write_pattern_file("/old.dat", 3000u, 240u), 0);
+    exofs_entry_ref_t rb, ra;
+    exofs_dirent_t eb, ea;
+    CU_ASSERT_EQUAL(resolve_entry("/old.dat", &rb, &eb), 0);
+    uint32_t free_before = exofs_fat_free_count(v);
+
+    CU_ASSERT_EQUAL(exofs_rename("/old.dat", "/a-longer-new-name.dat"), 0);
+
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat("/old.dat", &st), -EXO_ENOENT);
+    CU_ASSERT_TRUE(file_has_pattern("/a-longer-new-name.dat", 3000u, 240u));
+
+    /* Same slot, same chain, nothing allocated: a rename, not a copy. */
+    CU_ASSERT_EQUAL(resolve_entry("/a-longer-new-name.dat", &ra, &ea), 0);
+    CU_ASSERT_EQUAL(ra.block, rb.block);
+    CU_ASSERT_EQUAL(ra.index, rb.index);
+    CU_ASSERT_EQUAL(ea.first_block, eb.first_block);
+    CU_ASSERT_EQUAL(ea.size, 3000u);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
+
+    exofs_unmount();
+}
+
+static void test_rename_to_itself_and_onto_existing(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_EQUAL(write_pattern_file("/a", 700u, 1u), 0);
+    CU_ASSERT_EQUAL(write_pattern_file("/b", 900u, 2u), 0);
+
+    /* Onto itself, by its own name or an alias: nothing to do. */
+    CU_ASSERT_EQUAL(exofs_rename("/a", "/a"), 0);
+    CU_ASSERT_EQUAL(exofs_rename("/a", "/./a"), 0);
+    CU_ASSERT_TRUE(file_has_pattern("/a", 700u, 1u));
+
+    /* Onto a different entry: refused, and neither one touched. There is
+     * no replace-on-rename -- the caller removes the target if it means to. */
+    CU_ASSERT_EQUAL(exofs_rename("/a", "/b"), -EXO_EEXIST);
+    CU_ASSERT_TRUE(file_has_pattern("/a", 700u, 1u));
+    CU_ASSERT_TRUE(file_has_pattern("/b", 900u, 2u));
+
+    exofs_unmount();
+}
+
+static void test_rename_error_paths(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_EQUAL(exofs_rename("/missing", "/x"), -EXO_ENOENT);
+
+    CU_ASSERT_TRUE(write_small_file("/f"));
+    CU_ASSERT_EQUAL(exofs_mkdir("/d"), 0);
+
+    CU_ASSERT_EQUAL(exofs_rename("/f", "/nodir/x"), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_rename("/f", "/f/x"), -EXO_ENOTDIR);
+    CU_ASSERT_EQUAL(exofs_rename("/", "/x"), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exofs_rename("/f", "/"), -EXO_EINVAL);
+
+    /* A "." or ".." slot is not the entry naming the directory, on either
+     * side. */
+    CU_ASSERT_EQUAL(exofs_rename("/d/.", "/e"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rename("/d/..", "/e"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rename("/f", "/d/.."), -EXO_EINVAL);
+
+    /* Still exactly as they were. */
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat("/f", &st), 0);
+    CU_ASSERT_EQUAL(st.size, 1u);
+    CU_ASSERT_EQUAL(exofs_stat("/d", &st), 0);
+    CU_ASSERT_EQUAL(exofs_stat("/e", &st), -EXO_ENOENT);
+
+    exofs_unmount();
+}
+
+static void test_rename_moves_file_between_directories(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+    exofs_volume_t *v = exofs_vol();
+
+    CU_ASSERT_EQUAL(exofs_mkdir("/src"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/dst"), 0);
+    CU_ASSERT_EQUAL(write_pattern_file("/src/f", 5000u, 7u), 0);
+
+    exofs_dirent_t eb, ea;
+    CU_ASSERT_EQUAL(resolve_entry("/src/f", NULL, &eb), 0);
+    uint32_t free_before = exofs_fat_free_count(v);
+
+    CU_ASSERT_EQUAL(exofs_rename("/src/f", "/dst/g"), 0);
+
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat("/src/f", &st), -EXO_ENOENT);
+    CU_ASSERT_TRUE(file_has_pattern("/dst/g", 5000u, 7u));
+
+    CU_ASSERT_EQUAL(resolve_entry("/dst/g", NULL, &ea), 0);
+    CU_ASSERT_EQUAL(ea.first_block, eb.first_block);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
+
+    int found = 1;
+    CU_ASSERT_EQUAL(readdir_contains("/src", "f", &found), 0);
+    CU_ASSERT_FALSE(found);
+    CU_ASSERT_EQUAL(readdir_contains("/dst", "g", &found), 0);
+    CU_ASSERT_TRUE(found);
+
+    exofs_unmount();
+}
+
+/* A non-empty directory moves whole, and its ".." follows it: otherwise
+ * "/b/moved/.." would still be "/a", and an rmdir of "/a" -- now empty --
+ * would leave that ".." naming freed blocks. */
+static void test_rename_moves_directory_and_fixes_dotdot(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_EQUAL(exofs_mkdir("/a"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/a/sub"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/b"), 0);
+    CU_ASSERT_EQUAL(write_pattern_file("/a/sub/file", 1200u, 9u), 0);
+
+    CU_ASSERT_EQUAL(exofs_rename("/a/sub", "/b/moved"), 0);
+
+    CU_ASSERT_TRUE(file_has_pattern("/b/moved/file", 1200u, 9u));
+
+    exofs_dirent_t up, b, self, moved;
+    CU_ASSERT_EQUAL(resolve_entry("/b/moved/..", NULL, &up), 0);
+    CU_ASSERT_EQUAL(resolve_entry("/b", NULL, &b), 0);
+    CU_ASSERT_EQUAL(up.first_block, b.first_block);
+
+    /* "." is the directory's own chain and did not move. */
+    CU_ASSERT_EQUAL(resolve_entry("/b/moved/.", NULL, &self), 0);
+    CU_ASSERT_EQUAL(resolve_entry("/b/moved", NULL, &moved), 0);
+    CU_ASSERT_EQUAL(self.first_block, moved.first_block);
+
+    CU_ASSERT_TRUE(file_has_pattern("/b/moved/../moved/file", 1200u, 9u));
+    CU_ASSERT_EQUAL(exofs_rmdir("/a"), 0);
+
+    exofs_unmount();
+}
+
+static void test_rename_refuses_directory_into_itself(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_EQUAL(exofs_mkdir("/a"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/a/b"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/a/b/c"), 0);
+
+    CU_ASSERT_EQUAL(exofs_rename("/a", "/a/x"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rename("/a", "/a/b/c/x"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rename("/a/b", "/a/b/x"), -EXO_EINVAL);
+
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat("/a/b/c", &st), 0);
+
+    /* Up and out is fine. */
+    CU_ASSERT_EQUAL(exofs_rename("/a/b/c", "/c"), 0);
+    CU_ASSERT_EQUAL(exofs_stat("/c", &st), 0);
+    CU_ASSERT_EQUAL(exofs_stat("/a/b/c", &st), -EXO_ENOENT);
+
+    exofs_unmount();
+}
+
+/* Within a directory the slot does not move, so an open handle -- which
+ * remembers its slot, not its name -- keeps working and its close lands on
+ * the renamed entry. Between directories it would not, so that is refused. */
+static void test_rename_with_open_handle(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_TRUE(write_small_file("/f"));
+    CU_ASSERT_EQUAL(exofs_mkdir("/d"), 0);
+
+    exofs_file_t f;
+    CU_ASSERT_EQUAL(exofs_open("/f", EXOFS_O_WRITE | EXOFS_O_APPEND, &f), 0);
+    CU_ASSERT_EQUAL(exofs_write(&f, "abc", 3), 3);
+
+    CU_ASSERT_EQUAL(exofs_rename("/f", "/g"), 0);
+    CU_ASSERT_EQUAL(exofs_rename("/g", "/d/g"), -EXO_EBUSY);
+
+    CU_ASSERT_EQUAL(exofs_close(&f), 0);
+
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat("/f", &st), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_stat("/g", &st), 0);
+    CU_ASSERT_EQUAL(st.size, 4u);
+
+    /* Closed now, so the move goes through. */
+    CU_ASSERT_EQUAL(exofs_rename("/g", "/d/g"), 0);
+    CU_ASSERT_EQUAL(exofs_stat("/d/g", &st), 0);
+    CU_ASSERT_EQUAL(st.size, 4u);
+
+    exofs_unmount();
+}
+
+/* Every rename releases the name record it replaced and every move frees
+ * the slot it left, so going back and forth costs nothing in the end. */
+static void test_rename_cycles_leak_nothing(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+    exofs_volume_t *v = exofs_vol();
+
+    CU_ASSERT_EQUAL(exofs_mkdir("/x"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/y"), 0);
+    CU_ASSERT_EQUAL(write_pattern_file("/x/f", 2000u, 3u), 0);
+
+    /* One round first, so the destination directory's free slot and the
+     * name records the loop reuses already exist. */
+    CU_ASSERT_EQUAL(exofs_rename("/x/f", "/y/f"), 0);
+    CU_ASSERT_EQUAL(exofs_rename("/y/f", "/x/f"), 0);
+    uint32_t free_before = exofs_fat_free_count(v);
+
+    for (uint32_t i = 0; i < 40u; i++) {
+        CU_ASSERT_EQUAL(exofs_rename("/x/f", "/y/f"), 0);
+        CU_ASSERT_EQUAL(exofs_rename("/y/f", "/y/a-much-longer-name-for-f"),
+                        0);
+        CU_ASSERT_EQUAL(exofs_rename("/y/a-much-longer-name-for-f", "/x/f"),
+                        0);
+    }
+
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
+    CU_ASSERT_TRUE(file_has_pattern("/x/f", 2000u, 3u));
+
+    exofs_unmount();
+}
+
 void suite_exofs_tests(CU_pSuite s)
 {
     CU_add_test(s, "heap buffer lies in the LibOS window",
@@ -4089,4 +4340,20 @@ void suite_exofs_tests(CU_pSuite s)
                 test_another_context_cannot_take_an_overlapping_extent);
     CU_add_test(s, "ACCEPTANCE: format, write, remount, list, read back",
                 test_acceptance_round_trip);
+    CU_add_test(s, "rename: a file in place keeps its slot and chain",
+                test_rename_file_in_place);
+    CU_add_test(s, "rename: onto itself is a no-op, onto another is EEXIST",
+                test_rename_to_itself_and_onto_existing);
+    CU_add_test(s, "rename: error paths leave everything as it was",
+                test_rename_error_paths);
+    CU_add_test(s, "rename: moves a file between directories",
+                test_rename_moves_file_between_directories);
+    CU_add_test(s, "rename: moves a directory and repoints its ..",
+                test_rename_moves_directory_and_fixes_dotdot);
+    CU_add_test(s, "rename: a directory cannot move into itself",
+                test_rename_refuses_directory_into_itself);
+    CU_add_test(s, "rename: open handles survive in place, block a move",
+                test_rename_with_open_handle);
+    CU_add_test(s, "rename: cycles leak nothing",
+                test_rename_cycles_leak_nothing);
 }

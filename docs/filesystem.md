@@ -18,7 +18,7 @@ rather than restating the format in a script.
 > layer (superblock/format/mount/FAT cache), the FAT layer, the name area,
 > directory entries, path resolution, the directory operations
 > (mkdir/rmdir/opendir/readdir) and the file operations
-> (open/read/write/seek/stat/unlink). What remains on the ticket is wiring
+> (open/read/write/seek/stat/unlink), plus `rename` (SCRUM-240, §1.4). What remains on the ticket is wiring
 > and documentation, not filesystem behaviour.
 
 ---
@@ -87,6 +87,48 @@ root block first and the superblock last. Until that final sector lands
 there is no magic on the disk, so `exofs_mount()` refuses the volume — which
 is the honest answer for one whose FAT was only half written. The opposite
 order yields a *mountable* volume with a garbage FAT.
+
+### 1.4 Rename prepares, then unlinks, then links
+
+`exofs_rename()` (SCRUM-240, `src/libos_fs/exofs_dir.c`) re-links a directory
+entry and never touches the entry's data chain. How many writes that takes
+depends on whether the entry changes directory.
+
+**Within one directory it is one slot write.** The entry stays in its slot
+and only its name reference changes. So the rename is atomic, and an open
+handle on the file keeps working: a handle remembers its slot, not its name.
+The new name record is allocated before that write and the old one released
+after it. An interruption therefore leaves at most one unreferenced name
+record, and the file reachable under one of its two names. Releasing first
+would risk a live entry whose name cannot be read.
+
+**Between directories it is two slot writes, and their order is chosen.**
+`exofs_dir_move()` (`src/libos_fs/exofs_dirent.c`) first settles everything
+that can fail for want of space: a free slot in the destination (extending
+it if needed) and the new name record. `-EXO_ENOSPC` and `-EXO_EEXIST`
+therefore change nothing visible. Then:
+
+| Order | If it is interrupted between the two writes |
+|---|---|
+| **clear the old slot, then write the new one** (what ExoFS does) | Nothing names the entry's chain. It is leaked: invisible, harmless, reclaimed by a reformat. |
+| write the new slot, then clear the old one | Two live entries name one chain. The first `unlink` of either frees storage the other still points at, which is the "two files sharing storage" case from §6b. |
+
+If the second write fails with a device error, the original entry is written
+back before returning.
+
+**A moved directory's `..` is repointed last**, once the entry is in its new
+parent. Two more rules apply only to directories:
+
+- A directory may not move into itself or anywhere below itself
+  (`-EXO_EINVAL`), or it and its contents would become unreachable from the
+  root. This is checked by climbing `..` from the destination to the root,
+  which costs the tree's depth rather than the size of the subtree.
+- An entry with an open handle may not change directory (`-EXO_EBUSY`). The
+  handle would flush its size into the slot the entry just left.
+
+There is **no replace-on-rename**: an existing target is `-EXO_EEXIST`, and a
+caller that wants to overwrite removes the target first. The shell's `mv`
+does exactly that for a file onto a file (§8 "Mounts").
 
 ---
 
@@ -346,8 +388,8 @@ what lets path resolution handle them with no special case at all: it looks
 them up in the directory like any other name, so they mean whatever the
 directory says they mean. The cost is two slots and two name records per
 directory, plus the obligation that anything which ever *moves* a directory
-must fix its `..` — nothing moves directories yet, and a future rename owns
-that.
+must fix its `..`. That is `exofs_rename()` (§1.4), which repoints `..`
+whenever it moves a directory to a new parent.
 
 The root's `..` points at the root. There is nowhere above it, and a
 self-loop makes `/..` resolve to `/` the way every other filesystem behaves,
@@ -520,7 +562,7 @@ the directory entry (size, chain head) is only rewritten by `exo_file_close`
 (§6c Durability), so close every `FILE` before `exofs_unmount()`.
 
 `remove`/`rename` are not here yet. They are SCRUM-106, over `exofs_unlink`
-and a rename ExoFS does not have yet.
+and `exofs_rename` (§1.4).
 
 ---
 
@@ -711,7 +753,12 @@ program's (`docs/syscall_spec.md` §3.5a).
   holds the normalized absolute path.
 - `rm` and `mv` refuse a mount point itself.
 - Read/write, with no read-only mode.
-- `cp` and `mv` within a volume are as before. Between volumes they use
+- `mv` within a volume is `exofs_rename()` (§1.4), so it moves directories
+  too and copies nothing. For a file onto an existing file it unlinks the
+  target first, as the old copy-based `mv` effectively did. It refuses to move
+  a directory that contains the working directory or a mount point, because
+  both are stored as paths. `cp` within a volume is as before.
+- Between volumes, `cp` and `mv` use
   `shell_copy_between()` (the two-path form of `install`'s copy, §8 "Install"):
   chunked, alternating mounts, destination removed on failure. This needs both
   volumes bound at once, and the binding is one extent per owner per device, so
@@ -736,9 +783,9 @@ volumes, and the two-path copy.
 | `exofs_volume.c` | Superblock, geometry, `format`/`mount`/`sync`/`unmount`, the FAT cache and its writeback. |
 | `exofs_fat.c/.h` | Block allocation and chain traversal. |
 | `exofs_name.c/.h` | The variable-length name area (§6). |
-| `exofs_dirent.c/.h` | Entry storage, the positional iterator, lookup/add/remove. |
+| `exofs_dirent.c/.h` | Entry storage, the positional iterator, lookup/add/remove, and in-place rename / cross-directory move of an entry (§1.4). |
 | `exofs_path.c/.h` | Path parsing and resolution (§7). |
-| `exofs_dir.c/.h` | `mkdir`/`rmdir`/`opendir`/`readdir`, and the `.`/`..` bootstrap (§6b). |
+| `exofs_dir.c/.h` | `mkdir`/`rmdir`/`opendir`/`readdir`, `rename` (§1.4), and the `.`/`..` bootstrap (§6b). |
 | `exofs_file.c` | `open`/`read`/`write`/`seek`/`stat`/`unlink` (§6c). |
 | `exo_file.c/.h` | The descriptor table over `exofs_file.c`: `exo_file_open`/`close`/`read`/`write`/`seek`/`stat`/`close_all` (§6d, SCRUM-44). |
 | `tests/kernel/test_exofs_k.c` | The whole suite, 66 tests, ending in the ticket's end-to-end acceptance path. |
