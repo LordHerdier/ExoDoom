@@ -110,6 +110,7 @@ void suite_doom_sound_pcm_tests(CU_pSuite s);
 void suite_doom_sound_music_tests(CU_pSuite s);
 void suite_exo_pkg_tests(CU_pSuite s);
 void suite_exo_admit_tests(CU_pSuite s);
+void suite_exo_grant_tests(CU_pSuite s);
 void suite_shell_firstboot_tests(CU_pSuite s);
 void suite_acpi_tests(CU_pSuite s);
 void suite_shell_help_tests(CU_pSuite s);
@@ -740,6 +741,9 @@ int run_tests(void)
 
     s = CU_add_suite("exo_admit", NULL, NULL);
     suite_exo_admit_tests(s);
+
+    s = CU_add_suite("exo_grant", NULL, NULL);
+    suite_exo_grant_tests(s);
 
     s = CU_add_suite("shell_firstboot", NULL, NULL);
     suite_shell_firstboot_tests(s);

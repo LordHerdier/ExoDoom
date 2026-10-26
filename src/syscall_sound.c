@@ -526,6 +526,17 @@ uint32_t syscall_sound_pcm_slots_used(void)
     return used;
 }
 
+uint32_t syscall_sound_voices_of(page_owner_t owner)
+{
+    uint32_t n = 0;
+
+    for (uint32_t i = 0; i < PCM_MIXER_VOICES; i++)
+        if (pcm_slots[i].buf != NULL && pcm_slots[i].owner == owner)
+            n++;
+
+    return n;
+}
+
 uint32_t syscall_sound_pcm_pages_used(void)
 {
     uint32_t pages = 0;
