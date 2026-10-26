@@ -4263,10 +4263,10 @@ static void test_rename_enospc_changes_nothing(void)
 {
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
 
-    CU_ASSERT_EQUAL(exofs_mkdir("/src"), 0);
-    CU_ASSERT_EQUAL(exofs_mkdir("/dst"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/src"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/dst"), 0);
     CU_ASSERT_EQUAL(write_pattern_file("/src/f", 3000u, 5u), 0);
 
     for (uint32_t i = 0; i < EXOFS_ENTS_PER_BLOCK - 2u; i++) {
@@ -4274,7 +4274,7 @@ static void test_rename_enospc_changes_nothing(void)
         path[6] = (char)('0' + i / 10u);
         path[7] = (char)('0' + i % 10u);
         exofs_file_t f;
-        CU_ASSERT_EQUAL(exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE, &f),
+        CU_ASSERT_EQUAL(exofs_open(g_tv, path, EXOFS_O_WRITE | EXOFS_O_CREATE, &f),
                         0);
         CU_ASSERT_EQUAL(exofs_close(&f), 0);
     }
@@ -4289,7 +4289,7 @@ static void test_rename_enospc_changes_nothing(void)
     }
     CU_ASSERT_EQUAL(exofs_fat_free_count(v), 0u);
 
-    CU_ASSERT_EQUAL(exofs_rename("/src/f", "/dst/g"), -EXO_ENOSPC);
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/src/f", "/dst/g"), -EXO_ENOSPC);
 
     exofs_dirent_t after;
     CU_ASSERT_EQUAL(resolve_entry("/src/f", NULL, &after), 0);
@@ -4300,7 +4300,7 @@ static void test_rename_enospc_changes_nothing(void)
     CU_ASSERT_EQUAL(readdir_contains("/dst", "g", &found), 0);
     CU_ASSERT_FALSE(found);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 void suite_exofs_tests(CU_pSuite s)
