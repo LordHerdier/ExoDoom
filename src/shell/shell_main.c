@@ -312,6 +312,7 @@ static void shell_run_clear(fb_console_t *con, const char *arg);
 static void shell_run_about(fb_console_t *con, const char *arg);
 static void shell_run_wadview(fb_console_t *con, const char *arg);
 static void shell_run_clock(fb_console_t *con, const char *arg);
+static void shell_run_dashboard(fb_console_t *con, const char *arg);
 static void shell_run_snake(fb_console_t *con, const char *arg);
 static void shell_run_doom(fb_console_t *con, const char *arg);
 static void shell_print_usage(fb_console_t *con, const char *name);
@@ -496,6 +497,10 @@ static const shell_cmd_t shell_cmds[] = {
         "usage: cp <src> <dst>\n"
         "     Creates or truncates <dst>; refuses when <src> and <dst> are the same file\n" },
       shell_run_cp, 1 },
+    { { "dashboard", SHELL_GRP_APPS, "Live resource dashboard (Ctrl+Tab returns to the shell)",
+        "usage: dashboard\n"
+        "     Same as `run dashboard.exo`; pages, contexts, bindings and sound voices\n" },
+      shell_run_dashboard, 0 },
     { { "dd", SHELL_GRP_DISK, "Raw sector copy between the disk and a file",
         "usage: dd read <lba> <count> <path>\n"
         "       dd write <path> <lba>\n"
@@ -719,6 +724,13 @@ static void shell_run_clock(fb_console_t *con, const char *arg) {
      * (src/libos_clock/libos_clock.c's own comment on why), so control
      * comes back via Ctrl+Tab (SCRUM-111). */
     shell_run_run(con, "clock.exo");
+}
+
+static void shell_run_dashboard(fb_console_t *con, const char *arg) {
+    (void)arg;
+    /* `run dashboard.exo` (SCRUM-236). Like the clock it never yields on its
+     * own, so control comes back via Ctrl+Tab. */
+    shell_run_run(con, "dashboard.exo");
 }
 
 static void shell_run_snake(fb_console_t *con, const char *arg) {
@@ -1310,13 +1322,14 @@ static int shell_admit_report(fb_console_t *con, const exo_pkg_header_t *parsed)
  * program takes the screen the moment it runs, so an on-screen copy would
  * either vanish unread or need the shell to hold the launch back. */
 static int64_t shell_launch_with_grant(const void *pkg, uint32_t len,
-                                       const exo_pkg_header_t *hdr) {
+                                       const exo_pkg_header_t *hdr,
+                                       const char *prog_name) {
     if (hdr == NULL) {
         /* Not ours to judge; the kernel reports the format error. */
-        return exo_launch_pkg(pkg, len, 0);
+        return exo_launch_pkg(pkg, len, 0, prog_name);
     }
 
-    int64_t ctx = exo_launch_pkg(pkg, len, EXO_LAUNCH_HOLD);
+    int64_t ctx = exo_launch_pkg(pkg, len, EXO_LAUNCH_HOLD, prog_name);
     if (ctx <= 0) {
         return ctx < 0 ? ctx : -EXO_EINVAL;
     }
@@ -1458,7 +1471,25 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         return;
     }
 
-    int64_t lrc = shell_launch_with_grant(pkg, st.size, have_hdr ? &hdr : NULL);
+    /* The program's display name for pslist/the dashboard: the file name
+     * without its directory or ".exo", cut to what the kernel records. */
+    char prog_name[CONTEXT_NAME_MAX];
+    {
+        const char *base = path + 1;
+        size_t bl = 0;
+        while (base[bl] != '\0' && bl < sizeof(prog_name) - 1) {
+            prog_name[bl] = base[bl];
+            bl++;
+        }
+        prog_name[bl] = '\0';
+        if (bl > 4 && prog_name[bl - 4] == '.' && prog_name[bl - 3] == 'e' &&
+            prog_name[bl - 2] == 'x' && prog_name[bl - 1] == 'o') {
+            prog_name[bl - 4] = '\0';
+        }
+    }
+
+    int64_t lrc = shell_launch_with_grant(pkg, st.size, have_hdr ? &hdr : NULL,
+                                          prog_name);
     libos_heap_free(pkg);
     if (lrc == 0) {
         fbcon_clear(con);
@@ -2788,6 +2819,10 @@ static void shell_run_pslist(fb_console_t *con, const char *arg) {
     for (int64_t i = 0; i < rc; i++) {
         fbcon_write(con, "id=");
         shell_write_u32(con, procs[i].id);
+        if (procs[i].name[0] != '\0') {
+            fbcon_write(con, " name=");
+            fbcon_write(con, procs[i].name);
+        }
         fbcon_write(con, " state=");
         switch (procs[i].state) {
         case 1: fbcon_write(con, "ready");   break;

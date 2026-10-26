@@ -53,6 +53,7 @@
 #include "syscall_launch.h"
 #include "syscall.h"
 #include "exo_syscall.h"
+#include "string.h"
 #include "context.h"
 #include "libos_launch.h"
 #include "exo_pkg.h"
@@ -99,6 +100,7 @@ typedef struct {
     const uint8_t *data_end;
     size_t         bss_len;
     unsigned       flags;
+    const char    *name;   /* shown by exo_pslist (SCRUM-236) */
 } launch_app_t;
 
 /*
@@ -114,6 +116,7 @@ static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
         _binary_libos_wad_viewer_data_bin_end,
         LIBOS_WAD_VIEWER_BSS_LEN,
         LAUNCH_NEEDS_WAD | LAUNCH_RELEASES_FB,
+        "wadview",
     },
     [EXO_LAUNCH_APP_DOOM] = {
         _binary_libos_doom_code_bin_start,
@@ -122,6 +125,7 @@ static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
         _binary_libos_doom_data_bin_end,
         LIBOS_DOOM_BSS_LEN,
         LAUNCH_NEEDS_WAD | LAUNCH_RELEASES_FB,
+        "doom",
     },
 };
 
@@ -385,6 +389,7 @@ static int64_t sys_launch(uint64_t app_id, uint64_t a2, uint64_t a3,
     if (create_rc != CONTEXT_OK) {
         return create_rc == CONTEXT_ENOMEM ? -EXO_ENOMEM : -EXO_EINVAL;
     }
+    context_set_name(id, app->name);
 
     size_t code_len = (size_t)(app->code_end - app->code_start);
     size_t data_len = (size_t)(app->data_end - app->data_start);
@@ -435,9 +440,9 @@ _Static_assert(EXO_LAUNCH_PKG_MAX_LEN ==
  * buffer again, and libos_build_image() copies them exactly once.
  */
 static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
-                              uint64_t a4, uint64_t a5, uint64_t a6)
+                              uint64_t name_ptr, uint64_t a5, uint64_t a6)
 {
-    (void)a4; (void)a5; (void)a6;
+    (void)a5; (void)a6;
 
     /* Shape first, like the length: a flag this kernel does not know is a
      * caller that expects behavior it will not get. */
@@ -450,6 +455,18 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
     if (!exo_range_in_user_window(pkg, len) ||
         !exo_user_range_mapped(pkg, len, 0)) {
         return -EXO_EFAULT;
+    }
+
+    /* The display name is a fixed-size buffer, so there is no length to
+     * trust: the whole CONTEXT_NAME_MAX bytes are checked, then copied once
+     * (and forced NUL-terminated) so nothing below re-reads caller memory. */
+    char name[CONTEXT_NAME_MAX] = { 0 };
+    if (name_ptr != 0) {
+        if (!exo_range_in_user_window(name_ptr, CONTEXT_NAME_MAX) ||
+            !exo_user_range_mapped(name_ptr, CONTEXT_NAME_MAX, 0)) {
+            return -EXO_EFAULT;
+        }
+        memcpy(name, (const void *)(uintptr_t)name_ptr, CONTEXT_NAME_MAX - 1);
     }
 
     exo_pkg_header_t hdr;
@@ -511,6 +528,7 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
     if (create_rc != CONTEXT_OK) {
         return create_rc == CONTEXT_ENOMEM ? -EXO_ENOMEM : -EXO_EINVAL;
     }
+    context_set_name(id, name);
 
     if (libos_build_image(id, code, hdr.code_len, data, hdr.data_len,
                           hdr.bss_len, &launch_img) != VMM_OK) {

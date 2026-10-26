@@ -686,6 +686,8 @@ void kernel_main(void *mb2_info_ptr) {
         }
     }
 
+    context_set_name(shell_id, "shell");
+
     size_t shell_code_len = (size_t)(_binary_shell_code_bin_end -
                                      _binary_shell_code_bin_start);
     size_t shell_data_len = (size_t)(_binary_shell_data_bin_end -

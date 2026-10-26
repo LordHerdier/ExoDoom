@@ -368,6 +368,11 @@ typedef struct {
     uint64_t unix_secs;
 } exo_rtc_time_t;
 
+/* CONTEXT_NAME_MAX (name field below) and CONTEXT_MAX (EXO_PSLIST_MAX, further
+ * down) come from here; see the note at EXO_PSLIST_MAX for why it is safe to
+ * include from a LibOS. */
+#include "context.h"
+
 /* exo_pslist(out, max) — #23.  One entry per live LibOS context (the shell
  * included — it is context_create()'d like any other, SCRUM-178).
  * `state` mirrors context_state_t (src/context.h): 1=READY, 2=RUNNING,
@@ -378,6 +383,8 @@ typedef struct {
     uint8_t  state;
     uint8_t  reserved;      /* zeroed by the kernel                         */
     uint32_t page_count;    /* pages currently owned by this context        */
+    char     name[CONTEXT_NAME_MAX]; /* program name the launcher gave it
+                             * (SCRUM-236), NUL-terminated, "" if none      */
 } exo_ps_info_t;
 
 /* exo_diskstat(dev, out) — #31 (SCRUM-202, device SCRUM-244). Unscoped
@@ -413,7 +420,6 @@ typedef struct {
  * only ever wants #define numbers out of this header (see this file's own
  * top comment), and context.h's typedefs/prototypes are exactly the kind of
  * content that convention exists to keep out of assembly text. */
-#include "context.h"
 #define EXO_PSLIST_MAX CONTEXT_MAX
 #endif /* __ASSEMBLER__ */
 
@@ -423,7 +429,7 @@ _Static_assert(sizeof(exo_fb_info_t)     == 24, "exo_fb_info_t layout is ABI");
 _Static_assert(sizeof(exo_kbd_event_t)   ==  4, "exo_kbd_event_t layout is ABI");
 _Static_assert(sizeof(exo_mouse_state_t) ==  6, "exo_mouse_state_t layout is ABI");
 _Static_assert(sizeof(exo_memstat_t)     == 24, "exo_memstat_t layout is ABI");
-_Static_assert(sizeof(exo_ps_info_t)     ==  8, "exo_ps_info_t layout is ABI");
+_Static_assert(sizeof(exo_ps_info_t)     == 24, "exo_ps_info_t layout is ABI");
 _Static_assert(sizeof(exo_diskstat_t)    ==  8, "exo_diskstat_t layout is ABI");
 _Static_assert(sizeof(exo_diskextent_t)  ==  8, "exo_diskextent_t layout is ABI");
 _Static_assert(sizeof(exo_rtc_time_t)    == 16, "exo_rtc_time_t layout is ABI");
@@ -912,6 +918,11 @@ static inline int64_t exo_rtc_read(exo_rtc_time_t *out)
  *                mapped
  *   -EXO_ENOMEM  no room for the image or no free context row
  *
+ * `name` is the program name exo_pslist (#23) will report: NULL for none, or a
+ * NUL-terminated string in a buffer of CONTEXT_NAME_MAX bytes (longer names
+ * must be cut by the caller).  The kernel only records it for display.  A
+ * buffer not entirely inside the LibOS window and mapped is -EXO_EFAULT.
+ *
  * With EXO_LAUNCH_HOLD in `flags` the context is built but not entered: the
  * call returns its id (> 0) at once, and the program does not run until
  * exo_launch_start(id).  Any other flag bit is -EXO_EINVAL.  One hold is
@@ -920,9 +931,10 @@ static inline int64_t exo_rtc_read(exo_rtc_time_t *out)
  * launch.
  */
 static inline int64_t exo_launch_pkg(const void *pkg, uint64_t len,
-                                     uint64_t flags)
+                                     uint64_t flags, const char *name)
 {
-    return exo_syscall3(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len, flags);
+    return exo_syscall4(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len, flags,
+                        (uint64_t)(uintptr_t)name);
 }
 
 /* #40 — enter a context #36 built with EXO_LAUNCH_HOLD.  Like exo_launch, on

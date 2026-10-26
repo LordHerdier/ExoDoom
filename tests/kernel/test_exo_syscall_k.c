@@ -198,10 +198,11 @@ static void test_memstat_layout(void)
 
 static void test_ps_info_layout(void)
 {
-    CU_ASSERT_EQUAL(sizeof(exo_ps_info_t), 8);
+    CU_ASSERT_EQUAL(sizeof(exo_ps_info_t), 24);
     CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, id),         0);
     CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, state),      2);
     CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, page_count), 4);
+    CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, name),       8);
 
     /* EXO_PSLIST_MAX is CONTEXT_MAX itself (src/exo_syscall.h #include's
      * context.h rather than restating the number) -- this is a tautology by

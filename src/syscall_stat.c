@@ -9,6 +9,7 @@
 #include "syscall_sound.h"
 
 #include <stddef.h>
+#include <string.h>
 #include <stdint.h>
 
 /*
@@ -150,6 +151,7 @@ static int64_t sys_pslist(uint64_t out, uint64_t max, uint64_t a3,
         ps_out[i].id = infos[i].id;
         ps_out[i].state = (uint8_t)infos[i].state;
         ps_out[i].reserved = 0;
+        memcpy(ps_out[i].name, infos[i].name, CONTEXT_NAME_MAX);
         ps_out[i].page_count = page_count_owned(infos[i].id);
     }
 

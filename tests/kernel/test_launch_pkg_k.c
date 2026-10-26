@@ -190,6 +190,21 @@ static void test_rejects_lengths_that_cannot_be_a_package(void)
     CU_ASSERT_EQUAL(do_launch_pkg(PKG_UNMAPPED, ~0ULL), -EXO_EINVAL);
 }
 
+/* SCRUM-236: the optional program name (4th argument) is a fixed-size buffer
+ * that must be in the window and mapped, checked before anything is built. */
+static void test_rejects_bad_name_pointer(void)
+{
+    uint32_t before = context_count();
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_LAUNCH_PKG, PKG_UNMAPPED,
+                                         sizeof(exo_pkg_header_t), 0,
+                                         PKG_UNMAPPED, 0, 0), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_LAUNCH_PKG, PKG_UNMAPPED,
+                                         sizeof(exo_pkg_header_t), 0,
+                                         EXO_USER_VA_BASE - 1, 0, 0),
+                    -EXO_EFAULT);
+    CU_ASSERT_EQUAL(context_count(), before);
+}
+
 /* ---- Buffer: in the window AND mapped ---------------------------------- */
 
 static void test_rejects_unmapped_and_out_of_window_buffers(void)
@@ -1018,6 +1033,8 @@ void suite_launch_pkg_tests(CU_pSuite s)
 {
     CU_add_test(s, "lengths that cannot be a package are refused first",
                 test_rejects_lengths_that_cannot_be_a_package);
+    CU_add_test(s, "a bad program-name pointer is refused",
+                test_rejects_bad_name_pointer);
     CU_add_test(s, "unmapped and out-of-window buffers are refused",
                 test_rejects_unmapped_and_out_of_window_buffers);
     CU_add_test(s, "a buffer running into unmapped memory is refused",
