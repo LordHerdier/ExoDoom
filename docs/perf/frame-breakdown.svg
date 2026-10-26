@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="208" viewBox="0 0 760 208" role="img" aria-label="Average frame time split into busy-wait, simulation and sound plus render, KVM versus TCG">
+<style>
+  .surface { fill: #fcfcfb; }
+  .ink     { fill: #0b0b0b; }
+  .ink2    { fill: #52514e; }
+  .grid    { stroke: #e4e3df; stroke-width: 1; }
+  .axis    { stroke: #8a8984; stroke-width: 1; }
+  .ref     { stroke: #52514e; stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .s1      { fill: #2a78d6; }
+  .s2      { fill: #eb6834; }
+  .s3      { fill: #1baf7a; }
+  .whisker { stroke: #0b0b0b; stroke-width: 1.5; }
+  text     { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; }
+  .title   { font-size: 14px; font-weight: 600; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #1a1a19; }
+    .ink     { fill: #f0efec; }
+    .ink2    { fill: #c3c2b7; }
+    .grid    { stroke: #33332f; }
+    .axis    { stroke: #6f6e69; }
+    .ref     { stroke: #c3c2b7; }
+    .s1      { fill: #3987e5; }
+    .s2      { fill: #d95926; }
+    .s3      { fill: #199e70; }
+    .whisker { stroke: #f0efec; }
+  }
+</style>
+<rect class="surface" width="760" height="208"/><text class="ink title" x="16.0" y="26.0" text-anchor="start" >Average frame time, split by where it goes (ms)</text><rect class="s1" x="16" y="43" width="10" height="10" rx="2"/><text class="ink2" x="30.0" y="52.0" text-anchor="start" >busy-wait for next tic</text><rect class="s2" x="183.2" y="43" width="10" height="10" rx="2"/><text class="ink2" x="197.2" y="52.0" text-anchor="start" >game simulation</text><rect class="s3" x="304.2" y="43" width="10" height="10" rx="2"/><text class="ink2" x="318.2" y="52.0" text-anchor="start" >sound + render</text><line class="grid" x1="210.0" y1="76" x2="210.0" y2="180"/><text class="ink2" x="210.0" y="196.0" text-anchor="middle" >0</text><line class="grid" x1="270.0" y1="76" x2="270.0" y2="180"/><text class="ink2" x="270.0" y="196.0" text-anchor="middle" >2</text><line class="grid" x1="330.0" y1="76" x2="330.0" y2="180"/><text class="ink2" x="330.0" y="196.0" text-anchor="middle" >4</text><line class="grid" x1="390.0" y1="76" x2="390.0" y2="180"/><text class="ink2" x="390.0" y="196.0" text-anchor="middle" >6</text><line class="grid" x1="450.0" y1="76" x2="450.0" y2="180"/><text class="ink2" x="450.0" y="196.0" text-anchor="middle" >8</text><line class="grid" x1="510.0" y1="76" x2="510.0" y2="180"/><text class="ink2" x="510.0" y="196.0" text-anchor="middle" >10</text><line class="grid" x1="570.0" y1="76" x2="570.0" y2="180"/><text class="ink2" x="570.0" y="196.0" text-anchor="middle" >12</text><line class="grid" x1="630.0" y1="76" x2="630.0" y2="180"/><text class="ink2" x="630.0" y="196.0" text-anchor="middle" >14</text><line class="grid" x1="690.0" y1="76" x2="690.0" y2="180"/><text class="ink2" x="690.0" y="196.0" text-anchor="middle" >16</text><text class="ink" x="16.0" y="106.0" text-anchor="start" >KVM, Sep 2026 (SCRUM-87)</text><rect class="s1" x="210.0" y="88.0" width="400.1" height="28.0" rx="2"><title>KVM, Sep 2026 (SCRUM-87): busy-wait for next tic 13.37 ms</title></rect><text class="surface" x="410.5" y="106.0" text-anchor="middle" style="font-weight:600">13.4</text><rect class="s2" x="612.1" y="88.0" width="0.4" height="28.0" rx="2"><title>KVM, Sep 2026 (SCRUM-87): game simulation 0.08 ms</title></rect><rect class="s3" x="614.5" y="88.0" width="35.5" height="28.0" rx="2"><title>KVM, Sep 2026 (SCRUM-87): sound + render 1.25 ms</title></rect><text class="ink" x="657.0" y="106.0" text-anchor="start" >14.7 ms</text><text class="ink" x="16.0" y="154.0" text-anchor="start" >TCG, no KVM (this report)</text><rect class="s1" x="210.0" y="136.0" width="146.0" height="28.0" rx="2"><title>TCG, no KVM (this report): busy-wait for next tic 4.90 ms</title></rect><text class="surface" x="283.5" y="154.0" text-anchor="middle" style="font-weight:600">4.9</text><rect class="s2" x="358.0" y="136.0" width="2.9" height="28.0" rx="2"><title>TCG, no KVM (this report): game simulation 0.16 ms</title></rect><rect class="s3" x="362.9" y="136.0" width="294.9" height="28.0" rx="2"><title>TCG, no KVM (this report): sound + render 9.90 ms</title></rect><text class="surface" x="510.3" y="154.0" text-anchor="middle" style="font-weight:600">9.9</text><text class="ink" x="664.7" y="154.0" text-anchor="start" >15.0 ms</text></svg>
