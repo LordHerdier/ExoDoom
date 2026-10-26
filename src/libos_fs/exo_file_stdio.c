@@ -62,17 +62,13 @@ static int efs_open(const char *path, unsigned flags)
     /* A read of a file the default volume does not have goes on to the
      * fallback volume, if there is one. Reads only: anything that could write
      * stays on the default volume, so a program's own volume is the only one
-     * it can change. An open descriptor keeps the volume it was opened on
-     * (docs/filesystem.md 6d), so the default can be put straight back. */
+     * it can change. Opened on the fallback directly, so the default volume
+     * is never touched. */
     if (fd == -EXO_ENOENT &&
         !(flags & (EXO_STDIO_WRITE | EXO_STDIO_CREATE | EXO_STDIO_TRUNC |
                    EXO_STDIO_APPEND)) &&
         exofs_vol_live(g_fallback_vol, g_fallback_gen)) {
-        exofs_vol_t *keep = exo_file_volume();
-
-        exo_file_set_volume(g_fallback_vol);
-        fd = exo_file_open(abs, f);
-        exo_file_set_volume(keep);
+        fd = exo_file_open_on(g_fallback_vol, abs, f);
     }
     return fd;
 }

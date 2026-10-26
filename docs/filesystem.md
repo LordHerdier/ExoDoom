@@ -587,8 +587,10 @@ not replacing matters: the first save's `remove` finds nothing and fails
 
 **A second volume to read from** (SCRUM-267). `exo_file_stdio_set_fallback(vol)`
 names a volume that a read-only `fopen` tries when the default volume does not
-have the name. Anything that could write (`w`, `a`, `+`) never falls through,
-so a program can change only the default volume. A file on both is read from
+have the name, opened with `exo_file_open_on(vol, path, flags)` -- `exo_file_open`
+on a named volume, which leaves the default volume alone. Anything that could
+write (`w`, `a`, `+`) never falls through, so a program can change only the
+default volume. A file on both is read from
 the default one. Like the default, it reads as unset once unmounted. It exists
 because a program with a private volume *and* a shared read-only one (Doom,
 "Doom's volumes" in §8) needs "writes here, reads from either" and the
@@ -897,7 +899,7 @@ volumes, and the two-path copy.
 | `exofs_path.c/.h` | Path parsing and resolution (§7). |
 | `exofs_dir.c/.h` | `mkdir`/`rmdir`/`opendir`/`readdir`, `rename` (§1.4), and the `.`/`..` bootstrap (§6b). |
 | `exofs_file.c` | `open`/`read`/`write`/`seek`/`stat`/`unlink` (§6c). |
-| `exo_file.c/.h` | The descriptor table over `exofs_file.c`: `exo_file_open`/`close`/`read`/`write`/`seek`/`stat`/`remove`/`rename`/`close_all`, and the default volume they resolve paths against, `exo_file_set_volume` (§6d, SCRUM-44, SCRUM-265). |
+| `exo_file.c/.h` | The descriptor table over `exofs_file.c`: `exo_file_open`/`open_on`/`close`/`read`/`write`/`seek`/`stat`/`remove`/`rename`/`close_all`, and the default volume they resolve paths against, `exo_file_set_volume` (§6d, SCRUM-44, SCRUM-265). |
 | `exofs_attach.c/.h` | Mount a program's own volume, formatting it only when its first sector is blank (SCRUM-267). Knows only `exofs_*` and the LibOS heap; the caller binds the disk. |
 | `tests/kernel/test_exofs_multivol_k.c` | Several volumes mounted at once: interleaved I/O, the pool limit, the same volume twice, stale handles, and a copy between two mounted volumes. |
 | `tests/kernel/test_exofs_k.c` | The whole suite, 105 tests, ending in the ticket's end-to-end acceptance path. |

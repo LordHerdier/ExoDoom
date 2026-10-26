@@ -98,6 +98,20 @@ static disk_extent_t *find_assigned(page_owner_t who)
     return e ? e : find_assigned_role(who, 1);
 }
 
+/* The assignment of `who` that is exactly [base, base + count) of `dev`, or
+ * NULL: what acquire matches a request against. */
+static disk_extent_t *find_assigned_exact(page_owner_t who, uint32_t dev,
+                                          uint32_t base, uint32_t count)
+{
+    if (who == PAGE_OWNER_FREE)
+        return NULL;
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        if (assigned[i].owner == who && assigned[i].dev == dev &&
+            assigned[i].base == base && assigned[i].count == count)
+            return &assigned[i];
+    return NULL;
+}
+
 /* The extent of `dev` that holds all of [lba, lba + count), or NULL. *held is
  * set when `who` holds any extent of `dev` at all, which is what separates
  * "outside your extents" from "you hold nothing here". A context has at most
@@ -172,17 +186,13 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
         return DISK_BIND_ERANGE;
     }
 
-    /* A context with an assigned volume may bind that volume and nothing
-     * else -- no other device either, or a packaged program could reach a
-     * second disk just by asking; everyone else is kept out of every
+    /* A context with assigned volumes may bind exactly one of them and
+     * nothing else -- no other device either, or a packaged program could
+     * reach a second disk just by asking (SCRUM-267: it has up to two, a
+     * private one and the program volume); everyone else is kept out of every
      * assigned volume. */
-    /* SCRUM-267: with two assignments the extent must match either of them. */
     int            assigned_any = find_assigned(who) != NULL;
-    disk_extent_t *own = NULL;
-    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
-        if (assigned[i].owner == who && assigned[i].dev == dev &&
-            assigned[i].base == base && assigned[i].count == count)
-            own = &assigned[i];
+    disk_extent_t *own = find_assigned_exact(who, dev, base, count);
     if (assigned_any && !own)
         return DISK_BIND_EPERM;
     /* A read-only assignment grants no exclusivity, so it keeps nobody out. */

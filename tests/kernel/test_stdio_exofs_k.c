@@ -961,8 +961,59 @@ static void test_fallback_reads_shared_volume_writes_private(void)
     exofs_unmount_all();
 }
 
+/* exo_file_open_on() (SCRUM-267): open on a named volume, default untouched. */
+static void test_open_on_names_the_volume_not_the_default(void)
+{
+    exofs_vol_t *a = NULL, *b = NULL;
+    char         got[16];
+    int          fd;
+
+    if (!drive_present()) return;
+    exo_file_stdio_remove();
+    exo_file_close_all();
+    exofs_unmount_all();
+
+    CU_ASSERT_EQUAL(exofs_format(0, A_BASE, SMALL_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_format(0, B_BASE, SMALL_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, A_BASE, &a), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, B_BASE, &b), 0);
+    if (a == NULL || b == NULL) { exofs_unmount_all(); return; }
+    put_file(a, "/on-a.txt", "from-a");
+    put_file(b, "/on-b.txt", "from-b");
+    exo_file_set_volume(a);
+
+    /* A file only B has: invisible to the default, readable through open_on. */
+    CU_ASSERT_EQUAL(exo_file_open("/on-b.txt", EXO_FILE_O_READ), -EXO_ENOENT);
+    fd = exo_file_open_on(b, "/on-b.txt", EXO_FILE_O_READ);
+    CU_ASSERT_TRUE(fd >= 0);
+    if (fd >= 0) {
+        memset(got, 0, sizeof got);
+        CU_ASSERT_EQUAL(exo_file_read(fd, got, sizeof got), (int64_t)6);
+        CU_ASSERT_EQUAL(memcmp(got, "from-b", 6), 0);
+        CU_ASSERT_EQUAL(exo_file_close(fd), 0);
+    }
+    CU_ASSERT_TRUE(exo_file_volume() == a);             /* never moved */
+
+    /* The plain call is the same thing on the default volume. */
+    fd = exo_file_open("/on-a.txt", EXO_FILE_O_READ);
+    CU_ASSERT_TRUE(fd >= 0);
+    if (fd >= 0) exo_file_close(fd);
+
+    /* No volume, or one that is gone, is -EXO_EINVAL and uses no descriptor. */
+    CU_ASSERT_EQUAL(exo_file_open_on(NULL, "/on-b.txt", EXO_FILE_O_READ),
+                    -EXO_EINVAL);
+    exofs_unmount(b);
+    CU_ASSERT_EQUAL(exo_file_open_on(b, "/on-b.txt", EXO_FILE_O_READ),
+                    -EXO_EINVAL);
+
+    exo_file_close_all();
+    exofs_unmount_all();
+}
+
 void suite_stdio_exofs_tests(CU_pSuite s)
 {
+    CU_add_test(s, "exo_file_open_on names the volume, not the default",
+                test_open_on_names_the_volume_not_the_default);
     CU_add_test(s, "exofs_attach: blank-sector detection",
                 test_blank_sector_detection);
     CU_add_test(s, "exofs_attach formats a blank slot once, then mounts it",
