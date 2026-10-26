@@ -33,6 +33,7 @@ make docker-build              # Build kernel + ISO -> build/exodoom, build/exod
 make docker-run                # Build, then boot the ISO in QEMU (GRUB menu)
 make docker-run-kernel         # Build, then boot the ISO with the GRUB menu skipped -- preferred for dev iteration
 make docker-run-blank         # Like docker-run-kernel but on a zeroed disk: exercises the first-boot format prompt
+make demo-rehearse             # Build, then run the client demo unattended over QMP (host QEMU; docs/demo.md)
 make docker-test               # Build with TESTING=1, boot, stream serial test output
 make docker-ci                 # Same as docker-test; what CI runs
 make docker-build-doom         # Compile-only gate over vendored src/doom/ (79/79; CI runs it)
@@ -216,6 +217,7 @@ area.
 | libc per-function audit | `docs/libc_audit.md` |
 | Drivers (IDT, PIC, PIT, serial, keyboard, framebuffer, ATA, PCI, ACPI, RTC, HDA, speaker, USB) | `docs/drivers/*.md` |
 | Measured frame times, syscall latency, launch latency, memory per context | `docs/performance.md` |
+| The client demo: the beat-by-beat script, and its unattended rehearsal | `docs/demo.md` |
 
 **New architectural facts go into the doc that owns the subsystem, integrated
 into its existing section — not appended here.** If you find yourself writing

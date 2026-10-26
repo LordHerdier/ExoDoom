@@ -176,6 +176,7 @@ network failure there fails all of them and says nothing about your tree.
 | `make docker-build AUDIO_PROFILE=1` | Compile in the audio timing reports (`docs/drivers/hda.md` §12.12) |
 | `make run` | Build, then boot in a host QEMU window (SDL + ALSA) |
 | `make run-blank` | Same, on a zeroed disk, to exercise the first-boot format prompt |
+| `make demo-rehearse` | Build, then run the client demo unattended and check it (`docs/demo.md`) |
 | `make docker-run` | Build, then boot in a container with the GRUB menu |
 | `make docker-run-kernel` | Same with the GRUB menu skipped; the usual dev loop |
 | `make docker-run-blank` | `docker-run-kernel` on a zeroed disk |
@@ -289,6 +290,7 @@ for the user.
 | Paging, allocators, LibOS heap | `docs/memory.md` |
 | ExoFS, `install`, `mount` | `docs/filesystem.md` |
 | Writing a new LibOS program | `docs/libos-authoring.md` |
+| The client demo, beat by beat | `docs/demo.md` |
 | KUnit, writing and registering tests | `docs/testing.md` |
 | GDB and bare-metal debugging | `docs/debugging.md` |
 | Branches, commits, code style, CI checks | `docs/contributing.md` |
