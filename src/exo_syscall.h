@@ -914,7 +914,10 @@ static inline int64_t exo_rtc_read(exo_rtc_time_t *out)
  *
  * With EXO_LAUNCH_HOLD in `flags` the context is built but not entered: the
  * call returns its id (> 0) at once, and the program does not run until
- * exo_launch_start(id).  Any other flag bit is -EXO_EINVAL.
+ * exo_launch_start(id).  Any other flag bit is -EXO_EINVAL.  One hold is
+ * outstanding at a time: a hold from a context other than the one that owns
+ * it is -EXO_EBUSY, and a context's own unstarted hold is dropped by its next
+ * launch.
  */
 static inline int64_t exo_launch_pkg(const void *pkg, uint64_t len,
                                      uint64_t flags)
@@ -927,6 +930,7 @@ static inline int64_t exo_launch_pkg(const void *pkg, uint64_t len,
  *
  *   -EXO_ENOENT  no held context with that id (never held, already started,
  *                or since destroyed)
+ *   -EXO_EPERM   the hold was built by a different context
  *   -EXO_EINVAL  the switch could not be armed; the held context is destroyed
  */
 static inline int64_t exo_launch_start(uint64_t ctx)

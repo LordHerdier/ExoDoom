@@ -1328,6 +1328,9 @@ static int64_t shell_launch_with_grant(const void *pkg, uint32_t len,
         size_t n = exo_grant_format(text, sizeof(text), hdr, &g, &res,
                                     g.fb_owner);
         exo_serial_write(text, n);
+    } else {
+        static const char unavailable[] = "run: grant read-out unavailable\n";
+        exo_serial_write(unavailable, sizeof(unavailable) - 1);
     }
     return exo_launch_start((uint64_t)ctx);
 }

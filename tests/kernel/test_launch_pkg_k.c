@@ -875,12 +875,15 @@ static void test_a_hold_never_started_is_dropped_by_the_next_launch(void)
     CU_ASSERT_TRUE(first > 0);
     uint32_t n_held = context_count();
     uint32_t pages_held = page_count_owned((page_owner_t)first);
+    uint32_t free_held = free_pages_now();
 
     int64_t second = do_hold(PKG_SCRATCH, total);
     CU_ASSERT_TRUE(second > 0);
-    /* One row out, one row in. */
+    /* One row out, one row in, and the dropped hold gave back everything it
+     * took -- page tables included, not only its owned pages. */
     CU_ASSERT_EQUAL(context_count(), n_held);
     CU_ASSERT_EQUAL(page_count_owned((page_owner_t)second), pages_held);
+    CU_ASSERT_EQUAL(free_pages_now(), free_held);
     /* Only the newer hold can be started. */
     if (first != second)
         CU_ASSERT_EQUAL(do_start((uint64_t)first), -EXO_ENOENT);
@@ -926,6 +929,69 @@ static void test_hold_leaves_the_framebuffer_until_started(void)
     drop_foreground(fg);
     unmap_scratch(paddr);
     fb_binding_init(had_fb ? &saved : (const fb_geometry_t *)0);
+}
+
+/* A hold is out of the scheduler until #40: round-robin (exo_yield, Ctrl+Tab)
+ * must not be able to enter it before its launcher has read the grant. */
+static void test_a_hold_is_invisible_to_the_scheduler(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    size_t total = write_probe_package(&h);
+
+    int64_t id = do_hold(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(id > 0);
+    context_t *c = context_lookup((page_owner_t)id);
+    CU_ASSERT_PTR_NOT_NULL(c);
+    CU_ASSERT_EQUAL(c->state, CONTEXT_STATE_BLOCKED);
+    CU_ASSERT_NOT_EQUAL(context_next_ready(fg), (page_owner_t)id);
+    CU_ASSERT_EQUAL(context_switch_request((page_owner_t)id), CONTEXT_ENOENT);
+
+    CU_ASSERT_EQUAL(do_start((uint64_t)id), 0);
+    CU_ASSERT_EQUAL(context_switch_pending, 1);
+
+    destroy_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+/* Only the launcher that built a hold may start it, replace it or have it
+ * destroyed by a launch. */
+static void test_a_hold_belongs_to_its_launcher(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    size_t total = write_probe_package(&h);
+
+    int64_t id = do_hold(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(id > 0);
+    uint32_t n_held = context_count();
+
+    /* Another context: cannot start it, cannot take the slot, and a plain
+     * launch of its own leaves the hold standing. */
+    context_set_current(PAGE_OWNER_LIBOS);
+    CU_ASSERT_EQUAL(do_start((uint64_t)id), -EXO_EPERM);
+    CU_ASSERT_EQUAL(do_hold(PKG_SCRATCH, total), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(context_count(), n_held);
+    (void)do_launch_pkg(PKG_SCRATCH, total);
+    context_t *c = context_lookup((page_owner_t)id);
+    CU_ASSERT_PTR_NOT_NULL(c);
+    if (c != NULL)
+        CU_ASSERT_EQUAL(c->state, CONTEXT_STATE_BLOCKED);
+    context_switch_pending = 0;
+
+    /* The owner still can. */
+    context_set_current(fg);
+    CU_ASSERT_EQUAL(do_start((uint64_t)id), 0);
+    CU_ASSERT_EQUAL(context_switch_pending, 1);
+
+    destroy_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
 }
 
 static void test_unknown_launch_flags_are_refused(void)
@@ -990,6 +1056,10 @@ void suite_launch_pkg_tests(CU_pSuite s)
                 test_a_hold_never_started_is_dropped_by_the_next_launch);
     CU_add_test(s, "a hold leaves the framebuffer until started",
                 test_hold_leaves_the_framebuffer_until_started);
+    CU_add_test(s, "a hold is invisible to the scheduler",
+                test_a_hold_is_invisible_to_the_scheduler);
+    CU_add_test(s, "a hold belongs to its launcher",
+                test_a_hold_belongs_to_its_launcher);
     CU_add_test(s, "unknown launch flags are refused",
                 test_unknown_launch_flags_are_refused);
 }

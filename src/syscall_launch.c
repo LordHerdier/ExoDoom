@@ -128,35 +128,49 @@ static launch_app_t launch_apps[EXO_LAUNCH_APP_COUNT] = {
 /*
  * The one context #36 has built under EXO_LAUNCH_HOLD and not yet entered
  * (SCRUM-235). One slot, not a table: the only caller is the shell's `run`,
- * which holds, reads the grant and starts in one go. A second hold, or any
- * other launch, first drops a hold that was never started, so an abandoned
- * `run` cannot strand a context row and its pages.
+ * which holds, reads the grant and starts in one go.
+ *
+ * A hold is kept BLOCKED, not READY, until #40: context_next_ready() (what
+ * exo_yield and Ctrl+Tab use) skips BLOCKED rows, so nothing can enter the
+ * program before its launcher has read the grant and the framebuffer release
+ * has happened. The slot also remembers who built it. Only that context may
+ * start it (#40) or replace it; another caller's launch leaves it alone, and
+ * another caller's HOLD is refused with -EXO_EBUSY while the slot is taken,
+ * rather than silently destroying a launch that is in progress.
  */
 static struct {
     page_owner_t id;          /* PAGE_OWNER_FREE when nothing is held */
+    page_owner_t owner;       /* the context that built it */
     int          release_fb;  /* the manifest's EXO_PKG_WANT_FRAMEBUFFER */
 } held;
 
-/* A hold is only still a hold while its context is the READY, never-run row
- * it was built as. If something else already took it -- it was switched to by
- * a round-robin yield and ran or exited, or its row is gone -- the slot is
- * stale and its id may by now belong to another context, which must not be
- * torn down on the strength of an old hold. */
+/* A hold is only still a hold while its context is the BLOCKED, never-run
+ * row it was built as. If its row is gone the slot is stale and its id may by
+ * now belong to another context, which must not be torn down on the strength
+ * of an old hold. */
 static int launch_held_is_live(void)
 {
     if (held.id == PAGE_OWNER_FREE) {
         return 0;
     }
     context_t *c = context_lookup(held.id);
-    return c != NULL && c->state == CONTEXT_STATE_READY;
+    return c != NULL && c->state == CONTEXT_STATE_BLOCKED;
 }
 
+/* Drop the caller's own unstarted hold, so an abandoned `run` cannot strand a
+ * context row and its pages. Someone else's hold is left alone; a stale slot
+ * is just forgotten. */
 static void launch_drop_held(void)
 {
-    if (launch_held_is_live()) {
-        revoke_all(held.id);
-        context_destroy(held.id);
+    if (!launch_held_is_live()) {
+        held.id = PAGE_OWNER_FREE;
+        return;
     }
+    if (held.owner != syscall_current_context()) {
+        return;
+    }
+    revoke_all(held.id);
+    context_destroy(held.id);
     held.id = PAGE_OWNER_FREE;
 }
 
@@ -192,7 +206,8 @@ static void launch_reclaim_exited(void)
     context_info_t live[CONTEXT_MAX];
     uint32_t live_count = context_list(live, CONTEXT_MAX);
     for (uint32_t i = 0; i < live_count; i++) {
-        if (live[i].state == CONTEXT_STATE_BLOCKED) {
+        if (live[i].state == CONTEXT_STATE_BLOCKED &&
+            !(launch_held_is_live() && live[i].id == held.id)) {
             revoke_all(live[i].id);
             context_destroy(live[i].id);
         }
@@ -462,6 +477,13 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
 
     launch_reclaim_exited();
 
+    /* The caller's own earlier hold is gone by now, so a live one is another
+     * context's launch in progress: do not destroy it, and do not start a
+     * second. Before anything is allocated, like the checks below. */
+    if ((flags & EXO_LAUNCH_HOLD) && launch_held_is_live()) {
+        return -EXO_EBUSY;
+    }
+
     /* Looked up before anything is allocated, same ordering as #21: a
      * missing or unreadable WAD fails without a context row or a page taken. */
     uint64_t wad_paddr = 0, wad_size = 0;
@@ -531,7 +553,9 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
          * the framebuffer binding moves in #40, after the switch is armed,
          * so a hold that is never started displaces nobody. */
         context_prime_irq(id, launch_img.entry_vaddr, launch_img.stack_top_vaddr);
+        context_set_state(id, CONTEXT_STATE_BLOCKED);
         held.id = id;
+        held.owner = syscall_current_context();
         held.release_fb = release_fb;
         return (int64_t)id;
     }
@@ -544,6 +568,7 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
  * after it, but the image already exists. Like #21/#36, control does not
  * come back until something switches back to the caller.
  *   -EXO_ENOENT   `ctx` is not the held context
+ *   -EXO_EPERM    the hold was built by another context
  *   -EXO_EINVAL   the switch could not be armed; the held context is gone */
 static int64_t sys_launch_start(uint64_t ctx, uint64_t a2, uint64_t a3,
                                 uint64_t a4, uint64_t a5, uint64_t a6)
@@ -553,11 +578,18 @@ static int64_t sys_launch_start(uint64_t ctx, uint64_t a2, uint64_t a3,
     if (!launch_held_is_live() || ctx != held.id) {
         return -EXO_ENOENT;
     }
+    /* Only the launcher that built it may enter it: the entry displaces the
+     * framebuffer holder when the manifest asks (the known gap above). */
+    if (held.owner != syscall_current_context()) {
+        return -EXO_EPERM;
+    }
 
     page_owner_t id = held.id;
     int release_fb = held.release_fb;
     held.id = PAGE_OWNER_FREE;
 
+    /* context_switch_request() only enters a READY row. */
+    context_set_state(id, CONTEXT_STATE_READY);
     if (context_switch_request(id) != CONTEXT_OK) {
         /* revoke_all() frees the image's pages and the volume extent the
          * way launch_drop_held() does; the image struct is long gone. */
