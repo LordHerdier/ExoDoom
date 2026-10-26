@@ -51,7 +51,7 @@ int exofs_dirent_read(exofs_volume_t *v, const exofs_entry_ref_t *ref,
     uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     if (buf == NULL) return -EXO_ENOMEM;
 
-    int rc = exofs_read_block(ref->block, buf);
+    int rc = exofs_read_block(v, ref->block, buf);
     if (rc == 0) {
         memcpy(out, buf + (size_t)ref->index * sizeof(exofs_dirent_t),
                sizeof(exofs_dirent_t));
@@ -70,11 +70,11 @@ int exofs_dirent_write(exofs_volume_t *v, const exofs_entry_ref_t *ref,
     if (buf == NULL) return -EXO_ENOMEM;
 
     /* Read-modify-write: 15 other entries share this block. */
-    int rc = exofs_read_block(ref->block, buf);
+    int rc = exofs_read_block(v, ref->block, buf);
     if (rc == 0) {
         memcpy(buf + (size_t)ref->index * sizeof(exofs_dirent_t), in,
                sizeof(exofs_dirent_t));
-        rc = exofs_write_block(ref->block, buf);
+        rc = exofs_write_block(v, ref->block, buf);
     }
 
     libos_heap_free(buf);
@@ -152,7 +152,7 @@ static int dir_cursor_next(exofs_volume_t *v, dir_cursor_t *c, uint8_t *buf,
     for (;;) {
         if (c->index < EXOFS_ENTS_PER_BLOCK) {
             if (!c->loaded) {
-                int rc = exofs_read_block(c->block, buf);
+                int rc = exofs_read_block(v, c->block, buf);
                 if (rc < 0) return rc;
                 c->loaded = 1;
             }

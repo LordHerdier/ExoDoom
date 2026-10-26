@@ -1,11 +1,10 @@
 /*
  * shell_install.c — see shell_install.h (SCRUM-233).
  *
- * Every step mounts, does one thing, and unmounts before the next, so the
- * one-volume-at-a-time rule (docs/filesystem.md §8) holds at every return
- * and the destination's FAT is flushed before the caller releases the disk.
- * Remounting re-reads the resident FAT, which is why the shell hands in a
- * large chunk: the cost is per chunk, not per byte.
+ * A copy holds the source and the destination mounted together for its whole
+ * length (SCRUM-265), so the FAT of each is read once, not once per chunk.
+ * Everything is unmounted before returning, which is what flushes the
+ * destination's FAT before the caller releases the disk.
  */
 #include "shell/shell_install.h"
 
@@ -51,14 +50,10 @@ int shell_install_resolve(const char *name, char *out, size_t out_len) {
 /* Read `n` bytes at `off` of `path` on `v` into `buf`. A short read means
  * the file shrank under us, which this reports as -EXO_EIO rather than
  * installing a package with a hole in it. */
-static int read_chunk(const shell_vol_t *v, const char *path, uint32_t off,
+static int read_chunk(exofs_vol_t *v, const char *path, uint32_t off,
                       uint8_t *buf, uint32_t n) {
-    int rc = exofs_mount(v->dev, v->base);
-    if (rc != 0) {
-        return rc;
-    }
     exofs_file_t f;
-    rc = exofs_open(path, EXOFS_O_READ, &f);
+    int rc = exofs_open(v, path, EXOFS_O_READ, &f);
     if (rc == 0) {
         int64_t pos = exofs_seek(&f, off, EXOFS_SEEK_SET);
         uint32_t have = 0;
@@ -75,20 +70,15 @@ static int read_chunk(const shell_vol_t *v, const char *path, uint32_t off,
         }
         exofs_close(&f);
     }
-    exofs_unmount();
     return rc;
 }
 
 /* Write `n` bytes of `buf` at `off` of `path` on `v`. The close is checked:
  * it is what writes the size and chain head back to the directory entry. */
-static int write_chunk(const shell_vol_t *v, const char *path, uint32_t off,
+static int write_chunk(exofs_vol_t *v, const char *path, uint32_t off,
                        const uint8_t *buf, uint32_t n) {
-    int rc = exofs_mount(v->dev, v->base);
-    if (rc != 0) {
-        return rc;
-    }
     exofs_file_t f;
-    rc = exofs_open(path, EXOFS_O_WRITE, &f);
+    int rc = exofs_open(v, path, EXOFS_O_WRITE, &f);
     if (rc == 0) {
         int64_t pos = exofs_seek(&f, off, EXOFS_SEEK_SET);
         if (pos < 0) {
@@ -106,13 +96,12 @@ static int write_chunk(const shell_vol_t *v, const char *path, uint32_t off,
             rc = crc;
         }
     }
-    exofs_unmount();
     return rc;
 }
 
-int shell_copy_between(const shell_vol_t *src, const char *spath,
-                       const shell_vol_t *dst, const char *dpath,
-                       uint8_t *buf, uint32_t chunk, uint32_t *copied) {
+int shell_copy_vols(exofs_vol_t *src, const char *spath,
+                    exofs_vol_t *dst, const char *dpath,
+                    uint8_t *buf, uint32_t chunk, uint32_t *copied) {
     if (copied != NULL) {
         *copied = 0;
     }
@@ -123,12 +112,7 @@ int shell_copy_between(const shell_vol_t *src, const char *spath,
     /* Look before touching the destination: a typo must not truncate an
      * installed package of that name. */
     exofs_stat_t st;
-    int rc = exofs_mount(src->dev, src->base);
-    if (rc != 0) {
-        return rc;
-    }
-    rc = exofs_stat(spath, &st);
-    exofs_unmount();
+    int rc = exofs_stat(src, spath, &st);
     if (rc != 0) {
         return rc;
     }
@@ -137,17 +121,13 @@ int shell_copy_between(const shell_vol_t *src, const char *spath,
     }
 
     /* Create or empty the destination file; each chunk then reopens it. */
-    rc = exofs_mount(dst->dev, dst->base);
-    if (rc != 0) {
-        return rc;
-    }
     exofs_file_t f;
-    rc = exofs_open(dpath, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f);
+    rc = exofs_open(dst, dpath, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC,
+                    &f);
     int created = (rc == 0);
     if (created) {
         rc = exofs_close(&f);
     }
-    exofs_unmount();
 
     uint32_t off = 0;
     while (rc == 0 && off < st.size) {
@@ -165,9 +145,8 @@ int shell_copy_between(const shell_vol_t *src, const char *spath,
     }
 
     if (rc != 0) {
-        if (created && exofs_mount(dst->dev, dst->base) == 0) {
-            exofs_unlink(dpath);
-            exofs_unmount();
+        if (created) {
+            exofs_unlink(dst, dpath);
         }
         return rc;
     }
@@ -175,6 +154,39 @@ int shell_copy_between(const shell_vol_t *src, const char *spath,
         *copied = off;
     }
     return 0;
+}
+
+int shell_copy_between(const shell_vol_t *src, const char *spath,
+                       const shell_vol_t *dst, const char *dpath,
+                       uint8_t *buf, uint32_t chunk, uint32_t *copied) {
+    if (copied != NULL) {
+        *copied = 0;
+    }
+
+    exofs_vol_t *sv = NULL;
+    int rc = exofs_mount(src->dev, src->base, &sv);
+    if (rc != 0) {
+        return rc;
+    }
+
+    /* The same volume on both sides is one mount: ExoFS refuses a second
+     * resident copy of a volume's FAT. */
+    exofs_vol_t *dv = sv;
+    if (dst->dev != src->dev || dst->base != src->base) {
+        rc = exofs_mount(dst->dev, dst->base, &dv);
+        if (rc != 0) {
+            exofs_unmount(sv);
+            return rc;
+        }
+    }
+
+    rc = shell_copy_vols(sv, spath, dv, dpath, buf, chunk, copied);
+
+    if (dv != sv) {
+        exofs_unmount(dv);
+    }
+    exofs_unmount(sv);
+    return rc;
 }
 
 int shell_install_copy(const shell_vol_t *src, const shell_vol_t *dst,
@@ -228,14 +240,15 @@ int shell_install_matches(const shell_vol_t *src, const char *pattern,
         }
     }
 
-    int rc = exofs_mount(src->dev, src->base);
+    exofs_vol_t *v = NULL;
+    int rc = exofs_mount(src->dev, src->base, &v);
     if (rc != 0) {
         return rc;
     }
     exofs_dir_t dir;
-    rc = exofs_opendir("/", &dir);
+    rc = exofs_opendir(v, "/", &dir);
     if (rc != 0) {
-        exofs_unmount();
+        exofs_unmount(v);
         return rc;
     }
     for (;;) {
@@ -273,6 +286,6 @@ int shell_install_matches(const shell_vol_t *src, const char *pattern,
         (*count)++;
     }
     exofs_closedir(&dir);
-    exofs_unmount();
+    exofs_unmount(v);
     return rc;
 }

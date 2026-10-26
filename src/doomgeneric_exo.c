@@ -41,6 +41,7 @@
 #include "exo_syscall.h"
 
 #include "doom_wad.h"
+#include "libos_fs/exo_file.h"
 #include "libos_fs/exo_file_stdio.h"
 #include "libos_fs/exofs.h"
 #include "libos_wad_params.h"
@@ -232,12 +233,14 @@ static int dg_mount_program_volume(void)
         return DOOM_WAD_ENOENT;
     }
 
-    rc = exofs_mount(DG_SYSTEM_DEV, ext.base);
+    exofs_vol_t *vol = NULL;
+    rc = exofs_mount(DG_SYSTEM_DEV, ext.base, &vol);
     if (rc != 0) {
         printf("DG_Init: program volume will not mount: %d\n", (int)rc);
         return DOOM_WAD_ENOENT;
     }
 
+    exo_file_set_volume(vol);
     exo_file_stdio_install();
     return 0;
 }

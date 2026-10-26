@@ -553,9 +553,14 @@ that unmounts with descriptors open loses those files' sizes, and its next
 mount starts with stale slots occupied. `exo_file_close_all()` exists for
 exactly that point. Call it before `exofs_unmount()`.
 
-**No mount policy.** `exo_file_*` uses whatever volume the program mounted.
-With nothing mounted, ExoFS answers `-EXO_EINVAL` and this layer passes that
-through.
+**No mount policy, one default volume.** The path-taking calls
+(`exo_file_open`, `exo_file_stat`, and `mkdir` through the stdio backend) take
+no volume, so they resolve against the one the program named with
+`exo_file_set_volume()` after mounting. An open descriptor keeps the volume it
+was opened on, so changing the default does not move it. A default that has
+been unmounted reads as unset (the generation check, §8), and with no default
+ExoFS answers `-EXO_EINVAL`, which this layer passes through. A program with
+several volumes mounted uses `exofs_*` on the handles directly for the others.
 
 **stdio writes are buffered a block at a time.** ExoFS caches no data blocks
 (§4), so `src/stdio.c` holds up to 512 bytes per stream (`WBUF_SIZE`, one
@@ -597,27 +602,46 @@ difference.
 
 ## 8. Limits and scope
 
-- **One volume at a time, per program.** The mounted volume is a single
-  static state *inside one program's copy of ExoFS*. Since SCRUM-237 that is
-  no longer the whole story for the machine: the disk binding is a table of
-  non-overlapping sector extents (`docs/syscall_spec.md` §3.5a), so several
-  programs can each hold their own extent and mount their own volume at once.
-  Each links its own `src/libos_fs/`, so the statics are theirs alone — which
-  is the point. A volume must fit inside the extent its holder acquired
-  (`exo_disk_extent`, #37, says what that is for a program with an assigned
-  volume); every transfer outside it is refused by the kernel, not by ExoFS.
-  The reference consumer is `src/libos_voldemo/`: one program, packaged twice
-  with different slots, that formats on first launch, mounts thereafter, and
+- **Several volumes at once, through handles (SCRUM-265).** `exofs_mount()`
+  returns an opaque `exofs_vol_t *` and every call that takes a path takes it
+  first; an open `exofs_file_t` or `exofs_dir_t` remembers the volume it was
+  opened on. Up to `EXOFS_MAX_VOLUMES` (3) may be mounted together, on any
+  mix of devices, from a static pool in `exofs_volume.c`. Three rules keep
+  that safe:
+  - *The same volume cannot be mounted twice* (`-EXO_EBUSY`, same device and
+    base LBA): two resident copies of one FAT would each write back over the
+    other. A full pool is `-EXO_ENFILE`.
+  - *A handle is good until its unmount.* Each mount gets a generation number
+    that never repeats, copied into every file and directory opened on it, so
+    use after `exofs_unmount()` is `-EXO_EBADF` rather than a read through
+    whatever volume took the slot next. Unmount does not flush open files:
+    close them first (§6c "Durability").
+  - *Each mounted volume pays for its whole FAT in the LibOS heap* (up to
+    1 MiB at `EXOFS_MAX_BLOCKS`, below). Three worst-case volumes are 3 MiB of
+    the 16 MiB window (`LIBOS_PAGE_ALLOC_MAX_PAGES`); a mount that does not
+    fit is `-EXO_ENOMEM`, as before.
+  `exofs_format()` needs one free slot for the root bootstrap, refuses only
+  the volume it is formatting if that one is mounted, and leaves the others
+  alone. `exofs_unmount_all()` drops every volume (teardown and test fixtures).
+  Since SCRUM-237 programs also each hold an extent of their own and link
+  their own copy of `src/libos_fs/`, so their pools are theirs alone. A
+  volume must fit inside the extent its holder acquired (`exo_disk_extent`,
+  #37, says what that is for a program with an assigned volume); every
+  transfer outside it is refused by the kernel, not by ExoFS. The reference
+  consumer is `src/libos_voldemo/`: one program, packaged twice with
+  different slots, that formats on first launch, mounts thereafter, and
   probes the sectors it must not reach.
-- **One volume at a time, even across devices.** A program may hold an extent
-  on each of several devices at once (SCRUM-244), but it still mounts one
-  volume, so copying a file between two volumes means: hold both, mount the
-  source, read the file into a `libos_heap_alloc()` buffer, unmount, mount
-  the destination, write. That is what `tests/kernel/test_multidisk_k.c`'s
-  copy test asserts, and what `install` (below) does a chunk at a time.
-  Making the mount state a handle instead of a static is the change that
-  would lift this (SCRUM-265). The shell's `mount` (SCRUM-266, "Mounts"
-  below) works around it by swapping the one mounted volume per command.
+- **The disk binding, not ExoFS, still limits copies on one disk.** A program
+  may hold an extent on each of several devices (SCRUM-244) but only one
+  extent per device (`docs/syscall_spec.md` §3.5a). Two volumes of the same
+  disk can be mounted together if one extent covers both; two separate
+  extents on one disk cannot be held, which is why the shell refuses a `cp`
+  between two volumes of the same disk.
+- **The descriptor API names one default volume.** `exo_file_open()` and
+  `exo_file_stat()` take no volume, so they resolve against the one set with
+  `exo_file_set_volume()` (Doom's `DG_Init`, `doom_wad_disk.c`). An open
+  descriptor keeps its own volume if the default changes. It is not a mount
+  table: nothing routes a path between volumes below the shell.
 - **Unmount before releasing the binding.** `exofs_bdev_release(dev)`
   (`exo_disk_release`, #27) drops the binding on that device immediately; it cannot know a
   filesystem was mounted on top of it. The FAT is resident and written back
@@ -682,15 +706,19 @@ summary line closes the run. Matching and listing
 `src/shell/shell_install.c`, tested with the rest of the suite.
 
 The shell holds both disks for the whole copy (device 1 whole, the program
-volume's extent on device 0, `docs/syscall_spec.md` §3.5a). Because only one
-volume can be mounted (§8), `src/shell/shell_install.c` alternates: mount the
-source, read one chunk at its offset, unmount, mount the destination, write it
-at the same offset, unmount. Every mount re-reads the resident FAT, so the
-shell uses a 1 MiB `libos_heap_alloc()` buffer (64 KiB if the heap cannot
-spare that) to keep the IWAD to a few dozen mount pairs. With
-`exofs_write()`'s batched appends (§6c) the whole IWAD installs in a few
-seconds under QEMU. Before them, it took over three minutes. Two rules a change
-here must keep:
+volume's extent on device 0, `docs/syscall_spec.md` §3.5a).
+`shell_copy_between()` in `src/shell/shell_install.c` mounts the source and the
+destination together (§8), then `shell_copy_vols()` reads one chunk at its
+offset from the first and writes it at the same offset on the second, a chunk
+at a time through a `libos_heap_alloc()` buffer (1 MiB, or 64 KiB if the heap
+cannot spare that). Each FAT is read once for the whole copy. Before SCRUM-265
+only one volume could be mounted, so the copy unmounted and remounted for every
+chunk, re-reading both FATs each time, and the large buffer was there to keep
+the IWAD to a few dozen mount pairs. With `exofs_write()`'s batched appends
+(§6c) the whole IWAD installs in a few seconds under QEMU. Before them, it took
+over three minutes. `shell_copy_vols()` is the same copy over volumes the
+caller already has mounted, and also accepts the same handle on both sides.
+Two rules a change here must keep:
 
 - **Stat the source before touching the destination.** A name the install
   disk does not have is `-EXO_ENOENT` with the system volume untouched;
@@ -716,10 +744,10 @@ the shell's scratch one. `umount <dir>` takes it away again, and `mount` alone
 lists what is mounted. Mounts are RAM-only: gone at reboot, like the working
 directory.
 
-**It is a table in the shell, not an ExoFS feature.** ExoFS still mounts one
-volume at a time (§8), so `src/shell/shell_mount.c` keeps a table of
-`(directory, volume)` pairs and every path-taking command asks it which volume
-its path is on. `shell_route_arg()` in `src/shell/shell_main.c` resolves the
+**It is a table in the shell, not an ExoFS feature.** ExoFS can hold several
+volumes mounted (§8) but has no notion of a path crossing from one to the
+next, so `src/shell/shell_mount.c` keeps a table of `(directory, volume)`
+pairs and every path-taking command asks it which volume its path is on. `shell_route_arg()` in `src/shell/shell_main.c` resolves the
 argument against the working directory, normalizes it (`shell_mount_normalize()`
 collapses `.`, `..` and `//`), and picks the longest mount point that contains
 it. The command then acquires that volume's disk extent, mounts it, runs
@@ -728,8 +756,16 @@ command already did for the scratch volume. Normalizing first is what makes `..`
 work across a mount: ExoFS would resolve `..` through the mounted volume's own
 root, which is its own parent, never the directory the volume is mounted on.
 The cost is one FAT read per command per volume touched (§4), which is
-nothing for `ls` and `cat`. SCRUM-265 is the handle-based ExoFS that would let
-volumes stay mounted.
+nothing for `ls` and `cat`.
+
+**Mounted for the command, not for the session.** The shell keeps its policy
+of holding no disk binding while idle (SCRUM-202): a launched program such as
+`run doom` needs the system volume's extent, and a mount the shell kept open
+would hold it. So a command mounts every volume it needs *together* and
+releases them at the end. Today that matters for `cp` and `mv` between volumes
+and for `install`, which no longer unmount either volume part-way through. A
+mount that stayed resident across commands would need that binding released
+around `run`, and is not done.
 
 **Volume names.** `diskN` is the block device index (`disk` prints it; disk 0 is
 the system disk). `volM` is a fixed position on that disk, counted from 1:
@@ -765,9 +801,10 @@ program's (`docs/syscall_spec.md` §3.5a).
   a directory that contains the working directory or a mount point, because
   both are stored as paths. `cp` within a volume is as before.
 - Between volumes, `cp` and `mv` use
-  `shell_copy_between()` (the two-path form of `install`'s copy, §8 "Install"):
-  chunked, alternating mounts, destination removed on failure. This needs both
-  volumes bound at once, and the binding is one extent per owner per device, so
+  `shell_copy_vols()` (the two-path form of `install`'s copy, §8 "Install"):
+  chunked, both volumes mounted for the whole copy, destination removed on
+  failure. This needs both volumes bound at once, and the binding is one
+  extent per owner per device, so
   **a copy between two volumes of the same disk is refused**; between
   different disks it works.
 - `mkfs`, `run`, `programs`, `install`, `dd` and first boot keep their fixed
@@ -786,14 +823,15 @@ volumes, and the two-path copy.
 | `exofs.h` | The public API and its error contract. |
 | `exofs_internal.h` | The mounted volume's in-memory state, shared between ExoFS's own translation units. Not for the image builder. |
 | `exofs_blockdev.c/.h` | The only file that knows a syscall exists: acquire/release, chunked sector read/write, and the tick source. ExoFS's single `#ifdef EXO_KERNEL`. |
-| `exofs_volume.c` | Superblock, geometry, `format`/`mount`/`sync`/`unmount`, the FAT cache and its writeback. |
+| `exofs_volume.c` | Superblock, geometry, the pool of mounted volumes (`EXOFS_MAX_VOLUMES`), `format`/`mount`/`sync`/`unmount`, the FAT cache and its writeback. |
 | `exofs_fat.c/.h` | Block allocation and chain traversal. |
 | `exofs_name.c/.h` | The variable-length name area (§6). |
 | `exofs_dirent.c/.h` | Entry storage, the positional iterator, lookup/add/remove, and in-place rename / cross-directory move of an entry (§1.4). |
 | `exofs_path.c/.h` | Path parsing and resolution (§7). |
 | `exofs_dir.c/.h` | `mkdir`/`rmdir`/`opendir`/`readdir`, `rename` (§1.4), and the `.`/`..` bootstrap (§6b). |
 | `exofs_file.c` | `open`/`read`/`write`/`seek`/`stat`/`unlink` (§6c). |
-| `exo_file.c/.h` | The descriptor table over `exofs_file.c`: `exo_file_open`/`close`/`read`/`write`/`seek`/`stat`/`close_all` (§6d, SCRUM-44). |
+| `exo_file.c/.h` | The descriptor table over `exofs_file.c`: `exo_file_open`/`close`/`read`/`write`/`seek`/`stat`/`close_all`, and the default volume they resolve paths against, `exo_file_set_volume` (§6d, SCRUM-44, SCRUM-265). |
+| `tests/kernel/test_exofs_multivol_k.c` | Several volumes mounted at once: interleaved I/O, the pool limit, the same volume twice, stale handles, and a copy between two mounted volumes. |
 | `tests/kernel/test_exofs_k.c` | The whole suite, 105 tests, ending in the ticket's end-to-end acceptance path. |
 | `tests/kernel/test_exo_file_k.c` | The `exo_file` suite: descriptor errors, the access/seek/truncate/append pass-throughs, durability across a remount, and SCRUM-44's acceptance path. |
 
@@ -846,6 +884,13 @@ consumer.
   build `malloc()` is `kmalloc()` and returns a kernel address from outside
   that window. This is the single most likely thing to go wrong when adding a
   test.
+- **Every `exofs_*` call takes its volume** (SCRUM-265), and a file or
+  directory handle must not outlive the `exofs_unmount()` of the volume it was
+  opened on: it fails with `-EXO_EBADF` rather than reading, but an unclosed
+  writer's size is lost (§6c Durability). Close first, unmount second, release
+  the disk binding last. A test that keeps its volume in a file-static (every
+  suite here does) should reset with `exofs_unmount_all()`, or a failed test
+  strands a pool slot for the suites after it.
 - **A fresh volume has two blocks in use, not one:** the root directory and
   one name block (§6b — `exofs_format()` mounts what it wrote so it can create
   the root's `.`/`..`, and creating an entry allocates a name record). Keep

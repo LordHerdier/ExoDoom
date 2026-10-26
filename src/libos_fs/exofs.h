@@ -21,11 +21,13 @@
  * file; a library that terminates its caller cannot be used by a shell or by
  * Doom.
  *
- * ONE VOLUME AT A TIME. The mounted volume is a single static state, so
- * there is no handle to pass around and no second mount. That is not a
- * simplification that needs undoing later: the disk binding (SCRUM-188) is
- * exclusive, so only one context can reach the disk at all, and that context
- * has one disk to mount.
+ * SEVERAL VOLUMES AT ONCE (SCRUM-265). exofs_mount() returns an opaque
+ * exofs_vol_t * and every call that takes a path takes that handle first.
+ * Up to EXOFS_MAX_VOLUMES may be mounted together, on any mix of devices,
+ * each with its own resident FAT; an open file or directory remembers the
+ * volume it was opened on. A handle is good until exofs_unmount(): later use
+ * of it, or of a file/directory opened on it, fails with -EXO_EBADF rather
+ * than touching whatever the slot holds next.
  *
  * THREADING. None. There is no preemption inside a LibOS today, and no lock
  * here would help if there were — the FAT cache would need one too.
@@ -59,9 +61,19 @@
  * exofs_bdev_write() reports (-EXO_EBUSY if the disk binding is not held,
  * -EXO_ENODEV, -EXO_EIO).
  *
- * Does not leave the volume mounted; call exofs_mount() afterwards.
+ * Does not leave the volume mounted; call exofs_mount() afterwards. Other
+ * mounted volumes are unaffected (it needs one free mount slot for the
+ * root bootstrap); -EXO_EBUSY if this very volume is mounted.
  */
 int exofs_format(uint32_t dev, uint32_t base_lba, uint32_t total_sectors);
+
+/* A mounted volume. Opaque; the state lives in exofs_internal.h. */
+typedef struct exofs_volume exofs_vol_t;
+
+/* How many volumes may be mounted at once. Each holds its whole FAT in the
+ * LibOS heap (up to 1 MiB at EXOFS_MAX_BLOCKS), so this is a heap budget as
+ * much as a table size. */
+#define EXOFS_MAX_VOLUMES 3u
 
 /*
  * How many sectors a volume starting at `base_lba` may claim, given the
@@ -78,40 +90,44 @@ uint32_t exofs_region_sectors(uint32_t base_lba, uint32_t region_end_lba,
 
 /*
  * Mount the volume at `base_lba` of block device `dev` (SCRUM-244): read and
- * validate the superblock, then read the whole FAT into memory. One volume
- * is mounted at a time, whichever device it is on; copying between two
- * volumes means reading into a buffer, unmounting, and mounting the other.
+ * validate the superblock, then read the whole FAT into memory. On success
+ * `*out` is the volume's handle; on failure it is left untouched. Several volumes can be mounted at once, up
+ * to EXOFS_MAX_VOLUMES.
  *
  * Returns 0, -EXO_EINVAL (no ExoFS superblock there, an unsupported
  * version, or internally inconsistent geometry — this is what a blank or
- * foreign disk gets, and the reason the superblock exists), -EXO_EBUSY (a
- * volume is already mounted), -EXO_ENOMEM, or a device error.
+ * foreign disk gets, and the reason the superblock exists, or `out` NULL),
+ * -EXO_EBUSY (that same volume is already mounted: two resident FATs for
+ * one volume would overwrite each other), -EXO_ENFILE (all
+ * EXOFS_MAX_VOLUMES slots are in use), -EXO_ENOMEM, or a device error.
  */
-int exofs_mount(uint32_t dev, uint32_t base_lba);
+int exofs_mount(uint32_t dev, uint32_t base_lba, exofs_vol_t **out);
 
 /*
  * Write back any FAT sectors modified since the last sync.
  *
  * Structural operations sync as they go, so this is for callers that want a
  * known-durable point rather than a routine step. Returns 0, -EXO_EINVAL if
- * nothing is mounted, or a device error.
+ * `v` is not a mounted volume, or a device error.
  */
-int exofs_sync(void);
+int exofs_sync(exofs_vol_t *v);
 
 /*
- * Sync and release the mounted volume. Safe to call when nothing is
- * mounted. Any sync error is discarded — there is nothing a caller could do
+ * Sync and release `v`; other mounted volumes are untouched. Safe to call
+ * with NULL or an already-unmounted handle. Files and directories still open
+ * on `v` become unusable (-EXO_EBADF) and are not flushed, so close them
+ * first. Any sync error is discarded — there is nothing a caller could do
  * about it at this point and no way to report it that would not make the
  * common path harder; call exofs_sync() first if the answer matters.
  */
-void exofs_unmount(void);
+void exofs_unmount(exofs_vol_t *v);
 
-/* Whether a volume is currently mounted. */
-int exofs_is_mounted(void);
+/* exofs_unmount() every mounted volume. For teardown paths that must leave
+ * nothing resident, and test fixtures resetting after a failed test. */
+void exofs_unmount_all(void);
 
-/* Geometry of the mounted volume, for callers that want to report free
- * space or size a transfer. Fills `out` and returns 0, or -EXO_EINVAL if
- * nothing is mounted. */
+/* Geometry of `v`, for callers that want to report free space or size a
+ * transfer. Fills `out` and returns 0, or -EXO_EINVAL if `v` is not mounted. */
 typedef struct exofs_geometry {
     uint32_t base_lba;
     uint32_t total_blocks;   /* data blocks the FAT covers      */
@@ -120,7 +136,7 @@ typedef struct exofs_geometry {
     uint32_t root_block;     /* EXOFS_ROOT_BLOCK                */
 } exofs_geometry_t;
 
-int exofs_geometry(exofs_geometry_t *out);
+int exofs_geometry(exofs_vol_t *v, exofs_geometry_t *out);
 
 /* ---- Directories --------------------------------------------------------
  *
@@ -138,7 +154,7 @@ int exofs_geometry(exofs_geometry_t *out);
  * -EXO_EINVAL for a malformed path or an over-long component,
  * -EXO_ENOSPC, or a device error.
  */
-int exofs_mkdir(const char *path);
+int exofs_mkdir(exofs_vol_t *v, const char *path);
 
 /*
  * Remove the empty directory `path`.
@@ -149,7 +165,7 @@ int exofs_mkdir(const char *path);
  * path's last component resolves to "." or ".." (there is no correct target
  * to remove — see exofs_dir.c), or a device error.
  */
-int exofs_rmdir(const char *path);
+int exofs_rmdir(exofs_vol_t *v, const char *path);
 
 /*
  * Rename or move `old_path` to `new_path` (SCRUM-240). Works for files and
@@ -174,7 +190,7 @@ int exofs_rmdir(const char *path);
  * "..", or moving a directory into itself or its own subtree, -EXO_ENOSPC,
  * or a device error.
  */
-int exofs_rename(const char *old_path, const char *new_path);
+int exofs_rename(exofs_vol_t *v, const char *old_path, const char *new_path);
 
 /* One entry, as reported by exofs_readdir(). */
 typedef struct exofs_dirinfo {
@@ -190,6 +206,8 @@ typedef struct exofs_dirinfo {
  */
 typedef struct exofs_dir {
     int      open;
+    exofs_vol_t *vol;       /* the volume opened on; see exofs_unmount()   */
+    uint32_t vol_gen;
     uint32_t head;
     /* Iteration state. Deliberately not exofs_dir_iter_t by name: exofs.h
      * is the public header and must not drag in the internal ones. The
@@ -204,7 +222,7 @@ typedef struct exofs_dir {
  * Open `path` for reading. Returns 0, -EXO_ENOENT, -EXO_ENOTDIR if `path`
  * is not a directory, or a negative error.
  */
-int exofs_opendir(const char *path, exofs_dir_t *out);
+int exofs_opendir(exofs_vol_t *v, const char *path, exofs_dir_t *out);
 
 /*
  * Read the next entry into `out`.
@@ -250,6 +268,8 @@ int exofs_closedir(exofs_dir_t *d);
  */
 typedef struct exofs_file {
     int      open;
+    exofs_vol_t *vol;       /* the volume opened on; see exofs_unmount()   */
+    uint32_t vol_gen;
     uint32_t flags;
 
     /* Where the directory entry lives, so close() can write it back. */
@@ -295,7 +315,8 @@ typedef struct exofs_stat {
  * prevent), -EXO_ENFILE if the open-handle table is full, -EXO_ENOSPC, or a
  * device error.
  */
-int exofs_open(const char *path, uint32_t flags, exofs_file_t *out);
+int exofs_open(exofs_vol_t *v, const char *path, uint32_t flags,
+               exofs_file_t *out);
 
 /* Write the file's size and chain head back to its directory entry. See the
  * durability note on exofs_file_t. Also syncs the FAT. */
@@ -330,7 +351,7 @@ int64_t exofs_seek(exofs_file_t *f, int64_t off, uint32_t whence);
 /* Report on `path` without opening it. Returns -EXO_EINVAL if the path's
  * last component resolves to "." or ".." — see exofs_stat()'s own comment
  * for why there is no correct record to report there. */
-int exofs_stat(const char *path, exofs_stat_t *out);
+int exofs_stat(exofs_vol_t *v, const char *path, exofs_stat_t *out);
 
 /*
  * Remove the file `path`, freeing its data blocks and its name record.
@@ -340,7 +361,7 @@ int exofs_stat(const char *path, exofs_stat_t *out);
  * asked for. Returns -EXO_EBUSY if another handle already has this entry
  * open, for the same reason EXOFS_O_TRUNC refuses one in exofs_open().
  */
-int exofs_unlink(const char *path);
+int exofs_unlink(exofs_vol_t *v, const char *path);
 
 /* ---- Limits -------------------------------------------------------------
  *

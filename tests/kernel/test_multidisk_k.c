@@ -42,6 +42,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* The volume the tests in this file are working on (SCRUM-265): set by
+ * whichever helper mounts, read by everything after. A slot is zeroed on
+ * unmount, so a stale pointer reads as "not mounted". */
+static exofs_vol_t *g_tv;
+#define TV_MOUNTED() (g_tv != NULL && g_tv->mounted)
+
 #define OTHER_LIBOS ((page_owner_t)(PAGE_OWNER_LIBOS + 1))
 
 #define DEV_SYS   0u
@@ -105,7 +111,7 @@ static int64_t do_stat(uint64_t dev, exo_diskstat_t *out)
  * whatever a failed test left behind. */
 static void reset_bindings(void)
 {
-    exofs_unmount();
+    exofs_unmount_all();
     for (uint32_t d = 0; d < EXO_DISK_MAX_DEVICES; d++)
         do_release(d);
     disk_binding_reclaim(OTHER_LIBOS);
@@ -286,7 +292,7 @@ static void test_same_lba_two_devices_distinct(void)
 static int put_file(const char *path, const uint8_t *src, uint32_t len)
 {
     exofs_file_t f;
-    int rc = exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC,
+    int rc = exofs_open(g_tv, path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC,
                         &f);
     if (rc != 0)
         return rc;
@@ -300,7 +306,7 @@ static int put_file(const char *path, const uint8_t *src, uint32_t len)
 static int64_t get_file(const char *path, uint8_t *dst, uint32_t cap)
 {
     exofs_file_t f;
-    int rc = exofs_open(path, EXOFS_O_READ, &f);
+    int rc = exofs_open(g_tv, path, EXOFS_O_READ, &f);
     if (rc != 0)
         return rc;
     int64_t n = exofs_read(&f, dst, cap);
@@ -309,9 +315,9 @@ static int64_t get_file(const char *path, uint8_t *dst, uint32_t cap)
 }
 
 /* Jira acceptance: acquire both, a volume on each, copy a file between them.
- * One volume is mounted at a time (exofs.h), so the copy goes through a
- * buffer -- the shape `install` (SCRUM-233) takes. Both devices stay bound
- * for the whole copy. */
+ * This one goes through a buffer with one volume mounted at a time -- the
+ * shape `install` had before SCRUM-265. test_exofs_multivol_k.c covers both
+ * volumes mounted together. Both devices stay bound for the whole copy. */
 static void test_copy_file_between_devices(void)
 {
     if (!two_disks())
@@ -330,36 +336,36 @@ static void test_copy_file_between_devices(void)
 
     /* Stage the source: a volume on the stick holding the file. */
     CU_ASSERT_EQUAL(exofs_format(DEV_STICK, STICK_VOL_BASE, stick_sectors), 0);
-    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, STICK_VOL_BASE), 0);
+    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, STICK_VOL_BASE, &g_tv), 0);
     CU_ASSERT_EQUAL(put_file("/pkg.exo", src, COPY_LEN), 0);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 
     /* Destination volume on the system disk. */
     CU_ASSERT_EQUAL(exofs_format(DEV_SYS, SYS_VOL_BASE, SYS_VOL_SECTORS), 0);
 
     /* The copy: source volume -> buffer -> destination volume. */
-    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, STICK_VOL_BASE), 0);
+    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, STICK_VOL_BASE, &g_tv), 0);
     memset(buf, 0, COPY_LEN);
     CU_ASSERT_EQUAL(get_file("/pkg.exo", buf, COPY_LEN), (int64_t)COPY_LEN);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 
-    CU_ASSERT_EQUAL(exofs_mount(DEV_SYS, SYS_VOL_BASE), 0);
+    CU_ASSERT_EQUAL(exofs_mount(DEV_SYS, SYS_VOL_BASE, &g_tv), 0);
     CU_ASSERT_EQUAL(put_file("/pkg.exo", buf, COPY_LEN), 0);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 
     /* Verify from a fresh mount, not from anything cached. */
-    CU_ASSERT_EQUAL(exofs_mount(DEV_SYS, SYS_VOL_BASE), 0);
+    CU_ASSERT_EQUAL(exofs_mount(DEV_SYS, SYS_VOL_BASE, &g_tv), 0);
     memset(buf, 0, COPY_LEN);
     CU_ASSERT_EQUAL(get_file("/pkg.exo", buf, COPY_LEN), (int64_t)COPY_LEN);
     CU_ASSERT_EQUAL(memcmp(buf, src, COPY_LEN), 0);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 
     /* And the source is still intact on the stick. */
-    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, STICK_VOL_BASE), 0);
+    CU_ASSERT_EQUAL(exofs_mount(DEV_STICK, STICK_VOL_BASE, &g_tv), 0);
     memset(buf, 0, COPY_LEN);
     CU_ASSERT_EQUAL(get_file("/pkg.exo", buf, COPY_LEN), (int64_t)COPY_LEN);
     CU_ASSERT_EQUAL(memcmp(buf, src, COPY_LEN), 0);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 
 out:
     libos_heap_free(src);
