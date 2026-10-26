@@ -82,11 +82,8 @@ int kvprintf(void (*emit)(int c, void *ctx), void *ctx,
  * Nothing under src/doom/ reaches into it -- every use is through a
  * `FILE *` -- so the layout stays free to change without touching a caller.
  *
- * The one thing still missing is fscanf's scanset ("%99[^\n]"), used once,
- * to read the config file. fscanf returns EOF, which is what C99 specifies
- * for input failure before any conversion and what M_LoadDefaults' loop
- * already treats as end-of-file; it is also unreachable, since fopen cannot
- * produce a config file to read.
+ * fscanf supports the scanset ("%99[^\n]", m_config.c's config read); ranges
+ * such as "a-z" are not interpreted, which Doom never needs.
  */
 typedef struct _exo_file FILE;
 

@@ -809,12 +809,16 @@ without rebuilding: `make run-keep` (the built image) or
 `make run-keep DISK_IMG=build/exodoom_blank.img` (the image `run-blank` left).
 Delete the image, or `make clean`, to start from empty slots again.
 
-**Config is not saved, and that is the engine's doing.** `M_SaveDefaults` and
-`M_LoadDefaults` do their work inside `#if ORIGCODE` in the vendored
-`src/doom/m_config.c`, and `ORIGCODE` is `#undef`'d (`src/doom/config.h`), so
-this build never reads or writes `default.cfg` whatever volume is mounted. The
-volume is ready for it (writes work, the path resolves); the engine has to be
-patched to produce one. Not done: `src/doom/` is vendored verbatim.
+**Config is saved (SCRUM-269).** `M_LoadDefaults` reads and `M_SaveDefaults`
+(an `I_AtExit` hook, run from `I_Quit`) writes `.default.cfg` and
+`doomgenericdoom.cfg` at the volume root; `configdir` is `.` and
+`M_StringJoin` adds no separator. The vendored engine compiled both bodies out
+under `#if ORIGCODE`, which this build `#undef`s (`src/doom/config.h`).
+`src/doom/m_config.c` now widens just those two guards with `EXO_CONFIG_IO`
+(marked `ExoDoom (SCRUM-269)`); the rest of `ORIGCODE` stays off. The load half
+needs `fscanf`'s `%99[^\n]` scanset (in `src/stdio.c`'s `vsscanf_core`) and
+`isprint`. A missing or unreadable file is not an error: defaults apply. Like
+saves, the file survives a reboot only on the same image (`make run-keep`).
 
 ### Mounts (SCRUM-266)
 

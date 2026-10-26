@@ -1438,9 +1438,8 @@ int mkdir(const char *path, mode_t mode)
  * goes unconsumed and every later assignment in the same call lands in the
  * wrong variable.
  *
- * What is NOT here is the scanset ("%99[^\n]"). It has one call site,
- * m_config.c:1792, and that is an fscanf over the config file -- see fscanf
- * below for why that path cannot execute.
+ * The scanset ("%99[^\n]", m_config.c's config read) is handled in the '['
+ * case below; "a-z" ranges are not interpreted.
  */
 
 /*
