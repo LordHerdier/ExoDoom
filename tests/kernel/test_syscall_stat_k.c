@@ -277,9 +277,50 @@ static void test_pslist_page_count_matches_owner(void)
     CU_ASSERT_EQUAL(context_destroy(id), CONTEXT_OK);
 }
 
+/* SCRUM-236: the launcher's program name comes back through #23, cut to fit
+ * and NUL-terminated; an unnamed context reports "". */
+static void test_pslist_reports_context_name(void)
+{
+    page_owner_t named, unnamed;
+    CU_ASSERT_EQUAL(context_create(new_address_space(), &named), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_create(new_address_space(), &unnamed), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_set_name(named, "a-name-longer-than-fits"), CONTEXT_OK);
+
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p, EXO_PAGE_WRITE | EXO_PAGE_USER), 0);
+
+    int64_t rc = do_pslist(SCRATCH, EXO_PSLIST_MAX);
+    CU_ASSERT(rc >= 2);
+
+    exo_ps_info_t *procs = (exo_ps_info_t *)(uintptr_t)SCRATCH;
+    int found = 0;
+    for (int64_t i = 0; i < rc; i++) {
+        if (procs[i].id == named) {
+            found++;
+            CU_ASSERT_EQUAL(procs[i].name[CONTEXT_NAME_MAX - 1], '\0');
+            CU_ASSERT_EQUAL(strncmp(procs[i].name, "a-name-longer-than-fits",
+                                    CONTEXT_NAME_MAX - 1), 0);
+        } else if (procs[i].id == unnamed) {
+            found++;
+            CU_ASSERT_EQUAL(procs[i].name[0], '\0');
+        }
+    }
+    CU_ASSERT_EQUAL(found, 2);
+
+    CU_ASSERT_EQUAL(context_set_name(0x7ffe, "x"), CONTEXT_ENOENT);
+
+    CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+    CU_ASSERT_EQUAL(context_destroy(named), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_destroy(unnamed), CONTEXT_OK);
+}
+
 void suite_syscall_stat_tests(CU_pSuite s)
 {
     CU_add_test(s, "handlers are bound", test_handlers_are_bound);
+    CU_add_test(s, "pslist: reports the launcher's program name",
+                test_pslist_reports_context_name);
 
     CU_add_test(s, "memstat: NULL out rejected", test_memstat_null_out_rejected);
     CU_add_test(s, "memstat: unmapped in-window rejected",

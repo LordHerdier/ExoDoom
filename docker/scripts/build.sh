@@ -507,6 +507,14 @@ build_ring3_link_target libos_clock src/libos_clock "" "" \
   src/libos_clock/libos_clock.c src/fb.c src/fb_console.c src/libos_fb.c
 ring3_embed=1
 
+echo "[2e/7] Build resource dashboard LibOS (SCRUM-236)"
+# Same mechanism as the clock above: a package (top.exo), blobs built
+# for the packager and not linked into the kernel.
+ring3_embed=0
+build_ring3_link_target libos_top src/libos_top "" "" \
+  src/libos_top/libos_top.c src/fb.c src/fb_console.c src/libos_fb.c
+ring3_embed=1
+
 echo "[2f/7] Build Snake LibOS (SCRUM-182)"
 # Same reasoning and same mechanism as the WAD viewer step just above: built
 # UNCONDITIONALLY, with its blobs built but NOT linked into the kernel
@@ -661,6 +669,7 @@ package_ring3_target() {
 # Add Tetris (SCRUM-183) / the calculator here when their targets exist.
 package_ring3_target libos_snake      src/libos_snake      snake.exo   fb,kbd
 package_ring3_target libos_clock      src/libos_clock      clock.exo   fb,kbd
+package_ring3_target libos_top        src/libos_top        top.exo     fb,kbd
 package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,kbd,wad \
   --params-len 16
 package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd,progvol \

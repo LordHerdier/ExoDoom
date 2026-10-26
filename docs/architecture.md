@@ -971,6 +971,13 @@ Details and error codes: `docs/syscall_spec.md` §3.2 #36.
   (`ring3_embed=0`), and the shell's `snake`/`clock` commands are `run
   snake.exo`/`run clock.exo`. The kernel half is asserted by the
   `launch_pkg` suite; the boot half is a manual `make docker-run-kernel` check.
+- **Resource dashboard (SCRUM-236).** `src/libos_top/libos_top.c`,
+  shipped as `top.exo` (`ring3_embed=0`, like the clock) and started by the
+  shell's `top` command. Redraws ~4 Hz from #22/#23/#31/#38/#39 and #5; no syscall
+  was added. It is a full-screen app you Ctrl+Tab to: the kernel runs one context
+  at a time and the compositor shows only `context_current()`, so showing it
+  beside a running program needs the preemptive scheduling of SCRUM-127/176.
+  Contexts are listed by id and program name: the launcher passes the name to #36 (the shell uses the file name without `.exo`), the kernel names the shell and the #21 apps itself, and #23 reports it. The name is display-only and caller-asserted. The page redraws in place (one clear at start, every line padded to the row width) because clearing each frame let the compositor copy a black frame.
 - **Admission (SCRUM-232).** The manifest's `min_pages`/`recommended_pages`/
   `sound_voices`/`want_flags` are read at launch. The kernel *reports* what is
   free (`exo_resstat`, #38: free pages, free context slots, voices, whether the
