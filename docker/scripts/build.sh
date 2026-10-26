@@ -986,7 +986,7 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   #
   # Objects go to a scratch dir and are never added to $objs: the kernel
   # image links the -DEXO_KERNEL build, not this one.
-  exofs_r3_allowed="libos_heap_alloc libos_heap_free memcmp memcpy memset strlen"
+  exofs_r3_allowed="exo_stdio_set_backend libos_heap_alloc libos_heap_free memcmp memcpy memset strlen"
   rm -rf build/exofs_ring3 && mkdir -p build/exofs_ring3
   _compile_exofs_ring3_one() {
     local c="$1" o="$2"
@@ -1004,11 +1004,13 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     exit 1
   }
 
-  # nm -u lists undefined symbols. exofs_* ones resolve within the library
-  # itself once all the objects are linked together, so drop them and judge
-  # what is left.
+  # nm -u lists undefined symbols. exofs_* and exo_file_* ones resolve within
+  # the library itself once all the objects are linked together, so drop them
+  # and judge what is left. exo_stdio_set_backend (src/stdio.c, the libc shim)
+  # is what src/libos_fs/exo_file_stdio.c plugs into (SCRUM-42/75).
   exofs_r3_undef=$(x86_64-elf-nm -u build/exofs_ring3/*.o \
-                   | awk '{ print $2 }' | sort -u | grep -v '^exofs_' || true)
+                   | awk '{ print $2 }' | sort -u \
+                   | grep -v -e '^exofs_' -e '^exo_file_' || true)
   exofs_r3_bad=""
   for sym in ${exofs_r3_undef}; do
     case " ${exofs_r3_allowed} " in
