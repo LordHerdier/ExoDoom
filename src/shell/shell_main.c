@@ -97,6 +97,7 @@
 
 #include "doom_wad_disk.h"
 #include "exo_admit.h"
+#include "exo_grant.h"
 #include "exo_syscall.h"
 #include "fb.h"
 #include "fb_console.h"
@@ -276,7 +277,7 @@ static void shell_firstboot_check(fb_console_t *con);
 static int shell_probe_system_volume(void);
 static int shell_format_volume(fb_console_t *con, uint32_t base_lba,
                                uint32_t region_end_lba);
-static int shell_admit_report(fb_console_t *con, const void *pkg, uint32_t len);
+static int shell_admit_report(fb_console_t *con, const exo_pkg_header_t *parsed);
 static void shell_fs_release(void);
 static int shell_resolve_path(const char *in, char *out, size_t out_len);
 static int shell_resolve_arg(fb_console_t *con, const char *in, char *out,
@@ -1249,16 +1250,16 @@ static int shell_same_vol(const shell_volref_t *a, const shell_volref_t *b) {
 
 /* Admission check for `run` (SCRUM-232): compare the package's manifest with
  * what the kernel reports free (exo_resstat, #38) and say what was decided.
- * Returns 1 to go ahead (granted or degraded), 0 if refused. A package this
- * cannot parse is let through: exo_launch_pkg() owns the format check and
+ * `parsed` is the package's header as run's single exo_pkg_parse() call
+ * produced it, or NULL if it did not parse. Returns 1 to go ahead (granted or
+ * degraded), 0 if refused. A package that did not parse is let through: exo_launch_pkg() owns the format check and
  * reports it with its own error, and this must not second-guess it. The
  * report is a snapshot, so #36 keeps a page-count backstop of its own. */
-static int shell_admit_report(fb_console_t *con, const void *pkg, uint32_t len) {
-    exo_pkg_header_t hdr;
-    const void *code, *data;
-    if (exo_pkg_parse(pkg, len, &hdr, &code, &data) != 0) {
+static int shell_admit_report(fb_console_t *con, const exo_pkg_header_t *parsed) {
+    if (parsed == NULL) {
         return 1;
     }
+    const exo_pkg_header_t hdr = *parsed;
     exo_resstat_t res;
     if (exo_resstat(&res) != 0) {
         return 1;
@@ -1300,6 +1301,35 @@ static int shell_admit_report(fb_console_t *con, const void *pkg, uint32_t len) 
         fbcon_write(con, shell_admit_fb_text);
     }
     return 1;
+}
+
+/* Launch a package and log its resource grant first (SCRUM-235): build the
+ * context without entering it, read what it holds (exo_grantstat, #39), write
+ * that next to what the manifest asked for to COM1, then enter it (#40).
+ * Returns what exo_launch_pkg()/exo_launch_start() would. Serial only: the
+ * program takes the screen the moment it runs, so an on-screen copy would
+ * either vanish unread or need the shell to hold the launch back. */
+static int64_t shell_launch_with_grant(const void *pkg, uint32_t len,
+                                       const exo_pkg_header_t *hdr) {
+    if (hdr == NULL) {
+        /* Not ours to judge; the kernel reports the format error. */
+        return exo_launch_pkg(pkg, len, 0);
+    }
+
+    int64_t ctx = exo_launch_pkg(pkg, len, EXO_LAUNCH_HOLD);
+    if (ctx <= 0) {
+        return ctx < 0 ? ctx : -EXO_EINVAL;
+    }
+
+    exo_grant_t g;
+    exo_resstat_t res;
+    if (exo_grantstat((uint64_t)ctx, &g) == 0 && exo_resstat(&res) == 0) {
+        char text[EXO_GRANT_TEXT_MAX];
+        size_t n = exo_grant_format(text, sizeof(text), hdr, &g, &res,
+                                    g.fb_owner);
+        exo_serial_write(text, n);
+    }
+    return exo_launch_start((uint64_t)ctx);
 }
 
 /* `run <package>` -- SCRUM-230. Reads `/<package>` off the program volume
@@ -1410,12 +1440,22 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         return;
     }
 
-    if (!shell_admit_report(con, pkg, st.size)) {
+    /* The one exo_pkg_parse() in this file, shared by the admission check and
+     * the grant read-out. It is a static inline from a header, and this blob
+     * is linked with -fno-toplevel-reorder with byte 0 of the code as its
+     * entry point (docker/scripts/build.sh): a second call site stops GCC
+     * inlining it, and the out-of-line copy lands ahead of shell_main() and
+     * is run as the entry. A second parse here faults the shell at boot. */
+    exo_pkg_header_t hdr;
+    const void *code, *data;
+    int have_hdr = exo_pkg_parse(pkg, st.size, &hdr, &code, &data) == 0;
+
+    if (!shell_admit_report(con, have_hdr ? &hdr : NULL)) {
         libos_heap_free(pkg);
         return;
     }
 
-    int64_t lrc = exo_launch_pkg(pkg, st.size);
+    int64_t lrc = shell_launch_with_grant(pkg, st.size, have_hdr ? &hdr : NULL);
     libos_heap_free(pkg);
     if (lrc == 0) {
         fbcon_clear(con);

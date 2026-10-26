@@ -155,6 +155,10 @@
 /* Free-resource report for a launcher's admission check (SCRUM-232).
  * Appended for the reason #28-30 were. */
 #define EXO_SYS_RESSTAT             38
+/* What one context was granted (SCRUM-235), and the second half of a held
+ * launch (#36 with EXO_LAUNCH_HOLD).  Appended for the reason #28-30 were. */
+#define EXO_SYS_GRANTSTAT           39
+#define EXO_SYS_LAUNCH_START        40
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -164,7 +168,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        39
+#define EXO_SYS_COUNT        41
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -328,6 +332,28 @@ typedef struct {
     uint32_t reserved[4];       /* zeroed by the kernel                         */
 } exo_resstat_t;
 
+/* exo_grantstat(ctx, out) — #39 (SCRUM-235).  What one context holds right
+ * now, read from the tables that enforce it: page ownership, the framebuffer
+ * and disk bindings, the sound rows.  A read-out, nothing is tracked for it.
+ * Unscoped introspection like exo_resstat; a snapshot. */
+typedef struct {
+    uint32_t ctx_id;        /* the context asked about                       */
+    uint32_t pages;         /* pages it owns (page_count_owned)              */
+    uint32_t fb_owner;      /* context holding the framebuffer binding, 0 if
+                             * none -- equal to ctx_id when it holds it      */
+    uint32_t disk_base;     /* first sector of its assigned extent           */
+    uint32_t disk_sectors;  /* 0 if it has no assigned extent                */
+    uint32_t sound_voices;  /* mixer voices it started and that still hold
+                             * a staging buffer                              */
+    uint32_t sound_stream;  /* 1 if it holds the music stream                */
+    uint32_t reserved;      /* zeroed by the kernel                          */
+} exo_grant_t;
+
+/* Flag for exo_launch_pkg's third argument: build the context and hand back
+ * its id instead of switching to it.  The caller reads the grant with
+ * exo_grantstat and then calls exo_launch_start(id). */
+#define EXO_LAUNCH_HOLD   1u
+
 /* exo_rtc_read(out) — #35.  Calendar date and time from the CMOS RTC, which
  * the kernel treats as UTC (no time zones).  unix_secs is seconds since
  * 1970-01-01 00:00:00 and is derived from the other fields. */
@@ -402,6 +428,7 @@ _Static_assert(sizeof(exo_diskstat_t)    ==  8, "exo_diskstat_t layout is ABI");
 _Static_assert(sizeof(exo_diskextent_t)  ==  8, "exo_diskextent_t layout is ABI");
 _Static_assert(sizeof(exo_rtc_time_t)    == 16, "exo_rtc_time_t layout is ABI");
 _Static_assert(sizeof(exo_resstat_t)     == 32, "exo_resstat_t layout is ABI");
+_Static_assert(sizeof(exo_grant_t)       == 32, "exo_grant_t layout is ABI");
 #endif /* __ASSEMBLER__ */
 
 #ifndef EXO_KERNEL
@@ -884,10 +911,39 @@ static inline int64_t exo_rtc_read(exo_rtc_time_t *out)
  *   -EXO_EFAULT  [pkg, pkg + len) is not entirely inside the LibOS window and
  *                mapped
  *   -EXO_ENOMEM  no room for the image or no free context row
+ *
+ * With EXO_LAUNCH_HOLD in `flags` the context is built but not entered: the
+ * call returns its id (> 0) at once, and the program does not run until
+ * exo_launch_start(id).  Any other flag bit is -EXO_EINVAL.
  */
-static inline int64_t exo_launch_pkg(const void *pkg, uint64_t len)
+static inline int64_t exo_launch_pkg(const void *pkg, uint64_t len,
+                                     uint64_t flags)
 {
-    return exo_syscall2(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len);
+    return exo_syscall3(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len, flags);
+}
+
+/* #40 — enter a context #36 built with EXO_LAUNCH_HOLD.  Like exo_launch, on
+ * success control does not come back until something switches back.
+ *
+ *   -EXO_ENOENT  no held context with that id (never held, already started,
+ *                or since destroyed)
+ *   -EXO_EINVAL  the switch could not be armed; the held context is destroyed
+ */
+static inline int64_t exo_launch_start(uint64_t ctx)
+{
+    return exo_syscall1(EXO_SYS_LAUNCH_START, ctx);
+}
+
+/* #39 — fill *out with what `ctx` was granted (SCRUM-235).
+ *
+ *   0            *out filled
+ *   -EXO_ENOENT  no live context with that id
+ *   -EXO_EFAULT  [out, out + sizeof(exo_grant_t)) is not entirely inside the
+ *                LibOS window and mapped writable
+ */
+static inline int64_t exo_grantstat(uint64_t ctx, exo_grant_t *out)
+{
+    return exo_syscall2(EXO_SYS_GRANTSTAT, ctx, (uint64_t)(uintptr_t)out);
 }
 
 /* #38 — fill *out with what is free right now (SCRUM-232).  A snapshot: it

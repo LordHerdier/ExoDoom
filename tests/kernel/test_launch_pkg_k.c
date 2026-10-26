@@ -742,6 +742,212 @@ static void test_wad_flag_requires_the_params_struct_and_a_wad(void)
     unmap_scratch(paddr);
 }
 
+/* ---- Hold and grant: read what a program got before it runs (SCRUM-235) -- */
+
+static int64_t do_hold(uint64_t buf, uint64_t len)
+{
+    return exo_syscall_dispatch(EXO_SYS_LAUNCH_PKG, buf, len, EXO_LAUNCH_HOLD,
+                                0, 0, 0);
+}
+
+static int64_t do_start(uint64_t ctx)
+{
+    return exo_syscall_dispatch(EXO_SYS_LAUNCH_START, ctx, 0, 0, 0, 0, 0);
+}
+
+/* exo_grantstat writes through a user pointer, so it lands in the scratch
+ * page the package was built in; the caller has finished with the package
+ * by then. */
+static int64_t do_grantstat(uint64_t ctx)
+{
+    return exo_syscall_dispatch(EXO_SYS_GRANTSTAT, ctx, PKG_SCRATCH, 0, 0, 0, 0);
+}
+
+static void test_hold_builds_a_context_without_entering_it(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    size_t total = write_probe_package(&h);
+    uint32_t n_before = context_count();
+
+    int64_t id = do_hold(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(id > 0);
+    CU_ASSERT_EQUAL(context_switch_pending, 0);
+    CU_ASSERT_EQUAL(context_count(), n_before + 1);
+    context_t *c = context_lookup((page_owner_t)id);
+    CU_ASSERT_PTR_NOT_NULL(c);
+
+    /* Starting someone else's id, or nothing, finds no hold. */
+    CU_ASSERT_EQUAL(do_start((uint64_t)id + 1), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(do_start(0), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(context_switch_pending, 0);
+
+    CU_ASSERT_EQUAL(do_start((uint64_t)id), 0);
+    CU_ASSERT_EQUAL(context_switch_pending, 1);
+    /* A hold is entered once. */
+    CU_ASSERT_EQUAL(do_start((uint64_t)id), -EXO_ENOENT);
+
+    destroy_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+static void test_grantstat_reports_what_the_context_holds(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    size_t total = write_probe_package(&h);
+
+    int64_t id = do_hold(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(id > 0);
+
+    exo_grant_t *g = (exo_grant_t *)(uintptr_t)PKG_SCRATCH;
+    memset(g, 0xAB, sizeof(*g));
+    CU_ASSERT_EQUAL(do_grantstat((uint64_t)id), 0);
+    CU_ASSERT_EQUAL(g->ctx_id, (uint32_t)id);
+    CU_ASSERT_EQUAL(g->pages, page_count_owned((page_owner_t)id));
+    CU_ASSERT_TRUE(g->pages >= 1u + EXO_PKG_MAX_STACK_PAGES);
+    CU_ASSERT_EQUAL(g->fb_owner, (uint32_t)fb_binding_owner());
+    CU_ASSERT_EQUAL(g->disk_sectors, 0u);
+    CU_ASSERT_EQUAL(g->sound_voices, 0u);
+    CU_ASSERT_EQUAL(g->sound_stream, 0u);
+    CU_ASSERT_EQUAL(g->reserved, 0u);
+
+    /* No such context, and an id that cannot be one. */
+    CU_ASSERT_EQUAL(do_grantstat(0), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(do_grantstat(0xFFFFu), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(do_grantstat(0x12345u), -EXO_ENOENT);
+
+    destroy_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+static void test_grantstat_reports_the_assigned_volume(void)
+{
+    if (!disk_binding_present(0))
+        return;
+
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    h.want_flags     = EXO_PKG_WANT_DISK;
+    h.volume_slot    = 2;
+    h.volume_sectors = 64;
+    size_t total = write_probe_package(&h);
+
+    int64_t id = do_hold(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(id > 0);
+    CU_ASSERT_EQUAL(do_grantstat((uint64_t)id), 0);
+
+    exo_grant_t *g = (exo_grant_t *)(uintptr_t)PKG_SCRATCH;
+    CU_ASSERT_EQUAL(g->disk_base, exo_volume_slot_base(2));
+    CU_ASSERT_EQUAL(g->disk_sectors, 64u);
+
+    destroy_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+static void test_grantstat_bad_out_pointer_rejected(void)
+{
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_GRANTSTAT, PAGE_OWNER_LIBOS, 0,
+                                         0, 0, 0, 0), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_GRANTSTAT, PAGE_OWNER_LIBOS,
+                                         PKG_UNMAPPED, 0, 0, 0, 0), -EXO_EFAULT);
+}
+
+/* An abandoned hold must not strand a context row or its pages: the next
+ * launch of any kind drops it first. */
+static void test_a_hold_never_started_is_dropped_by_the_next_launch(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    size_t total = write_probe_package(&h);
+
+    int64_t first = do_hold(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(first > 0);
+    uint32_t n_held = context_count();
+    uint32_t pages_held = page_count_owned((page_owner_t)first);
+
+    int64_t second = do_hold(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(second > 0);
+    /* One row out, one row in. */
+    CU_ASSERT_EQUAL(context_count(), n_held);
+    CU_ASSERT_EQUAL(page_count_owned((page_owner_t)second), pages_held);
+    /* Only the newer hold can be started. */
+    if (first != second)
+        CU_ASSERT_EQUAL(do_start((uint64_t)first), -EXO_ENOENT);
+
+    destroy_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+/* The framebuffer binding moves when the program is entered, not when it is
+ * built: a hold that is never started displaces nobody. */
+static void test_hold_leaves_the_framebuffer_until_started(void)
+{
+    const fb_geometry_t *boot = fb_binding_geometry();
+    fb_geometry_t saved;
+    int had_fb = (boot != NULL);
+    if (had_fb)
+        saved = *boot;
+
+    fb_geometry_t g = {
+        .phys_addr = 0x40000000ULL, .width = 64, .height = 64,
+        .pitch = 256, .bpp = 32,
+    };
+    CU_ASSERT_EQUAL(fb_binding_init(&g), FB_BIND_OK);
+
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    h.want_flags = EXO_PKG_WANT_FRAMEBUFFER;
+    size_t total = write_probe_package(&h);
+
+    CU_ASSERT_EQUAL(fb_binding_acquire(FB_TEST_HOLDER), FB_BIND_OK);
+    int64_t id = do_hold(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(id > 0);
+    CU_ASSERT_EQUAL(fb_binding_owner(), FB_TEST_HOLDER);
+
+    CU_ASSERT_EQUAL(do_start((uint64_t)id), 0);
+    CU_ASSERT_EQUAL(fb_binding_owner(), PAGE_OWNER_FREE);
+
+    destroy_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+    fb_binding_init(had_fb ? &saved : (const fb_geometry_t *)0);
+}
+
+static void test_unknown_launch_flags_are_refused(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    size_t total = write_probe_package(&h);
+    uint32_t n_before = context_count();
+
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_LAUNCH_PKG, PKG_SCRATCH, total,
+                                         2, 0, 0, 0), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_LAUNCH_PKG, PKG_SCRATCH, total,
+                                         EXO_LAUNCH_HOLD | 0x100, 0, 0, 0),
+                    -EXO_EINVAL);
+    CU_ASSERT_EQUAL(context_count(), n_before);
+    CU_ASSERT_EQUAL(context_switch_pending, 0);
+
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
 void suite_launch_pkg_tests(CU_pSuite s)
 {
     CU_add_test(s, "lengths that cannot be a package are refused first",
@@ -772,4 +978,18 @@ void suite_launch_pkg_tests(CU_pSuite s)
                 test_no_volume_request_assigns_nothing);
     CU_add_test(s, "launching past the context table fails cleanly",
                 test_launch_past_capacity_fails_gracefully);
+    CU_add_test(s, "a hold builds a context without entering it",
+                test_hold_builds_a_context_without_entering_it);
+    CU_add_test(s, "grantstat reports what the context holds",
+                test_grantstat_reports_what_the_context_holds);
+    CU_add_test(s, "grantstat reports the assigned volume",
+                test_grantstat_reports_the_assigned_volume);
+    CU_add_test(s, "grantstat rejects a bad out pointer",
+                test_grantstat_bad_out_pointer_rejected);
+    CU_add_test(s, "a hold never started is dropped by the next launch",
+                test_a_hold_never_started_is_dropped_by_the_next_launch);
+    CU_add_test(s, "a hold leaves the framebuffer until started",
+                test_hold_leaves_the_framebuffer_until_started);
+    CU_add_test(s, "unknown launch flags are refused",
+                test_unknown_launch_flags_are_refused);
 }

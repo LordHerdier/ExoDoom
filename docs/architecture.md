@@ -1079,6 +1079,21 @@ Details and error codes: `docs/syscall_spec.md` §3.2 #36.
   (code + data/bss + the fixed 16-page stack + 4 page-table pages, + 33 more for
   `EXO_PKG_WANT_WAD` since the WAD's tables are the program's own), and
   `test_launch_pkg_k.c` measures a real launch against it.
+- **The grant read-out (SCRUM-235).** Admission says what was *asked* against
+  what is *free*; the read-out says what the program *holds*, at the moment it
+  starts. `run` launches with `EXO_LAUNCH_HOLD` (#36), so the context exists but
+  has not run; reads it with `exo_grantstat` (#39: pages, framebuffer holder,
+  disk extent, sound voices); writes it next to the manifest through
+  `exo_grant_format()` (`src/exo_grant.h`, header-only and pure like
+  `exo_admit.h`); then enters it with `exo_launch_start` (#40). The split is
+  needed because #36 otherwise switches away immediately and the shell never
+  runs again until the program yields. The read-out goes to COM1 only: the
+  program draws over the console as soon as it runs, so an on-screen copy
+  would vanish unread or need the shell to delay the launch. Nothing new is
+  tracked: every field is read from the table that already enforces it. The framebuffer line states what
+  *will* happen (the binding moves in #40), and "sound" reports voices
+  *available*, since voices are owned at play time. Same data, continuously, is
+  SCRUM-236.
 - **Doom and the WAD viewer launch this way too.** `EXO_PKG_WANT_WAD` (with
   `params_len` = 16) makes #36 map the IWAD and patch `libos_wad_params_t`
   exactly as #21's `LAUNCH_NEEDS_WAD` rows do (shared `launch_attach_wad`), so
