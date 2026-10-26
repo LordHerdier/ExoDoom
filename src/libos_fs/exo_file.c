@@ -44,18 +44,23 @@ static exofs_file_t *fd_handle(int fd)
     return &g_fds[fd];
 }
 
-int exo_file_open(const char *path, uint32_t flags)
+int exo_file_open_on(exofs_vol_t *v, const char *path, uint32_t flags)
 {
     for (int fd = 0; fd < EXO_FILE_MAX_FDS; fd++) {
         if (g_fds[fd].open) continue;
 
         /* exofs_open() only marks the handle open on success, so a failure
          * leaves the slot free with no cleanup here. */
-        int rc = exofs_open(exo_file_volume(), path, flags, &g_fds[fd]);
+        int rc = exofs_open(v, path, flags, &g_fds[fd]);
         if (rc < 0) return rc;
         return fd;
     }
     return -EXO_EMFILE;
+}
+
+int exo_file_open(const char *path, uint32_t flags)
+{
+    return exo_file_open_on(exo_file_volume(), path, flags);
 }
 
 int exo_file_close(int fd)

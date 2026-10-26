@@ -44,6 +44,7 @@
 #include "libos_fs/exo_file.h"
 #include "libos_fs/exo_file_stdio.h"
 #include "libos_fs/exofs.h"
+#include "libos_fs/exofs_attach.h"
 #include "libos_wad_params.h"
 #include "stdio.h"
 
@@ -78,6 +79,23 @@ int dg_init_result(void)
 {
     return g_dg_init_result;
 }
+
+/*
+ * The private volume's outcome (SCRUM-267): DG_INIT_NOT_RUN until DG_Init(),
+ * then 0 (mounted or formatted) or a negative -EXO_E*. Failure is not fatal
+ * -- Doom plays without saves -- so it is reported here rather than halting,
+ * the same split dg_init_result() makes for the IWAD.
+ */
+static int g_dg_save_result = DG_INIT_NOT_RUN;
+
+int dg_save_result(void)
+{
+    return g_dg_save_result;
+}
+
+/* The program volume, kept so the private volume can name it as the place
+ * reads fall through to (exo_file_stdio_set_fallback). */
+static exofs_vol_t *g_dg_program_vol;
 
 /*
  * The one place the tick value enters this file.
@@ -185,6 +203,31 @@ void DG_SleepMs(uint32_t ms)
 }
 
 /*
+ * #37 and #26 by whichever route this build has (the header comment): both
+ * volumes below are found and bound the same way, so the #ifdef lives here
+ * once instead of four times.
+ */
+static int64_t dg_disk_extent(uint64_t role, exo_diskextent_t *ext)
+{
+#ifdef EXO_KERNEL
+    return exo_syscall_dispatch(EXO_SYS_DISK_EXTENT, (uint64_t)(uintptr_t)ext,
+                                role, 0, 0, 0, 0);
+#else
+    return exo_disk_extent_role(role, ext);
+#endif
+}
+
+static int64_t dg_disk_acquire(const exo_diskextent_t *ext)
+{
+#ifdef EXO_KERNEL
+    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, DG_SYSTEM_DEV, ext->base,
+                                ext->sectors, 0, 0, 0);
+#else
+    return exo_disk_acquire(DG_SYSTEM_DEV, ext->base, ext->sectors);
+#endif
+}
+
+/*
  * Bind and mount the program volume (SCRUM-75).
  *
  * The IWAD is a file on the program volume, the one `install` copies it to,
@@ -208,24 +251,14 @@ static int dg_mount_program_volume(void)
     exo_diskextent_t ext;
     int64_t          rc;
 
-#ifdef EXO_KERNEL
-    rc = exo_syscall_dispatch(EXO_SYS_DISK_EXTENT, (uint64_t)(uintptr_t)&ext,
-                              0, 0, 0, 0, 0);
-#else
-    rc = exo_disk_extent(&ext);
-#endif
+    rc = dg_disk_extent(EXO_DISK_EXTENT_PROGRAM, &ext);
     if (rc != 0) {
         printf("DG_Init: no program volume was granted to this program "
                "(manifest lacks progvol?): %d\n", (int)rc);
         return DOOM_WAD_ENOENT;
     }
 
-#ifdef EXO_KERNEL
-    rc = exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, DG_SYSTEM_DEV, ext.base,
-                              ext.sectors, 0, 0, 0);
-#else
-    rc = exo_disk_acquire(DG_SYSTEM_DEV, ext.base, ext.sectors);
-#endif
+    rc = dg_disk_acquire(&ext);
     if (rc != 0) {
         printf("DG_Init: could not bind the program volume (LBA %u +%u): %d "
                "-- is the shell using it?\n",
@@ -240,8 +273,74 @@ static int dg_mount_program_volume(void)
         return DOOM_WAD_ENOENT;
     }
 
+    g_dg_program_vol = vol;
     exo_file_set_volume(vol);
     exo_file_stdio_install();
+    return 0;
+}
+
+/*
+ * Bind and mount Doom's private volume (SCRUM-267), and make it the volume
+ * fopen writes to.
+ *
+ * Doom writes two kinds of file: savegames (G_DoSaveGame) and its config
+ * (M_SaveDefaults). The program volume is read-only to it, so both go to the
+ * slot its package asked for (--volume-slot, docker/scripts/build.sh), which
+ * the kernel assigned at launch and exo_disk_extent (#37) reports. The slot
+ * is formatted the first time, mounted every time after (exofs_attach: only a
+ * blank slot is ever formatted, so a volume that merely fails to mount is
+ * reported and left alone).
+ *
+ * After this the private volume is the default one, so every fopen and every
+ * write lands on it, and the program volume is the fallback for reads: the
+ * IWAD is not on the private volume, and Doom's startup opens the config
+ * (M_LoadDefaults) before it looks for the IWAD, so which volume is "current"
+ * cannot be what finds the WAD.
+ *
+ * Both extents stay bound for the life of the program. Nothing is unmounted:
+ * every save is closed (and so synced, docs/filesystem.md 6c) by the engine
+ * itself, and the kernel reclaims the bindings when the program ends.
+ *
+ * Returns 0, or a negative -EXO_E* code; on failure the program volume stays
+ * the default and Doom runs, read-only, without saves.
+ */
+static int dg_mount_save_volume(void)
+{
+    exo_diskextent_t ext;
+    int64_t          rc;
+
+    rc = dg_disk_extent(EXO_DISK_EXTENT_PRIVATE, &ext);
+    if (rc != 0) {
+        printf("DG_Init: no private volume was granted to this program "
+               "(manifest lacks a volume request?): %d -- savegames and "
+               "config will not persist\n", (int)rc);
+        return (int)rc;
+    }
+
+    rc = dg_disk_acquire(&ext);
+    if (rc != 0) {
+        printf("DG_Init: could not bind the private volume (LBA %u +%u): %d "
+               "-- savegames and config will not persist\n",
+               (unsigned)ext.base, (unsigned)ext.sectors, (int)rc);
+        return (int)rc;
+    }
+
+    exofs_vol_t *vol = NULL;
+    int arc = exofs_attach(DG_SYSTEM_DEV, ext.base, ext.sectors, &vol);
+    if (arc < 0) {
+        printf("DG_Init: private volume (LBA %u +%u) will not mount: %d "
+               "-- savegames and config will not persist\n",
+               (unsigned)ext.base, (unsigned)ext.sectors, arc);
+        return arc;
+    }
+    printf("DG_Init: private volume LBA %u +%u: %s\n", (unsigned)ext.base,
+           (unsigned)ext.sectors,
+           arc == EXOFS_ATTACH_FORMATTED ? "blank, formatted a new volume"
+                                         : "mounted existing volume");
+
+    exo_file_set_volume(vol);
+    exo_file_stdio_install();
+    exo_file_stdio_set_fallback(g_dg_program_vol);
     return 0;
 }
 
@@ -318,4 +417,9 @@ void DG_Init(void)
         rc = dg_check_iwad(DOOM_IWAD_NAME);
     }
     g_dg_init_result = rc;
+
+    /* SCRUM-267. After the IWAD check, which runs against the program volume
+     * while that is still the default. Independent of its outcome: a program
+     * with a private volume and no program volume still gets its saves. */
+    g_dg_save_result = dg_mount_save_volume();
 }

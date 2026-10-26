@@ -6,8 +6,10 @@
 
 /*
  * disk_binding.c — the disk ownership table (SCRUM-188, extended by
- * SCRUM-237 from one owner to one sector extent per owner, and by SCRUM-244
- * to one extent per owner *per device*).
+ * SCRUM-237 from one owner to one sector extent per owner, by SCRUM-244
+ * to one extent per owner *per device*, and by SCRUM-267 to two for a context
+ * assigned both a private and a program volume, which is the only way an
+ * owner holds two extents of one device).
  *
  * State is a small table of
  * {owner, device, base, count, revoke mark}. Extents on the same device
@@ -76,13 +78,60 @@ static disk_extent_t *find_any(page_owner_t who)
     return NULL;
 }
 
-static disk_extent_t *find_assigned(page_owner_t who)
+/* SCRUM-267: a context may be assigned two volumes, one private read-write
+ * and one shared read-only (the program volume), so an assignment is looked
+ * up by role. */
+static disk_extent_t *find_assigned_role(page_owner_t who, int ro)
 {
     if (who == PAGE_OWNER_FREE)
         return NULL;
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
-        if (assigned[i].owner == who)
+        if (assigned[i].owner == who && !!assigned[i].read_only == !!ro)
             return &assigned[i];
+    return NULL;
+}
+
+/* Whichever assignment `who` has, the private one first. */
+static disk_extent_t *find_assigned(page_owner_t who)
+{
+    disk_extent_t *e = find_assigned_role(who, 0);
+    return e ? e : find_assigned_role(who, 1);
+}
+
+/* The assignment of `who` that is exactly [base, base + count) of `dev`, or
+ * NULL: what acquire matches a request against. */
+static disk_extent_t *find_assigned_exact(page_owner_t who, uint32_t dev,
+                                          uint32_t base, uint32_t count)
+{
+    if (who == PAGE_OWNER_FREE)
+        return NULL;
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        if (assigned[i].owner == who && assigned[i].dev == dev &&
+            assigned[i].base == base && assigned[i].count == count)
+            return &assigned[i];
+    return NULL;
+}
+
+/* The extent of `dev` that holds all of [lba, lba + count), or NULL. *held is
+ * set when `who` holds any extent of `dev` at all, which is what separates
+ * "outside your extents" from "you hold nothing here". A context has at most
+ * two extents on a device (SCRUM-267), both assigned, so a range is checked
+ * against the one it falls in rather than against the first one found. */
+static disk_extent_t *find_covering(page_owner_t who, uint32_t dev,
+                                    uint64_t lba, uint64_t count, int *held)
+{
+    *held = 0;
+    if (who == PAGE_OWNER_FREE)
+        return NULL;
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++) {
+        disk_extent_t *e = &extents[i];
+        if (e->owner != who || e->dev != dev)
+            continue;
+        *held = 1;
+        if (lba >= e->base && lba <= (uint64_t)e->base + e->count &&
+            count <= (uint64_t)e->base + e->count - lba)
+            return e;
+    }
     return NULL;
 }
 
@@ -137,12 +186,14 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
         return DISK_BIND_ERANGE;
     }
 
-    /* A context with an assigned volume may bind that volume and nothing
-     * else -- no other device either, or a packaged program could reach a
-     * second disk just by asking; everyone else is kept out of every
+    /* A context with assigned volumes may bind exactly one of them and
+     * nothing else -- no other device either, or a packaged program could
+     * reach a second disk just by asking (SCRUM-267: it has up to two, a
+     * private one and the program volume); everyone else is kept out of every
      * assigned volume. */
-    disk_extent_t *own = find_assigned(who);
-    if (own && (own->dev != dev || own->base != base || own->count != count))
+    int            assigned_any = find_assigned(who) != NULL;
+    disk_extent_t *own = find_assigned_exact(who, dev, base, count);
+    if (assigned_any && !own)
         return DISK_BIND_EPERM;
     /* A read-only assignment grants no exclusivity, so it keeps nobody out. */
     int ro = own != NULL && own->read_only;
@@ -152,13 +203,20 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
             overlap(base, count, assigned[i].base, assigned[i].count))
             return DISK_BIND_EBUSY;
 
-    disk_extent_t *mine = find(who, dev);
-    if (mine) {
-        /* Re-acquire of the same extent is success; a different one is not
-         * silently swapped in, because the old one may hold a mounted
-         * volume the caller has not let go of. */
-        return (mine->base == base && mine->count == count)
-                   ? DISK_BIND_OK : DISK_BIND_EBUSY;
+    /* Re-acquire of the same extent is success; a different one is not
+     * silently swapped in, because the old one may hold a mounted volume the
+     * caller has not let go of. The exception is a context with assignments
+     * (SCRUM-267): every extent it can reach here is one the launcher gave
+     * it, so holding both its volumes at once is what it was granted, not a
+     * swap. Everyone else keeps one extent per device. */
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++) {
+        disk_extent_t *e = &extents[i];
+        if (e->owner != who || e->dev != dev)
+            continue;
+        if (e->base == base && e->count == count)
+            return DISK_BIND_OK;
+        if (!assigned_any)
+            return DISK_BIND_EBUSY;
     }
 
     disk_extent_t *free_slot = NULL;
@@ -198,7 +256,7 @@ int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count)
 {
     if (!disk_binding_present(0))
         return DISK_BIND_ENODEV;
-    if (who == PAGE_OWNER_FREE || find_assigned(who))
+    if (who == PAGE_OWNER_FREE || find_assigned_role(who, 0))
         return DISK_BIND_EBUSY;
     if (count == 0 || base >= DISK_BIND_LBA_LIMIT ||
         count > DISK_BIND_LBA_LIMIT - base)
@@ -209,8 +267,11 @@ int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count)
         if (assigned[i].owner == PAGE_OWNER_FREE) {
             if (!free_slot)
                 free_slot = &assigned[i];
-        } else if (!assigned[i].read_only &&
+        } else if ((!assigned[i].read_only || assigned[i].owner == who) &&
                    overlap(base, count, assigned[i].base, assigned[i].count)) {
+            /* Another's private volume, or `who`'s own read-only one: a
+             * context's two volumes are disjoint, so a write through one can
+             * never change what it reads through the other (SCRUM-267). */
             return DISK_BIND_EBUSY;
         }
     }
@@ -236,7 +297,7 @@ int disk_binding_assign_ro(page_owner_t who, uint32_t base, uint32_t count)
 {
     if (!disk_binding_present(0))
         return DISK_BIND_ENODEV;
-    if (who == PAGE_OWNER_FREE || find_assigned(who))
+    if (who == PAGE_OWNER_FREE || find_assigned_role(who, 1))
         return DISK_BIND_EBUSY;
     if (count == 0 || base >= DISK_BIND_LBA_LIMIT ||
         count > DISK_BIND_LBA_LIMIT - base)
@@ -274,11 +335,25 @@ int disk_binding_assignment_of(page_owner_t who, uint32_t *base,
     return DISK_BIND_OK;
 }
 
+int disk_binding_assignment_role(page_owner_t who, int program,
+                                 uint32_t *base, uint32_t *count)
+{
+    disk_extent_t *a = find_assigned_role(who, program);
+    if (!a)
+        return DISK_BIND_EBUSY;
+
+    *base  = a->base;
+    *count = a->count;
+    return DISK_BIND_OK;
+}
+
 void disk_binding_forget(page_owner_t who)
 {
-    disk_extent_t *a = find_assigned(who);
-    if (a)
-        clear_slot(a);
+    if (who == PAGE_OWNER_FREE)
+        return;
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        if (assigned[i].owner == who)
+            clear_slot(&assigned[i]);
 }
 
 int disk_binding_extent_of(page_owner_t who, uint32_t dev, uint32_t *base,
@@ -296,25 +371,22 @@ int disk_binding_extent_of(page_owner_t who, uint32_t dev, uint32_t *base,
 int disk_binding_check_range(page_owner_t who, uint32_t dev, uint64_t lba,
                              uint64_t count)
 {
-    disk_extent_t *e = find(who, dev);
-    if (!e)
-        return DISK_BIND_EBUSY;
+    int held;
+    if (find_covering(who, dev, lba, count, &held))
+        return DISK_BIND_OK;
 
-    if (lba < e->base || lba > (uint64_t)e->base + e->count ||
-        count > (uint64_t)e->base + e->count - lba)
-        return DISK_BIND_ERANGE;
-
-    return DISK_BIND_OK;
+    return held ? DISK_BIND_ERANGE : DISK_BIND_EBUSY;
 }
 
 int disk_binding_check_write(page_owner_t who, uint32_t dev, uint64_t lba,
                              uint64_t count)
 {
-    int rc = disk_binding_check_range(who, dev, lba, count);
-    if (rc != DISK_BIND_OK)
-        return rc;
+    int held;
+    disk_extent_t *e = find_covering(who, dev, lba, count, &held);
+    if (!e)
+        return held ? DISK_BIND_ERANGE : DISK_BIND_EBUSY;
 
-    return find(who, dev)->read_only ? DISK_BIND_EROFS : DISK_BIND_OK;
+    return e->read_only ? DISK_BIND_EROFS : DISK_BIND_OK;
 }
 
 void disk_binding_release(page_owner_t who, uint32_t dev)
@@ -322,10 +394,13 @@ void disk_binding_release(page_owner_t who, uint32_t dev)
     /* The voluntary return, and the compliance half of the revocation
      * protocol: dropping the binding drops the mark with it. One device
      * only -- an installer holding the source and the system disk lets go
-     * of each when it is done with it. */
-    disk_extent_t *e = find(who, dev);
-    if (e)
-        clear_slot(e);
+     * of each when it is done with it. A context holding both of its
+     * assigned volumes (SCRUM-267) gives up both: the release is per device. */
+    if (who == PAGE_OWNER_FREE)
+        return;
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        if (extents[i].owner == who && extents[i].dev == dev)
+            clear_slot(&extents[i]);
 }
 
 page_owner_t disk_binding_owner(uint32_t dev)
@@ -337,7 +412,7 @@ page_owner_t disk_binding_owner(uint32_t dev)
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++) {
         if (extents[i].owner == PAGE_OWNER_FREE || extents[i].dev != dev)
             continue;
-        if (sole != PAGE_OWNER_FREE)
+        if (sole != PAGE_OWNER_FREE && sole != extents[i].owner)
             return PAGE_OWNER_FREE; /* several holders: no single owner */
         sole = extents[i].owner;
     }

@@ -359,8 +359,8 @@ static void c_vol_size_over(exo_pkg_header_t *h)
 static void c_vol_slot_without_size(exo_pkg_header_t *h)
 { h->want_flags |= EXO_PKG_WANT_DISK; h->volume_slot = 1; }
 
-/* SCRUM-75 program-volume request: a disk resource, and an alternative to a
- * private volume of the program's own. */
+/* SCRUM-75 program-volume request: a disk resource. Since SCRUM-267 it may
+ * accompany a private volume of the program's own (Doom: IWAD + saves). */
 static void c_progvol_ok(exo_pkg_header_t *h)
 { h->want_flags |= EXO_PKG_WANT_DISK | EXO_PKG_WANT_PROGRAM_RO; }
 static void c_progvol_no_disk(exo_pkg_header_t *h)
@@ -372,7 +372,7 @@ static void test_program_volume_request_is_validated(void)
 {
     CU_ASSERT_EQUAL(parse_after(c_progvol_ok), 0);
     CU_ASSERT_EQUAL(parse_after(c_progvol_no_disk), EXO_PKG_EINVAL);
-    CU_ASSERT_EQUAL(parse_after(c_progvol_and_volume), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_progvol_and_volume), 0);
 }
 
 static void test_volume_request_is_validated(void)

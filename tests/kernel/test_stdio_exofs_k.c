@@ -17,10 +17,13 @@
 #include "sys/stat.h"
 
 #include "libos_fs/exofs.h"
+#include "libos_fs/exofs_attach.h"
+#include "libos_fs/exofs_blockdev.h"
 #include "libos_fs/exo_file.h"
 #include "libos_fs/exo_file_stdio.h"
 #include "doom_wad.h"
 #include "doomgeneric_exo.h"
+#include "libos_heap.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -522,6 +525,63 @@ static void test_mkdir_over_exofs(void)
     teardown();
 }
 
+/* Doom's savegame rotation (g_game.c G_DoSaveGame): write a temp file,
+ * remove the old save, rename the temp over it. Rename never replaces
+ * (docs/filesystem.md section 1.4), so the remove is what lets a second save
+ * of the same slot through, and the first save's remove finds nothing and
+ * must fail rather than claim a delete (SCRUM-267). */
+static void test_save_rotation_remove_rename(void)
+{
+    char  got[8];
+    FILE *f;
+
+    if (!drive_present()) return;
+    CU_ASSERT_TRUE(setup());
+
+    for (int round = 0; round < 2; round++) {
+        const char *body = round ? "second" : "first";
+        size_t      len  = round ? 6 : 5;
+
+        f = fopen("temp.dsg", "wb");
+        CU_ASSERT_PTR_NOT_NULL(f);
+        if (f != NULL) {
+            CU_ASSERT_EQUAL(fwrite(body, 1, len, f), len);
+            CU_ASSERT_EQUAL(fclose(f), 0);
+        }
+
+        errno = 0;
+        if (round == 0) {
+            CU_ASSERT_EQUAL(remove("doomsav0.dsg"), -1);
+            CU_ASSERT_EQUAL(errno, ENOENT);
+        } else {
+            errno = 0;
+            CU_ASSERT_EQUAL(rename("temp.dsg", "doomsav0.dsg"), -1);
+            CU_ASSERT_EQUAL(errno, EEXIST);       /* never replaces */
+            CU_ASSERT_EQUAL(remove("doomsav0.dsg"), 0);
+        }
+        CU_ASSERT_EQUAL(rename("temp.dsg", "./doomsav0.dsg"), 0);
+
+        errno = 0;
+        CU_ASSERT_PTR_NULL(fopen("temp.dsg", "rb"));   /* moved, not copied */
+        CU_ASSERT_EQUAL(errno, ENOENT);
+
+        memset(got, 0, sizeof got);
+        f = fopen("doomsav0.dsg", "rb");
+        CU_ASSERT_PTR_NOT_NULL(f);
+        if (f != NULL) {
+            CU_ASSERT_EQUAL(fread(got, 1, sizeof got, f), len);
+            CU_ASSERT_EQUAL(memcmp(got, body, len), 0);
+            fclose(f);
+        }
+    }
+
+    /* The root is not a file to remove. */
+    errno = 0;
+    CU_ASSERT_EQUAL(remove("./"), -1);
+    CU_ASSERT_EQUAL(errno, EISDIR);
+    teardown();
+}
+
 /* A backend with no write op: every write mode stays EROFS, which is how
  * the table behaved before SCRUM-42. */
 static int ro_open(const char *path, unsigned flags)
@@ -536,7 +596,7 @@ static int ro_close(int h)                       { (void)h; return 0; }
 static void test_backend_without_write_is_read_only(void)
 {
     static const exo_stdio_backend_t ro = {
-        ro_open, ro_read, ro_seek, ro_close, NULL, NULL,
+        ro_open, ro_read, ro_seek, ro_close, NULL, NULL, NULL, NULL,
     };
 
     exo_stdio_set_backend(&ro);
@@ -548,6 +608,12 @@ static void test_backend_without_write_is_read_only(void)
     CU_ASSERT_EQUAL(errno, EROFS);
     errno = 0;
     CU_ASSERT_EQUAL(mkdir("d", 0755), -1);
+    CU_ASSERT_EQUAL(errno, EROFS);
+    errno = 0;
+    CU_ASSERT_EQUAL(remove("a"), -1);                 /* no remove/rename op */
+    CU_ASSERT_EQUAL(errno, EROFS);
+    errno = 0;
+    CU_ASSERT_EQUAL(rename("a", "b"), -1);
     CU_ASSERT_EQUAL(errno, EROFS);
     errno = 0;
     CU_ASSERT_PTR_NULL(fopen("a", "r"));              /* reading still goes through */
@@ -603,7 +669,7 @@ static int64_t mem_write(int h, const void *b, size_t n)
 static int mem_close(int h) { (void)h; return 0; }
 
 static const exo_stdio_backend_t mem_backend = {
-    mem_open, mem_read, mem_seek, mem_close, mem_write, NULL,
+    mem_open, mem_read, mem_seek, mem_close, mem_write, NULL, NULL, NULL,
 };
 
 static void mem_reset(long limit)
@@ -689,8 +755,273 @@ static void test_fwrite_clears_eof(void)
     exo_stdio_set_backend(NULL);
 }
 
+/* ---- Doom's two volumes (SCRUM-267) ------------------------------------
+ *
+ * Two small volumes inside the 8192..16383 range this suite owns: "A" is the
+ * private one (the default volume, what fopen writes to), "B" the shared
+ * read-only one the IWAD lives on (the fallback for reads). */
+
+#define A_BASE 8192u
+#define B_BASE 10240u
+#define SMALL_SECTORS 2048u
+
+static void put_file(exofs_vol_t *v, const char *path, const char *body)
+{
+    exofs_file_t f;
+    uint32_t     n = (uint32_t)strlen(body);
+
+    CU_ASSERT_EQUAL(exofs_open(v, path, EXOFS_O_WRITE | EXOFS_O_CREATE, &f), 0);
+    CU_ASSERT_EQUAL(exofs_write(&f, body, n), (int64_t)n);
+    CU_ASSERT_EQUAL(exofs_close(&f), 0);
+}
+
+static uint32_t vol_file_size(exofs_vol_t *v, const char *path)
+{
+    exofs_stat_t st;
+
+    return exofs_stat(v, path, &st) == 0 ? st.size : 0xFFFFFFFFu;
+}
+
+static void test_blank_sector_detection(void)
+{
+    uint8_t sec[512];
+
+    memset(sec, 0, sizeof sec);
+    CU_ASSERT_TRUE(exofs_sector_is_blank(sec, sizeof sec));
+    CU_ASSERT_TRUE(exofs_sector_is_blank(sec, 0));
+    sec[511] = 1;                          /* the last byte counts too */
+    CU_ASSERT_FALSE(exofs_sector_is_blank(sec, sizeof sec));
+    sec[511] = 0;
+    sec[0] = 0x45;
+    CU_ASSERT_FALSE(exofs_sector_is_blank(sec, sizeof sec));
+    CU_ASSERT_FALSE(exofs_sector_is_blank(NULL, 512));
+}
+
+/* First launch formats, every later one mounts and finds what was there. */
+static void test_attach_formats_a_blank_slot_once(void)
+{
+    exofs_vol_t *v = NULL;
+    uint8_t     *sec;
+
+    if (!drive_present()) return;
+    exo_file_stdio_remove();
+    exo_file_close_all();
+    exofs_unmount_all();
+
+    /* A slot nobody has written: whatever an earlier test left is wiped. Disk
+     * buffers must be in the LibOS window, hence the heap. */
+    sec = libos_heap_alloc(512);
+    CU_ASSERT_PTR_NOT_NULL(sec);
+    if (sec == NULL) return;
+    memset(sec, 0, 512);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, B_BASE, sec, 1), 0);
+    libos_heap_free(sec);
+
+    CU_ASSERT_EQUAL(exofs_attach(0, B_BASE, SMALL_SECTORS, &v),
+                    EXOFS_ATTACH_FORMATTED);
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v == NULL) return;
+    put_file(v, "/slot0.dsg", "saved");
+    exofs_unmount(v);
+
+    v = NULL;
+    CU_ASSERT_EQUAL(exofs_attach(0, B_BASE, SMALL_SECTORS, &v),
+                    EXOFS_ATTACH_MOUNTED);
+    CU_ASSERT_PTR_NOT_NULL(v);
+    if (v != NULL) {
+        CU_ASSERT_EQUAL(vol_file_size(v, "/slot0.dsg"), 5u);   /* kept */
+        exofs_unmount(v);
+    }
+}
+
+/* A volume that will not mount but is not blank is somebody's data. */
+static void test_attach_never_formats_over_data(void)
+{
+    uint8_t     *junk, *back;
+    exofs_vol_t *v = NULL;
+
+    if (!drive_present()) return;
+    exo_file_stdio_remove();
+    exo_file_close_all();
+    exofs_unmount_all();
+
+    junk = libos_heap_alloc(512);
+    back = libos_heap_alloc(512);
+    CU_ASSERT_PTR_NOT_NULL(junk);
+    CU_ASSERT_PTR_NOT_NULL(back);
+    if (junk == NULL || back == NULL) {
+        libos_heap_free(junk);
+        libos_heap_free(back);
+        return;
+    }
+    memset(junk, 0x5a, 512);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, B_BASE, junk, 1), 0);
+
+    CU_ASSERT_EQUAL(exofs_attach(0, B_BASE, SMALL_SECTORS, &v), -EXO_EINVAL);
+    CU_ASSERT_PTR_NULL(v);
+
+    memset(back, 0, 512);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, B_BASE, back, 1), 0);
+    CU_ASSERT_EQUAL(memcmp(back, junk, 512), 0);   /* untouched */
+    libos_heap_free(junk);
+    libos_heap_free(back);
+
+    /* Already mounted is its own answer, not a reason to write. */
+    CU_ASSERT_EQUAL(exofs_format(0, B_BASE, SMALL_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, B_BASE, &v), 0);
+    exofs_vol_t *again = NULL;
+    CU_ASSERT_EQUAL(exofs_attach(0, B_BASE, SMALL_SECTORS, &again), -EXO_EBUSY);
+    exofs_unmount(v);
+}
+
+/* The IWAD is on the shared volume; writes and saves go to the private one. */
+static void test_fallback_reads_shared_volume_writes_private(void)
+{
+    exofs_vol_t *a = NULL, *b = NULL;
+    char         got[16];
+    FILE        *f;
+
+    if (!drive_present()) return;
+    exo_file_stdio_remove();
+    exo_file_close_all();
+    exofs_unmount_all();
+
+    CU_ASSERT_EQUAL(exofs_format(0, A_BASE, SMALL_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_format(0, B_BASE, SMALL_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, A_BASE, &a), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, B_BASE, &b), 0);
+    if (a == NULL || b == NULL) { exofs_unmount_all(); return; }
+    put_file(a, "/default.cfg", "mine");
+    put_file(b, "/doom2.wad", "IWAD-from-b");
+
+    exo_file_set_volume(a);
+    exo_file_stdio_install();
+    exo_file_stdio_set_fallback(b);
+
+    /* In neither -> ENOENT; only on the private one -> read; only on the
+     * shared one -> read through. */
+    errno = 0;
+    CU_ASSERT_PTR_NULL(fopen("nothing.dsg", "rb"));
+    CU_ASSERT_EQUAL(errno, ENOENT);
+    memset(got, 0, sizeof got);
+    f = fopen("./default.cfg", "rb");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        CU_ASSERT_EQUAL(fread(got, 1, sizeof got, f), (size_t)4);
+        fclose(f);
+    }
+    memset(got, 0, sizeof got);
+    f = fopen("doom2.wad", "rb");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        CU_ASSERT_EQUAL(fread(got, 1, sizeof got, f), (size_t)11);
+        CU_ASSERT_EQUAL(memcmp(got, "IWAD-from-b", 11), 0);
+        CU_ASSERT_EQUAL(fseek(f, 0, SEEK_END), 0);        /* a live stream */
+        CU_ASSERT_EQUAL(ftell(f), 11L);
+        fclose(f);
+    }
+    /* The default is back where it was, so the next write goes to A. */
+    CU_ASSERT_TRUE(exo_file_volume() == a);
+
+    /* Writing a name only the shared volume has creates it on the private
+     * one and leaves the shared one exactly as it was. */
+    f = fopen("doom2.wad", "wb");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        CU_ASSERT_EQUAL(fwrite("mine!", 1, 5, f), (size_t)5);
+        CU_ASSERT_EQUAL(fclose(f), 0);
+    }
+    CU_ASSERT_EQUAL(vol_file_size(a, "/doom2.wad"), 5u);
+    CU_ASSERT_EQUAL(vol_file_size(b, "/doom2.wad"), 11u);
+    /* Present on both: the private copy wins. */
+    f = fopen("doom2.wad", "rb");
+    CU_ASSERT_PTR_NOT_NULL(f);
+    if (f != NULL) {
+        CU_ASSERT_EQUAL(fseek(f, 0, SEEK_END), 0);
+        CU_ASSERT_EQUAL(ftell(f), 5L);
+        fclose(f);
+    }
+    /* A name only the shared volume has: readable, but r+ is a write mode
+     * and must not fall through to it. */
+    put_file(b, "/only-b.txt", "x");
+    errno = 0;
+    CU_ASSERT_PTR_NULL(fopen("only-b.txt", "r+"));
+    CU_ASSERT_EQUAL(errno, ENOENT);
+
+    /* A fallback that has been unmounted reads as none. */
+    CU_ASSERT_PTR_NOT_NULL((f = fopen("only-b.txt", "rb")));
+    if (f != NULL) fclose(f);
+    exofs_unmount(b);
+    errno = 0;
+    CU_ASSERT_PTR_NULL(fopen("only-b.txt", "rb"));
+    CU_ASSERT_EQUAL(errno, ENOENT);
+
+    exo_file_stdio_remove();
+    exo_file_close_all();
+    exofs_unmount_all();
+}
+
+/* exo_file_open_on() (SCRUM-267): open on a named volume, default untouched. */
+static void test_open_on_names_the_volume_not_the_default(void)
+{
+    exofs_vol_t *a = NULL, *b = NULL;
+    char         got[16];
+    int          fd;
+
+    if (!drive_present()) return;
+    exo_file_stdio_remove();
+    exo_file_close_all();
+    exofs_unmount_all();
+
+    CU_ASSERT_EQUAL(exofs_format(0, A_BASE, SMALL_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_format(0, B_BASE, SMALL_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, A_BASE, &a), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, B_BASE, &b), 0);
+    if (a == NULL || b == NULL) { exofs_unmount_all(); return; }
+    put_file(a, "/on-a.txt", "from-a");
+    put_file(b, "/on-b.txt", "from-b");
+    exo_file_set_volume(a);
+
+    /* A file only B has: invisible to the default, readable through open_on. */
+    CU_ASSERT_EQUAL(exo_file_open("/on-b.txt", EXO_FILE_O_READ), -EXO_ENOENT);
+    fd = exo_file_open_on(b, "/on-b.txt", EXO_FILE_O_READ);
+    CU_ASSERT_TRUE(fd >= 0);
+    if (fd >= 0) {
+        memset(got, 0, sizeof got);
+        CU_ASSERT_EQUAL(exo_file_read(fd, got, sizeof got), (int64_t)6);
+        CU_ASSERT_EQUAL(memcmp(got, "from-b", 6), 0);
+        CU_ASSERT_EQUAL(exo_file_close(fd), 0);
+    }
+    CU_ASSERT_TRUE(exo_file_volume() == a);             /* never moved */
+
+    /* The plain call is the same thing on the default volume. */
+    fd = exo_file_open("/on-a.txt", EXO_FILE_O_READ);
+    CU_ASSERT_TRUE(fd >= 0);
+    if (fd >= 0) exo_file_close(fd);
+
+    /* No volume, or one that is gone, is -EXO_EINVAL and uses no descriptor. */
+    CU_ASSERT_EQUAL(exo_file_open_on(NULL, "/on-b.txt", EXO_FILE_O_READ),
+                    -EXO_EINVAL);
+    exofs_unmount(b);
+    CU_ASSERT_EQUAL(exo_file_open_on(b, "/on-b.txt", EXO_FILE_O_READ),
+                    -EXO_EINVAL);
+
+    exo_file_close_all();
+    exofs_unmount_all();
+}
+
 void suite_stdio_exofs_tests(CU_pSuite s)
 {
+    CU_add_test(s, "exo_file_open_on names the volume, not the default",
+                test_open_on_names_the_volume_not_the_default);
+    CU_add_test(s, "exofs_attach: blank-sector detection",
+                test_blank_sector_detection);
+    CU_add_test(s, "exofs_attach formats a blank slot once, then mounts it",
+                test_attach_formats_a_blank_slot_once);
+    CU_add_test(s, "exofs_attach never formats over data it cannot mount",
+                test_attach_never_formats_over_data);
+    CU_add_test(s, "reads fall through to the shared volume, writes stay private",
+                test_fallback_reads_shared_volume_writes_private);
     CU_add_test(s, "dg_check_iwad reads the header off ExoFS", test_check_iwad);
     CU_add_test(s, "fread a whole file off ExoFS", test_read_whole_file);
     CU_add_test(s, "fseek then fread at random offsets",
@@ -714,6 +1045,8 @@ void suite_stdio_exofs_tests(CU_pSuite s)
                 test_fprintf_config_round_trip);
     CU_add_test(s, "mkdir over ExoFS and a file inside it",
                 test_mkdir_over_exofs);
+    CU_add_test(s, "savegame rotation: remove then rename over ExoFS",
+                test_save_rotation_remove_rename);
     CU_add_test(s, "a backend without write stays read-only",
                 test_backend_without_write_is_read_only);
     CU_add_test(s, "failed flush leaves pos within size",

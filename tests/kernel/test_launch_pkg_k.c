@@ -547,6 +547,64 @@ static page_owner_t first_context_but(page_owner_t not_this)
     return PAGE_OWNER_FREE;
 }
 
+/* SCRUM-267: one manifest, both volumes -- Doom's. The private slot is
+ * fenced like any other and the program volume stays shared. */
+static void test_progvol_and_volume_request_assigns_both(void)
+{
+    if (!disk_binding_present(0))
+        return;
+
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    h.want_flags     = EXO_PKG_WANT_DISK | EXO_PKG_WANT_PROGRAM_RO;
+    h.volume_slot    = 2;
+    h.volume_sectors = 64;
+    size_t total = write_probe_package(&h);
+
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), 0);
+    page_owner_t child = first_context_but(fg);
+    CU_ASSERT_NOT_EQUAL(child, PAGE_OWNER_FREE);
+    context_switch_pending = 0;
+    context_set_current(fg);
+
+    uint32_t base = 0, count = 0;
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(child, 0, &base, &count),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(base, exo_volume_slot_base(2));
+    CU_ASSERT_EQUAL(count, 64);
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(child, 1, &base, &count),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(base, LIBOS_WAD_DISK_BASE_LBA);
+    CU_ASSERT_EQUAL(count, EXO_VOLUME_REGION_BASE_LBA - LIBOS_WAD_DISK_BASE_LBA);
+
+    /* The private slot is fenced; the program volume is not. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(fg, 0,
+                                                exo_volume_slot_base(2), 1),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(fg, 0, LIBOS_WAD_DISK_BASE_LBA,
+                                                8),
+                    DISK_BIND_OK);
+    disk_binding_release(fg, 0);
+
+    /* The same slot again: refused, with no context row left behind. */
+    context_info_t before[CONTEXT_MAX];
+    uint32_t n_before = context_list(before, CONTEXT_MAX);
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), -EXO_EBUSY);
+    context_info_t after[CONTEXT_MAX];
+    CU_ASSERT_EQUAL(context_list(after, CONTEXT_MAX), n_before);
+
+    revoke_all_but(fg);
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(child, 0, &base, &count),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(child, 1, &base, &count),
+                    DISK_BIND_EBUSY);
+
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
 static void test_volume_request_assigns_a_fenced_extent(void)
 {
     if (!disk_binding_present(0))
@@ -862,8 +920,60 @@ static void test_grantstat_reports_the_assigned_volume(void)
     exo_grant_t *g = (exo_grant_t *)(uintptr_t)PKG_SCRATCH;
     CU_ASSERT_EQUAL(g->disk_base, exo_volume_slot_base(2));
     CU_ASSERT_EQUAL(g->disk_sectors, 64u);
+    CU_ASSERT_EQUAL(g->prog_sectors, 0u);   /* no program volume asked for */
 
-    destroy_all_but(fg);
+    /* revoke_all, not a bare destroy: only it drops the volume assignment, and
+     * a leaked one fences slot 2 from every later test (SCRUM-267). */
+    revoke_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+/* SCRUM-267: the read-out names a private volume and the program volume
+ * separately, so a context holding both (Doom) shows both, and one holding
+ * only the program volume does not show it as a private extent. */
+static void test_grantstat_reports_both_volumes(void)
+{
+    if (!disk_binding_present(0))
+        return;
+
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    h.want_flags     = EXO_PKG_WANT_DISK | EXO_PKG_WANT_PROGRAM_RO;
+    h.volume_slot    = 2;
+    h.volume_sectors = 64;
+    size_t total = write_probe_package(&h);
+
+    int64_t id = do_hold(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(id > 0);
+    CU_ASSERT_EQUAL(do_grantstat((uint64_t)id), 0);
+
+    exo_grant_t *g = (exo_grant_t *)(uintptr_t)PKG_SCRATCH;
+    CU_ASSERT_EQUAL(g->disk_base, exo_volume_slot_base(2));
+    CU_ASSERT_EQUAL(g->disk_sectors, 64u);
+    CU_ASSERT_EQUAL(g->prog_base, LIBOS_WAD_DISK_BASE_LBA);
+    CU_ASSERT_EQUAL(g->prog_sectors,
+                    EXO_VOLUME_REGION_BASE_LBA - LIBOS_WAD_DISK_BASE_LBA);
+    CU_ASSERT_EQUAL(g->reserved, 0u);
+
+    revoke_all_but(fg);
+    context_switch_pending = 0;
+
+    /* The program volume alone. */
+    h.volume_slot    = 0;
+    h.volume_sectors = 0;
+    total = write_probe_package(&h);
+    id = do_hold(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(id > 0);
+    CU_ASSERT_EQUAL(do_grantstat((uint64_t)id), 0);
+    CU_ASSERT_EQUAL(g->disk_sectors, 0u);
+    CU_ASSERT_EQUAL(g->prog_base, LIBOS_WAD_DISK_BASE_LBA);
+    CU_ASSERT_EQUAL(g->prog_sectors,
+                    EXO_VOLUME_REGION_BASE_LBA - LIBOS_WAD_DISK_BASE_LBA);
+
+    revoke_all_but(fg);
     context_switch_pending = 0;
     drop_foreground(fg);
     unmap_scratch(paddr);
@@ -1057,6 +1167,8 @@ void suite_launch_pkg_tests(CU_pSuite s)
                 test_manifest_minimum_above_free_pages_is_refused);
     CU_add_test(s, "a volume request assigns a fenced extent",
                 test_volume_request_assigns_a_fenced_extent);
+    CU_add_test(s, "a progvol-and-volume request assigns both",
+                test_progvol_and_volume_request_assigns_both);
     CU_add_test(s, "a package with no volume request gets none",
                 test_no_volume_request_assigns_nothing);
     CU_add_test(s, "launching past the context table fails cleanly",
@@ -1067,6 +1179,8 @@ void suite_launch_pkg_tests(CU_pSuite s)
                 test_grantstat_reports_what_the_context_holds);
     CU_add_test(s, "grantstat reports the assigned volume",
                 test_grantstat_reports_the_assigned_volume);
+    CU_add_test(s, "grantstat reports a private and a program volume",
+                test_grantstat_reports_both_volumes);
     CU_add_test(s, "grantstat rejects a bad out pointer",
                 test_grantstat_bad_out_pointer_rejected);
     CU_add_test(s, "a hold never started is dropped by the next launch",

@@ -605,8 +605,8 @@ done in integers (`src/fpconv.c`), because the kernel build has no floating
 point.
 
 `FILE*` sits on a pluggable backend. In ring-3 Doom and the shell it is ExoFS,
-which supports reading, writing (`w`, `a`, `+`), `fflush` and `mkdir`. With no
-backend installed, `fopen` reads only from a built-in table, and writing fails
+which supports reading, writing (`w`, `a`, `+`), `fflush`, `mkdir`, `remove`
+and `rename`. With no backend installed, `fopen` reads only from a built-in table, and writing fails
 with `EROFS`.
 
 The same source compiles for the kernel and for ring 3. One compile-time
@@ -1087,7 +1087,7 @@ matter most. Beyond them:
 | Fault containment | A faulting program halts the machine | End the program and reclaim its resources through the `exo_exit` path |
 | Scheduling | Cooperative; a program that never yields keeps the CPU | Timer-driven preemption (SCRUM-127), which first needs the syscall path's single global stack slot replaced with per-CPU state (SCRUM-176) |
 | Vector state | Shared between SSE programs across a switch | `fxsave`/`fxrstor` in the context switch |
-| Doom saves | Doom cannot yet save games or settings: its only volume is the read-only program volume | A private writable volume for Doom, which the kernel already supports for other programs (SCRUM-267) |
+| Doom config | Savegames work: Doom has a private writable volume (SCRUM-267) and the engine writes them there. Its settings file does not: the vendored engine compiles `M_SaveDefaults`/`M_LoadDefaults` out (`ORIGCODE` is undefined) | Patch the vendored `src/doom/m_config.c` to read and write the config; the volume is ready for it |
 | USB input | USB keyboards are decoded but their events reach no program | Route each keyboard to a program (SCRUM-199) |
 | Disk speed | Polled PIO, one sector at a time across the bus | Bus-master DMA (SCRUM-241) |
 | Concurrent file systems in one program | One mounted volume per program | Handle-based volumes (in progress, SCRUM-265) |

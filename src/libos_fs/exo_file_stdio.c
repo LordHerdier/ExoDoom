@@ -3,12 +3,19 @@
 #include "exo_errno.h"
 #include "libos_fs/exo_file.h"
 #include "libos_fs/exofs.h"
+#include "libos_fs/exofs_internal.h"
 #include "stdio.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 #define STDIO_PATH_MAX 128
+
+/* The read-through volume (exo_file_stdio_set_fallback), and the mount it was
+ * taken from: the generation makes one that outlived its unmount read as
+ * "none", the same rule exo_file.c applies to the default volume. */
+static exofs_vol_t *g_fallback_vol;
+static uint32_t     g_fallback_gen;
 
 /* Turn fopen's path into the absolute one ExoFS wants: a leading "./" is
  * dropped and a relative path is taken from the volume root. "" and "/" both
@@ -50,7 +57,20 @@ static int efs_open(const char *path, unsigned flags)
     if (flags & EXO_STDIO_TRUNC)  f |= EXO_FILE_O_TRUNC;
     if (flags & EXO_STDIO_APPEND) f |= EXO_FILE_O_APPEND;
 
-    return exo_file_open(abs, f);
+    int fd = exo_file_open(abs, f);
+
+    /* A read of a file the default volume does not have goes on to the
+     * fallback volume, if there is one. Reads only: anything that could write
+     * stays on the default volume, so a program's own volume is the only one
+     * it can change. Opened on the fallback directly, so the default volume
+     * is never touched. */
+    if (fd == -EXO_ENOENT &&
+        !(flags & (EXO_STDIO_WRITE | EXO_STDIO_CREATE | EXO_STDIO_TRUNC |
+                   EXO_STDIO_APPEND)) &&
+        exofs_vol_live(g_fallback_vol, g_fallback_gen)) {
+        fd = exo_file_open_on(g_fallback_vol, abs, f);
+    }
+    return fd;
 }
 
 static int efs_mkdir(const char *path)
@@ -73,6 +93,36 @@ static int efs_mkdir(const char *path)
         return -EXO_EEXIST;   /* the root is always there */
 
     return exofs_mkdir(exo_file_volume(), abs);
+}
+
+static int efs_remove(const char *path)
+{
+    char abs[STDIO_PATH_MAX];
+    int rc;
+
+    rc = efs_resolve(path, abs, sizeof abs);
+    if (rc < 0)
+        return rc;
+    if (abs[1] == '\0')
+        return -EXO_EISDIR;   /* the root is not a file to remove */
+
+    return exo_file_remove(abs);
+}
+
+static int efs_rename(const char *oldpath, const char *newpath)
+{
+    char from[STDIO_PATH_MAX];
+    char to[STDIO_PATH_MAX];
+    int rc;
+
+    rc = efs_resolve(oldpath, from, sizeof from);
+    if (rc < 0)
+        return rc;
+    rc = efs_resolve(newpath, to, sizeof to);
+    if (rc < 0)
+        return rc;
+
+    return exo_file_rename(from, to);
 }
 
 static int64_t efs_read(int handle, void *buf, size_t n)
@@ -105,6 +155,7 @@ static int efs_close(int handle)
 
 static const exo_stdio_backend_t exofs_backend = {
     efs_open, efs_read, efs_seek, efs_close, efs_write, efs_mkdir,
+    efs_remove, efs_rename,
 };
 
 void exo_file_stdio_install(void)
@@ -115,4 +166,11 @@ void exo_file_stdio_install(void)
 void exo_file_stdio_remove(void)
 {
     exo_stdio_set_backend(NULL);
+    exo_file_stdio_set_fallback(NULL);
+}
+
+void exo_file_stdio_set_fallback(exofs_vol_t *vol)
+{
+    g_fallback_vol = vol;
+    g_fallback_gen = vol != NULL ? vol->gen : 0;
 }

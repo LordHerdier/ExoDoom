@@ -253,6 +253,14 @@ static void test_dg_init_reports_no_volume_granted(void)
 
     CU_ASSERT_EQUAL(dg_init_result(), DOOM_WAD_ENOENT);
     CU_ASSERT_PTR_NULL(doom_wad_mounted());
+
+    /* SCRUM-267: and with no private volume granted either, DG_Init reports
+     * that too and carries on -- Doom then runs without saves. Any failure
+     * will do: from ring 0 the extent query's out-pointer is on the kernel
+     * stack, outside the LibOS window, so the code is -EXO_EFAULT here rather
+     * than the -EXO_ENOENT a ring-3 Doom without a volume request sees. */
+    CU_ASSERT_TRUE(dg_save_result() < 0);
+    CU_ASSERT_NOT_EQUAL(dg_save_result(), DG_INIT_NOT_RUN);
 }
 
 /*

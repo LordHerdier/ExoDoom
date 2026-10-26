@@ -564,7 +564,11 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
     if (hdr.volume_sectors != 0) {
         arc = disk_binding_assign(id, exo_volume_slot_base(hdr.volume_slot),
                                   hdr.volume_sectors);
-    } else if (hdr.want_flags & EXO_PKG_WANT_PROGRAM_RO) {
+    }
+    /* Not an else-branch since SCRUM-267: Doom has a private volume for its
+     * saves and reads the IWAD off the program volume, both for its whole
+     * run. */
+    if (arc == DISK_BIND_OK && (hdr.want_flags & EXO_PKG_WANT_PROGRAM_RO)) {
         /* SCRUM-75: the program volume, read-only -- the extent the shell
          * binds read-write (shell_main.c shell_disk_acquire_for()). */
         arc = disk_binding_assign_ro(id, LIBOS_WAD_DISK_BASE_LBA,

@@ -30,7 +30,8 @@
 #include "exo_pkg.h"
 #include "exo_syscall.h"
 
-/* Worst case is about 280 bytes; callers size their buffer with this. */
+/* Worst case is about 330 bytes (every number at its maximum, both a private
+ * and a program volume, SCRUM-267); callers size their buffer with this. */
 #define EXO_GRANT_TEXT_MAX 384
 
 typedef struct {
@@ -112,16 +113,29 @@ EXO_GRANT_INLINE size_t exo_grant_format(char *buf, size_t cap,
         exo_grant_putu(&o, fb_prev);
     }
     exo_grant_puts(&o, "\n  disk   ");
-    if (g->disk_sectors == 0) {
+    if (g->disk_sectors == 0 && g->prog_sectors == 0) {
         exo_grant_puts(&o, (hdr->want_flags & EXO_PKG_WANT_DISK) ? "asked for, none assigned"
                                                                  : "none");
-    } else {
+    }
+    /* A context can hold a private volume and the read-only program volume at
+     * once (SCRUM-267, Doom), so each gets its own line and neither hides the
+     * other. */
+    if (g->disk_sectors != 0) {
         exo_grant_puts(&o, "volume slot ");
         exo_grant_putu(&o, hdr->volume_slot);
         exo_grant_puts(&o, ", ");
         exo_grant_putu(&o, g->disk_sectors);
         exo_grant_puts(&o, " sectors from ");
         exo_grant_putu(&o, g->disk_base);
+    }
+    if (g->prog_sectors != 0) {
+        if (g->disk_sectors != 0) {
+            exo_grant_puts(&o, "\n         ");
+        }
+        exo_grant_puts(&o, "program volume (read-only), ");
+        exo_grant_putu(&o, g->prog_sectors);
+        exo_grant_puts(&o, " sectors from ");
+        exo_grant_putu(&o, g->prog_base);
     }
     exo_grant_puts(&o, "\n  sound  ");
     if (hdr->sound_voices == 0) {

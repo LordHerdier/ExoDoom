@@ -109,6 +109,9 @@ SHIM_SOURCES=(
   src/libos_fs/exofs_blockdev.c
   src/libos_fs/exo_file.c
   src/libos_fs/exo_file_stdio.c
+  # SCRUM-267: DG_Init also mounts Doom's private volume, formatting it the
+  # first time (exofs_attach).
+  src/libos_fs/exofs_attach.c
 )
 
 # Symbols that are allowed to remain undefined, each with the ticket that

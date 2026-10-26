@@ -227,10 +227,20 @@ static void render(fb_console_t *con, uint32_t total_seconds)
         pad_to(con, 29);  write_u32(con, g.pages);
         pad_to(con, 36);  fbcon_write(con, g.fb_owner == g.ctx_id ? "yes" : "-");
         pad_to(con, 41);
+        /* "base+sectors" is a private volume; "+ro" after it, or "ro" before
+         * a lone one, is the shared read-only program volume (SCRUM-267). */
         if (g.disk_sectors != 0) {
             write_u32(con, g.disk_base);
             fbcon_write(con, "+");
             write_u32(con, g.disk_sectors);
+            if (g.prog_sectors != 0) {
+                fbcon_write(con, " +ro");
+            }
+        } else if (g.prog_sectors != 0) {
+            fbcon_write(con, "ro ");
+            write_u32(con, g.prog_base);
+            fbcon_write(con, "+");
+            write_u32(con, g.prog_sectors);
         } else {
             fbcon_write(con, "-");
         }

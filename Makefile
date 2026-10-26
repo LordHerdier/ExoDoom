@@ -1,4 +1,4 @@
-.PHONY: docker-build docker-run docker-run-kernel docker-run-blank run-blank docker-test docker-build-doom docker-link-doom demo-rehearse clean
+.PHONY: docker-build docker-run docker-run-kernel docker-run-blank run-blank run-keep docker-test docker-build-doom docker-link-doom demo-rehearse clean
 
 DEBUG ?= 0
 # AUDIO_PROFILE=1 compiles in the MUSPROF/HDAPROF serial timing reports
@@ -196,6 +196,28 @@ run-blank: docker-build
 # not hold.
 demo-rehearse: docker-build
 	DEMO_QEMU_DEVICES='$(QEMU_DISK2_ARGS) $(QEMU_USB_ARGS)' tools/demo/rehearse.sh
+
+# Boot an existing disk image as it is, so what a program wrote survives
+# (SCRUM-267: Doom's savegames live in its volume slot on the image).
+#
+# Every other target here is built to start from a known disk: `run`,
+# `docker-run*` and `docker-test` all go through docker-build, which recreates
+# build/exodoom_disk.img (mkexofsimg opens its output "w+b"), and `run-blank`
+# zeroes build/exodoom_blank.img on each call. Both wipe the slots. This one
+# does neither, so build once, then use it for as many boots as you like:
+#
+#   make run-keep                                    # build/exodoom_disk.img
+#   make run-keep DISK_IMG=build/exodoom_blank.img   # carry on after run-blank
+#
+# It never builds. Run `make docker-build` first for a new kernel, which also
+# resets exodoom_disk.img (and so the saves on it).
+DISK_IMG ?= build/exodoom_disk.img
+
+run-keep:
+	@test -f build/exodoom.iso && test -f "$(DISK_IMG)" || { \
+	  echo "run-keep: build/exodoom.iso or $(DISK_IMG) is missing -- run 'make docker-build' (or 'make run-blank' for the blank image) once first"; \
+	  exit 1; }
+	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=$(DISK_IMG),format=raw,if=ide,index=0 $(QEMU_DISK2_ARGS) -device intel-hda -device hda-output,audiodev=snd0 $(HOST_QEMU_AV_ARGS) $(QEMU_USB_ARGS) -no-reboot -serial stdio
 
 clean:
 	rm -rf build
