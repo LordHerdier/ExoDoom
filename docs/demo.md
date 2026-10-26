@@ -65,7 +65,7 @@ in front of the client.
 
 1. **Start `top` before Doom.** A running Doom holds the program volume, read
    only, and `run` needs that same volume to read any package. So `run`
-   *anything* while Doom is up answers `disk busy: err=-16`. Launch the
+   *anything* while Doom is up answers `another program is using the disk -- Ctrl+Tab to it, or quit it first`. Launch the
    dashboard first, then use Ctrl+Tab to reach it. (Extents of different
    owners may not overlap, read-only or not; see `docs/syscall_spec.md` §3.5a.)
 2. **The grant is on serial only.** `run` builds the program, prints what it
@@ -97,8 +97,8 @@ in front of the client.
 
 | Symptom | Cause | Recovery |
 |---|---|---|
-| `disk busy: err=-16` on `run` | Doom is running (rule 1) | Ctrl+Tab to Doom and carry on |
-| `error: err=-2` on `run` | not installed, or `.exo` missing (rule 4) | `install <name>`, `run <name>.exo` |
+| `another program is using the disk` on `run` | Doom is running (rule 1) | Ctrl+Tab to Doom and carry on |
+| `run: no such program (try 'programs')` | not installed (rule 4) | `install <name>`, then `run <name>` |
 | Doom: `IWAD not found` | `freedoom2.wad` not installed (rule 5) | Ctrl+Tab to the shell, `install freedoom2.wad`, run Doom again |
 | Anything else | | Close QEMU and `make run-blank` again: a rebuild, then the format prompt about 8 s after boot |
 

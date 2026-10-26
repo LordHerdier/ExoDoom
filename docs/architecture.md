@@ -1261,6 +1261,15 @@ focus and the active framebuffer.
 > kernel for `tests/kernel/test_shell_help_k.c`. `shell_key_to_ascii()`
 > now maps Shift+`/`, `8`, `-` to `?`, `*`, `_`, the only shifted symbols
 > the command syntax uses.
+>
+> ✅ **SCRUM-271:** failures print a sentence, not a bare `err=-16`. Every
+> handler calls `shell_err_report(con, op, err)`, which asks
+> `shell_err_text()` in `src/shell/shell_err.c` (pure logic, also compiled
+> into the TESTING kernel for `tests/kernel/test_shell_err_k.c`). The `op`
+> picks the lead word and the few codes whose advice depends on the command
+> (`ENOENT` on `run` vs `install`). A code with no sentence of its own prints
+> the op's generic one followed by `(err=N)`, so it stays greppable. The
+> sentence does not name which program holds the disk.
 
 ---
 
