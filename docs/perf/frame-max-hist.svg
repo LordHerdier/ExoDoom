@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="300" viewBox="0 0 760 300" role="img" aria-label="Histogram of per-window worst frame time against the 30 ms budget">
+<style>
+  .surface { fill: #fcfcfb; }
+  .ink     { fill: #0b0b0b; }
+  .ink2    { fill: #52514e; }
+  .grid    { stroke: #e4e3df; stroke-width: 1; }
+  .axis    { stroke: #8a8984; stroke-width: 1; }
+  .ref     { stroke: #52514e; stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .s1      { fill: #2a78d6; }
+  .s2      { fill: #eb6834; }
+  .s3      { fill: #1baf7a; }
+  .whisker { stroke: #0b0b0b; stroke-width: 1.5; }
+  text     { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; }
+  .title   { font-size: 14px; font-weight: 600; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #1a1a19; }
+    .ink     { fill: #f0efec; }
+    .ink2    { fill: #c3c2b7; }
+    .grid    { stroke: #33332f; }
+    .axis    { stroke: #6f6e69; }
+    .ref     { stroke: #c3c2b7; }
+    .s1      { fill: #3987e5; }
+    .s2      { fill: #d95926; }
+    .s3      { fill: #199e70; }
+    .whisker { stroke: #f0efec; }
+  }
+</style>
+<rect class="surface" width="760" height="300"/><text class="ink title" x="16.0" y="26.0" text-anchor="start" >Worst frame in each 1-second window, TCG (count of windows)</text><text class="ink2" x="16.0" y="44.0" text-anchor="start" >281 windows of 35 frames; median 29 ms, p95 38 ms, worst 1252 ms (level load)</text><line class="grid" x1="56" y1="250.0" x2="736" y2="250.0"/><text class="ink2" x="50.0" y="254.0" text-anchor="end" >0</text><line class="grid" x1="56" y1="228.9" x2="736" y2="228.9"/><text class="ink2" x="50.0" y="232.9" text-anchor="end" >10</text><line class="grid" x1="56" y1="207.8" x2="736" y2="207.8"/><text class="ink2" x="50.0" y="211.8" text-anchor="end" >20</text><line class="grid" x1="56" y1="186.7" x2="736" y2="186.7"/><text class="ink2" x="50.0" y="190.7" text-anchor="end" >30</text><line class="grid" x1="56" y1="165.6" x2="736" y2="165.6"/><text class="ink2" x="50.0" y="169.6" text-anchor="end" >40</text><line class="grid" x1="56" y1="144.4" x2="736" y2="144.4"/><text class="ink2" x="50.0" y="148.4" text-anchor="end" >50</text><line class="grid" x1="56" y1="123.3" x2="736" y2="123.3"/><text class="ink2" x="50.0" y="127.3" text-anchor="end" >60</text><line class="grid" x1="56" y1="102.2" x2="736" y2="102.2"/><text class="ink2" x="50.0" y="106.2" text-anchor="end" >70</text><line class="grid" x1="56" y1="81.1" x2="736" y2="81.1"/><text class="ink2" x="50.0" y="85.1" text-anchor="end" >80</text><line class="grid" x1="56" y1="60.0" x2="736" y2="60.0"/><text class="ink2" x="50.0" y="64.0" text-anchor="end" >90</text><text class="ink2" x="56.0" y="266.0" text-anchor="middle" >0</text><text class="ink2" x="165.7" y="266.0" text-anchor="middle" >10</text><text class="ink2" x="275.4" y="266.0" text-anchor="middle" >20</text><rect class="s1" x="320.2" y="218.3" width="19.9" height="31.7" rx="2"><title>24-26 ms: 15 windows</title></rect><rect class="s1" x="342.2" y="119.1" width="19.9" height="130.9" rx="2"><title>26-28 ms: 62 windows</title></rect><rect class="s1" x="364.1" y="74.8" width="19.9" height="175.2" rx="2"><title>28-30 ms: 83 windows</title></rect><rect class="s1" x="386.0" y="163.4" width="19.9" height="86.6" rx="2"><title>30-32 ms: 41 windows</title></rect><text class="ink2" x="385.0" y="266.0" text-anchor="middle" >30</text><rect class="s1" x="408.0" y="182.4" width="19.9" height="67.6" rx="2"><title>32-34 ms: 32 windows</title></rect><rect class="s1" x="429.9" y="218.3" width="19.9" height="31.7" rx="2"><title>34-36 ms: 15 windows</title></rect><rect class="s1" x="451.8" y="214.1" width="19.9" height="35.9" rx="2"><title>36-38 ms: 17 windows</title></rect><rect class="s1" x="473.8" y="233.1" width="19.9" height="16.9" rx="2"><title>38-40 ms: 8 windows</title></rect><rect class="s1" x="495.7" y="241.6" width="19.9" height="8.4" rx="2"><title>40-42 ms: 4 windows</title></rect><text class="ink2" x="494.7" y="266.0" text-anchor="middle" >40</text><rect class="s1" x="517.6" y="247.9" width="19.9" height="2.1" rx="2"><title>42-44 ms: 1 windows</title></rect><text class="ink2" x="604.4" y="266.0" text-anchor="middle" >50</text><rect class="s1" x="715.1" y="243.7" width="19.9" height="6.3" rx="2"><title>&gt;= 60 ms: 3 windows</title></rect><text class="ink2" x="714.1" y="266.0" text-anchor="middle" >60+</text><line class="ref" x1="385.0" y1="54" x2="385.0" y2="250"/><text class="ink2" x="389.0" y="64.0" text-anchor="start" >30 ms budget (33 fps)</text><text class="ink2" x="396.0" y="288.0" text-anchor="middle" >worst frame in the window (ms)</text></svg>

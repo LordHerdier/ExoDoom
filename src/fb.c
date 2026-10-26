@@ -5,6 +5,16 @@ static inline uint32_t pack_bgrx8888(uint8_t r, uint8_t g, uint8_t b) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b; // 0x00RRGGBB
 }
 
+/* One row of `n` identical pixels. `rep stosl` rather than a per-pixel loop
+ * (SCRUM-192): fb_clear() of a 1024x768 screen is ~786k stores, and as a C
+ * loop that was most of the shell's start-up time on an emulated CPU, with
+ * the screen showing nothing the whole while. No SIMD, so it is fine in the
+ * -mno-sse kernel and in every ring-3 target that links this file. */
+static inline void fill_row32(uint32_t* row, uint32_t px, uint32_t n) {
+    __asm__ volatile("rep stosl"
+                     : "+D"(row), "+c"(n) : "a"(px) : "memory");
+}
+
 static inline void put_px32_bgrx(const framebuffer_t* fb, uint32_t x, uint32_t y, uint32_t px) {
     *(uint32_t*)(fb->addr + y * fb->pitch + x * 4) = px;
 }
@@ -27,8 +37,7 @@ void fb_clear(framebuffer_t* fb, uint8_t r, uint8_t g, uint8_t b) {
 
     uint32_t px = pack_bgrx8888(r,g,b);
     for (uint32_t y = 0; y < fb->height; y++) {
-        uint32_t* row = (uint32_t*)(fb->addr + y * fb->pitch);
-        for (uint32_t x = 0; x < fb->width; x++) row[x] = px;
+        fill_row32((uint32_t*)(fb->addr + y * fb->pitch), px, fb->width);
     }
 }
 
@@ -42,8 +51,7 @@ void fb_fill_rect(framebuffer_t* fb, uint32_t x0, uint32_t y0, uint32_t w, uint3
     uint32_t px = pack_bgrx8888(r,g,b);
 
     for (uint32_t y = 0; y < h; y++) {
-        uint32_t* row = (uint32_t*)(fb->addr + (y0 + y) * fb->pitch + x0 * 4);
-        for (uint32_t x = 0; x < w; x++) row[x] = px;
+        fill_row32((uint32_t*)(fb->addr + (y0 + y) * fb->pitch + x0 * 4), px, w);
     }
 }
 

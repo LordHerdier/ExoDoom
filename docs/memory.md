@@ -817,7 +817,7 @@ already resolve the caller's root through it. The context table
 (`src/context.c`, `docs/architecture.md` §7 "Multi-application") deliberately does not duplicate
 that binding — `vmm.c`'s registry stays the single source of truth for which
 PML4 a context runs on. How an image is placed into one of these address
-spaces, and where, is `docs/architecture.md` §7 "LibOS launch conventions".
+spaces, and where, is `docs/libos-authoring.md` §4 and `src/libos_launch.h`.
 The per-syscall ownership and VA-window rules (`may_map_phys()` and friends)
 are `docs/syscall_spec.md` §3.3 and §3.7.
 

@@ -515,6 +515,16 @@ build_ring3_link_target libos_top src/libos_top "" "" \
   src/libos_top/libos_top.c src/fb.c src/fb_console.c src/libos_fb.c
 ring3_embed=1
 
+echo "[2e/7] Build hello-world LibOS (SCRUM-238)"
+# The worked example docs/libos-authoring.md walks through, packaged as
+# hello.exo below so that walkthrough is built and run, not just written.
+# Same shape as the clock: a package, not linked into the kernel, and
+# libos_hello.c first in the list.
+ring3_embed=0
+build_ring3_link_target libos_hello src/libos_hello "" "" \
+  src/libos_hello/libos_hello.c src/fb.c src/fb_console.c src/libos_fb.c
+ring3_embed=1
+
 echo "[2f/7] Build Snake LibOS (SCRUM-182)"
 # Same reasoning and same mechanism as the WAD viewer step just above: built
 # UNCONDITIONALLY, with its blobs built but NOT linked into the kernel
@@ -670,6 +680,7 @@ package_ring3_target() {
 package_ring3_target libos_snake      src/libos_snake      snake.exo   fb,kbd
 package_ring3_target libos_clock      src/libos_clock      clock.exo   fb,kbd
 package_ring3_target libos_top        src/libos_top        top.exo     fb,kbd
+package_ring3_target libos_hello      src/libos_hello      hello.exo   fb,kbd
 package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,kbd,wad \
   --params-len 16
 package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd,progvol \

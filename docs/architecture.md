@@ -3,6 +3,9 @@
 **Last updated:** 18 Sep 2026 — sprint roadmap and epic breakdown reconciled
 against the Jira board
 
+Diagrams of the architecture, memory layout, syscall flow, interrupt path and more
+live in [`docs/diagrams/`](diagrams/README.md).
+
 ---
 
 ## Table of Contents
@@ -479,6 +482,22 @@ kernel's own boot-time console draws directly to the real hardware buffer
 before any LibOS launches and is never composited over, since nothing has
 acquired a virtual framebuffer yet at that point.
 
+**The boot hand-off (SCRUM-192).** The boot shell is the one exception to
+"a new context's buffer starts black". `kernel_main` creates the shell's
+virtual framebuffer itself with `fb_shadow_seed_from_screen()`, a copy of the
+boot console as it stands, ending in "Launching shell LibOS...". The
+compositor shows the shell's buffer from its first syscall, and the shell
+spends its first stretch mapping that buffer page by page and then clearing
+it. With a zeroed buffer the screen sat black for all of that, which
+under QEMU emulation was seconds. Measured with `-icount shift=8`, that
+stretch was ~950 ms of guest time and ~850 ms of it was `fb_clear()`'s
+per-pixel loop. That loop is now a `rep stosl` per row (`src/fb.c`), and the
+compositor copy and shadow zeroing are `rep movsq`/`rep stosq`
+(`src/fb_copy.h`) instead of `src/string.c`'s byte loops. Launch to banner
+drops from ~1350 ms to ~960 ms of guest time with no black frame. Seeding is
+only safe because nothing but the kernel has drawn yet; every other launch
+keeps a zeroed buffer, or it would see another context's pixels.
+
 **✅ SCRUM-111:** the Ctrl+Tab hotkey this note originally left undone.
 "Foreground == running" turned out not to need a scheduler to interrupt —
 `context_switch_request()` (`src/context.c`) already lets *anything*
@@ -733,7 +752,7 @@ the single argument-based launch syscall SCRUM-184 collapsed four per-app ones
 into), and the shell's `doom` command calls it. Doom then completes its whole
 startup — `W_Init` over the mounted WAD, `R_Init`, `P_Init`, `S_Init`,
 `HU_Init`, `ST_Init`, `I_InitGraphics` — and runs its tick loop. Page and
-stack sizing for the launch are in "LibOS launch conventions" above.
+stack sizing for the launch are in `docs/libos-authoring.md` §4.7–§4.8.
 
 Things the audit turned up that are worth knowing before touching this area:
 
@@ -1356,8 +1375,8 @@ The entire toolchain runs inside Docker. No host cross-compiler is required.
     function; `libos_doom` alone passes `-msse -msse2` via the `extra_cflags`
     parameter (§7).
 
-  Entry-point and params placement rules for all of them are in §7, "LibOS
-  launch conventions".
+  Entry-point and params placement rules for all of them are in
+  `docs/libos-authoring.md` §4.
 - **Toolchain fetches have more than one host.** Every `docker-*` target
   leads with the same `docker buildx build` of `docker/Dockerfile.build`, so a
   failure fetching the cross-toolchain sources fails all of them, with a

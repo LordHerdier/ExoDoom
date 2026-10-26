@@ -1519,8 +1519,9 @@ cycle counts would be flaky by construction on this kernel's only timing
 source. `exo_page_alloc`'s cost is the standout: `src/page_alloc.c`'s
 bitmap PMM does a linear scan for a free page, an order of magnitude above
 `exo_page_map`'s page-table edit and nearly 150x the dispatcher floor —
-worth keeping in mind for SCRUM-117's eventual performance report if
-anything above this layer starts allocating pages in a hot loop.
+worth keeping in mind if anything above this layer starts allocating pages
+in a hot loop. `docs/performance.md` §2 (SCRUM-117) re-ran this suite six
+times against today's tree, with medians and ranges.
 
 ---
 
