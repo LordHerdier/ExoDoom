@@ -192,15 +192,15 @@ explained in the comments at the top of the `Makefile`.
 
 ## Architecture overview
 
-```
- ring 3   shell   doom   top   wadview   voldemo   snake   clock     <- LibOS programs
-            |       |     |      |           |        |       |
-            |   ExoFS, libc shim, heap, page allocator (all LibOS code)
- ---------- | ------ syscall / sysret gate -------------------------------
- ring 0   ownership + revocation, page tables, scheduler (contexts),
-          framebuffer / disk / sound bindings, drivers
- hardware PIT, PS/2, UHCI + USB keyboard, ATA, Intel HDA, CMOS RTC, VESA fb
-```
+![ExoDoom system architecture: ring 3 LibOS programs above the syscall gate, the ring 0 exokernel below it, hardware at the bottom](docs/diagrams/01-system-architecture.svg)
+
+The other six diagrams, all in [`docs/diagrams/`](docs/diagrams/README.md):
+[memory layout](docs/diagrams/02-memory-layout.svg),
+[syscall flow](docs/diagrams/03-syscall-flow.svg),
+[interrupt path](docs/diagrams/04-interrupt-path.svg),
+[secure binding](docs/diagrams/05-secure-binding.svg),
+[boot sequence](docs/diagrams/06-boot-sequence.svg) and
+[context switch](docs/diagrams/07-context-switch.svg).
 
 **Exokernel in one paragraph.** The kernel does not provide files, processes or
 a heap. It exposes hardware resources and tracks which context owns each one
@@ -245,6 +245,7 @@ For the reasoning behind all of this, start with `docs/architecture.md`, then
 | `tests/kernel/` | KUnit tests, run inside the kernel at boot |
 | `docker/` | `Dockerfile.build` (cross-toolchain), `Dockerfile.qemu`, `scripts/build.sh` and friends |
 | `docs/` | Design docs (below) |
+| `docs/diagrams/` | Architecture diagrams: D2 sources, rendered SVG and PNG |
 | `tools/` | Small host-side helper scripts |
 | `Makefile` | Entry point for everything above |
 
@@ -291,6 +292,7 @@ for the user.
 | Branches, commits, code style, CI checks | `docs/contributing.md` |
 | Per-function libc audit | `docs/libc_audit.md` |
 | Drivers (PIC, PIT, serial, ATA, PCI, ACPI, RTC, HDA, USB, ...) | `docs/drivers/*.md` |
+| Diagrams: architecture, memory, syscall flow, interrupts, secure binding, boot, context switch | `docs/diagrams/README.md` |
 
 New contributors: read `docs/contributing.md` first.
 

@@ -3,6 +3,9 @@
 **Last updated:** 18 Sep 2026 — sprint roadmap and epic breakdown reconciled
 against the Jira board
 
+Diagrams of the architecture, memory layout, syscall flow, interrupt path and more
+live in [`docs/diagrams/`](diagrams/README.md).
+
 ---
 
 ## Table of Contents
