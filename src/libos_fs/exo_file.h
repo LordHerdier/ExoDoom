@@ -24,7 +24,7 @@
  * -EXO_ENFILE, by contrast, comes from ExoFS's own open-entry table
  * (EXOFS_MAX_OPEN_HANDLES) and is passed through as-is.
  *
- * NO MOUNT POLICY. The path-taking calls (open, stat) resolve against one
+ * NO MOUNT POLICY. The path-taking calls (open, stat, remove, rename) resolve against one
  * *default volume*, which the caller names with exo_file_set_volume() after
  * exofs_mount(). Descriptors remember the volume they were opened on, so
  * changing the default later does not move an open file. With no default set
@@ -109,6 +109,26 @@ int64_t exo_file_seek(int fd, int64_t off, uint32_t whence);
  * reports — -EXO_ENOENT for a missing path. Sizes of files still open for
  * writing are as of their last close or flush, not their last write. */
 int exo_file_stat(const char *path, uint32_t *size_out);
+
+/*
+ * Delete the file `path` (SCRUM-106), freeing its data and its name. Returns
+ * 0, or what exofs_unlink() reports: -EXO_ENOENT for a missing path,
+ * -EXO_EISDIR for a directory (that is exofs_rmdir()'s job), -EXO_EBUSY if a
+ * descriptor has the file open, -EXO_EINVAL for a malformed path or no
+ * default volume, or a device error. Close the file first.
+ */
+int exo_file_remove(const char *path);
+
+/*
+ * Rename or move `old_path` to `new_path` (SCRUM-106) without copying data.
+ * Returns 0, or what exofs_rename() reports: -EXO_ENOENT, -EXO_EEXIST if
+ * `new_path` already names a different entry (there is no replace-on-rename;
+ * remove the target first), -EXO_EBUSY for moving an open file between
+ * directories, -EXO_EINVAL for a malformed path or no default volume,
+ * -EXO_ENOSPC, or a device error. Renaming within one directory keeps an
+ * open descriptor on the file valid.
+ */
+int exo_file_rename(const char *old_path, const char *new_path);
 
 /* Close every open descriptor. Returns 0, or the first close error seen;
  * every descriptor is closed either way. Call before exofs_unmount(). */
