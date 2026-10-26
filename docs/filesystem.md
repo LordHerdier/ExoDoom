@@ -18,7 +18,8 @@ rather than restating the format in a script.
 > layer (superblock/format/mount/FAT cache), the FAT layer, the name area,
 > directory entries, path resolution, the directory operations
 > (mkdir/rmdir/opendir/readdir) and the file operations
-> (open/read/write/seek/stat/unlink), plus `rename` (SCRUM-240, §1.4). What remains on the ticket is wiring
+> (open/read/write/seek/stat/unlink), plus `rename` (SCRUM-240, §1.4). What
+> remains on the ticket is wiring
 > and documentation, not filesystem behaviour.
 
 ---
@@ -117,7 +118,12 @@ If the second write fails with a device error, the original entry is written
 back before returning.
 
 **A moved directory's `..` is repointed last**, once the entry is in its new
-parent. Two more rules apply only to directories:
+parent. If that lookup or write fails, `exofs_rename()` moves the entry back
+to its old parent before returning the error. That move-back is best effort:
+if it fails too, the directory is left under its new parent with `..` still
+naming the old one, and a later `rmdir` of the old parent would leave that
+`..` dangling. It takes two device errors in a row. Two more rules apply only
+to directories:
 
 - A directory may not move into itself or anywhere below itself
   (`-EXO_EINVAL`), or it and its contents would become unreachable from the
@@ -788,7 +794,7 @@ volumes, and the two-path copy.
 | `exofs_dir.c/.h` | `mkdir`/`rmdir`/`opendir`/`readdir`, `rename` (§1.4), and the `.`/`..` bootstrap (§6b). |
 | `exofs_file.c` | `open`/`read`/`write`/`seek`/`stat`/`unlink` (§6c). |
 | `exo_file.c/.h` | The descriptor table over `exofs_file.c`: `exo_file_open`/`close`/`read`/`write`/`seek`/`stat`/`close_all` (§6d, SCRUM-44). |
-| `tests/kernel/test_exofs_k.c` | The whole suite, 66 tests, ending in the ticket's end-to-end acceptance path. |
+| `tests/kernel/test_exofs_k.c` | The whole suite, 105 tests, ending in the ticket's end-to-end acceptance path. |
 | `tests/kernel/test_exo_file_k.c` | The `exo_file` suite: descriptor errors, the access/seek/truncate/append pass-throughs, durability across a remount, and SCRUM-44's acceptance path. |
 
 ### Building it
