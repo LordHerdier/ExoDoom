@@ -102,10 +102,17 @@ static int64_t sys_grantstat(uint64_t ctx, uint64_t out, uint64_t a3,
     page_owner_t id = (page_owner_t)ctx;
     exo_grant_t *g = (exo_grant_t *)(uintptr_t)out;
 
+    /* A context can be assigned a private volume and the program volume
+     * (SCRUM-267), and each is read out under its own name. */
     uint32_t base = 0, count = 0;
-    if (disk_binding_assignment_of(id, &base, &count) != DISK_BIND_OK) {
+    if (disk_binding_assignment_role(id, 0, &base, &count) != DISK_BIND_OK) {
         base = 0;
         count = 0;
+    }
+    uint32_t pbase = 0, pcount = 0;
+    if (disk_binding_assignment_role(id, 1, &pbase, &pcount) != DISK_BIND_OK) {
+        pbase = 0;
+        pcount = 0;
     }
 
     g->ctx_id       = id;
@@ -115,6 +122,8 @@ static int64_t sys_grantstat(uint64_t ctx, uint64_t out, uint64_t a3,
     g->disk_sectors = count;
     g->sound_voices = syscall_sound_voices_of(id);
     g->sound_stream = syscall_sound_stream_holder() == id;
+    g->prog_base    = pbase;
+    g->prog_sectors = pcount;
     g->reserved     = 0;
 
     return 0;

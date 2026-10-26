@@ -920,8 +920,60 @@ static void test_grantstat_reports_the_assigned_volume(void)
     exo_grant_t *g = (exo_grant_t *)(uintptr_t)PKG_SCRATCH;
     CU_ASSERT_EQUAL(g->disk_base, exo_volume_slot_base(2));
     CU_ASSERT_EQUAL(g->disk_sectors, 64u);
+    CU_ASSERT_EQUAL(g->prog_sectors, 0u);   /* no program volume asked for */
 
-    destroy_all_but(fg);
+    /* revoke_all, not a bare destroy: only it drops the volume assignment, and
+     * a leaked one fences slot 2 from every later test (SCRUM-267). */
+    revoke_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+/* SCRUM-267: the read-out names a private volume and the program volume
+ * separately, so a context holding both (Doom) shows both, and one holding
+ * only the program volume does not show it as a private extent. */
+static void test_grantstat_reports_both_volumes(void)
+{
+    if (!disk_binding_present(0))
+        return;
+
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    h.want_flags     = EXO_PKG_WANT_DISK | EXO_PKG_WANT_PROGRAM_RO;
+    h.volume_slot    = 2;
+    h.volume_sectors = 64;
+    size_t total = write_probe_package(&h);
+
+    int64_t id = do_hold(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(id > 0);
+    CU_ASSERT_EQUAL(do_grantstat((uint64_t)id), 0);
+
+    exo_grant_t *g = (exo_grant_t *)(uintptr_t)PKG_SCRATCH;
+    CU_ASSERT_EQUAL(g->disk_base, exo_volume_slot_base(2));
+    CU_ASSERT_EQUAL(g->disk_sectors, 64u);
+    CU_ASSERT_EQUAL(g->prog_base, LIBOS_WAD_DISK_BASE_LBA);
+    CU_ASSERT_EQUAL(g->prog_sectors,
+                    EXO_VOLUME_REGION_BASE_LBA - LIBOS_WAD_DISK_BASE_LBA);
+    CU_ASSERT_EQUAL(g->reserved, 0u);
+
+    revoke_all_but(fg);
+    context_switch_pending = 0;
+
+    /* The program volume alone. */
+    h.volume_slot    = 0;
+    h.volume_sectors = 0;
+    total = write_probe_package(&h);
+    id = do_hold(PKG_SCRATCH, total);
+    CU_ASSERT_TRUE(id > 0);
+    CU_ASSERT_EQUAL(do_grantstat((uint64_t)id), 0);
+    CU_ASSERT_EQUAL(g->disk_sectors, 0u);
+    CU_ASSERT_EQUAL(g->prog_base, LIBOS_WAD_DISK_BASE_LBA);
+    CU_ASSERT_EQUAL(g->prog_sectors,
+                    EXO_VOLUME_REGION_BASE_LBA - LIBOS_WAD_DISK_BASE_LBA);
+
+    revoke_all_but(fg);
     context_switch_pending = 0;
     drop_foreground(fg);
     unmap_scratch(paddr);
@@ -1127,6 +1179,8 @@ void suite_launch_pkg_tests(CU_pSuite s)
                 test_grantstat_reports_what_the_context_holds);
     CU_add_test(s, "grantstat reports the assigned volume",
                 test_grantstat_reports_the_assigned_volume);
+    CU_add_test(s, "grantstat reports a private and a program volume",
+                test_grantstat_reports_both_volumes);
     CU_add_test(s, "grantstat rejects a bad out pointer",
                 test_grantstat_bad_out_pointer_rejected);
     CU_add_test(s, "a hold never started is dropped by the next launch",

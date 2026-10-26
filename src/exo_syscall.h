@@ -341,11 +341,14 @@ typedef struct {
     uint32_t pages;         /* pages it owns (page_count_owned)              */
     uint32_t fb_owner;      /* context holding the framebuffer binding, 0 if
                              * none -- equal to ctx_id when it holds it      */
-    uint32_t disk_base;     /* first sector of its assigned extent           */
-    uint32_t disk_sectors;  /* 0 if it has no assigned extent                */
+    uint32_t disk_base;     /* first sector of its private volume            */
+    uint32_t disk_sectors;  /* 0 if it has no private volume                 */
     uint32_t sound_voices;  /* mixer voices it started and that still hold
                              * a staging buffer                              */
     uint32_t sound_stream;  /* 1 if it holds the music stream                */
+    uint32_t prog_base;     /* first sector of the shared read-only program
+                             * volume it was assigned (SCRUM-267)            */
+    uint32_t prog_sectors;  /* 0 if it was not assigned the program volume   */
     uint32_t reserved;      /* zeroed by the kernel                          */
 } exo_grant_t;
 
@@ -443,7 +446,7 @@ _Static_assert(sizeof(exo_diskstat_t)    ==  8, "exo_diskstat_t layout is ABI");
 _Static_assert(sizeof(exo_diskextent_t)  ==  8, "exo_diskextent_t layout is ABI");
 _Static_assert(sizeof(exo_rtc_time_t)    == 16, "exo_rtc_time_t layout is ABI");
 _Static_assert(sizeof(exo_resstat_t)     == 32, "exo_resstat_t layout is ABI");
-_Static_assert(sizeof(exo_grant_t)       == 32, "exo_grant_t layout is ABI");
+_Static_assert(sizeof(exo_grant_t)       == 40, "exo_grant_t layout is ABI");
 #endif /* __ASSEMBLER__ */
 
 #ifndef EXO_KERNEL
