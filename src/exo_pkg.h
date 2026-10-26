@@ -64,8 +64,10 @@
                                             * to) read-only: exo_disk_acquire of the
                                             * extent exo_disk_extent (#37) reports,
                                             * reads only (SCRUM-75). Needs
-                                            * EXO_PKG_WANT_DISK; excludes a private
-                                            * volume of its own. */
+                                            * EXO_PKG_WANT_DISK; may be combined with
+                                            * a private volume of its own (SCRUM-267),
+                                            * which exo_disk_extent_role() then tells
+                                            * apart. */
 
 /* Negative sentinel returns for exo_pkg_pack()/exo_pkg_parse(). Deliberately
  * NOT src/exo_errno.h's -EXO_E* space: that header is kernel/LibOS-only and
@@ -236,12 +238,12 @@ static inline int exo_pkg_check_header(const exo_pkg_header_t *hdr) {
             return EXO_PKG_EINVAL;
     }
 
-    /* One assignment per program (src/disk_binding.h): a private volume and
-     * the program volume are alternatives, and either is a disk resource. */
+    /* The program volume is a disk resource too. It may accompany a private
+     * volume (SCRUM-267: Doom reads the IWAD from one and saves to the
+     * other); the two extents are disjoint by construction, the private slot
+     * lying past EXO_VOLUME_REGION_BASE_LBA. */
     if (hdr->want_flags & EXO_PKG_WANT_PROGRAM_RO) {
         if (!(hdr->want_flags & EXO_PKG_WANT_DISK))
-            return EXO_PKG_EINVAL;
-        if (hdr->volume_sectors != 0)
             return EXO_PKG_EINVAL;
     }
 

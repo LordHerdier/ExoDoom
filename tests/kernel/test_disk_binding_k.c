@@ -646,8 +646,152 @@ static void test_ro_assignment_refuses_a_private_volume_overlap(void)
     disk_binding_forget(PAGE_OWNER_LIBOS);
 }
 
+/* ── A private volume alongside the program volume (SCRUM-267) ──────────── */
+
+/* Doom's shape: the shared read-only program volume for the IWAD, a private
+ * read-write slot for saves, both bound for the whole run. */
+static void test_private_and_program_volume_coexist(void)
+{
+    uint32_t b, c;
+
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 1000, 100),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 6000, 64),
+                    DISK_BIND_OK);
+
+    /* Each role reports its own extent; the unnamed lookup keeps meaning
+     * "the private volume if there is one". */
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(PAGE_OWNER_LIBOS, 0, &b, &c),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(b, 6000);
+    CU_ASSERT_EQUAL(c, 64);
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(PAGE_OWNER_LIBOS, 1, &b, &c),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(b, 1000);
+    CU_ASSERT_EQUAL(c, 100);
+    CU_ASSERT_EQUAL(disk_binding_assignment_of(PAGE_OWNER_LIBOS, &b, &c),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(b, 6000);
+
+    /* Still one of each, and a context with neither role has nothing. */
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 9000, 8),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 9000, 8),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(OTHER_LIBOS, 0, &b, &c),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(OTHER_LIBOS, 1, &b, &c),
+                    DISK_BIND_EBUSY);
+
+    /* Both extents may be held at once, nothing else may. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 1000, 100),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 6000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 7000, 8),
+                    DISK_BIND_EPERM);
+    CU_ASSERT_EQUAL(disk_binding_acquire(PAGE_OWNER_LIBOS, 0), DISK_BIND_EPERM);
+    /* Re-acquire of either is still success. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 1000, 100),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), PAGE_OWNER_LIBOS);
+
+    /* A range is judged against the extent it falls in: the program volume
+     * reads but never writes, the private one does both, and a range that
+     * leaves one extent is out of range even though it touches the other. */
+    CU_ASSERT_EQUAL(disk_binding_check_range(PAGE_OWNER_LIBOS, 0, 1000, 100),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_range(PAGE_OWNER_LIBOS, 0, 6000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_write(PAGE_OWNER_LIBOS, 0, 1000, 1),
+                    DISK_BIND_EROFS);
+    CU_ASSERT_EQUAL(disk_binding_check_write(PAGE_OWNER_LIBOS, 0, 6000, 1),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_range(PAGE_OWNER_LIBOS, 0, 1090, 20),
+                    DISK_BIND_ERANGE);
+    CU_ASSERT_EQUAL(disk_binding_check_range(PAGE_OWNER_LIBOS, 0, 6060, 10),
+                    DISK_BIND_ERANGE);
+    CU_ASSERT_EQUAL(disk_binding_check_write(PAGE_OWNER_LIBOS, 0, 2000, 1),
+                    DISK_BIND_ERANGE);
+    CU_ASSERT_EQUAL(disk_binding_check_write(OTHER_LIBOS, 0, 6000, 1),
+                    DISK_BIND_EBUSY);
+
+    /* Release is per device, so it lets go of both; the assignments stay. */
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), PAGE_OWNER_FREE);
+    CU_ASSERT_EQUAL(disk_binding_check_range(PAGE_OWNER_LIBOS, 0, 6000, 1),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, 6000, 8),
+                    DISK_BIND_EBUSY);   /* still fenced */
+
+    /* Teardown lifts both assignments. */
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(PAGE_OWNER_LIBOS, 0, &b, &c),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(PAGE_OWNER_LIBOS, 1, &b, &c),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, 6000, 8),
+                    DISK_BIND_OK);
+    disk_binding_release(OTHER_LIBOS, 0);
+}
+
+/* The other order, and the two volumes of one context must be disjoint. */
+static void test_a_contexts_two_volumes_must_not_overlap(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 6000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 6032, 100),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 1000, 100),
+                    DISK_BIND_OK);
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+
+    /* A private volume over its own read-only one is refused too, though
+     * over *someone else's* read-only volume it is not (the shell binds the
+     * program volume read-write). */
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 1000, 100),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 1050, 10),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assign(OTHER_LIBOS, 1050, 10), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 1100, 10),
+                    DISK_BIND_OK);   /* adjacent, not overlapping */
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+    disk_binding_forget(OTHER_LIBOS);
+}
+
+/* The relaxation is for assigned extents only: a context with no
+ * assignments keeps one extent per device, and one with a single assignment
+ * has nothing else to hold. */
+static void test_second_extent_needs_an_assignment(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, 7000, 8),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, 8000, 8),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(OTHER_LIBOS, 0);
+
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 6000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 6000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 1000, 100),
+                    DISK_BIND_EPERM);
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+}
+
 void suite_disk_binding_tests(CU_pSuite s)
 {
+    CU_add_test(s, "private and program volume coexist",
+                test_private_and_program_volume_coexist);
+    CU_add_test(s, "a context's two volumes must not overlap",
+                test_a_contexts_two_volumes_must_not_overlap);
+    CU_add_test(s, "second extent needs an assignment",
+                test_second_extent_needs_an_assignment);
     CU_add_test(s, "read-only assignment refuses a private volume overlap",
                 test_ro_assignment_refuses_a_private_volume_overlap);
     CU_add_test(s, "read-only assignment binds one extent, read-only",

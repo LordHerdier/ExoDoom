@@ -273,20 +273,38 @@ static int64_t sys_disk_stat(uint64_t dev, uint64_t out, uint64_t a3,
     return 0;
 }
 
-/* #37 -- the volume extent the launcher assigned this context (SCRUM-237).
- * Unscoped introspection like #31: it reveals only the caller's own range. */
-static int64_t sys_disk_extent(uint64_t out, uint64_t a2, uint64_t a3,
+/* #37 -- the volume extent the launcher assigned this context (SCRUM-237),
+ * `role` picking which when it has two (SCRUM-267). Unscoped introspection
+ * like #31: it reveals only the caller's own range. The pointer is checked
+ * before the role, the order every handler here uses. */
+static int64_t sys_disk_extent(uint64_t out, uint64_t role, uint64_t a3,
                                uint64_t a4, uint64_t a5, uint64_t a6)
 {
-    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    (void)a3; (void)a4; (void)a5; (void)a6;
 
     if (!exo_range_in_user_window(out, sizeof(exo_diskextent_t)) ||
         !exo_user_range_mapped(out, sizeof(exo_diskextent_t), 1))
         return -EXO_EFAULT;
 
     uint32_t base, count;
-    if (disk_binding_assignment_of(syscall_current_context(), &base,
-                                   &count) != DISK_BIND_OK)
+    int      rc;
+    switch (role) {
+    case EXO_DISK_EXTENT_ANY:
+        rc = disk_binding_assignment_of(syscall_current_context(), &base,
+                                        &count);
+        break;
+    case EXO_DISK_EXTENT_PRIVATE:
+        rc = disk_binding_assignment_role(syscall_current_context(), 0, &base,
+                                          &count);
+        break;
+    case EXO_DISK_EXTENT_PROGRAM:
+        rc = disk_binding_assignment_role(syscall_current_context(), 1, &base,
+                                          &count);
+        break;
+    default:
+        return -EXO_EINVAL;
+    }
+    if (rc != DISK_BIND_OK)
         return -EXO_ENOENT;
 
     exo_diskextent_t *e = (exo_diskextent_t *)(uintptr_t)out;

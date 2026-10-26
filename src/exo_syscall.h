@@ -405,6 +405,15 @@ typedef struct {
     uint32_t sectors; /* length in sectors, never 0                     */
 } exo_diskextent_t;
 
+/* #37 second argument (SCRUM-267): which of the caller's assigned volumes.
+ * ANY is what the call meant before there were two: the private volume if
+ * the caller has one, else the program volume. Name the role when a program
+ * can have both -- ANY would hand back the private one and a program that
+ * asked for "the program volume" would never notice. */
+#define EXO_DISK_EXTENT_ANY     0u
+#define EXO_DISK_EXTENT_PRIVATE 1u
+#define EXO_DISK_EXTENT_PROGRAM 2u
+
 /* EXO_PSLIST_MAX *is* CONTEXT_MAX (src/context.h) — included here rather than
  * restated as a separate literal, so the two can never drift the way they
  * did across SCRUM-193: that ticket raised VMM_MAX_ADDRESS_SPACES (and so
@@ -783,7 +792,19 @@ static inline int64_t exo_diskstat(uint32_t dev, exo_diskstat_t *out)
  * writable in the LibOS window. */
 static inline int64_t exo_disk_extent(exo_diskextent_t *out)
 {
-    return exo_syscall1(EXO_SYS_DISK_EXTENT, (uint64_t)(uintptr_t)out);
+    return exo_syscall2(EXO_SYS_DISK_EXTENT, (uint64_t)(uintptr_t)out,
+                        EXO_DISK_EXTENT_ANY);
+}
+
+/* #37 with a role (SCRUM-267): a package may be assigned a private volume
+ * (EXO_DISK_EXTENT_PRIVATE, the `--volume-slot` extent) and the shared
+ * read-only program volume (EXO_DISK_EXTENT_PROGRAM, `progvol`) at once, and
+ * exo_disk_extent() cannot say which it means. -EXO_ENOENT if the caller has
+ * no assignment of that kind, -EXO_EINVAL for an unknown role. */
+static inline int64_t exo_disk_extent_role(uint64_t role,
+                                           exo_diskextent_t *out)
+{
+    return exo_syscall2(EXO_SYS_DISK_EXTENT, (uint64_t)(uintptr_t)out, role);
 }
 
 /* #28 — queue `num_samples` bytes of 8-bit *unsigned* mono PCM at `buf`,

@@ -547,6 +547,64 @@ static page_owner_t first_context_but(page_owner_t not_this)
     return PAGE_OWNER_FREE;
 }
 
+/* SCRUM-267: one manifest, both volumes -- Doom's. The private slot is
+ * fenced like any other and the program volume stays shared. */
+static void test_progvol_and_volume_request_assigns_both(void)
+{
+    if (!disk_binding_present(0))
+        return;
+
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    h.want_flags     = EXO_PKG_WANT_DISK | EXO_PKG_WANT_PROGRAM_RO;
+    h.volume_slot    = 2;
+    h.volume_sectors = 64;
+    size_t total = write_probe_package(&h);
+
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), 0);
+    page_owner_t child = first_context_but(fg);
+    CU_ASSERT_NOT_EQUAL(child, PAGE_OWNER_FREE);
+    context_switch_pending = 0;
+    context_set_current(fg);
+
+    uint32_t base = 0, count = 0;
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(child, 0, &base, &count),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(base, exo_volume_slot_base(2));
+    CU_ASSERT_EQUAL(count, 64);
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(child, 1, &base, &count),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(base, LIBOS_WAD_DISK_BASE_LBA);
+    CU_ASSERT_EQUAL(count, EXO_VOLUME_REGION_BASE_LBA - LIBOS_WAD_DISK_BASE_LBA);
+
+    /* The private slot is fenced; the program volume is not. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(fg, 0,
+                                                exo_volume_slot_base(2), 1),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(fg, 0, LIBOS_WAD_DISK_BASE_LBA,
+                                                8),
+                    DISK_BIND_OK);
+    disk_binding_release(fg, 0);
+
+    /* The same slot again: refused, with no context row left behind. */
+    context_info_t before[CONTEXT_MAX];
+    uint32_t n_before = context_list(before, CONTEXT_MAX);
+    CU_ASSERT_EQUAL(do_launch_pkg(PKG_SCRATCH, total), -EXO_EBUSY);
+    context_info_t after[CONTEXT_MAX];
+    CU_ASSERT_EQUAL(context_list(after, CONTEXT_MAX), n_before);
+
+    revoke_all_but(fg);
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(child, 0, &base, &count),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(child, 1, &base, &count),
+                    DISK_BIND_EBUSY);
+
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
 static void test_volume_request_assigns_a_fenced_extent(void)
 {
     if (!disk_binding_present(0))
@@ -1057,6 +1115,8 @@ void suite_launch_pkg_tests(CU_pSuite s)
                 test_manifest_minimum_above_free_pages_is_refused);
     CU_add_test(s, "a volume request assigns a fenced extent",
                 test_volume_request_assigns_a_fenced_extent);
+    CU_add_test(s, "a progvol-and-volume request assigns both",
+                test_progvol_and_volume_request_assigns_both);
     CU_add_test(s, "a package with no volume request gets none",
                 test_no_volume_request_assigns_nothing);
     CU_add_test(s, "launching past the context table fails cleanly",

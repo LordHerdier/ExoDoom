@@ -577,8 +577,24 @@ over `exofs_unlink` and `exofs_rename` (§1.4) on the default volume; errors
 pass through unchanged. Remove refuses a directory (`-EXO_EISDIR`) and an open
 file (`-EXO_EBUSY`), so close first. Rename never replaces (`-EXO_EEXIST`;
 remove the target first) and never copies data; within a directory an open
-descriptor stays valid. libc `remove()`/`rename()` on the `FILE*` shim are not
-wired up.
+descriptor stays valid. libc `remove()`/`rename()` on the `FILE*` shim go
+through them (SCRUM-267): the stdio backend has optional `remove` and `rename`
+ops, the ExoFS one resolves both paths the way `fopen` does and calls these,
+and a backend without them (or no backend) still answers `EROFS`. Doom's
+savegame rotation is `remove(save); rename(temp, save)`, which is why rename
+not replacing matters: the first save's `remove` finds nothing and fails
+`ENOENT`, which Doom ignores, and every later one removes the old file first.
+
+**A second volume to read from** (SCRUM-267). `exo_file_stdio_set_fallback(vol)`
+names a volume that a read-only `fopen` tries when the default volume does not
+have the name. Anything that could write (`w`, `a`, `+`) never falls through,
+so a program can change only the default volume. A file on both is read from
+the default one. Like the default, it reads as unset once unmounted. It exists
+because a program with a private volume *and* a shared read-only one (Doom,
+"Doom's volumes" in §8) needs "writes here, reads from either" and the
+descriptor layer has one default volume; it also does not depend on which
+volume is current when a file is first opened, which matters because Doom
+opens its config before it looks for the IWAD.
 
 ---
 
@@ -741,6 +757,52 @@ reinstall, missing source, `-EXO_ENOSPC` cleanup, directories). A test boot
 reformats device 1, so a QEMU line run after `make docker-test` without a
 rebuild finds an empty install disk.
 
+### Doom's volumes (SCRUM-267)
+
+Doom is the first real program with a private volume. Its package asks for
+both volumes (`docker/scripts/build.sh`): `progvol`, the read-only program
+volume holding the IWAD, and `--volume-slot 2 --volume-sectors 8192`, a 4 MiB
+slot of its own (`EXO_VOLUME_SLOT_DOOM`, `src/exo_volume.h`). The kernel assigns
+both at launch (`docs/syscall_spec.md` §3.5a "Both at once"), so Doom holds
+both extents for its whole run and can reach nothing else on the disk.
+
+`DG_Init` (`src/doomgeneric_exo.c`) mounts them in this order:
+
+1. The program volume (`exo_disk_extent` with `EXO_DISK_EXTENT_PROGRAM`), made
+   the default, and checks the IWAD's header on it.
+2. The private volume (`EXO_DISK_EXTENT_PRIVATE`), through `exofs_attach()`
+   (`src/libos_fs/exofs_attach.c`), made the default; the program volume
+   becomes the fallback for reads (§6d).
+
+`exofs_attach` mounts the volume if it will, and **formats it only if its first
+sector is all zero**. A volume that fails to mount but holds data is reported
+and left alone: `exofs_mount` answers `-EXO_EINVAL` for a blank slot and a
+damaged one alike, and formatting on that answer would erase a player's saves
+over one bad sector (the voldemo does format on any failure; Doom's saves are
+worth more than its demo's launch counter). Failure to get the private volume
+at all (no slot requested, not bindable, will not mount) is reported on serial
+and is **not fatal**: Doom runs without saves, with the program volume still
+the default, where every write fails.
+
+Nothing is unmounted at exit. Every file Doom writes is closed by the engine,
+and a close (and every create/remove/rename) ends in `exofs_sync()` (§4), so
+the volume on disk is consistent without one; the kernel reclaims the bindings
+when the program ends. A program that hands the disk to someone else and keeps
+running still has to unmount first (§8 "Unmount before releasing the binding").
+
+What ends up on the slot: savegames are `/.savegame/doomsav0.dsg` to
+`doomsav5.dsg` (about 50 KB each for a Freedoom level; the engine's config
+directory is `.`, which Doom joins into `./.savegame/`). `mount disk0:vol5 <dir>`
+from the shell browses them while Doom is not running; while it is, the slot
+reads as in use.
+
+**Config is not saved, and that is the engine's doing.** `M_SaveDefaults` and
+`M_LoadDefaults` do their work inside `#if ORIGCODE` in the vendored
+`src/doom/m_config.c`, and `ORIGCODE` is `#undef`'d (`src/doom/config.h`), so
+this build never reads or writes `default.cfg` whatever volume is mounted. The
+volume is ready for it (writes work, the path resolves); the engine has to be
+patched to produce one. Not done: `src/doom/` is vendored verbatim.
+
 ### Mounts (SCRUM-266)
 
 `mount diskN:volM <dir>` makes a volume reachable under an existing, empty
@@ -777,7 +839,7 @@ the system disk). `volM` is a fixed position on that disk, counted from 1:
 
 | Disk | volM |
 |---|---|
-| 0 | 1 = the shell's scratch volume (`mkfs`), 2 = the system volume (programs and the IWAD), 3-10 = per-program volume slots 0-7 (`src/exo_volume.h`) |
+| 0 | 1 = the shell's scratch volume (`mkfs`), 2 = the system volume (programs and the IWAD), 3-10 = per-program volume slots 0-7 (`src/exo_volume.h`; slots 0 and 1 are the voldemo packages, slot 2 = `vol5` is Doom's saves) |
 | 1 and up | 1 = the volume at LBA 0 (the install disk's) |
 
 A position counts only if a sector at the volume's base holds an ExoFS
@@ -836,6 +898,7 @@ volumes, and the two-path copy.
 | `exofs_dir.c/.h` | `mkdir`/`rmdir`/`opendir`/`readdir`, `rename` (§1.4), and the `.`/`..` bootstrap (§6b). |
 | `exofs_file.c` | `open`/`read`/`write`/`seek`/`stat`/`unlink` (§6c). |
 | `exo_file.c/.h` | The descriptor table over `exofs_file.c`: `exo_file_open`/`close`/`read`/`write`/`seek`/`stat`/`remove`/`rename`/`close_all`, and the default volume they resolve paths against, `exo_file_set_volume` (§6d, SCRUM-44, SCRUM-265). |
+| `exofs_attach.c/.h` | Mount a program's own volume, formatting it only when its first sector is blank (SCRUM-267). Knows only `exofs_*` and the LibOS heap; the caller binds the disk. |
 | `tests/kernel/test_exofs_multivol_k.c` | Several volumes mounted at once: interleaved I/O, the pool limit, the same volume twice, stale handles, and a copy between two mounted volumes. |
 | `tests/kernel/test_exofs_k.c` | The whole suite, 105 tests, ending in the ticket's end-to-end acceptance path. |
 | `tests/kernel/test_exo_file_k.c` | The `exo_file` suite: descriptor errors, the access/seek/truncate/append pass-throughs, durability across a remount, remove/rename (SCRUM-106), and SCRUM-44's acceptance path. |

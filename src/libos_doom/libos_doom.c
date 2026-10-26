@@ -10,7 +10,9 @@
  * Unlike src/libos_wad_viewer/libos_wad_viewer.c, nothing stages the WAD for
  * it (SCRUM-75): the launcher grants the program volume read-only and
  * DG_Init (src/doomgeneric_exo.c) mounts it, so the IWAD is read with
- * ordinary fopen/fread like any file.
+ * ordinary fopen/fread like any file. Since SCRUM-267 it also mounts Doom's
+ * own volume (the package's --volume-slot), which is where fopen writes:
+ * savegames, and the config file if the engine ever writes one.
  *
  * ── What this file owes the link ──────────────────────────────────────
  *
