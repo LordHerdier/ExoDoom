@@ -149,6 +149,37 @@ int shell_install_suite_cleanup(void)
     return 0;
 }
 
+/* ---- `run` name matching, SCRUM-270 (no disk) ---------------------------- */
+
+static void test_run_rank_bare_name_finds_exo(void)
+{
+    CU_ASSERT_EQUAL(shell_run_match_rank("doom", "doom.exo"), 1);
+    CU_ASSERT_EQUAL(shell_run_match_rank("DOOM", "doom.exo"), 1);
+    CU_ASSERT_EQUAL(shell_run_match_rank("Snake", "SNAKE.EXO"), 1);
+}
+
+static void test_run_rank_exact_and_case(void)
+{
+    CU_ASSERT_EQUAL(shell_run_match_rank("doom.exo", "doom.exo"), 3);
+    CU_ASSERT_EQUAL(shell_run_match_rank("doom.exo", "DOOM.EXO"), 2);
+    /* An exact `foo` outranks `foo.exo`, which outranks nothing. */
+    CU_ASSERT_TRUE(shell_run_match_rank("foo", "foo") >
+                   shell_run_match_rank("foo", "foo.exo"));
+    CU_ASSERT_EQUAL(shell_run_match_rank("foo", "foo"), 3);
+}
+
+static void test_run_rank_no_fuzzy_or_double_suffix(void)
+{
+    CU_ASSERT_EQUAL(shell_run_match_rank("do", "doom.exo"), 0);
+    CU_ASSERT_EQUAL(shell_run_match_rank("doom", "doomx.exo"), 0);
+    CU_ASSERT_EQUAL(shell_run_match_rank("doomx", "doom.exo"), 0);
+    CU_ASSERT_EQUAL(shell_run_match_rank("doom", "doom"), 3);
+    CU_ASSERT_EQUAL(shell_run_match_rank("doom.exo", "doom.exo.exo"), 0);
+    CU_ASSERT_EQUAL(shell_run_match_rank("doom", "doom.wad"), 0);
+    CU_ASSERT_EQUAL(shell_run_match_rank("", "doom.exo"), 0);
+    CU_ASSERT_EQUAL(shell_run_match_rank("doom", ""), 0);
+}
+
 /* ---- Name resolution (no disk) ------------------------------------------- */
 
 static void test_resolve_bare_name_gets_exo(void)
@@ -561,6 +592,12 @@ void suite_shell_install_tests(CU_pSuite s)
                 test_directory_refused);
     CU_add_test(s, "glob: * matches any run of characters",
                 test_glob_match);
+    CU_add_test(s, "run: bare name finds name.exo, case-insensitive",
+                test_run_rank_bare_name_finds_exo);
+    CU_add_test(s, "run: exact name beats name.exo",
+                test_run_rank_exact_and_case);
+    CU_add_test(s, "run: no prefix match, no double suffix",
+                test_run_rank_no_fuzzy_or_double_suffix);
     CU_add_test(s, "glob: install * means every .exo",
                 test_star_resolves_to_packages);
     CU_add_test(s, "glob: matching files listed, directories skipped",

@@ -76,6 +76,15 @@ int shell_copy_vols(exofs_vol_t *src, const char *spath,
                     exofs_vol_t *dst, const char *dpath,
                     uint8_t *buf, uint32_t chunk, uint32_t *copied);
 
+/*
+ * How well directory entry `entry` answers `run <want>` (SCRUM-270); `want`
+ * has its leading '/' already stripped. Higher is better and the caller keeps
+ * the best entry: 3 byte-for-byte equal, 2 equal ignoring ASCII case, 1
+ * `want` + ".exo" ignoring case (only when `want` does not already end in
+ * ".exo"), 0 no match. No prefix or fuzzy matching.
+ */
+int shell_run_match_rank(const char *want, const char *entry);
+
 /* 1 if a resolved path names a pattern (contains '*') rather than a file. */
 int shell_install_is_glob(const char *path);
 
