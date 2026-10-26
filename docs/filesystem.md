@@ -481,8 +481,8 @@ is help nobody asked for.
 `exofs.h` hands out caller-allocated `exofs_file_t` handles and has no
 descriptor table on purpose. `exo_file.c` (SCRUM-44) is that table, the layer
 a libc-style caller sits on. The `FILE*` shim (SCRUM-42, `src/libos_fs/exo_file_stdio.c`) is built on it:
-`exo_file_stdio_install()` points `fopen`/`fread`/`fseek` at it, which is how
-Doom reads the IWAD (`docs/architecture.md` §7). Like the rest of this directory it is **LibOS code, not a syscall**:
+`exo_file_stdio_install()` points `fopen`/`fread`/`fwrite`/`fseek`/`mkdir` at it,
+which is how Doom reads the IWAD (`docs/architecture.md` §7). Like the rest of this directory it is **LibOS code, not a syscall**:
 dispatcher numbers #9–16 were once reserved for kernel file syscalls and are
 now permanently unbound (`docs/syscall_spec.md` §3.2, §4).
 
@@ -508,6 +508,16 @@ exactly that point. Call it before `exofs_unmount()`.
 **No mount policy.** `exo_file_*` uses whatever volume the program mounted.
 With nothing mounted, ExoFS answers `-EXO_EINVAL` and this layer passes that
 through.
+
+**stdio writes are buffered a block at a time.** ExoFS caches no data blocks
+(§4), so `src/stdio.c` holds up to 512 bytes per stream (`WBUF_SIZE`, one
+`EXOFS_BLOCK_SIZE`) and calls `exo_file_write` when it fills, on `fflush`,
+`fseek`, and before an `fread`; a write of a block or more with an empty buffer
+goes straight through so ExoFS can batch it (§6c). Doom's savegame code writes
+one byte per `fwrite`, which unbuffered would be a sector read-modify-write per
+byte. **`fclose` is the durability point**: `fflush` pushes the bytes out but
+the directory entry (size, chain head) is only rewritten by `exo_file_close`
+(§6c Durability), so close every `FILE` before `exofs_unmount()`.
 
 `remove`/`rename` are not here yet. They are SCRUM-106, over `exofs_unlink`
 and a rename ExoFS does not have yet.

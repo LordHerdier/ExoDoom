@@ -12,6 +12,7 @@
 > | `printf` had no precision (§3.1) | precision, length modifiers, `%X`/`%o`/`%f`, `%n`, `*` width |
 > | 8 functions called with no prototype (§3.2) | all declared; `strncmp`/`strrchr`/`strstr`/`strdup` implemented |
 > | no `FILE*` | `fopen` over a pluggable backend: ExoFS when mounted (`exo_file_stdio_install`), else registered blobs (`exo_file_register_blob`) |
+> | read-only `fopen` | SCRUM-42: with the ExoFS backend `fopen` takes `r`/`w`/`a`/`+`, `fwrite`/`fprintf`/`fflush` write (one buffered block per stream), `mkdir` creates; no backend still means `EROFS` |
 >
 > `docker/scripts/link-doom.sh` (`make docker-link-doom`, run by CI) is the
 > gate that keeps it true: it compiles the shim as a ring-3 LibOS target,
@@ -21,7 +22,8 @@
 > that script *by ticket number*.
 >
 > Two things §6 suggested were deliberately NOT done its way. `mkdir` returns
-> `-1`/`EROFS` rather than "a no-op returning 0", and `remove`/`rename` do the
+> `-1`/`EROFS` (with no write-capable backend; with ExoFS it creates the
+> directory) rather than "a no-op returning 0", and `remove`/`rename` do the
 > same: `M_MakeDirectory` is called immediately before writing into that
 > directory, so claiming success just moves the failure one step further from
 > its cause. And the "defensible smaller fix" for §3.1 — making `default:`

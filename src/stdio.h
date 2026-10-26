@@ -66,12 +66,14 @@ int kvprintf(void (*emit)(int c, void *ctx), void *ctx,
  * (SCRUM-75: that is the default. A program that has mounted ExoFS installs
  * a backend, exo_stdio_set_backend below, and the same calls then read real
  * files; ring-3 Doom reads its IWAD that way and registers no blob.)
- *   - fopen() for WRITING FAILS, and that is deliberate. Doom writes a
+ *   - fopen() for WRITING needs a backend with a write op (SCRUM-42). With
+ *     none installed it FAILS (EROFS), and that is deliberate: Doom writes a
  *     config file and savegames; a write that silently went nowhere would
  *     surface much later as a config that never persists or a savegame that
  *     reloads as garbage. Returning NULL puts the failure at the open, where
  *     M_SaveDefaults and P_SaveGame already handle it. Same reasoning for
- *     remove/rename/mkdir, which report EROFS rather than claiming success.
+ *     remove/rename, which report EROFS rather than claiming success, and
+ *     for mkdir when the backend has no mkdir op.
  *   - fwrite/fprintf/vfprintf to stdout or stderr go to COM1. Those are the
  *     65 fprintf(stderr, ...) diagnostics the audit counted, and they need
  *     no file at all.
@@ -198,15 +200,30 @@ void exo_file_reset_blobs(void);
  * the kernel link, does not drag ExoFS into all of them.
  * src/libos_fs/exo_file_stdio.c supplies the ExoFS one.
  *
- * All four return a negative EXO_E* code (numerically the errno value) on
- * failure; open returns a handle >= 0, read the byte count (0 at end of
- * file), seek the new absolute position, close 0.
+ * open, read, seek and close are required; write and mkdir are optional. A
+ * backend without write makes every write mode fail EROFS, which is how the
+ * table stayed read-only until SCRUM-42.
+ *
+ * All of them return a negative EXO_E* code (numerically the errno value) on
+ * failure; open returns a handle >= 0, read/write the byte count (read 0 at
+ * end of file), seek the new absolute position, close and mkdir 0.
+ * `flags` to open is a mask of EXO_STDIO_*, derived from fopen's mode string.
+ * A backend's write is a plain write at the handle's current position (at
+ * end of file under EXO_STDIO_APPEND); the position is set with seek first.
  */
+#define EXO_STDIO_READ    0x01
+#define EXO_STDIO_WRITE   0x02
+#define EXO_STDIO_CREATE  0x04   /* create if absent              */
+#define EXO_STDIO_TRUNC   0x08   /* discard existing contents     */
+#define EXO_STDIO_APPEND  0x10   /* every write goes to the end   */
+
 typedef struct {
-    int     (*open)(const char *path);
+    int     (*open)(const char *path, unsigned flags);
     int64_t (*read)(int handle, void *buf, size_t n);
     int64_t (*seek)(int handle, int64_t off, int whence);
     int     (*close)(int handle);
+    int64_t (*write)(int handle, const void *buf, size_t n);   /* optional */
+    int     (*mkdir)(const char *path);                        /* optional */
 } exo_stdio_backend_t;
 
 /* Install (or, with NULL, remove) the backend. Streams already open keep the
