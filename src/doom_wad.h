@@ -88,3 +88,26 @@ void doom_wad_unmount(void);
 /* Human-readable form of a doom_wad_mount() result, for the serial report.
  * Never NULL, including for an unrecognised code. */
 const char *doom_wad_strerror(int rc);
+
+/*
+ * Lump lookup for the sound code (SCRUM-75).
+ *
+ * The sound path used to walk the mounted flat WAD (doom_wad_mounted()). A
+ * program that reads its IWAD through FILE* (ring-3 Doom) has no flat WAD
+ * mapped, but it does have the engine's own lump cache, so the lookup is
+ * behind a function: if a source is installed it answers, otherwise the
+ * mounted WAD does (the kernel tests, which mount the real IWAD buffer).
+ *
+ * A source takes a lump name and returns a pointer that stays valid for the
+ * life of the program (PU_STATIC), or NULL for no such lump, writing the
+ * lump's length to *size.
+ */
+typedef const uint8_t *(*doom_lump_source_fn)(const char *name, uint32_t *size);
+
+/* Install a source (NULL removes it, falling back to the mounted WAD). */
+void doom_wad_set_lump_source(doom_lump_source_fn fn);
+
+/* The lump `name` (upper case, as in the directory): from the installed
+ * source if there is one, else the mounted WAD. NULL if there is neither or
+ * no such lump. *size is written only on success. */
+const uint8_t *doom_wad_lump(const char *name, uint32_t *size);

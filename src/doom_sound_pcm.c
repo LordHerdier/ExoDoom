@@ -172,12 +172,21 @@ int doom_sound_pcm_start(const char *sfx_name, int channel, int priority,
     if (row == NULL || g_no_device)
         return 0;
 
-    const doom_wad_t *w = doom_wad_mounted();
-    if (w == NULL)
+    /* Through doom_wad_lump(), not the mounted flat WAD: ring-3 Doom reads its
+     * IWAD through FILE* and answers from the engine's lump cache
+     * (SCRUM-75). Same name rule as doom_dmx_find_sfx(). */
+    if (sfx_name[0] == '\0')
+        return 0;
+    char lump_name[9];
+    doom_dmx_lump_name(sfx_name, lump_name);
+
+    uint32_t lump_size = 0;
+    const uint8_t *lump = doom_wad_lump(lump_name, &lump_size);
+    if (lump == NULL)
         return 0;
 
     doom_dmx_t dmx;
-    if (doom_dmx_find_sfx(&w->wad, sfx_name, &dmx) != DOOM_DMX_OK)
+    if (doom_dmx_parse(lump, lump_size, &dmx) != DOOM_DMX_OK)
         return 0;
 
     /* Before the new voice, not after: Doom reuses a channel without always

@@ -18,6 +18,8 @@
 #include "libos_fs/exofs.h"
 #include "libos_fs/exo_file.h"
 #include "libos_fs/exo_file_stdio.h"
+#include "doom_wad.h"
+#include "doomgeneric_exo.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -215,8 +217,45 @@ static void test_remove_restores_blob_behaviour(void)
     teardown();
 }
 
+/* ---- dg_check_iwad (SCRUM-75) ------------------------------------------- */
+
+static void write_file(const char *path, const void *data, uint32_t n)
+{
+    int fd = exo_file_open(path, EXO_FILE_O_WRITE | EXO_FILE_O_CREATE);
+    CU_ASSERT_TRUE(fd >= 0);
+    if (fd >= 0) {
+        CU_ASSERT_EQUAL(exo_file_write(fd, data, n), (int64_t)n);
+        CU_ASSERT_EQUAL(exo_file_close(fd), 0);
+    }
+}
+
+static void test_check_iwad(void)
+{
+    if (!drive_present()) return;
+    CU_ASSERT_TRUE(setup());
+
+    /* magic, numlumps, dirofs -- the directory is W_AddFile's to read. */
+    static const uint8_t iwad[12] = { 'I','W','A','D', 2,0,0,0, 12,0,0,0 };
+    static const uint8_t pwad[12] = { 'P','W','A','D', 2,0,0,0, 12,0,0,0 };
+    static const uint8_t junk[12] = { 'J','U','N','K', 2,0,0,0, 12,0,0,0 };
+    static const uint8_t shorty[5] = { 'I','W','A','D', 0 };
+
+    write_file("/good.wad", iwad, sizeof iwad);
+    write_file("/patch.wad", pwad, sizeof pwad);
+    write_file("/junk.wad", junk, sizeof junk);
+    write_file("/short.wad", shorty, sizeof shorty);
+
+    CU_ASSERT_EQUAL(dg_check_iwad("good.wad"), DOOM_WAD_OK);
+    CU_ASSERT_EQUAL(dg_check_iwad("patch.wad"), DOOM_WAD_OK);   /* warned */
+    CU_ASSERT_EQUAL(dg_check_iwad("junk.wad"), DOOM_WAD_EINVAL);
+    CU_ASSERT_EQUAL(dg_check_iwad("short.wad"), DOOM_WAD_EINVAL);
+    CU_ASSERT_EQUAL(dg_check_iwad("absent.wad"), DOOM_WAD_ENOENT);
+    teardown();
+}
+
 void suite_stdio_exofs_tests(CU_pSuite s)
 {
+    CU_add_test(s, "dg_check_iwad reads the header off ExoFS", test_check_iwad);
     CU_add_test(s, "fread a whole file off ExoFS", test_read_whole_file);
     CU_add_test(s, "fseek then fread at random offsets",
                 test_seek_and_random_read);

@@ -346,9 +346,10 @@ void doom_music_play(void *handle, int looping, uint32_t now_ms)
     /* Looked up per song, not cached: g_genmidi points into the mounted WAD's
      * lump, and a cache would outlive an unmount or a remount.  It is a
      * directory lookup and a header check, once per level. */
-    const doom_wad_t *w = doom_wad_mounted();
+    uint32_t gm_size = 0;
+    const uint8_t *gm = doom_wad_lump("GENMIDI", &gm_size);
 
-    if (w == NULL || doom_genmidi_find(&w->wad, &g_genmidi) != DOOM_GENMIDI_OK)
+    if (gm == NULL || doom_genmidi_parse(gm, gm_size, &g_genmidi) != DOOM_GENMIDI_OK)
         return;
     /* Cleared first: a failed init leaves g_opl half-built, and stop/pause
      * must not key off a chip that was never brought up. */

@@ -614,6 +614,11 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/libos_doom/doom_opl.c src/nuked_opl3/opl3.c \
   src/libos_doom/doom_sound_music.c \
   src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c \
+  src/libos_fs/exofs_volume.c src/libos_fs/exofs_fat.c \
+  src/libos_fs/exofs_name.c src/libos_fs/exofs_dirent.c \
+  src/libos_fs/exofs_path.c src/libos_fs/exofs_dir.c \
+  src/libos_fs/exofs_file.c src/libos_fs/exofs_blockdev.c \
+  src/libos_fs/exo_file.c src/libos_fs/exo_file_stdio.c \
   src/doom/*.c
 
 echo "[2g/7] Package ring-3 targets and write the disk image (SCRUM-230, SCRUM-231)"
@@ -661,8 +666,8 @@ package_ring3_target libos_snake      src/libos_snake      snake.exo   fb,kbd
 package_ring3_target libos_clock      src/libos_clock      clock.exo   fb,kbd
 package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,kbd,wad \
   --params-len 16
-package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd,wad \
-  --params-len 16 --sound-voices 8
+package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd,progvol \
+  --sound-voices 8
 # SCRUM-237: one program, two packages, each requesting a private volume
 # (docs/architecture.md, src/exo_volume.h). Only the slot differs.
 package_ring3_target libos_voldemo    src/libos_voldemo    voldemoa.exo fb,disk,kbd \

@@ -55,7 +55,10 @@
 #include "doomgeneric_exo.h"
 #include "libos_fb.h"
 #include "doom_keymap.h"
+#include "doom_wad.h"
 #include "doom/doomgeneric.h"
+#include "doom/w_wad.h"
+#include "doom/z_zone.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -394,8 +397,27 @@ void DG_SetWindowTitle(const char *title)
     }
 }
 
+/*
+ * The sound code's way to a lump (SCRUM-75): through the engine's own cache,
+ * since there is no flat WAD mapped to walk any more. PU_STATIC, so the
+ * pointer outlives the call -- sound effects and GENMIDI are handed on to the
+ * mixer and the OPL synth, which keep using them. W_CheckNumForName answers
+ * -1 before W_Init has run, which reads as "no such lump".
+ */
+static const uint8_t *engine_lump(const char *name, uint32_t *size)
+{
+    int num = W_CheckNumForName((char *)name);
+
+    if (num < 0)
+        return NULL;
+    *size = (uint32_t)W_LumpLength(num);
+    return W_CacheLumpNum(num, PU_STATIC);
+}
+
 void libos_doom_main(void)
 {
+    doom_wad_set_lump_source(engine_lump);
+
     printf("libos_doom: entering doomgeneric_Create\n");
 
     /*
