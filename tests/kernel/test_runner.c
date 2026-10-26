@@ -113,6 +113,7 @@ void suite_exo_admit_tests(CU_pSuite s);
 void suite_shell_firstboot_tests(CU_pSuite s);
 void suite_acpi_tests(CU_pSuite s);
 void suite_shell_help_tests(CU_pSuite s);
+void suite_shell_mount_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -186,6 +187,8 @@ int exo_file_suite_cleanup(void);
 int multidisk_suite_init(void);
 int multidisk_suite_cleanup(void);
 int shell_install_suite_init(void);
+int shell_mount_suite_init(void);
+int shell_mount_suite_cleanup(void);
 int shell_install_suite_cleanup(void);
 
 /* Same idea as context_launch_rebind_suite_cleanup (SCRUM-196): each test
@@ -748,6 +751,10 @@ int run_tests(void)
      * syscall dependency. */
     s = CU_add_suite("shell_help", NULL, NULL);
     suite_shell_help_tests(s);
+
+    s = CU_add_suite("shell_mount", shell_mount_suite_init,
+                     shell_mount_suite_cleanup);
+    suite_shell_mount_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not

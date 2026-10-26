@@ -52,6 +52,18 @@ int shell_install_copy(const shell_vol_t *src, const shell_vol_t *dst,
                        const char *path, uint8_t *buf, uint32_t chunk,
                        uint32_t *copied);
 
+/*
+ * shell_install_copy() with a different path on each side (SCRUM-266, for
+ * `cp`/`mv` across mounted volumes): copy `spath` on `src` to `dpath` on
+ * `dst`. Same contract and the same two rules -- the source is stat'ed
+ * before the destination is touched, and a failed copy unlinks the
+ * destination it created. `src` and `dst` must be held through different
+ * disk bindings the caller already owns; this only mounts and unmounts.
+ */
+int shell_copy_between(const shell_vol_t *src, const char *spath,
+                       const shell_vol_t *dst, const char *dpath,
+                       uint8_t *buf, uint32_t chunk, uint32_t *copied);
+
 /* 1 if a resolved path names a pattern (contains '*') rather than a file. */
 int shell_install_is_glob(const char *path);
 

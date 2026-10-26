@@ -557,7 +557,8 @@ difference.
   the destination, write. That is what `tests/kernel/test_multidisk_k.c`'s
   copy test asserts, and what `install` (below) does a chunk at a time.
   Making the mount state a handle instead of a static is the change that
-  would lift this.
+  would lift this (SCRUM-265). The shell's `mount` (SCRUM-266, "Mounts"
+  below) works around it by swapping the one mounted volume per command.
 - **Unmount before releasing the binding.** `exofs_bdev_release(dev)`
   (`exo_disk_release`, #27) drops the binding on that device immediately; it cannot know a
   filesystem was mounted on top of it. The FAT is resident and written back
@@ -647,6 +648,71 @@ name resolution and the copy (multi-chunk, exact-multiple and empty files,
 reinstall, missing source, `-EXO_ENOSPC` cleanup, directories). A test boot
 reformats device 1, so a QEMU line run after `make docker-test` without a
 rebuild finds an empty install disk.
+
+### Mounts (SCRUM-266)
+
+`mount diskN:volM <dir>` makes a volume reachable under an existing, empty
+directory, so `ls`, `cat`, `cd`, `cp` and the rest work on a volume other than
+the shell's scratch one. `umount <dir>` takes it away again, and `mount` alone
+lists what is mounted. Mounts are RAM-only: gone at reboot, like the working
+directory.
+
+**It is a table in the shell, not an ExoFS feature.** ExoFS still mounts one
+volume at a time (§8), so `src/shell/shell_mount.c` keeps a table of
+`(directory, volume)` pairs and every path-taking command asks it which volume
+its path is on. `shell_route_arg()` in `src/shell/shell_main.c` resolves the
+argument against the working directory, normalizes it (`shell_mount_normalize()`
+collapses `.`, `..` and `//`), and picks the longest mount point that contains
+it. The command then acquires that volume's disk extent, mounts it, runs
+against the path *within* the volume, unmounts and releases, as every shell
+command already did for the scratch volume. Normalizing first is what makes `..`
+work across a mount: ExoFS would resolve `..` through the mounted volume's own
+root, which is its own parent, never the directory the volume is mounted on.
+The cost is one FAT read per command per volume touched (§4), which is
+nothing for `ls` and `cat`. SCRUM-265 is the handle-based ExoFS that would let
+volumes stay mounted.
+
+**Volume names.** `diskN` is the block device index (`disk` prints it; disk 0 is
+the system disk). `volM` is a fixed position on that disk, counted from 1:
+
+| Disk | volM |
+|---|---|
+| 0 | 1 = the shell's scratch volume (`mkfs`), 2 = the system volume (programs and the IWAD), 3-10 = per-program volume slots 0-7 (`src/exo_volume.h`) |
+| 1 and up | 1 = the volume at LBA 0 (the install disk's) |
+
+A position counts only if a sector at the volume's base holds an ExoFS
+superblock (`shell_mount_sb_valid()`, one sector read rather than a mount). A
+blank or unformatted position is absent from `disk` and cannot be mounted.
+Because numbers are positions, not a running count, `mkfs` creating the shell
+volume does not renumber the system volume. A slot held by a running program
+is listed as in use and refuses to mount, because its extent is exclusively that
+program's (`docs/syscall_spec.md` §3.5a).
+
+**Rules.**
+
+- The mount point must exist, be a directory and hold only `.` and `..`;
+  `/` and an existing mount point are refused. So is mounting the shell's own
+  volume (`disk0:vol1`, which is `/`): it would put the volume under one of
+  its own directories and make every path to it ambiguous. Mounts nest: a directory on a
+  mounted volume can itself be a mount point.
+- `umount` is refused (`EBUSY`) while the working directory is at or below the
+  mount point, or another mount lies beneath it. `shell_cwd` therefore always
+  holds the normalized absolute path.
+- `rm` and `mv` refuse a mount point itself.
+- Read/write, with no read-only mode.
+- `cp` and `mv` within a volume are as before. Between volumes they use
+  `shell_copy_between()` (the two-path form of `install`'s copy, §8 "Install"):
+  chunked, alternating mounts, destination removed on failure. This needs both
+  volumes bound at once, and the binding is one extent per owner per device, so
+  **a copy between two volumes of the same disk is refused**; between
+  different disks it works.
+- `mkfs`, `run`, `programs`, `install`, `dd` and first boot keep their fixed
+  volumes and ignore the mount table.
+
+Routing, normalization, the table and the superblock probe are in
+`tests/kernel/test_shell_mount_k.c`, together with tests that route a path to
+the second disk's volume and read a file, the probe on formatted and blanked
+volumes, and the two-path copy.
 
 ## 9. Source map
 

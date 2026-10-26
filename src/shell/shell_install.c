@@ -110,9 +110,9 @@ static int write_chunk(const shell_vol_t *v, const char *path, uint32_t off,
     return rc;
 }
 
-int shell_install_copy(const shell_vol_t *src, const shell_vol_t *dst,
-                       const char *path, uint8_t *buf, uint32_t chunk,
-                       uint32_t *copied) {
+int shell_copy_between(const shell_vol_t *src, const char *spath,
+                       const shell_vol_t *dst, const char *dpath,
+                       uint8_t *buf, uint32_t chunk, uint32_t *copied) {
     if (copied != NULL) {
         *copied = 0;
     }
@@ -127,7 +127,7 @@ int shell_install_copy(const shell_vol_t *src, const shell_vol_t *dst,
     if (rc != 0) {
         return rc;
     }
-    rc = exofs_stat(path, &st);
+    rc = exofs_stat(spath, &st);
     exofs_unmount();
     if (rc != 0) {
         return rc;
@@ -142,7 +142,7 @@ int shell_install_copy(const shell_vol_t *src, const shell_vol_t *dst,
         return rc;
     }
     exofs_file_t f;
-    rc = exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f);
+    rc = exofs_open(dpath, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f);
     int created = (rc == 0);
     if (created) {
         rc = exofs_close(&f);
@@ -155,9 +155,9 @@ int shell_install_copy(const shell_vol_t *src, const shell_vol_t *dst,
         if (n > chunk) {
             n = chunk;
         }
-        rc = read_chunk(src, path, off, buf, n);
+        rc = read_chunk(src, spath, off, buf, n);
         if (rc == 0) {
-            rc = write_chunk(dst, path, off, buf, n);
+            rc = write_chunk(dst, dpath, off, buf, n);
         }
         if (rc == 0) {
             off += n;
@@ -166,7 +166,7 @@ int shell_install_copy(const shell_vol_t *src, const shell_vol_t *dst,
 
     if (rc != 0) {
         if (created && exofs_mount(dst->dev, dst->base) == 0) {
-            exofs_unlink(path);
+            exofs_unlink(dpath);
             exofs_unmount();
         }
         return rc;
@@ -175,6 +175,12 @@ int shell_install_copy(const shell_vol_t *src, const shell_vol_t *dst,
         *copied = off;
     }
     return 0;
+}
+
+int shell_install_copy(const shell_vol_t *src, const shell_vol_t *dst,
+                       const char *path, uint8_t *buf, uint32_t chunk,
+                       uint32_t *copied) {
+    return shell_copy_between(src, path, dst, path, buf, chunk, copied);
 }
 
 int shell_install_is_glob(const char *path) {

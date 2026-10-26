@@ -53,6 +53,13 @@
  * `wadview`/`clock`/`snake`/`doom` launch from this shell never contends
  * with a held-open volume.
  *
+ * SCRUM-266: every path-taking command (`ls`, `cat`, `cd`, `mkdir`, `rm`,
+ * `touch`, `cp`, `mv`) first routes its path through the mount table
+ * (shell_route_arg(), src/shell/shell_mount.h) and so may land on a volume
+ * other than the scratch one -- another disk's, a program slot's -- which it
+ * then acquires and mounts the same way. `mkfs`, `run`, `programs`,
+ * `install` and `dd` keep their fixed volumes.
+ *
  * `mv` is copy-then-delete, not a real rename -- ExoFS has no rename() yet
  * (a follow-up ticket covers adding one). `cd`/`pwd` are the one piece of
  * state ExoFS deliberately has none of (docs/filesystem.md §7: "a shell
@@ -101,6 +108,7 @@
 #include "shell/shell_firstboot.h"
 #include "shell/shell_help.h"
 #include "shell/shell_install.h"
+#include "shell/shell_mount.h"
 #include "stdlib.h"
 
 #define SHELL_CMD_BUF_LEN 64
@@ -222,6 +230,25 @@ static char shell_dd_range_text[] =
     "dd: write refused -- only lbas below the shell volume are writable\n";
 static char shell_disk_fail_text[] = "disk: query failed\n";
 static char shell_disk_none_text[] = "disk 0: no system disk present\n";
+/* mount / umount (SCRUM-266). */
+static char shell_mount_none_text[] = "nothing mounted\n";
+static char shell_mount_badname_text[] =
+    "mount: expected diskN:volM, e.g. disk1:vol1 (see `disk`)\n";
+static char shell_mount_novol_text[] = "mount: no such volume (see `disk`): ";
+static char shell_mount_inuse_text[] =
+    "mount: that volume belongs to a running program: ";
+static char shell_mount_notempty_text[] = "mount: directory is not empty\n";
+static char shell_mount_root_text[] = "mount: cannot mount over /\n";
+static char shell_mount_self_text[] =
+    "mount: that is the shell's own volume; it is already mounted at /\n";
+static char shell_mount_already_text[] = "mount: something is already mounted there\n";
+static char shell_umount_notmnt_text[] = "umount: not a mount point\n";
+static char shell_umount_busy_text[] =
+    "umount: busy (the current directory is inside it, or another mount is below it)\n";
+static char shell_fs_mountpoint_text[] =
+    "error: that is a mount point (umount it first)\n";
+static char shell_cp_samedisk_text[] =
+    "error: cannot copy between two volumes of the same disk\n";
 
 /* ExoFS itself has no notion of a working directory by design
  * (docs/filesystem.md §7) -- this is that state, kept here instead. Always
@@ -272,6 +299,8 @@ static void shell_run_cd(fb_console_t *con, const char *arg);
 static void shell_run_pwd(fb_console_t *con, const char *arg);
 static void shell_run_echo(fb_console_t *con, const char *arg);
 static void shell_run_disk(fb_console_t *con, const char *arg);
+static void shell_run_mount(fb_console_t *con, const char *arg);
+static void shell_run_umount(fb_console_t *con, const char *arg);
 static void shell_run_dd(fb_console_t *con, const char *arg);
 static void shell_run_dd_read(fb_console_t *con, const char *rest);
 static int shell_dd_number(fb_console_t *con, const char **p, char *tok,
@@ -376,6 +405,7 @@ static char shell_key_to_ascii(uint8_t key, uint8_t modifiers) {
         case KEY_SLASH: return '?';
         case KEY_8:     return '*';
         case KEY_MINUS: return '_';
+        case KEY_SEMICOLON: return ':';    /* diskN:volM (SCRUM-266) */
         default:        break;
         }
     }
@@ -512,6 +542,13 @@ static const shell_cmd_t shell_cmds[] = {
         "usage: mkfs\n"
         "     Destroys everything on the shell volume. Never touches the program/IWAD volume\n" },
       shell_run_mkfs, 0 },
+    { { "mount", SHELL_GRP_DISK, "Mount a volume on an empty directory",
+        "usage: mount [diskN:volM <dir>]\n"
+        "     (none)        List what is mounted\n"
+        "     diskN:volM    A volume `disk` lists: disk numbers start at 0, volume numbers at 1\n"
+        "     <dir>         An existing, empty directory; the volume's files appear under it\n"
+        "                   until `umount <dir>` or a reboot. Read/write.\n" },
+      shell_run_mount, 1 },
     { { "mv", SHELL_GRP_FS, "Move a file (copy, then delete)",
         "usage: mv <src> <dst>\n"
         "     Not atomic: copies <src> to <dst>, then deletes <src>\n" },
@@ -540,6 +577,10 @@ static const shell_cmd_t shell_cmds[] = {
     { { "touch", SHELL_GRP_FS, "Create an empty file if it does not exist",
         "usage: touch <path>\n" },
       shell_run_touch, 1 },
+    { { "umount", SHELL_GRP_DISK, "Unmount a volume mounted with `mount`",
+        "usage: umount <dir>\n"
+        "     Refused while the current directory is inside <dir> or another mount is below it\n" },
+      shell_run_umount, 1 },
     { { "wadview", SHELL_GRP_APPS, "Launch the WAD/automap viewer (Q or Esc exits)",
         "usage: wadview\n" },
       shell_run_wadview, 0 },
@@ -989,14 +1030,32 @@ static int64_t shell_disk_acquire_for(uint32_t base_lba) {
     return exo_disk_acquire(SHELL_SYS_DEV, 0, LIBOS_WAD_DISK_BASE_LBA);
 }
 
-static int shell_fs_acquire_and_mount(fb_console_t *con) {
-    return shell_fs_acquire_and_mount_at(con, SHELL_FS_BASE_LBA);
+/* The volume refs of the two ExoFS volumes this shell has always known at
+ * compile time, with the disk extent shell_disk_acquire_for() binds for
+ * each. */
+static shell_volref_t shell_sys_volref(uint32_t base_lba) {
+    shell_volref_t v = { SHELL_SYS_DEV, base_lba, 0, 0, 0 };
+    if (base_lba >= LIBOS_WAD_DISK_BASE_LBA) {
+        v.extent_base = LIBOS_WAD_DISK_BASE_LBA;
+        v.extent_count = EXO_VOLUME_REGION_BASE_LBA - LIBOS_WAD_DISK_BASE_LBA;
+        v.volno = 2;
+    } else {
+        v.extent_count = LIBOS_WAD_DISK_BASE_LBA;
+        v.volno = 1;
+    }
+    return v;
 }
 
-/* Same, for a volume other than the shell's scratch one -- `run` reads
- * program packages off the program volume at LIBOS_WAD_DISK_BASE_LBA. */
-static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba) {
-    int64_t rc = shell_disk_acquire_for(base_lba);
+/* The device shell_fs_acquire_and_mount_vol() last bound, so that
+ * shell_fs_release() gives back the right one: a mounted volume can be on
+ * any disk now, not only the system disk. */
+static uint32_t shell_fs_held_dev;
+
+/* Acquire the extent `v` lives in and mount it. Prints its own diagnostic
+ * and returns 0 on failure so each caller can just return. */
+static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
+                                          const shell_volref_t *v) {
+    int64_t rc = exo_disk_acquire(v->dev, v->extent_base, v->extent_count);
     if (rc != 0) {
         fbcon_write(con, shell_fs_disk_busy_text);
         shell_write_i64(con, rc);
@@ -1004,21 +1063,188 @@ static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba) {
         return 0;
     }
 
-    int mrc = exofs_mount(SHELL_SYS_DEV, base_lba);
+    int mrc = exofs_mount(v->dev, v->base);
     if (mrc != 0) {
         fbcon_write(con, shell_fs_mount_fail_text);
         shell_write_i64(con, mrc);
         fbcon_write(con, "\n");
-        exo_disk_release(SHELL_SYS_DEV);
+        exo_disk_release(v->dev);
         return 0;
     }
 
+    shell_fs_held_dev = v->dev;
     return 1;
+}
+
+static int shell_fs_acquire_and_mount(fb_console_t *con) {
+    return shell_fs_acquire_and_mount_at(con, SHELL_FS_BASE_LBA);
+}
+
+/* Same, for a volume other than the shell's scratch one -- `run` reads
+ * program packages off the program volume at LIBOS_WAD_DISK_BASE_LBA. */
+static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba) {
+    shell_volref_t v = shell_sys_volref(base_lba);
+    return shell_fs_acquire_and_mount_vol(con, &v);
 }
 
 static void shell_fs_release(void) {
     exofs_unmount();
-    exo_disk_release(SHELL_SYS_DEV);
+    exo_disk_release(shell_fs_held_dev);
+    shell_fs_held_dev = SHELL_SYS_DEV;
+}
+
+/* ---- Volumes and mounts (SCRUM-266) --------------------------------------
+ *
+ * `disk` lists the volumes the shell can find, `mount` attaches one to a
+ * directory, and every path-taking filesystem command routes through
+ * shell_route_arg() to learn which volume its path is on. See
+ * src/shell/shell_mount.h for the table and docs/filesystem.md "Mounts" for
+ * why the shell swaps volumes per command rather than ExoFS holding several.
+ */
+
+/* Where a volume might be. The system disk has a fixed layout
+ * (src/exo_volume.h): the shell's scratch volume, the program volume, then
+ * the per-program slots. Every other disk is tried at LBA 0 only, which is
+ * where the install disk's volume is. */
+#define SHELL_VOL_MAX (2u + EXO_VOLUME_MAX_SLOTS)
+
+typedef enum {
+    SHELL_VOLK_SHELL,
+    SHELL_VOLK_SYSTEM,
+    SHELL_VOLK_SLOT,
+    SHELL_VOLK_DISK
+} shell_volkind_t;
+
+typedef struct {
+    shell_volref_t ref;
+    shell_volkind_t kind;
+    uint32_t slot;       /* SHELL_VOLK_SLOT only */
+    int busy;            /* held by a running program: cannot be mounted */
+} shell_volinfo_t;
+
+static uint32_t shell_vol_candidates(uint32_t dev) {
+    return dev == SHELL_SYS_DEV ? SHELL_VOL_MAX : 1u;
+}
+
+static void shell_vol_candidate(uint32_t dev, uint32_t i, shell_volinfo_t *out) {
+    out->busy = 0;
+    out->slot = 0;
+    if (dev != SHELL_SYS_DEV) {
+        shell_volref_t v = { dev, 0, 0, 0, 0 };
+        out->ref = v;
+        out->kind = SHELL_VOLK_DISK;
+    } else if (i == 0) {
+        out->ref = shell_sys_volref(SHELL_FS_BASE_LBA);
+        out->kind = SHELL_VOLK_SHELL;
+    } else if (i == 1) {
+        out->ref = shell_sys_volref(LIBOS_WAD_DISK_BASE_LBA);
+        out->kind = SHELL_VOLK_SYSTEM;
+    } else {
+        uint32_t base = exo_volume_slot_base(i - 2u);
+        shell_volref_t v = { dev, base, base, EXO_VOLUME_SLOT_SECTORS, 0 };
+        out->ref = v;
+        out->kind = SHELL_VOLK_SLOT;
+        out->slot = i - 2u;
+    }
+}
+
+/* Whether an ExoFS superblock sits at the volume's base: 1 yes, 0 no (blank,
+ * foreign, unreadable, or past the end of the disk), or -EXO_EBUSY when the
+ * extent belongs to a running program and so could not be looked at. Reads
+ * one sector rather than mounting, which would read the whole FAT. Leaves no
+ * binding held. */
+static int shell_vol_probe(const shell_volref_t *r) {
+    int64_t rc = exo_disk_acquire(r->dev, r->extent_base, r->extent_count);
+    if (rc == -EXO_EBUSY) {
+        return -EXO_EBUSY;
+    }
+    if (rc != 0) {
+        return 0;
+    }
+    int found = 0;
+    uint8_t *sec = libos_heap_alloc(EXOFS_BLOCK_SIZE);
+    if (sec != NULL && exo_disk_read(r->dev, r->base, sec, 1) == 1) {
+        found = shell_mount_sb_valid(sec);
+    }
+    libos_heap_free(sec);
+    exo_disk_release(r->dev);
+    return found;
+}
+
+/* The volumes found on `dev`. A volume's number is its candidate's position
+ * (1-based) -- on the system disk 1 is the shell volume, 2 the program
+ * volume, 3 and up the slots -- so it does not change when another volume is
+ * formatted (`mkfs`) or a program holding a slot starts or exits. A
+ * candidate with no superblock is simply absent from the list; one held by a
+ * running program is listed as busy. Returns how many were found; the array
+ * is in number order but has gaps in the numbering. */
+static uint32_t shell_vol_list(uint32_t dev, shell_volinfo_t *out, uint32_t max) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < shell_vol_candidates(dev) && n < max; i++) {
+        shell_vol_candidate(dev, i, &out[n]);
+        int p = shell_vol_probe(&out[n].ref);
+        if (p == 0) {
+            continue;
+        }
+        out[n].busy = (p < 0);
+        out[n].ref.volno = i + 1u;
+        n++;
+    }
+    return n;
+}
+
+static void shell_vol_describe(fb_console_t *con, const shell_volinfo_t *v) {
+    switch (v->kind) {
+    case SHELL_VOLK_SHELL:  fbcon_write(con, "shell volume"); break;
+    case SHELL_VOLK_SYSTEM: fbcon_write(con, "system volume"); break;
+    case SHELL_VOLK_SLOT:
+        fbcon_write(con, "program slot ");
+        shell_write_u32(con, v->slot);
+        break;
+    default:
+        fbcon_write(con, v->ref.dev == SHELL_SRC_DEV ? "install disk volume"
+                                                     : "volume");
+        break;
+    }
+}
+
+/* Where a path argument lands: the absolute, normalized path, the volume it
+ * is on, and the path within that volume. mount_idx >= 0 with inner "/" means
+ * the path is a mount point itself. */
+typedef struct {
+    char abs[SHELL_FS_RESOLVED_BUF_LEN];
+    char inner[SHELL_FS_RESOLVED_BUF_LEN];
+    shell_volref_t vol;
+    int mount_idx;
+} shell_route_t;
+
+static shell_mount_table_t shell_mounts;
+
+/* Route the already-absolute `abs`. Prints the diagnostic itself and returns
+ * 0 on failure (a path that no longer fits once normalized). */
+static int shell_route_abs(fb_console_t *con, const char *abs, shell_route_t *r) {
+    shell_volref_t root = shell_sys_volref(SHELL_FS_BASE_LBA);
+    if (shell_mount_normalize(abs, r->abs, sizeof(r->abs)) != 0 ||
+        shell_mount_route(&shell_mounts, &root, r->abs, &r->vol, r->inner,
+                          sizeof(r->inner), &r->mount_idx) != 0) {
+        fbcon_write(con, shell_fs_toolong_text);
+        return 0;
+    }
+    return 1;
+}
+
+/* shell_resolve_arg() followed by shell_route_abs(): the cwd-relative `in`
+ * becomes (volume, path within it). */
+static int shell_route_arg(fb_console_t *con, const char *in, shell_route_t *r) {
+    char abs[SHELL_FS_RESOLVED_BUF_LEN];
+    if (!shell_resolve_arg(con, in, abs, sizeof(abs))) {
+        return 0;
+    }
+    return shell_route_abs(con, abs, r);
+}
+
+static int shell_same_vol(const shell_volref_t *a, const shell_volref_t *b) {
+    return a->dev == b->dev && a->base == b->base;
 }
 
 /* Admission check for `run` (SCRUM-232): compare the package's manifest with
@@ -1592,15 +1818,15 @@ static void shell_run_mkdir(fb_console_t *con, const char *arg) {
         shell_print_usage(con, "mkdir");
         return;
     }
-    char path[SHELL_FS_RESOLVED_BUF_LEN];
-    if (!shell_resolve_arg(con, arg, path, sizeof(path))) {
+    shell_route_t rt;
+    if (!shell_route_arg(con, arg, &rt)) {
         return;
     }
 
-    if (!shell_fs_acquire_and_mount(con)) {
+    if (!shell_fs_acquire_and_mount_vol(con, &rt.vol)) {
         return;
     }
-    int rc = exofs_mkdir(path);
+    int rc = exofs_mkdir(rt.inner);
     shell_fs_release();
 
     if (rc != 0) {
@@ -1617,26 +1843,17 @@ static void shell_run_mkdir(fb_console_t *con, const char *arg) {
  * "/" so mkdir'd entries are visually distinct from files, same spirit as
  * `ls -F`. */
 static void shell_run_ls(fb_console_t *con, const char *arg) {
-    char path[SHELL_FS_RESOLVED_BUF_LEN];
-    if (arg[0] != '\0') {
-        if (!shell_resolve_arg(con, arg, path, sizeof(path))) {
-            return;
-        }
-    } else {
-        size_t i = 0;
-        while (shell_cwd[i] != '\0' && i < sizeof(path) - 1) {
-            path[i] = shell_cwd[i];
-            i++;
-        }
-        path[i] = '\0';
+    shell_route_t rt;
+    if (!shell_route_arg(con, arg[0] != '\0' ? arg : ".", &rt)) {
+        return;
     }
 
-    if (!shell_fs_acquire_and_mount(con)) {
+    if (!shell_fs_acquire_and_mount_vol(con, &rt.vol)) {
         return;
     }
 
     exofs_dir_t dir;
-    int rc = exofs_opendir(path, &dir);
+    int rc = exofs_opendir(rt.inner, &dir);
     if (rc != 0) {
         shell_fs_release();
         fbcon_write(con, shell_fs_err_prefix);
@@ -1685,21 +1902,21 @@ static void shell_run_cat(fb_console_t *con, const char *arg) {
         shell_print_usage(con, "cat");
         return;
     }
-    char path[SHELL_FS_RESOLVED_BUF_LEN];
-    if (!shell_resolve_arg(con, path_raw, path, sizeof(path))) {
+    shell_route_t rt;
+    if (!shell_route_arg(con, path_raw, &rt)) {
         return;
     }
 
     int writing = (*text != '\0');
 
-    if (!shell_fs_acquire_and_mount(con)) {
+    if (!shell_fs_acquire_and_mount_vol(con, &rt.vol)) {
         return;
     }
 
     exofs_file_t f;
     int orc = writing
-        ? exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f)
-        : exofs_open(path, EXOFS_O_READ, &f);
+        ? exofs_open(rt.inner, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f)
+        : exofs_open(rt.inner, EXOFS_O_READ, &f);
     if (orc != 0) {
         shell_fs_release();
         fbcon_write(con, shell_fs_err_prefix);
@@ -1756,18 +1973,24 @@ static void shell_run_rm(fb_console_t *con, const char *arg) {
         shell_print_usage(con, "rm");
         return;
     }
-    char path[SHELL_FS_RESOLVED_BUF_LEN];
-    if (!shell_resolve_arg(con, arg, path, sizeof(path))) {
+    shell_route_t rt;
+    if (!shell_route_arg(con, arg, &rt)) {
+        return;
+    }
+    /* Removing the directory a volume is mounted on would pull it out from
+     * under the mount table. */
+    if (rt.mount_idx >= 0 && rt.inner[1] == '\0') {
+        fbcon_write(con, shell_fs_mountpoint_text);
         return;
     }
 
-    if (!shell_fs_acquire_and_mount(con)) {
+    if (!shell_fs_acquire_and_mount_vol(con, &rt.vol)) {
         return;
     }
 
-    int rc = exofs_unlink(path);
+    int rc = exofs_unlink(rt.inner);
     if (rc == -EXO_EISDIR) {
-        rc = exofs_rmdir(path);
+        rc = exofs_rmdir(rt.inner);
     }
     shell_fs_release();
 
@@ -1778,6 +2001,77 @@ static void shell_run_rm(fb_console_t *con, const char *arg) {
         return;
     }
     fbcon_write(con, shell_fs_ok_text);
+}
+
+/*
+ * The copy behind `cp` and `mv` (`remove_src` set): within one volume,
+ * shell_fs_copy_file(); across two, the chunked alternate-mount copy
+ * `install` uses (shell_copy_between()), which needs both volumes bound at
+ * once. The disk binding is one extent per device, so two volumes of the
+ * same disk cannot be -- that is refused here, before anything is touched.
+ * A refusal or a failed acquire is reported here and returns 1, so the
+ * caller neither prints "error" nor "ok" on top; otherwise returns the first
+ * error code (negative), or 0 for success.
+ */
+static int shell_fs_copy_or_move(fb_console_t *con, const shell_route_t *src,
+                                 const shell_route_t *dst, int remove_src) {
+    if (shell_same_vol(&src->vol, &dst->vol)) {
+        if (!shell_fs_acquire_and_mount_vol(con, &src->vol)) {
+            return 1;
+        }
+        int rc = shell_fs_copy_file(src->inner, dst->inner);
+        if (rc == 0 && remove_src) {
+            rc = exofs_unlink(src->inner);
+        }
+        shell_fs_release();
+        return rc;
+    }
+
+    if (src->vol.dev == dst->vol.dev) {
+        fbcon_write(con, shell_cp_samedisk_text);
+        return 1;
+    }
+
+    int64_t arc = exo_disk_acquire(src->vol.dev, src->vol.extent_base,
+                                   src->vol.extent_count);
+    if (arc == 0) {
+        arc = exo_disk_acquire(dst->vol.dev, dst->vol.extent_base,
+                               dst->vol.extent_count);
+        if (arc != 0) {
+            exo_disk_release(src->vol.dev);
+        }
+    }
+    if (arc != 0) {
+        fbcon_write(con, shell_fs_disk_busy_text);
+        shell_write_i64(con, arc);
+        fbcon_write(con, "\n");
+        return 1;
+    }
+
+    uint32_t chunk = SHELL_INSTALL_CHUNK;
+    uint8_t *buf = libos_heap_alloc(chunk);
+    if (buf == NULL) {
+        chunk = SHELL_INSTALL_CHUNK_SMALL;
+        buf = libos_heap_alloc(chunk);
+    }
+    int rc = -EXO_ENOMEM;
+    if (buf != NULL) {
+        shell_vol_t sv = { src->vol.dev, src->vol.base };
+        shell_vol_t dv = { dst->vol.dev, dst->vol.base };
+        rc = shell_copy_between(&sv, src->inner, &dv, dst->inner, buf, chunk,
+                                NULL);
+        if (rc == 0 && remove_src) {
+            rc = exofs_mount(sv.dev, sv.base);
+            if (rc == 0) {
+                rc = exofs_unlink(src->inner);
+                exofs_unmount();
+            }
+        }
+        libos_heap_free(buf);
+    }
+    exo_disk_release(src->vol.dev);
+    exo_disk_release(dst->vol.dev);
+    return rc;
 }
 
 /* `cp <src> <dst>` -- shell_fs_copy_file(), both paths resolved against
@@ -1794,17 +2088,16 @@ static void shell_run_cp(fb_console_t *con, const char *arg) {
         shell_print_usage(con, "cp");
         return;
     }
-    char src[SHELL_FS_RESOLVED_BUF_LEN], dst[SHELL_FS_RESOLVED_BUF_LEN];
-    if (!shell_resolve_arg(con, src_raw, src, sizeof(src)) ||
-        !shell_resolve_arg(con, dst_raw, dst, sizeof(dst))) {
+    shell_route_t src, dst;
+    if (!shell_route_arg(con, src_raw, &src) ||
+        !shell_route_arg(con, dst_raw, &dst)) {
         return;
     }
 
-    if (!shell_fs_acquire_and_mount(con)) {
+    int rc = shell_fs_copy_or_move(con, &src, &dst, 0);
+    if (rc > 0) {
         return;
     }
-    int rc = shell_fs_copy_file(src, dst);
-    shell_fs_release();
 
     if (rc == -EXO_EEXIST) {
         fbcon_write(con, shell_fs_same_text);
@@ -1836,20 +2129,21 @@ static void shell_run_mv(fb_console_t *con, const char *arg) {
         shell_print_usage(con, "mv");
         return;
     }
-    char src[SHELL_FS_RESOLVED_BUF_LEN], dst[SHELL_FS_RESOLVED_BUF_LEN];
-    if (!shell_resolve_arg(con, src_raw, src, sizeof(src)) ||
-        !shell_resolve_arg(con, dst_raw, dst, sizeof(dst))) {
+    shell_route_t src, dst;
+    if (!shell_route_arg(con, src_raw, &src) ||
+        !shell_route_arg(con, dst_raw, &dst)) {
+        return;
+    }
+    /* Moving a mount point away would leave the table pointing at nothing. */
+    if (src.mount_idx >= 0 && src.inner[1] == '\0') {
+        fbcon_write(con, shell_fs_mountpoint_text);
         return;
     }
 
-    if (!shell_fs_acquire_and_mount(con)) {
+    int rc = shell_fs_copy_or_move(con, &src, &dst, 1);
+    if (rc > 0) {
         return;
     }
-    int rc = shell_fs_copy_file(src, dst);
-    if (rc == 0) {
-        rc = exofs_unlink(src);
-    }
-    shell_fs_release();
 
     if (rc == -EXO_EEXIST) {
         fbcon_write(con, shell_fs_same_text);
@@ -1875,16 +2169,16 @@ static void shell_run_touch(fb_console_t *con, const char *arg) {
         shell_print_usage(con, "touch");
         return;
     }
-    char path[SHELL_FS_RESOLVED_BUF_LEN];
-    if (!shell_resolve_arg(con, arg, path, sizeof(path))) {
+    shell_route_t rt;
+    if (!shell_route_arg(con, arg, &rt)) {
         return;
     }
 
-    if (!shell_fs_acquire_and_mount(con)) {
+    if (!shell_fs_acquire_and_mount_vol(con, &rt.vol)) {
         return;
     }
     exofs_file_t f;
-    int rc = exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE, &f);
+    int rc = exofs_open(rt.inner, EXOFS_O_WRITE | EXOFS_O_CREATE, &f);
     if (rc == 0) {
         exofs_close(&f);
     }
@@ -1899,61 +2193,24 @@ static void shell_run_touch(fb_console_t *con, const char *arg) {
     fbcon_write(con, shell_fs_ok_text);
 }
 
-/* `cd [path]` -- no arg goes to "/"; "." is a validated no-op; ".." drops
- * the last '/'-separated component of shell_cwd; anything else resolves
- * via shell_resolve_path() as normal. Every case is validated with
- * exofs_opendir() before shell_cwd is actually updated, so an invalid
- * target leaves the cwd unchanged.
- *
- * Scope note: ".." only collapses as the *whole* argument here, not
- * embedded mid-path ("cd foo/../bar") -- ExoFS would still resolve that
- * correctly, since ".."/"." are real directory entries it walks
- * (docs/filesystem.md §7), but pwd would then show the uncollapsed literal
- * text. A full path canonicalizer is more than this toy shell needs. */
+/* `cd [path]` -- no arg goes to "/"; anything else is resolved against
+ * shell_cwd, normalized ("." and ".." collapsed, including mid-path), and
+ * routed to the volume it is on (SCRUM-266). The target is validated with
+ * exofs_opendir() on that volume before shell_cwd is updated, so an invalid
+ * target leaves the cwd unchanged. shell_cwd therefore always holds the
+ * normalized absolute path, which `umount` relies on to tell whether the
+ * shell is standing inside a mount. */
 static void shell_run_cd(fb_console_t *con, const char *arg) {
-    char target[SHELL_FS_RESOLVED_BUF_LEN];
-
-    if (arg[0] == '\0') {
-        target[0] = '/';
-        target[1] = '\0';
-    } else if (str_eq(arg, ".")) {
-        size_t i = 0;
-        while (shell_cwd[i] != '\0' && i < sizeof(target) - 1) {
-            target[i] = shell_cwd[i];
-            i++;
-        }
-        target[i] = '\0';
-    } else if (str_eq(arg, "..")) {
-        size_t len = 0;
-        while (shell_cwd[len] != '\0') {
-            len++;
-        }
-        size_t cut = 0;
-        for (size_t k = 0; k < len; k++) {
-            if (shell_cwd[k] == '/') {
-                cut = k;
-            }
-        }
-        if (cut == 0) {
-            target[0] = '/';
-            target[1] = '\0';
-        } else {
-            size_t i = 0;
-            while (i < cut && i < sizeof(target) - 1) {
-                target[i] = shell_cwd[i];
-                i++;
-            }
-            target[i] = '\0';
-        }
-    } else if (!shell_resolve_arg(con, arg, target, sizeof(target))) {
+    shell_route_t rt;
+    if (!shell_route_arg(con, arg[0] == '\0' ? "/" : arg, &rt)) {
         return;
     }
 
-    if (!shell_fs_acquire_and_mount(con)) {
+    if (!shell_fs_acquire_and_mount_vol(con, &rt.vol)) {
         return;
     }
     exofs_dir_t dir;
-    int rc = exofs_opendir(target, &dir);
+    int rc = exofs_opendir(rt.inner, &dir);
     if (rc == 0) {
         exofs_closedir(&dir);
     }
@@ -1967,8 +2224,8 @@ static void shell_run_cd(fb_console_t *con, const char *arg) {
     }
 
     size_t i = 0;
-    while (target[i] != '\0' && i < sizeof(shell_cwd) - 1) {
-        shell_cwd[i] = target[i];
+    while (rt.abs[i] != '\0' && i < sizeof(shell_cwd) - 1) {
+        shell_cwd[i] = rt.abs[i];
         i++;
     }
     shell_cwd[i] = '\0';
@@ -2002,6 +2259,7 @@ static void shell_disk_line(fb_console_t *con, uint32_t dev,
 
 static void shell_run_disk_system(fb_console_t *con,
                                   const exo_diskstat_t *stat);
+static void shell_disk_volumes(fb_console_t *con, uint32_t dev);
 
 /* `disk` -- exo_diskstat() (#31) for presence/capacity of every block device
  * (SCRUM-244: every index below EXO_DISK_MAX_DEVICES, since the system
@@ -2027,26 +2285,225 @@ static void shell_run_disk(fb_console_t *con, const char *arg) {
     for (uint32_t dev = SHELL_SYS_DEV + 1u; dev < EXO_DISK_MAX_DEVICES; dev++) {
         if (exo_diskstat(dev, &stat) == 0 && stat.present) {
             shell_disk_line(con, dev, &stat);
+            shell_disk_volumes(con, dev);
         }
     }
 }
 
-/* The system disk's `disk` lines: its size and the volumes this shell
- * places on it at fixed LBAs. */
+/* The volumes found on `dev` (shell_vol_list()), one line each, with the
+ * directories they are mounted on. */
+static void shell_disk_volumes(fb_console_t *con, uint32_t dev) {
+    shell_volinfo_t vols[SHELL_VOL_MAX];
+    uint32_t n = shell_vol_list(dev, vols, SHELL_VOL_MAX);
+    for (uint32_t i = 0; i < n; i++) {
+        fbcon_write(con, "  vol");
+        shell_write_u32(con, vols[i].ref.volno);
+        fbcon_write(con, ": ");
+        shell_vol_describe(con, &vols[i]);
+        fbcon_write(con, ", lba ");
+        shell_write_u32(con, vols[i].ref.base);
+        fbcon_write(con, "+");
+        if (vols[i].busy) {
+            fbcon_write(con, " (in use by a program)");
+        }
+        for (uint32_t m = 0; m < SHELL_MOUNT_MAX; m++) {
+            if (shell_mounts.e[m].used &&
+                shell_same_vol(&shell_mounts.e[m].vol, &vols[i].ref)) {
+                fbcon_write(con, " -> ");
+                fbcon_write(con, shell_mounts.e[m].point);
+            }
+        }
+        fbcon_write(con, "\n");
+    }
+}
+
+/* The system disk's `disk` lines: its size, then its volumes. The shell
+ * volume's own size is computed live from the same capacity via
+ * exofs_region_sectors() (SCRUM-203) -- the same number `mkfs` would format
+ * -- so the two commands can't disagree. */
 static void shell_run_disk_system(fb_console_t *con,
                                   const exo_diskstat_t *stat) {
     shell_disk_line(con, SHELL_SYS_DEV, stat);
-    uint32_t sys_sectors = stat->total_sectors;
-    fbcon_write(con, "  wad volume:   lba ");
-    shell_write_u32(con, LIBOS_WAD_DISK_BASE_LBA);
-    fbcon_write(con, "+\n");
-    fbcon_write(con, "  shell volume: lba ");
-    shell_write_u32(con, SHELL_FS_BASE_LBA);
-    fbcon_write(con, "+ (");
+    shell_disk_volumes(con, SHELL_SYS_DEV);
+    fbcon_write(con, "  mkfs formats ");
     shell_write_u32(con, exofs_region_sectors(SHELL_FS_BASE_LBA,
                                               LIBOS_WAD_DISK_BASE_LBA,
-                                              sys_sectors));
-    fbcon_write(con, " sectors)\n");
+                                              stat->total_sectors));
+    fbcon_write(con, " sectors at lba ");
+    shell_write_u32(con, SHELL_FS_BASE_LBA);
+    fbcon_write(con, "\n");
+}
+
+/* `mount` with no arguments: what is mounted where. */
+static void shell_mount_list(fb_console_t *con) {
+    int any = 0;
+    for (uint32_t m = 0; m < SHELL_MOUNT_MAX; m++) {
+        if (!shell_mounts.e[m].used) {
+            continue;
+        }
+        any = 1;
+        fbcon_write(con, shell_mounts.e[m].point);
+        fbcon_write(con, " <- disk");
+        shell_write_u32(con, shell_mounts.e[m].vol.dev);
+        fbcon_write(con, ":vol");
+        shell_write_u32(con, shell_mounts.e[m].vol.volno);
+        fbcon_write(con, "\n");
+    }
+    if (!any) {
+        fbcon_write(con, shell_mount_none_text);
+    }
+}
+
+/* Whether the directory `path` on the volume `v` holds nothing but "." and
+ * "..". Returns 1 empty, 0 not empty, or a negative error from the
+ * filesystem (no such directory, not a directory, ...). If the volume could
+ * not be mounted at all it has already said so and this returns 2. */
+static int shell_dir_is_empty(fb_console_t *con, const shell_volref_t *v,
+                              const char *path) {
+    if (!shell_fs_acquire_and_mount_vol(con, v)) {
+        return 2;
+    }
+    exofs_dir_t dir;
+    int rc = exofs_opendir(path, &dir);
+    if (rc == 0) {
+        rc = 1;
+        for (;;) {
+            exofs_dirinfo_t info;
+            int got = exofs_readdir(&dir, &info);
+            if (got < 0) {
+                rc = got;
+                break;
+            }
+            if (got == 0) {
+                break;
+            }
+            if (!str_eq(info.name, ".") && !str_eq(info.name, "..")) {
+                rc = 0;
+                break;
+            }
+        }
+        exofs_closedir(&dir);
+    }
+    shell_fs_release();
+    return rc;
+}
+
+/* `mount diskN:volM <dir>` -- attach a volume `disk` lists to an existing,
+ * empty directory. Only records it (shell_mount_add()): the volume is
+ * actually mounted, per command, when a path routes to it. */
+static void shell_run_mount(fb_console_t *con, const char *arg) {
+    if (arg[0] == '\0') {
+        shell_mount_list(con);
+        return;
+    }
+
+    char vname[SHELL_FS_PATH_BUF_LEN], dir_raw[SHELL_FS_PATH_BUF_LEN];
+    int split = shell_split_two(arg, vname, sizeof(vname),
+                                dir_raw, sizeof(dir_raw));
+    if (split < 0) {
+        fbcon_write(con, shell_fs_toolong_text);
+        return;
+    }
+    if (split == 0) {
+        shell_print_usage(con, "mount");
+        return;
+    }
+
+    uint32_t disk, volno;
+    if (shell_mount_parse_volname(vname, &disk, &volno) != 0) {
+        fbcon_write(con, shell_mount_badname_text);
+        return;
+    }
+    shell_volinfo_t vols[SHELL_VOL_MAX];
+    uint32_t n = disk < EXO_DISK_MAX_DEVICES
+                     ? shell_vol_list(disk, vols, SHELL_VOL_MAX)
+                     : 0;
+    const shell_volinfo_t *vi = NULL;
+    for (uint32_t k = 0; k < n; k++) {
+        if (vols[k].ref.volno == volno) {
+            vi = &vols[k];
+        }
+    }
+    if (vi == NULL) {
+        fbcon_write(con, shell_mount_novol_text);
+        fbcon_write(con, vname);
+        fbcon_write(con, "\n");
+        return;
+    }
+    /* The volume `/` already is. Mounting it again would put the shell's
+     * own files under one of its own directories, so a path could reach the
+     * same volume two ways and the mount point would be inside what it
+     * mounts. */
+    shell_volref_t self = shell_sys_volref(SHELL_FS_BASE_LBA);
+    if (shell_same_vol(&vi->ref, &self)) {
+        fbcon_write(con, shell_mount_self_text);
+        return;
+    }
+    if (vi->busy) {
+        fbcon_write(con, shell_mount_inuse_text);
+        fbcon_write(con, vname);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    shell_route_t rt;
+    if (!shell_route_arg(con, dir_raw, &rt)) {
+        return;
+    }
+    if (rt.abs[1] == '\0') {
+        fbcon_write(con, shell_mount_root_text);
+        return;
+    }
+    if (shell_mount_find(&shell_mounts, rt.abs) >= 0) {
+        fbcon_write(con, shell_mount_already_text);
+        return;
+    }
+
+    int empty = shell_dir_is_empty(con, &rt.vol, rt.inner);
+    if (empty == 2) {
+        return;
+    }
+    if (empty == 0) {
+        fbcon_write(con, shell_mount_notempty_text);
+        return;
+    }
+    if (empty < 0) {
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, empty);
+        fbcon_write(con, "\n");
+        return;
+    }
+
+    int rc = shell_mount_add(&shell_mounts, rt.abs, &vi->ref);
+    if (rc != 0) {
+        fbcon_write(con, shell_fs_err_prefix);
+        shell_write_i64(con, rc);
+        fbcon_write(con, "\n");
+        return;
+    }
+    fbcon_write(con, shell_fs_ok_text);
+}
+
+/* `umount <dir>` -- forget a mount. */
+static void shell_run_umount(fb_console_t *con, const char *arg) {
+    if (arg[0] == '\0') {
+        shell_print_usage(con, "umount");
+        return;
+    }
+    shell_route_t rt;
+    if (!shell_route_arg(con, arg, &rt)) {
+        return;
+    }
+    int rc = shell_mount_remove(&shell_mounts, rt.abs, shell_cwd);
+    if (rc == -EXO_EINVAL) {
+        fbcon_write(con, shell_umount_notmnt_text);
+        return;
+    }
+    if (rc == -EXO_EBUSY) {
+        fbcon_write(con, shell_umount_busy_text);
+        return;
+    }
+    fbcon_write(con, shell_fs_ok_text);
 }
 
 /* Next token of a `dd` command line as a uint32_t (shell_parse_u32()).
