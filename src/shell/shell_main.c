@@ -576,7 +576,7 @@ static const shell_cmd_t shell_cmds[] = {
         "usage: snake\n"
         "     Same as `run snake.exo`\n" },
       shell_run_snake, 0 },
-    { { "top", SHELL_GRP_APPS, "Live resource dashboard (Ctrl+Tab returns to the shell)",
+    { { "top", SHELL_GRP_APPS, "Live resource monitor (Q/Esc exits, Ctrl+Tab returns to the shell)",
         "usage: top\n"
         "     Same as `run top.exo`; pages, contexts, bindings and sound voices\n" },
       shell_run_top, 0 },
@@ -1476,6 +1476,9 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
     char prog_name[CONTEXT_NAME_MAX];
     {
         const char *base = path + 1;
+        for (const char *q = base; *q != '\0'; q++) {
+            if (*q == '/') { base = q + 1; }
+        }
         size_t bl = 0;
         while (base[bl] != '\0' && bl < sizeof(prog_name) - 1) {
             prog_name[bl] = base[bl];

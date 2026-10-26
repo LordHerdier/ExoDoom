@@ -1,1 +1,0 @@
-#define LIBOS_TOP_BSS_LEN 0
