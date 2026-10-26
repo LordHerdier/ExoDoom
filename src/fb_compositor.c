@@ -1,8 +1,8 @@
 #include "fb_compositor.h"
 #include "fb_binding.h"
 #include "fb_shadow.h"
+#include "fb_copy.h"
 #include "context.h"
-#include "string.h"
 #include "pit.h"
 
 #include <stdint.h>
@@ -24,9 +24,9 @@ void fb_compositor_tick(void) {
      * maps the framebuffer aperture; shadow pages come from the ordinary
      * PMM, mapped 1:1 like every other page the kernel manages), so the
      * physical addresses are directly dereferenceable from kernel context. */
-    memcpy((void *)(uintptr_t)geom->phys_addr,
-           (void *)(uintptr_t)shadow_phys,
-           (size_t)fb_bytes);
+    fb_copy_bytes((void *)(uintptr_t)geom->phys_addr,
+                  (const void *)(uintptr_t)shadow_phys,
+                  (size_t)fb_bytes);
 }
 
 void fb_compositor_service(void) {

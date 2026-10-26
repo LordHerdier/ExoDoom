@@ -271,6 +271,59 @@ static void test_launch_past_capacity_fails_gracefully(void)
     settle_switch(fg);
 }
 
+/*
+ * SCRUM-194's exact failure: with the table full, an exited app's leftover
+ * BLOCKED row made a launch of anything other than that same app fail with
+ * -EXO_ENOMEM, because each sys_launch_*() only reclaimed its own app's
+ * last id. sys_launch()'s table-wide sweep (SCRUM-196) is what fixed it;
+ * this pins it at the boundary where it mattered. The row marked BLOCKED is
+ * the OLDEST one, not the most recent launch, so a per-app "my last id"
+ * reclaim would not have found it either.
+ */
+static void test_full_table_with_exited_row_admits_new_launch(void)
+{
+    /* Start from an empty table: the capacity test before this one leaves
+     * it full. Same teardown as launch_multi_suite_cleanup(). */
+    context_info_t live[CONTEXT_MAX];
+    uint32_t n = context_list(live, CONTEXT_MAX);
+    for (uint32_t i = 0; i < n; i++) {
+        page_reclaim_all(live[i].id);
+        context_destroy(live[i].id);
+    }
+    context_switch_pending = 0;
+    context_set_current(PAGE_OWNER_LIBOS);
+
+    page_owner_t fg = make_foreground();
+
+    /* Fill whatever room is left. */
+    int64_t rc = 0;
+    for (uint32_t i = 0; i < CONTEXT_MAX && rc == 0; i++) {
+        rc = launch_probe_pkg();
+        settle_switch(fg);
+    }
+    CU_ASSERT_EQUAL(rc, -EXO_ENOMEM);
+
+    n = context_list(live, CONTEXT_MAX);
+    CU_ASSERT_EQUAL(n, CONTEXT_MAX);
+
+    page_owner_t exited_id = PAGE_OWNER_FREE;
+    for (uint32_t i = 0; i < n; i++) {
+        if (live[i].id != fg) { exited_id = live[i].id; break; }
+    }
+    CU_ASSERT_NOT_EQUAL(exited_id, PAGE_OWNER_FREE);
+
+    /* exo_exit()'s end state for that row. */
+    CU_ASSERT_EQUAL(context_set_state(exited_id, CONTEXT_STATE_BLOCKED),
+                   CONTEXT_OK);
+
+    CU_ASSERT_EQUAL(launch_probe_pkg(), 0);
+    settle_switch(fg);
+
+    CU_ASSERT_PTR_NULL(context_lookup(exited_id));
+    CU_ASSERT_PTR_NOT_NULL(context_lookup(fg));
+    CU_ASSERT_EQUAL(context_list(live, CONTEXT_MAX), CONTEXT_MAX);
+}
+
 void suite_launch_multi_tests(CU_pSuite s)
 {
     CU_add_test(s, "two launches of the same app yield two live contexts",
@@ -279,4 +332,6 @@ void suite_launch_multi_tests(CU_pSuite s)
                 test_blocked_context_reclaimed_but_live_one_survives);
     CU_add_test(s, "launching past context table capacity fails gracefully",
                 test_launch_past_capacity_fails_gracefully);
+    CU_add_test(s, "a full table with an exited row still admits a launch",
+                test_full_table_with_exited_row_admits_new_launch);
 }

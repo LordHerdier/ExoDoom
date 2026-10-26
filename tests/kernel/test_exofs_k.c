@@ -4256,6 +4256,53 @@ static void test_rename_cycles_leak_nothing(void)
     exofs_unmount(g_tv);
 }
 
+/* exofs_dir_move()'s promise: a move that runs out of space changes nothing
+ * visible. The destination holds only "." and ".." plus a full set of empty
+ * files, so the move needs a chain extension, and the FAT has none to give. */
+static void test_rename_enospc_changes_nothing(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+    exofs_volume_t *v = exofs_vol();
+
+    CU_ASSERT_EQUAL(exofs_mkdir("/src"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir("/dst"), 0);
+    CU_ASSERT_EQUAL(write_pattern_file("/src/f", 3000u, 5u), 0);
+
+    for (uint32_t i = 0; i < EXOFS_ENTS_PER_BLOCK - 2u; i++) {
+        char path[] = "/dst/e00";
+        path[6] = (char)('0' + i / 10u);
+        path[7] = (char)('0' + i % 10u);
+        exofs_file_t f;
+        CU_ASSERT_EQUAL(exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE, &f),
+                        0);
+        CU_ASSERT_EQUAL(exofs_close(&f), 0);
+    }
+
+    exofs_dirent_t before;
+    CU_ASSERT_EQUAL(resolve_entry("/src/f", NULL, &before), 0);
+
+    /* Every free block taken, in the in-RAM FAT only, as in
+     * test_exhaustion_reports_enospc. */
+    for (uint32_t i = 1; i < v->total_blocks; i++) {
+        if (v->fat[i] == EXOFS_BLOCK_FREE) v->fat[i] = EXOFS_BLOCK_EOC;
+    }
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), 0u);
+
+    CU_ASSERT_EQUAL(exofs_rename("/src/f", "/dst/g"), -EXO_ENOSPC);
+
+    exofs_dirent_t after;
+    CU_ASSERT_EQUAL(resolve_entry("/src/f", NULL, &after), 0);
+    CU_ASSERT_EQUAL(after.first_block, before.first_block);
+    CU_ASSERT_TRUE(file_has_pattern("/src/f", 3000u, 5u));
+
+    int found = 1;
+    CU_ASSERT_EQUAL(readdir_contains("/dst", "g", &found), 0);
+    CU_ASSERT_FALSE(found);
+
+    exofs_unmount();
+}
+
 void suite_exofs_tests(CU_pSuite s)
 {
     CU_add_test(s, "heap buffer lies in the LibOS window",
@@ -4450,4 +4497,6 @@ void suite_exofs_tests(CU_pSuite s)
                 test_rename_with_open_handle);
     CU_add_test(s, "rename: cycles leak nothing",
                 test_rename_cycles_leak_nothing);
+    CU_add_test(s, "rename: ENOSPC leaves both directories untouched",
+                test_rename_enospc_changes_nothing);
 }

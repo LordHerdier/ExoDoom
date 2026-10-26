@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="286" viewBox="0 0 760 286" role="img" aria-label="Pages per context split into shadow framebuffer and the rest">
+<style>
+  .surface { fill: #fcfcfb; }
+  .ink     { fill: #0b0b0b; }
+  .ink2    { fill: #52514e; }
+  .grid    { stroke: #e4e3df; stroke-width: 1; }
+  .axis    { stroke: #8a8984; stroke-width: 1; }
+  .ref     { stroke: #52514e; stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .s1      { fill: #2a78d6; }
+  .s2      { fill: #eb6834; }
+  .s3      { fill: #1baf7a; }
+  .whisker { stroke: #0b0b0b; stroke-width: 1.5; }
+  text     { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; }
+  .title   { font-size: 14px; font-weight: 600; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #1a1a19; }
+    .ink     { fill: #f0efec; }
+    .ink2    { fill: #c3c2b7; }
+    .grid    { stroke: #33332f; }
+    .axis    { stroke: #6f6e69; }
+    .ref     { stroke: #c3c2b7; }
+    .s1      { fill: #3987e5; }
+    .s2      { fill: #d95926; }
+    .s3      { fill: #199e70; }
+    .whisker { stroke: #f0efec; }
+  }
+</style>
+<rect class="surface" width="760" height="286"/><text class="ink title" x="16.0" y="26.0" text-anchor="start" >Pages owned per running context (4 KiB pages)</text><rect class="s1" x="16" y="43" width="10" height="10" rx="2"/><text class="ink2" x="30.0" y="52.0" text-anchor="start" >shadow framebuffer (3 MiB at 1024x768x32)</text><rect class="s2" x="308.59999999999997" y="43" width="10" height="10" rx="2"/><text class="ink2" x="322.6" y="52.0" text-anchor="start" >everything else: image, stack, heap</text><line class="grid" x1="120.0" y1="72" x2="120.0" y2="252"/><text class="ink2" x="120.0" y="268.0" text-anchor="middle" >0</text><line class="grid" x1="208.3" y1="72" x2="208.3" y2="252"/><text class="ink2" x="208.3" y="268.0" text-anchor="middle" >500</text><line class="grid" x1="296.7" y1="72" x2="296.7" y2="252"/><text class="ink2" x="296.7" y="268.0" text-anchor="middle" >1,000</text><line class="grid" x1="385.0" y1="72" x2="385.0" y2="252"/><text class="ink2" x="385.0" y="268.0" text-anchor="middle" >1,500</text><line class="grid" x1="473.3" y1="72" x2="473.3" y2="252"/><text class="ink2" x="473.3" y="268.0" text-anchor="middle" >2,000</text><line class="grid" x1="561.7" y1="72" x2="561.7" y2="252"/><text class="ink2" x="561.7" y="268.0" text-anchor="middle" >2,500</text><line class="grid" x1="650.0" y1="72" x2="650.0" y2="252"/><text class="ink2" x="650.0" y="268.0" text-anchor="middle" >3,000</text><text class="ink" x="16.0" y="92.0" text-anchor="start" >doom</text><rect class="s1" x="120.0" y="78.0" width="134.7" height="20.0" rx="2"><title>doom: shadow framebuffer 768 pages</title></rect><rect class="s2" x="256.7" y="78.0" width="377.1" height="20.0" rx="2"><title>doom: other 2140 pages</title></rect><text class="ink2" x="639.7" y="92.0" text-anchor="start" >2,908 (11.4 MiB)</text><text class="ink" x="16.0" y="126.0" text-anchor="start" >shell (idle)</text><rect class="s1" x="120.0" y="112.0" width="134.7" height="20.0" rx="2"><title>shell (idle): shadow framebuffer 768 pages</title></rect><rect class="s2" x="256.7" y="112.0" width="34.0" height="20.0" rx="2"><title>shell (idle): other 198 pages</title></rect><text class="ink2" x="296.7" y="126.0" text-anchor="start" >966 (3.8 MiB)</text><text class="ink" x="16.0" y="160.0" text-anchor="start" >wadview</text><rect class="s1" x="120.0" y="146.0" width="134.7" height="20.0" rx="2"><title>wadview: shadow framebuffer 768 pages</title></rect><rect class="s2" x="256.7" y="146.0" width="2.7" height="20.0" rx="2"><title>wadview: other 21 pages</title></rect><text class="ink2" x="265.4" y="160.0" text-anchor="start" >789 (3.1 MiB)</text><text class="ink" x="16.0" y="194.0" text-anchor="start" >top</text><rect class="s1" x="120.0" y="180.0" width="134.7" height="20.0" rx="2"><title>top: shadow framebuffer 768 pages</title></rect><rect class="s2" x="256.7" y="180.0" width="2.5" height="20.0" rx="2"><title>top: other 20 pages</title></rect><text class="ink2" x="265.2" y="194.0" text-anchor="start" >788 (3.1 MiB)</text><text class="ink" x="16.0" y="228.0" text-anchor="start" >clock</text><rect class="s1" x="120.0" y="214.0" width="134.7" height="20.0" rx="2"><title>clock: shadow framebuffer 768 pages</title></rect><rect class="s2" x="256.7" y="214.0" width="2.4" height="20.0" rx="2"><title>clock: other 19 pages</title></rect><text class="ink2" x="265.0" y="228.0" text-anchor="start" >787 (3.1 MiB)</text></svg>

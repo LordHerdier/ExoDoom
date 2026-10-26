@@ -1,0 +1,106 @@
+# 06 Boot sequence: power-on to a shell in ring 3. Order is taken from
+# kernel_main() itself, not from the prose docs.
+# Sources: src/boot.s, src/grub.cfg, src/kernel.c
+...@style
+grid-columns: 1
+grid-gap: 14
+
+title: "ExoDoom: boot sequence\nFrom GRUB to an interactive shell in ring 3. The order below is the order in kernel_main()." {
+  class: note
+  style.font-size: 18
+  style.italic: false
+  style.font-color: "#111827"
+}
+
+phases: "" {
+  style.fill: transparent
+  style.stroke: transparent
+  grid-rows: 1
+  grid-columns: 5
+  grid-gap: 12
+
+  p1: "1  Firmware to long mode\nGRUB 2 + boot.s" {
+    class: zone
+    style.stroke: "#5B6B7F"
+    style.font-color: "#374151"
+    style.font-size: 17
+    grid-columns: 1
+    grid-gap: 6
+    a: "BIOS / UEFI → GRUB 2\nmultiboot2 /boot/exodoom\ngfxpayload=keep (VESA)" {class: hw}
+    b: "_start, 32-bit\nsave MB2 info pointer (EBX → EDI)\nzero 24 KiB of page tables" {class: hw}
+    c: "build a 4 GB identity map\n2 MiB pages: PML4 → PDPT → 4 PDs" {class: hw}
+    d: "CR4.PAE · EFER.LME · CR0.PG\nload the 64-bit GDT, ljmp 0x08" {class: hw}
+    e: "_start64\nsegments = 0x10, 16 KiB stack\nenable SSE (CR0, CR4, MXCSR)\ncall kernel_main(mb2_info)" {class: hw}
+  }
+
+  p2: "2  Core kernel\nkernel_main()" {
+    class: zone
+    style.stroke: "#4F46E5"
+    style.font-color: "#4F46E5"
+    style.font-size: 17
+    grid-columns: 1
+    grid-gap: 6
+    a: "serial_init\nlocate the framebuffer tag\n(logged to COM1 only)" {class: k}
+    b: "mmap_init → memory_init\nMB2 memory map, bump allocator" {class: k}
+    c: "idt_init → tss_init\nfaults are reported from here on" {class: k}
+    d: "acpi_init\nmust precede vmm_init: the kernel\nmap does not map firmware tables" {class: k}
+    e: "page_alloc_init\nbitmap + owner table" {class: k}
+    f: "vmm_init\nkernel map, load CR3\nbind PAGE_OWNER_LIBOS to it" {class: k}
+    g: "syscall_init (EFER, STAR, LSTAR, FMASK)\nbind #0–#8: mem, fb, exit,\nserial, stat, kbd, mouse" {class: k}
+  }
+
+  p3: "3  Interrupts, devices,\nremaining syscalls" {
+    class: zone
+    style.stroke: "#4F46E5"
+    style.font-color: "#4F46E5"
+    style.font-size: 17
+    grid-columns: 1
+    grid-gap: 6
+    a: "pic_remap (only IRQ0 unmasked)\nspurious gates 0x27 / 0x2F\nIRQ0 gate, pit_init(1000)" {class: k}
+    b: "speaker_init\npci_init, hda_init" {class: k}
+    c: "ata_init + ata_register_blkdevs\nall four IDE slots; device 0 =\nthe system disk" {class: k}
+    d: "usb_init\nUHCI + HID boot keyboards (polled)" {class: k}
+    e: "bind the rest: disk, pit,\nrtc (rtc_init), sound, yield, launch" {class: k}
+  }
+
+  p4: "4  The fork" {
+    class: zone
+    style.stroke: "#D9822B"
+    style.font-color: "#92400E"
+    style.font-size: 17
+    grid-columns: 1
+    grid-gap: 6
+    a: "TESTING=1 build\nrun_tests() runs the KUnit suites\nqemu_exit(pass / fail)\nnever returns" {class: doom}
+    b: "Normal build\nfalls through to the tail" {class: doom}
+    c: "So everything ring-3 tests need\nmust sit above this line. The\nframebuffer, keyboard and shell\ndo not exist during tests." {class: note; style.font-size: 14}
+  }
+
+  p5: "5  Normal-boot tail" {
+    class: zone
+    style.stroke: "#0F8B7A"
+    style.font-color: "#0F8B7A"
+    style.font-size: 17
+    grid-columns: 1
+    grid-gap: 6
+    a: "fb_init + fbcon_init, banner\nhalts if there is no framebuffer" {class: u}
+    b: "boot_sanity_check\npaging live, and a real syscall\nround trip: alloc → map → unmap → free\nFATAL halt on failure" {class: warn}
+    c: "IRQ1 gate, kbd_init, unmask\nIRQ12 gate, mouse, unmask IRQ2 + 12" {class: u}
+    d: "sti" {class: gate}
+    e: "context_create + libos_build_image\nthe embedded shell blob\nlibos_enter_irq → ring 3\nnever returns" {class: u; style.stroke-width: 2}
+  }
+}
+
+phases.p1 -> phases.p2 -> phases.p3 -> phases.p4 -> phases.p5: {class: flow}
+
+why: "Why the order matters" {
+  class: zone
+  style.stroke: "#374151"
+  style.font-color: "#111827"
+  grid-rows: 1
+  grid-columns: 4
+  grid-gap: 8
+  w1: "idt_init runs early so a fault in\npage_alloc_init or vmm_init is\nreported, not a silent reboot" {class: k}
+  w2: "tss_init follows at once: a fault at\nCPL 3 needs TSS.RSP0 to land on" {class: k}
+  w3: "Boot map first, kernel map second:\nboot.s only needs to reach long mode;\nvmm_init builds the real, narrower map" {class: k}
+  w4: "No sti before the fork: ring-3 test\nprobes enter and resume with IF clear,\nso one early sti would not last" {class: k}
+}

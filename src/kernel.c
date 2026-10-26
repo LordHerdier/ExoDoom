@@ -688,6 +688,18 @@ void kernel_main(void *mb2_info_ptr) {
 
     context_set_name(shell_id, "shell");
 
+    // SCRUM-192: give the shell a shadow framebuffer that starts as a copy
+    // of this boot console instead of black. The compositor shows the
+    // current context's shadow from its first syscall on, and the shell's
+    // first stretch is mapping that buffer one page at a time before it can
+    // draw anything -- with a zeroed shadow the screen went black for all of
+    // it, seconds under emulation. Seeded, the boot log (ending in
+    // "Launching shell LibOS..." above) stays up until the shell's
+    // fbcon_init() clears it to draw the banner. Safe only because nothing
+    // but the kernel has drawn yet (fb_shadow.h). Best effort: on failure
+    // the shell's own exo_fb_acquire allocates a zeroed one, as before.
+    (void)fb_shadow_seed_from_screen(shell_id);
+
     size_t shell_code_len = (size_t)(_binary_shell_code_bin_end -
                                      _binary_shell_code_bin_start);
     size_t shell_data_len = (size_t)(_binary_shell_data_bin_end -

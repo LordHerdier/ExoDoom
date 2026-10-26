@@ -316,7 +316,9 @@ int exofs_rename(exofs_vol_t *v, const char *old_path, const char *new_path)
         if (inside) return -EXO_EINVAL;
     }
 
-    rc = exofs_dir_move(v, &ref, new_parent.first_block, new_leaf, NULL);
+    exofs_entry_ref_t moved_ref;
+    rc = exofs_dir_move(v, &ref, new_parent.first_block, new_leaf,
+                        &moved_ref);
     if (rc < 0) return rc;
 
     /* Last, once the move has landed: a directory's ".." has to name its
@@ -326,11 +328,19 @@ int exofs_rename(exofs_vol_t *v, const char *old_path, const char *new_path)
         exofs_entry_ref_t up_ref;
         exofs_dirent_t up;
         rc = exofs_dir_lookup(v, e.first_block, "..", &up_ref, &up);
-        if (rc < 0) return rc;
-
-        up.first_block = new_parent.first_block;
-        rc = exofs_dirent_write(v, &up_ref, &up);
-        if (rc < 0) return rc;
+        if (rc == 0) {
+            up.first_block = new_parent.first_block;
+            rc = exofs_dirent_write(v, &up_ref, &up);
+        }
+        if (rc < 0) {
+            /* Move it back rather than leave a ".." naming the old parent.
+             * Best effort, as in exofs_dir_move(): the old slot was just
+             * freed, so only a second device error stops this, and then
+             * it is the window docs/filesystem.md §1.4 describes. */
+            (void)exofs_dir_move(v, &moved_ref, old_parent.first_block,
+                                 old_leaf, NULL);
+            return rc;
+        }
     }
 
     return exofs_sync(v);

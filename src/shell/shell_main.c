@@ -62,9 +62,9 @@
  *
  * `mv` within one volume is exofs_rename() (SCRUM-240): files and
  * directories alike, nothing copied. Between volumes there is no entry to
- * re-link, so it is `cp`'s copy and then a delete. `cd`/`pwd` are the one piece of
- * state ExoFS deliberately has none of (docs/filesystem.md §7: "a shell
- * that wants a cd keeps the state itself"): shell_cwd below, resolved
+ * re-link, so it is `cp`'s copy and then a delete. `cd`/`pwd` are the one
+ * piece of state ExoFS deliberately has none of (docs/filesystem.md §7: "a
+ * shell that wants a cd keeps the state itself"): shell_cwd below, resolved
  * against by shell_resolve_path() for every other path-taking command.
  *
  * SCRUM-111: the idle loop below used to call exo_yield() once per
@@ -559,7 +559,9 @@ static const shell_cmd_t shell_cmds[] = {
     { { "mv", SHELL_GRP_FS, "Move or rename a file or directory",
         "usage: mv <src> <dst>\n"
         "     Same volume: renames in place, nothing is copied. Replaces an\n"
-        "     existing file <dst>; refuses an existing directory.\n"
+        "     existing file <dst>; refuses an existing directory. The\n"
+        "     replace is not atomic: if the rename then fails (disk full,\n"
+        "     device error), <dst> is already gone and <src> stays put.\n"
         "     Between volumes: copies <src> to <dst>, then deletes <src>\n"
         "     (files only)\n" },
       shell_run_mv, 1 },
@@ -2213,9 +2215,11 @@ static void shell_run_cp(fb_console_t *con, const char *arg) {
 /*
  * exofs_rename(), plus the overwrite `mv` has always done onto an existing
  * *file*: exofs_rename() never replaces, so the target is unlinked first and
- * the rename retried. That pair is not atomic -- neither was the copy-based
- * mv it replaces -- and is only tried file-onto-file; a directory on either
- * side keeps -EXO_EEXIST.
+ * the rename retried. That pair is not atomic: if the retry fails, the
+ * target is already gone and the source stays where it was (the `mv` help
+ * says so). The open-handle -EXO_EBUSY cannot be that failure: the shell
+ * mounts a fresh volume per command, so nothing here holds a handle. Only
+ * tried file-onto-file; a directory on either side keeps -EXO_EEXIST.
  */
 static int shell_fs_rename(exofs_vol_t *v, const char *src, const char *dst) {
     int rc = exofs_rename(v, src, dst);
