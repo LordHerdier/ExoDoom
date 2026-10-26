@@ -56,6 +56,17 @@ int exofs_is_mounted(void)
  * checked and walked down rather than trusted — cheaper and more obviously
  * correct than a closed form that has to be right about the rounding.
  */
+
+/* The one statement of how many FAT sectors `total_blocks` needs. format()
+ * writes this and mount() demands exactly it back (validate_super() below),
+ * so the two must never compute it separately: a rounding change made to
+ * only one of them would have mount() reject every volume format() makes. */
+static uint32_t fat_blocks_for(uint32_t total_blocks)
+{
+    return (uint32_t)((total_blocks + EXOFS_FAT_PER_BLOCK - 1u)
+                      / EXOFS_FAT_PER_BLOCK);
+}
+
 static int compute_geometry(uint32_t total_sectors, uint32_t *total_blocks_out,
                             uint32_t *fat_blocks_out)
 {
@@ -73,8 +84,7 @@ static int compute_geometry(uint32_t total_sectors, uint32_t *total_blocks_out,
     uint32_t total_blocks = (uint32_t)est;
 
     while (total_blocks > 0) {
-        uint32_t fat_blocks =
-            (total_blocks + EXOFS_FAT_PER_BLOCK - 1u) / EXOFS_FAT_PER_BLOCK;
+        uint32_t fat_blocks = fat_blocks_for(total_blocks);
 
         if ((uint64_t)1u + fat_blocks + total_blocks <= total_sectors) {
             *total_blocks_out = total_blocks;
@@ -325,9 +335,7 @@ static int validate_super(const exofs_super_t *sb, uint32_t base_lba)
     /* The FAT must be exactly big enough for the block count it describes —
      * not merely large enough, since a too-large fat_blocks would push
      * data_lba past where format() put the data. */
-    uint32_t want_fat =
-        (sb->total_blocks + EXOFS_FAT_PER_BLOCK - 1u) / EXOFS_FAT_PER_BLOCK;
-    if (sb->fat_blocks != want_fat)               return -EXO_EINVAL;
+    if (sb->fat_blocks != fat_blocks_for(sb->total_blocks)) return -EXO_EINVAL;
 
     /* And the data region must start immediately after it. */
     if (sb->data_lba != base_lba + 1u + sb->fat_blocks) return -EXO_EINVAL;

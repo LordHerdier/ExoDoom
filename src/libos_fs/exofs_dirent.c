@@ -341,7 +341,7 @@ int exofs_dir_lookup(exofs_volume_t *v, uint32_t dir_head, const char *name,
     if (v == NULL || name == NULL) return -EXO_EINVAL;
 
     size_t want = strlen(name);
-    if (want == 0 || want > EXOFS_MAX_NAME) return -EXO_EINVAL;
+    if (!exofs_name_len_valid(want)) return -EXO_EINVAL;
 
     int rc = dir_scan_for_name(v, dir_head, name, want, ref, out, NULL, NULL);
     if (rc < 0) return rc;
@@ -358,7 +358,7 @@ int exofs_dir_add(exofs_volume_t *v, uint32_t dir_head, const char *name,
     if (v == NULL || name == NULL) return -EXO_EINVAL;
 
     size_t len = strlen(name);
-    if (len == 0 || len > EXOFS_MAX_NAME) return -EXO_EINVAL;
+    if (!exofs_name_len_valid(len)) return -EXO_EINVAL;
 
     /* One pass: is the name already here, and if not, where is the first
      * free slot? Before anything is allocated, so a rejected create has cost

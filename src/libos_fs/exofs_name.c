@@ -364,7 +364,7 @@ int exofs_name_alloc(exofs_volume_t *v, const char *name, uint32_t len,
     if (v == NULL || name == NULL || blk_out == NULL || off_out == NULL) {
         return -EXO_EINVAL;
     }
-    if (len == 0 || len > EXOFS_MAX_NAME) return -EXO_EINVAL;
+    if (!exofs_name_len_valid(len)) return -EXO_EINVAL;
 
     uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     if (buf == NULL) return -EXO_ENOMEM;
@@ -502,7 +502,7 @@ int exofs_name_read(exofs_volume_t *v, uint32_t blk, uint16_t off,
                     uint32_t len, char *out)
 {
     if (v == NULL || out == NULL)          return -EXO_EINVAL;
-    if (len == 0 || len > EXOFS_MAX_NAME)  return -EXO_EINVAL;
+    if (!exofs_name_len_valid(len))        return -EXO_EINVAL;
 
     uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     if (buf == NULL) return -EXO_ENOMEM;
@@ -526,7 +526,7 @@ int exofs_name_equals(exofs_volume_t *v, uint32_t blk, uint16_t off,
                       uint32_t len, const char *cmp)
 {
     if (v == NULL || cmp == NULL)          return -EXO_EINVAL;
-    if (len == 0 || len > EXOFS_MAX_NAME)  return -EXO_EINVAL;
+    if (!exofs_name_len_valid(len))        return -EXO_EINVAL;
 
     /* A different length cannot be the same name, and answering that
      * without touching the disk is the point of keeping name_len in the

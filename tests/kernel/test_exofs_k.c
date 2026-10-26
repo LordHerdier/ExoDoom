@@ -622,6 +622,44 @@ static void test_format_rejects_tiny_volume(void)
 }
 
 /*
+ * format() sizes the FAT and mount() insists on exactly that size back
+ * (SCRUM-221), so the two have to agree at every size, and the sizes most
+ * likely to expose a rounding disagreement are the ones where total_blocks
+ * sits on or just past a multiple of EXOFS_FAT_PER_BLOCK -- where one more
+ * data block costs a whole extra FAT sector. Each row's expected
+ * total_blocks is worked by hand from 1 + ceil(T / 128) + T <= sectors, so
+ * a geometry change shows up here as a number, not just as a failed mount.
+ */
+static void test_format_mounts_at_fat_boundaries(void)
+{
+    if (!drive_present()) return;
+
+    static const struct { uint32_t sectors, total_blocks; } rows[] = {
+        { EXOFS_MIN_SECTORS, 6u },   /* 1 + 1 + 6                         */
+        { 130u, 128u },              /* one FAT sector, exactly full      */
+        { 131u, 128u },              /* 129 would need a 2nd FAT sector   */
+        { 132u, 129u },              /* ...which now fits                 */
+        { 259u, 256u },              /* two FAT sectors, exactly full     */
+        { 260u, 256u },
+        { 261u, 257u },
+    };
+
+    for (uint32_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        exofs_unmount();
+        CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, rows[i].sectors),
+                        0);
+        CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA), 0);
+
+        exofs_geometry_t g;
+        CU_ASSERT_EQUAL(exofs_geometry(&g), 0);
+        CU_ASSERT_EQUAL(g.total_blocks, rows[i].total_blocks);
+        CU_ASSERT_TRUE(1u + g.fat_blocks + g.total_blocks <= rows[i].sectors);
+    }
+
+    exofs_unmount();
+}
+
+/*
  * exofs_region_sectors() (SCRUM-203) -- pure arithmetic, no drive needed:
  * how many sectors a volume at base_lba may claim before the next fixed
  * region (region_end_lba) or the disk's own reported capacity, whichever
@@ -1303,6 +1341,53 @@ static void test_name_length_limits(void)
 
     make_name(name, 1u, 0);
     CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 0, &blk, &off), -EXO_EINVAL);
+
+    exofs_unmount();
+}
+
+/*
+ * SCRUM-222: path parsing, directory lookup/add and the name area all apply
+ * the same length rule (exofs_name_len_valid()), so a name is accepted or
+ * refused by all of them together -- never by one and not the next. Checked
+ * at the boundary from both the public API and each internal layer.
+ */
+static void test_name_length_rule_agrees_across_layers(void)
+{
+    CU_ASSERT_FALSE(exofs_name_len_valid(0));
+    CU_ASSERT_TRUE(exofs_name_len_valid(1));
+    CU_ASSERT_TRUE(exofs_name_len_valid(EXOFS_MAX_NAME));
+    CU_ASSERT_FALSE(exofs_name_len_valid(EXOFS_MAX_NAME + 1u));
+
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    /* "/" + name + NUL */
+    char path[EXOFS_MAX_NAME + 3];
+    char comp[EXOFS_MAX_NAME + 1];
+    exofs_path_iter_t it;
+
+    /* 255: every layer takes it. */
+    path[0] = '/';
+    make_name(path + 1, EXOFS_MAX_NAME, 3);
+    CU_ASSERT_EQUAL(exofs_path_validate(path), 0);
+    exofs_path_iter_init(&it, path);
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&it, comp), 1);
+    CU_ASSERT_EQUAL(exofs_mkdir(path), 0);
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, EXOFS_ROOT_BLOCK, path + 1,
+                                     NULL, NULL), 0);
+
+    /* 256: every layer refuses it, with the same error. */
+    make_name(path + 1, EXOFS_MAX_NAME + 1u, 3);
+    CU_ASSERT_EQUAL(exofs_path_validate(path), -EXO_EINVAL);
+    exofs_path_iter_init(&it, path);
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&it, comp), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_mkdir(path), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, EXOFS_ROOT_BLOCK, path + 1,
+                                     NULL, NULL), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_dir_add(v, EXOFS_ROOT_BLOCK, path + 1,
+                                  EXOFS_ATTR_DIRECTORY, EXOFS_NO_BLOCK, 0,
+                                  NULL), -EXO_EINVAL);
 
     exofs_unmount();
 }
@@ -4192,6 +4277,8 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "double mount rejected", test_double_mount_rejected);
     CU_add_test(s, "format rejects a tiny volume",
                 test_format_rejects_tiny_volume);
+    CU_add_test(s, "format then mount agree at FAT-sector boundaries",
+                test_format_mounts_at_fat_boundaries);
     CU_add_test(s, "region_sectors: disk bigger than region",
                 test_region_sectors_disk_bigger_than_region);
     CU_add_test(s, "region_sectors: disk ends inside region",
@@ -4235,6 +4322,8 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "a name longer than cfat's 11-byte cap",
                 test_name_longer_than_cfat_limit);
     CU_add_test(s, "name length limits enforced", test_name_length_limits);
+    CU_add_test(s, "one name-length rule across layers",
+                test_name_length_rule_agrees_across_layers);
     CU_add_test(s, "long names with a common prefix stay distinct",
                 test_long_names_with_common_prefix_are_distinct);
     CU_add_test(s, "freed name records are reused",
