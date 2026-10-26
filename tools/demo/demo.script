@@ -39,29 +39,29 @@ key q
 wait 3
 
 # Beat 6 -- two programs, two filesystems, one disk
-type run voldemoa.exo
+type run voldemoa
 wait 5
 shot 06-volume-a
 key q
 wait 2
-type run voldemob.exo
+type run voldemob
 wait 5
 shot 06-volume-b
 key q
 wait 2
-type run voldemoa.exo
+type run voldemoa
 wait 5
 shot 06-volume-a-again
 key q
 wait 2
 
 # Beat 7 -- the dashboard, started BEFORE Doom (see docs/demo.md, "Order")
-type run top.exo
+type run top
 wait 4
 shot 07-top
 key ctrl-tab
 wait 2
-type run doom.exo
+type run doom
 wait 25
 shot 07-doom
 key ctrl-tab

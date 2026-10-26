@@ -208,6 +208,8 @@ static char shell_firstboot_done_text[] =
     "system volume formatted; no programs installed\n";
 static char shell_firstboot_probe_text[] = "system volume: cannot check it: err=";
 static char shell_programs_none_text[] = "no programs installed\n";
+static char shell_run_nosuch_text[] = "run: no such program: ";
+static char shell_run_hint_text[] = "installed programs:\n";
 static char shell_install_nodev_text[] = "install: no source disk\n";
 static char shell_install_novol_text[] = "install: source disk has no volume\n";
 static char shell_install_empty_text[] = "install: source disk is empty\n";
@@ -275,6 +277,7 @@ static int shell_cmd_match(const char *line, const char *cmd, const char **rest)
 static int shell_fs_acquire_and_mount(fb_console_t *con);
 static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba);
 static void shell_run_run(fb_console_t *con, const char *arg);
+static int shell_list_programs(fb_console_t *con, exofs_dir_t *dir);
 static void shell_run_programs(fb_console_t *con, const char *arg);
 static void shell_run_install(fb_console_t *con, const char *arg);
 static void shell_firstboot_check(fb_console_t *con);
@@ -580,7 +583,9 @@ static const shell_cmd_t shell_cmds[] = {
       shell_run_rm, 1 },
     { { "run", SHELL_GRP_APPS, "Launch a program package",
         "usage: run <package>\n"
-        "     <package>  A .exo file on the program volume, e.g. run snake.exo\n" },
+        "     <package>  A .exo file on the program volume, e.g. run snake.exo\n"
+        "                The .exo may be left off and case is ignored: run snake,\n"
+        "                run SNAKE. A file named exactly as typed wins.\n" },
       shell_run_run, 1 },
     { { "snake", SHELL_GRP_APPS, "Launch Snake",
         "usage: snake\n"
@@ -1418,6 +1423,68 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         return;
     }
 
+    /* SCRUM-270: the name as typed, or `install`'s reading of it. An exact
+     * file wins; otherwise the best case-insensitive / ".exo" match at the
+     * volume root (shell_run_match_rank()). The real name replaces `path`,
+     * so the display name below is the file's, not what was typed. */
+    {
+        exofs_dir_t dir;
+        int rc0 = exofs_opendir(shell_cur_vol, "/", &dir);
+        if (rc0 != 0) {
+            shell_fs_release();
+            fbcon_write(con, shell_fs_err_prefix);
+            shell_write_i64(con, rc0);
+            fbcon_write(con, "\n");
+            return;
+        }
+        int best = 0;
+        char found[SHELL_FS_PATH_BUF_LEN + 1];
+        for (;;) {
+            exofs_dirinfo_t info;
+            if (exofs_readdir(&dir, &info) <= 0) {
+                break;
+            }
+            if (info.attributes & EXOFS_ATTR_DIRECTORY) {
+                continue;
+            }
+            int r = shell_run_match_rank(path + 1, info.name);
+            if (r > best) {
+                best = r;
+                size_t m = 0;
+                found[m++] = '/';
+                for (size_t q = 0; info.name[q] != '\0' && m + 1 < sizeof(found); q++) {
+                    found[m++] = info.name[q];
+                }
+                found[m] = '\0';
+                if (r == 3) {
+                    break;
+                }
+            }
+        }
+        exofs_closedir(&dir);
+        if (best == 0) {
+            fbcon_write(con, shell_run_nosuch_text);
+            fbcon_write(con, path + 1);
+            fbcon_write(con, "\n");
+            exofs_dir_t hd;
+            if (exofs_opendir(shell_cur_vol, "/", &hd) == 0) {
+                fbcon_write(con, shell_run_hint_text);
+                if (!shell_list_programs(con, &hd)) {
+                    fbcon_write(con, shell_programs_none_text);
+                }
+                exofs_closedir(&hd);
+            }
+            shell_fs_release();
+            return;
+        }
+        for (size_t q = 0; ; q++) {
+            path[q] = found[q];
+            if (found[q] == '\0') {
+                break;
+            }
+        }
+    }
+
     exofs_stat_t st;
     int rc = exofs_stat(shell_cur_vol, path, &st);
     if (rc != 0) {
@@ -1647,6 +1714,33 @@ static void shell_firstboot_check(fb_console_t *con) {
     }
 }
 
+/* Print every *.exo file at the root of an open directory; returns how many. */
+static int shell_list_programs(fb_console_t *con, exofs_dir_t *dir) {
+    int found = 0;
+    for (;;) {
+        exofs_dirinfo_t info;
+        if (exofs_readdir(dir, &info) <= 0) {
+            break;
+        }
+        if (info.attributes & EXOFS_ATTR_DIRECTORY) {
+            continue;
+        }
+        size_t n = 0;
+        while (info.name[n] != '\0') {
+            n++;
+        }
+        if (n < 5 || info.name[n - 4] != '.' || info.name[n - 3] != 'e' ||
+            info.name[n - 2] != 'x' || info.name[n - 1] != 'o') {
+            continue;
+        }
+        found = 1;
+        fbcon_write(con, shell_ls_file_prefix);
+        fbcon_write(con, info.name);
+        fbcon_write(con, "\n");
+    }
+    return found;
+}
+
 /* `programs` -- the *.exo packages on the system volume. */
 static void shell_run_programs(fb_console_t *con, const char *arg) {
     (void)arg;
@@ -1670,28 +1764,7 @@ static void shell_run_programs(fb_console_t *con, const char *arg) {
         return;
     }
 
-    int found = 0;
-    for (;;) {
-        exofs_dirinfo_t info;
-        if (exofs_readdir(&dir, &info) <= 0) {
-            break;
-        }
-        if (info.attributes & EXOFS_ATTR_DIRECTORY) {
-            continue;
-        }
-        size_t n = 0;
-        while (info.name[n] != '\0') {
-            n++;
-        }
-        if (n < 5 || info.name[n - 4] != '.' || info.name[n - 3] != 'e' ||
-            info.name[n - 2] != 'x' || info.name[n - 1] != 'o') {
-            continue;
-        }
-        found = 1;
-        fbcon_write(con, shell_ls_file_prefix);
-        fbcon_write(con, info.name);
-        fbcon_write(con, "\n");
-    }
+    int found = shell_list_programs(con, &dir);
     exofs_closedir(&dir);
     shell_fs_release();
 

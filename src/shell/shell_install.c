@@ -47,6 +47,63 @@ int shell_install_resolve(const char *name, char *out, size_t out_len) {
     return 0;
 }
 
+static char run_lower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+}
+
+/* Rank 1: `want` has no ".exo" suffix and `entry` is `want` + ".exo",
+ * ignoring case. */
+static int shell_run_rank_exo(const char *want, size_t wn, const char *entry) {
+    static const char ext[] = ".exo";
+    if (wn >= 4) {
+        size_t k = 0;
+        while (k < 4 && run_lower(want[wn - 4 + k]) == ext[k]) {
+            k++;
+        }
+        if (k == 4) {
+            return 0;                /* already has the suffix */
+        }
+    }
+    for (size_t i = 0; i < wn; i++) {
+        if (run_lower(want[i]) != run_lower(entry[i])) {
+            return 0;
+        }
+        if (entry[i] == '\0') {
+            return 0;
+        }
+    }
+    for (size_t k = 0; k < 4; k++) {
+        if (run_lower(entry[wn + k]) != ext[k]) {
+            return 0;
+        }
+    }
+    return entry[wn + 4] == '\0' ? 1 : 0;
+}
+
+int shell_run_match_rank(const char *want, const char *entry) {
+    if (want == NULL || entry == NULL || want[0] == '\0') {
+        return 0;
+    }
+    size_t wn = 0;
+    while (want[wn] != '\0') {
+        wn++;
+    }
+    int exact = 1;
+    size_t i = 0;
+    for (; want[i] != '\0' && entry[i] != '\0'; i++) {
+        if (run_lower(want[i]) != run_lower(entry[i])) {
+            return shell_run_rank_exo(want, wn, entry);
+        }
+        if (want[i] != entry[i]) {
+            exact = 0;
+        }
+    }
+    if (want[i] == '\0' && entry[i] == '\0') {
+        return exact ? 3 : 2;
+    }
+    return shell_run_rank_exo(want, wn, entry);
+}
+
 /* Read `n` bytes at `off` of `path` on `v` into `buf`. A short read means
  * the file shrank under us, which this reports as -EXO_EIO rather than
  * installing a package with a hole in it. */

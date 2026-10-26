@@ -48,11 +48,11 @@ USB stick until USB mass storage lands (SCRUM-247); say so if asked.
 | | *(prep, unnarrated)* | `install voldemoa`, `install voldemob`, `install top` | three `installed` lines | | 5 s |
 | 4 | **Program specs vs. what is free** | `run snake.exo` | Snake starts | `granted: context N` / `pages 20 (asked min 24, rec 40)` / `fb …` / `disk none` / `sound none asked for` | 2 s |
 | 5 | **Run it** | play, then `q` | Snake (arrows steer). If it ends: `GAME OVER`, and any key returns to the shell | | ~30 s |
-| 6 | **Two programs, two filesystems, one disk** | `run voldemoa.exo` | `volume A`, extent `LBA 262144 +8192 sectors`, `first launch -- formatted a new volume`, root lists `launches` and `hello-a.txt`; under `reaching for what is not mine:` volumes B–H, `shell-scratch` and `program-volume` each `refused (-22)`, and `whole disk: refused (-1)` | `voldemo[A] …` lines; grant shows `disk volume slot 0` | 5 s |
-| | | `q`, `run voldemob.exo` | the same for `volume B`, `LBA 270336`, `hello-b.txt` | `voldemo[B] …` | 5 s |
-| | | `q`, `run voldemoa.exo` | `mounted existing volume`, `launches 2`: A's files survived B, and B never saw them | `voldemo[A] launches=2` | 5 s |
-| 7 | **Live dashboard alongside** | `q`, `run top.exo` | the resource dashboard: pages, free contexts and voices, one row per program | | 4 s |
-| | | Ctrl+Tab, `run doom.exo` | Doom's title, then its demo | grant: `pages 242 (asked min 246, rec 262)`, `disk volume slot 0, 245760 sectors from 16384`, `sound 8 of 8 voices available` | 20 s |
+| 6 | **Two programs, two filesystems, one disk** | `run voldemoa` | `volume A`, extent `LBA 262144 +8192 sectors`, `first launch -- formatted a new volume`, root lists `launches` and `hello-a.txt`; under `reaching for what is not mine:` volumes B–H, `shell-scratch` and `program-volume` each `refused (-22)`, and `whole disk: refused (-1)` | `voldemo[A] …` lines; grant shows `disk volume slot 0` | 5 s |
+| | | `q`, `run voldemob` | the same for `volume B`, `LBA 270336`, `hello-b.txt` | `voldemo[B] …` | 5 s |
+| | | `q`, `run voldemoa` | `mounted existing volume`, `launches 2`: A's files survived B, and B never saw them | `voldemo[A] launches=2` | 5 s |
+| 7 | **Live dashboard alongside** | `q`, `run top` | the resource dashboard: pages, free contexts and voices, one row per program | | 4 s |
+| | | Ctrl+Tab, `run doom` | Doom's title, then its demo | grant: `pages 242 (asked min 246, rec 262)`, `disk volume slot 0, 245760 sectors from 16384`, `sound 8 of 8 voices available` | 20 s |
 | | | play; Ctrl+Tab, Ctrl+Tab | `top` again, now with a `doom` row: about 3,100 pages, disk extent `16384+245760`, 2–4 voices (the count moves with the sound effects playing), music `yes` | | |
 | | | Ctrl+Tab back to Doom | Doom resumes where it was | | |
 
@@ -78,8 +78,10 @@ in front of the client.
    against free memory before launching (`src/exo_admit.h`). The program takes
    the rest itself as it runs: Doom starts with 242 and is near 3,100 by the
    time `top` shows it.
-4. **`run` needs the `.exo`; `install` does not.** `install doom` means
-   `doom.exo`, but `run doom` answers `error: err=-2` (file not found).
+4. **`run` and `install` take the same name.** `run doom` finds `doom.exo`,
+   as `install doom` installs it, and case is ignored (`run SNAKE`). A file
+   named exactly as typed wins, so `run snake.exo` still works. An unknown
+   name prints `run: no such program: <name>` and the installed programs.
 5. **Install `freedoom2.wad` as well as `doom.exo`.** The package does not
    bring the game data.
 6. **The shell clears its screen when a program starts.** Coming back with
