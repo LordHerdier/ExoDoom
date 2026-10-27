@@ -62,7 +62,7 @@ static int shadow_acquire(page_owner_t who, exo_fb_info_t *info_out,
         /* SCRUM-197: a context with a pane gets a buffer exactly its pane's
          * size, tightly pitched, so the compositor's copy is a plain row-by-
          * row move and an app scaling to fb.width/height fills the pane. */
-        uint32_t width = geom->width, height = geom->height;
+        uint32_t width = geom->width, height = fb_binding_usable_height();
         uint32_t pitch = geom->pitch;
         fb_rect_t pane;
         if (fb_layout_get(who, &pane) == 0) {
@@ -161,7 +161,7 @@ int fb_shadow_seed_from_screen(page_owner_t who) {
 
     /* Non-NULL: fb_shadow_acquire() just succeeded off the same geometry. */
     const fb_geometry_t *geom = fb_binding_geometry();
-    uint64_t fb_bytes = (uint64_t)geom->pitch * (uint64_t)geom->height;
+    uint64_t fb_bytes = (uint64_t)geom->pitch * (uint64_t)fb_binding_usable_height();
 
     fb_copy_bytes((void *)(uintptr_t)info.phys_addr,
                   (const void *)(uintptr_t)geom->phys_addr,

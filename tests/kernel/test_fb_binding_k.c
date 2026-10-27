@@ -183,7 +183,7 @@ static void test_acquire_describes_a_private_buffer(void)
 
     CU_ASSERT_NOT_EQUAL(info->phys_addr, TEST_FB_BASE);
     CU_ASSERT_EQUAL(info->width,     TEST_FB_WIDTH);
-    CU_ASSERT_EQUAL(info->height,    TEST_FB_HEIGHT);
+    CU_ASSERT_EQUAL(info->height,    TEST_FB_HEIGHT - FB_BAR_ROWS);
     CU_ASSERT_EQUAL(info->pitch,     TEST_FB_PITCH);
     CU_ASSERT_EQUAL(info->bpp,       TEST_FB_BPP);
 

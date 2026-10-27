@@ -171,6 +171,12 @@
 #define EXO_SYS_PANE_SET            43
 /* A launcher binds a keyboard to a context it holds (SCRUM-297). */
 #define EXO_SYS_KBD_BIND            44
+/* Turn the compositor's status bar on or off, or ask (SCRUM-278). */
+#define EXO_SYS_STATUSBAR           45
+/* exo_statusbar() modes; the contract is documented on the stub below. */
+#define EXO_STATUSBAR_OFF    0
+#define EXO_STATUSBAR_ON     1
+#define EXO_STATUSBAR_QUERY  2
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -180,7 +186,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        45
+#define EXO_SYS_COUNT        46
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -1147,6 +1153,22 @@ static inline int64_t exo_kbd_bind(uint64_t ctx, uint64_t source)
 static inline int64_t exo_kbd_unbind(uint64_t ctx)
 {
     return exo_syscall2(EXO_SYS_KBD_BIND, ctx, EXO_KBD_SRC_NONE);
+}
+
+/* #45 -- the status bar (SCRUM-278, src/status_bar.h). The strip along the
+ * bottom of the screen is the compositor's, never a program's: its rows are
+ * never part of the framebuffer a program is given, so this only decides
+ * whether it is painted or left black.
+ *
+ *   EXO_STATUSBAR_OFF    0   blank the strip
+ *   EXO_STATUSBAR_ON     1   show it
+ *   EXO_STATUSBAR_QUERY  2   change nothing
+ *
+ * Returns 1 if the bar is now on, 0 if off, or -EXO_EINVAL for another mode.
+ * Unscoped, like #22/#38: any program may toggle it. Off at boot. */
+static inline int64_t exo_statusbar(uint64_t mode)
+{
+    return exo_syscall1(EXO_SYS_STATUSBAR, mode);
 }
 
 /* #39 — fill *out with what `ctx` was granted (SCRUM-235).

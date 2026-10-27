@@ -513,6 +513,34 @@ Redraw the cursor at the current position. Called internally after every
 character; exposed for external use if the cursor needs refreshing after direct
 framebuffer writes.
 
+### 7a. The reserved status-bar strip (SCRUM-278)
+
+The bottom `FB_BAR_ROWS` (16, one 8x16 font cell) rows of the real screen
+belong to the compositor, not to any program. `fb_binding_usable_height()`
+(`src/fb_binding.c`) is the height a program may use: the full height minus
+those rows, on a screen at least `FB_BAR_MIN_HEIGHT` (480) tall. A shorter
+screen keeps all its rows and shows no bar, so a small synthetic test geometry
+or a degenerate mode is not eaten by the reserve. `fb_binding_has_bar()` says
+which case applies.
+
+* `fb_shadow.c` sizes every full-screen shadow to the usable height, so
+  `exo_fb_acquire` reports it; Doom's scaler, the WAD viewer, Snake and the
+  shell all size from that report and adapt.
+* `fb_layout_set()` rejects a pane that reaches into the strip.
+* `fb_compositor.c` copies only the usable rows, and the split-mode clear
+  spares the strip.
+* `src/status_bar.c` paints the strip after the program copy, with the same
+  8x8 font as the console (`src/font8x8.h`, moved out of `fb_console.c`),
+  each glyph doubled vertically. It lists live (READY/RUNNING) contexts as
+  `n:name`, brackets the focused one (`context_current()`, the value the
+  compositor picked the frame by), and right-aligns `Ctrl+Tab: next`; for
+  `STATUS_BAR_TOOLTIP_MS` after the entries or the focus change the hint is the
+  longer `Ctrl+Tab cycles programs -- Esc/Q quits most apps`. It repaints only
+  when what it would show changed.
+* The bar is **off by default** (`statusbar on` / `exo_statusbar` #45). The
+  rows stay reserved either way, because programs size their buffers once; off
+  blanks the strip to black rather than giving the rows back.
+
 ---
 
 ## 9. Design decisions and gotchas

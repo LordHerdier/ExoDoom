@@ -5,6 +5,7 @@
 #include "fb_copy.h"
 #include "context.h"
 #include "pit.h"
+#include "status_bar.h"
 
 #include <stdint.h>
 
@@ -15,7 +16,9 @@ static void composite_fullscreen(const fb_geometry_t *geom, page_owner_t who) {
         return;
     }
 
-    uint64_t fb_bytes = (uint64_t)geom->pitch * (uint64_t)geom->height;
+    /* SCRUM-278: the shadow is usable-height tall; the rows below it belong
+     * to the status bar (src/status_bar.c) and are not touched here. */
+    uint64_t fb_bytes = (uint64_t)geom->pitch * (uint64_t)fb_binding_usable_height();
 
     /* Both extents are inside the kernel's identity map (src/vmm.c always
      * maps the framebuffer aperture; shadow pages come from the ordinary
@@ -46,11 +49,12 @@ static void composite_panes(const fb_geometry_t *geom, page_owner_t only) {
         /* fb_layout_set() validated the rect against the geometry of the
          * day; fb_binding_init() can republish a smaller one since. Clip to
          * the screen as it is now rather than write past the aperture. */
-        if (rect.x >= geom->width || rect.y >= geom->height) {
+        uint32_t usable_h = fb_binding_usable_height();
+        if (rect.x >= geom->width || rect.y >= usable_h) {
             continue;
         }
         if (rect.w > geom->width - rect.x)  rect.w = geom->width - rect.x;
-        if (rect.h > geom->height - rect.y) rect.h = geom->height - rect.y;
+        if (rect.h > usable_h - rect.y)      rect.h = usable_h - rect.y;
 
         /* A context that has not called exo_fb_acquire yet shows as the
          * cleared background until it does. */
@@ -80,7 +84,17 @@ static void composite_panes(const fb_geometry_t *geom, page_owner_t only) {
     }
 }
 
+static void compose_programs(void);
+
 void fb_compositor_tick(void) {
+    compose_programs();
+
+    /* SCRUM-278: the strip below the programs' rows, repainted only when it
+     * changed. After the copy so it reads the focus the frame was chosen by. */
+    status_bar_update(fb_binding_geometry(), kernel_get_ticks_ms());
+}
+
+static void compose_programs(void) {
     /* Remembered across ticks so the screen around the panes is cleared once
      * per change, not copied over every 16 ms. */
     static int      was_split;
@@ -105,7 +119,7 @@ void fb_compositor_tick(void) {
     uint32_t generation = fb_layout_generation();
     if (!was_split || generation != last_generation) {
         fb_zero_bytes((void *)(uintptr_t)geom->phys_addr,
-                      (size_t)geom->pitch * (size_t)geom->height);
+                      (size_t)geom->pitch * (size_t)fb_binding_usable_height());
         was_split = 1;
         last_generation = generation;
         composite_panes(geom, PAGE_OWNER_FREE);

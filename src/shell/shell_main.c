@@ -202,6 +202,7 @@ static char shell_admit_oom_tail_text[] =
 static char shell_admit_fb_text[] = "run: framebuffer is held; taking it over\n";
 static char shell_memstat_fail_text[] = "memstat: query failed\n";
 static char shell_pslist_fail_text[] = "pslist: query failed\n";
+static char shell_statusbar_fail_text[] = "statusbar: failed\n";
 static char shell_fs_ok_text[] = "ok\n";
 /* First boot (SCRUM-234). */
 static char shell_nosys_text[] = "no system volume";
@@ -288,6 +289,7 @@ static int shell_report_faults(fb_console_t *con);
 static void shell_report_newest_fault(fb_console_t *con);
 static void shell_run_memstat(fb_console_t *con, const char *arg);
 static void shell_run_pslist(fb_console_t *con, const char *arg);
+static void shell_run_statusbar(fb_console_t *con, const char *arg);
 static int shell_cmd_match(const char *line, const char *cmd, const char **rest);
 static int shell_fs_acquire_and_mount(fb_console_t *con);
 static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba);
@@ -677,6 +679,12 @@ static const shell_cmd_t shell_cmds[] = {
         "usage: snake\n"
         "     Same as `run snake.exo`\n" },
       shell_run_snake, 0 },
+    { { "statusbar", SHELL_GRP_SYSTEM, "Show or hide the program strip along the bottom",
+        "usage: statusbar [on|off]\n"
+        "     The strip lists the running programs and the Ctrl+Tab hint.\n"
+        "     It is off by default; off leaves the bottom rows blank.\n"
+        "     With no argument, says whether it is on\n" },
+      shell_run_statusbar, 1 },
     { { "top", SHELL_GRP_APPS, "Live resource monitor (Q/Esc exits, Ctrl+Tab returns to the shell)",
         "usage: top\n"
         "     Same as `run top.exo`; pages, contexts, bindings and sound voices\n" },
@@ -3251,6 +3259,44 @@ static void shell_run_memstat(fb_console_t *con, const char *arg) {
     fbcon_write(con, " regions=");
     shell_write_u32(con, stat.region_count);
     fbcon_write(con, " (pages)\n");
+}
+
+/* `statusbar [on|off]` -- exo_statusbar (#45, src/syscall_statusbar.c).
+ * Trailing blanks are ignored; anything else after the word is a usage error. */
+static void shell_run_statusbar(fb_console_t *con, const char *arg) {
+    while (*arg == ' ') {
+        arg++;
+    }
+    size_t len = 0;
+    while (arg[len] != '\0' && arg[len] != ' ') {
+        len++;
+    }
+    const char *tail = arg + len;
+    while (*tail == ' ') {
+        tail++;
+    }
+
+    uint64_t mode;
+    if (len == 0) {
+        mode = EXO_STATUSBAR_QUERY;
+    } else if (*tail == '\0' && len == 2 && arg[0] == 'o' && arg[1] == 'n') {
+        mode = EXO_STATUSBAR_ON;
+    } else if (*tail == '\0' && len == 3 && arg[0] == 'o' && arg[1] == 'f' &&
+               arg[2] == 'f') {
+        mode = EXO_STATUSBAR_OFF;
+    } else {
+        shell_print_usage(con, "statusbar");
+        return;
+    }
+
+    int64_t rc = exo_statusbar(mode);
+    if (rc < 0) {
+        fbcon_write(con, shell_statusbar_fail_text);
+        return;
+    }
+    if (mode == EXO_STATUSBAR_QUERY) {
+        fbcon_write(con, rc ? "statusbar: on\n" : "statusbar: off\n");
+    }
 }
 
 /* `pslist` -- exo_pslist (#23, src/syscall_stat.c). Same stack-buffer

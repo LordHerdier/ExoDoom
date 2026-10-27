@@ -126,7 +126,8 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | Doom `music_module_t` logic (register/play/poll/pause over the OPL3 synth and the stream; ring 3, TESTING-kernel suite) | `src/libos_doom/doom_sound_music.c/h` (glue table in `src/doom_sound.c`) |
 | Software PCM mixer (8 sfx voices + 1 music voice) | `src/pcm_mixer.c/h` (+ `hda_pcm_*` in `src/hda.c/h`) |
 | Serial (COM1, all diagnostic + test output) | `src/serial.c/h` |
-| Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h` |
+| Framebuffer + text console | `src/fb.c/h`, `src/fb_console.c/h`, `src/font8x8.h` |
+| Status bar (compositor-drawn strip in the reserved bottom rows; `exo_statusbar` #45) | `src/status_bar.c/h`, `src/syscall_statusbar.c/h` — `docs/drivers/framebuffer.md` §7a |
 | Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_*.c/h` (one per area) |
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h`, `src/disk_binding.c/h` |
 | Resource revocation | `src/revoke.c/h` and the `*_revoke_*` primitives |
