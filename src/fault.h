@@ -69,6 +69,18 @@ void page_fault_handler(exception_frame_t *f);
  * idt.c).  Same hook/halt behaviour as page_fault_handler, no CR2. */
 void gp_fault_handler(exception_frame_t *f);
 
+/*
+ * End the program that took `f` and resume the next ready context
+ * (SCRUM-283).  Ring 3: logs the context id and name, reclaims through
+ * context_teardown() (the exo_exit path), marks the dead row BLOCKED and
+ * resumes the next READY context via context_resume_noreturn(); the row is
+ * left for the next launch to context_destroy().  Ring 0, or a ring-3 fault
+ * with no context row or no other context to run: halts with a diagnostic.
+ * Never returns.  `why` is a short plain-language reason for the log.
+ */
+void fault_terminate_current(const exception_frame_t *f, const char *why)
+    __attribute__((noreturn));
+
 #ifdef TESTING
 /*
  * Test hook.  Called before anything is printed; returning nonzero makes the

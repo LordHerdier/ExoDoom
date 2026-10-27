@@ -8,7 +8,9 @@
  */
 
 #include "fault.h"
+#include "context.h"
 #include "serial.h"
+#include "syscall_exit.h"
 #include "vmm.h"
 
 /* Append as much of `s` as fits.  *pos is the write cursor; on return it is
@@ -73,6 +75,73 @@ void fault_set_hook(fault_hook_t h)
     last_resume_rip = 0;
 }
 #endif
+
+/* Nothing left to hand the machine to.  Halts with an explicit message for
+ * now; the shell relaunch (SCRUM-283 step 5) replaces this. */
+static void no_survivor(void)
+{
+    serial_print("  no runnable context left -- halting\n");
+    serial_print("=== halted ===\n");
+    halt_forever();
+}
+
+void fault_terminate_current(const exception_frame_t *f, const char *why)
+{
+    serial_print("  context:   ");
+
+    /* CPL comes from the low two bits of the saved CS. A fault at CPL 0 is a
+     * kernel bug: nothing to terminate, nothing safe to resume. */
+    if ((f->cs & 3) != 3) {
+        serial_print("ring 0 (kernel) -- fatal\n");
+        serial_print("=== halted ===\n");
+        halt_forever();
+    }
+
+    /* Only a context with a real table row can be torn down and switched
+     * away from; the boot-time PAGE_OWNER_LIBOS default (a LibOS entered
+     * directly, with no row) has neither a register save area nor a row for
+     * context_switch_request() to find, so it keeps the old behaviour. */
+    page_owner_t owner = context_current();
+    context_t *ctx = context_lookup(owner);
+    if (ctx == NULL) {
+        serial_print("ring 3 (LibOS) with no context row -- cannot terminate, halting\n");
+        serial_print("=== halted ===\n");
+        halt_forever();
+    }
+
+    serial_print("ring 3 (LibOS) id ");
+    serial_print_hex64(owner);
+    serial_print(" \"");
+    serial_print(ctx->name);
+    serial_print("\" -- terminating: ");
+    serial_print(why);
+    serial_print("\n");
+
+    /* The same reclaim exo_exit runs (SCRUM-155), so the two cannot drift. */
+    if (context_teardown(owner) != 0) {
+        serial_print("  teardown refused -- halting\n");
+        serial_print("=== halted ===\n");
+        halt_forever();
+    }
+
+    /* The outgoing context is dead, so there is nothing to capture: arm the
+     * switch only to fill in context_switch_in_*, then resume without the
+     * syscall-path capture (context_resume_noreturn, src/context_switch.s).
+     * context_switch_request() marks the outgoing row READY; override it as
+     * sys_exit does (SCRUM-111) so round-robin never re-enters freed pages. */
+    page_owner_t next = context_next_ready(owner);
+    if (next == PAGE_OWNER_FREE || context_switch_request(next) != CONTEXT_OK)
+        no_survivor();
+    context_set_state(owner, CONTEXT_STATE_BLOCKED);
+
+    serial_print("  resuming context id ");
+    serial_print_hex64(next);
+    serial_print("\n");
+
+    /* Handled: a later fault is a new event, not a fault inside this one. */
+    in_fault = 0;
+    context_resume_noreturn();
+}
 
 /* Report what the live tables say about the faulting address.  This is what
  * separates "faulted at X" from "faulted at X, which is unmapped" versus
@@ -156,27 +225,12 @@ void page_fault_handler(exception_frame_t *f)
 
     print_mapping(cr2);
 
-    /* CPL comes from the low two bits of the saved CS.
-     *
-     * The ring-3 arm is reachable now that tss_init() loads a TSS with a
-     * valid RSP0 (SCRUM-46): idt_set_gate's gates are all IST=0, so a CPL 3
-     * exception loads that RSP0 rather than faulting for want of one.
-     * tests/kernel/test_tss_k.c drives it deliberately; no LibOS runs in
-     * ring 3 on a normal boot yet (SCRUM-47), so in practice this still only
-     * fires under test.
-     *
-     * A real LibOS fault still just halts, because there is no policy yet
-     * for what should happen instead -- this is where a faulting LibOS gets
-     * terminated and its resources reclaimed via revoke_all(), once that
-     * policy exists. */
-    serial_print("  context:   ");
-    if ((f->cs & 3) != 0) {
-        serial_print("ring 3 (LibOS) -- no per-context teardown yet, halting\n");
-    } else {
-        serial_print("ring 0 (kernel) -- fatal\n");
-    }
+    /* A ring-3 fault ends that program and carries on (SCRUM-283); a CPL 0
+     * fault is a kernel bug and halts. Either way the diagnostic above has
+     * already been printed. */
+    fault_terminate_current(f, "illegal memory access");
 
-    serial_print("=== halted ===\n");
+    /* Not reached: fault_terminate_current() halts or switches away. */
     halt_forever();
 }
 
@@ -218,15 +272,9 @@ void gp_fault_handler(exception_frame_t *f)
     serial_print_hex64(f->rflags);
     serial_print("\n");
 
-    /* See page_fault_handler's own comment: a real LibOS fault still just
-     * halts, because there is no teardown policy yet (SCRUM-147/revoke_all). */
-    serial_print("  context:   ");
-    if ((f->cs & 3) != 0) {
-        serial_print("ring 3 (LibOS) -- no per-context teardown yet, halting\n");
-    } else {
-        serial_print("ring 0 (kernel) -- fatal\n");
-    }
+    /* See page_fault_handler: ring 3 is terminated, ring 0 halts. */
+    fault_terminate_current(f, "privileged or illegal operation");
 
-    serial_print("=== halted ===\n");
+    /* Not reached: fault_terminate_current() halts or switches away. */
     halt_forever();
 }

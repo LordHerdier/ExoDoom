@@ -61,6 +61,7 @@ void suite_libos_heap_tests(CU_pSuite s);
 void suite_libos_heap_stress_tests(CU_pSuite s);
 void suite_port_io_fault_tests(CU_pSuite s);
 void suite_kernel_mem_fault_tests(CU_pSuite s);
+void suite_fault_contain_tests(CU_pSuite s);
 void suite_irq_entry_tests(CU_pSuite s);
 void suite_context_tests(CU_pSuite s);
 void suite_fb_console_tests(CU_pSuite s);
@@ -294,6 +295,10 @@ int port_io_fault_suite_cleanup(void);
  * ring-3 kernel-memory-fault test (SCRUM-55). */
 int kernel_mem_fault_suite_cleanup(void);
 
+/* Same idea for the fault_contain suite (SCRUM-283): real context rows and
+ * address spaces around live ring-3 faults, no fault hook. */
+int fault_contain_suite_cleanup(void);
+
 /* Same idea for the irq_entry suite: it installs the fault hook, a
  * SYS_LIBOS_RETURN handler, and a real address space around its live
  * ring-3 hardware-interrupt test (SCRUM-170). */
@@ -523,6 +528,9 @@ int run_tests(void)
 
     s = CU_add_suite("kernel_mem_fault", NULL, kernel_mem_fault_suite_cleanup);
     suite_kernel_mem_fault_tests(s);
+
+    s = CU_add_suite("fault_contain", NULL, fault_contain_suite_cleanup);
+    suite_fault_contain_tests(s);
 
     s = CU_add_suite("irq_entry", NULL, irq_entry_suite_cleanup);
     suite_irq_entry_tests(s);
