@@ -272,6 +272,9 @@ static void shell_run_command(fb_console_t *con, const char *line);
 static void shell_write_u32(fb_console_t *con, uint32_t v);
 static void shell_write_i64(fb_console_t *con, int64_t v);
 static void shell_err_report(fb_console_t *con, shell_op_t op, int64_t err);
+static int shell_fault_poll(exo_fault_info_t *rec);
+static void shell_fault_print(fb_console_t *con, const exo_fault_info_t *rec);
+static int shell_report_faults(fb_console_t *con);
 static void shell_run_memstat(fb_console_t *con, const char *arg);
 static void shell_run_pslist(fb_console_t *con, const char *arg);
 static int shell_cmd_match(const char *line, const char *cmd, const char **rest);
@@ -353,6 +356,9 @@ void shell_main(void) {
     fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
     fbcon_write(&con, shell_help_text);
     shell_firstboot_check(&con);
+    /* A shell the kernel relaunched because the last program crashed says so
+     * (SCRUM-283); on a normal boot there is nothing to report. */
+    (void)shell_report_faults(&con);
     shell_print_prompt(&con);
 
     static char cmd_buf[SHELL_CMD_BUF_LEN];
@@ -390,6 +396,9 @@ void shell_main(void) {
                 shell_hist_push(&hist, cmd_buf);
                 fbcon_write(&con, "\n");
                 shell_run_command(&con, cmd_buf);
+                /* A launched program that crashed hands control back here;
+                 * say what happened before the prompt returns (SCRUM-283). */
+                (void)shell_report_faults(&con);
                 shell_print_prompt(&con);
                 cmd_len = 0;
                 continue;
@@ -430,6 +439,19 @@ void shell_main(void) {
                 cmd_buf[cmd_len++] = c;
                 fbcon_putc(&con, c);
             }
+        }
+
+        /* A background program can crash while the shell is idle at its
+         * prompt: report it on a fresh line, then put the prompt and the
+         * half-typed command back. */
+        exo_fault_info_t crashed;
+        if (shell_fault_poll(&crashed)) {
+            fbcon_write(&con, "\n");
+            shell_fault_print(&con, &crashed);
+            (void)shell_report_faults(&con);
+            shell_print_prompt(&con);
+            cmd_buf[cmd_len] = '\0';
+            fbcon_write(&con, cmd_buf);
         }
     }
 }
@@ -875,6 +897,44 @@ static void shell_err_report(fb_console_t *con, shell_op_t op, int64_t err) {
         fbcon_write(con, ")");
     }
     fbcon_write(con, "\n");
+}
+
+/* The newest fault record this shell has already told the user about
+ * (SCRUM-283). exo_fault_info (#41) hands out records in seq order, so asking
+ * for "newer than this" reports each crash once, whichever program died and
+ * wherever the shell was when it happened. A relaunched shell starts at 0 and
+ * so reports the crash that replaced its predecessor. */
+static uint64_t shell_fault_seen;
+
+/* Fetch the next unreported fault into *rec and mark it seen. 1 if there was
+ * one, 0 if not (-EXO_ENOENT is the normal answer). */
+static int shell_fault_poll(exo_fault_info_t *rec) {
+    if (exo_fault_info(shell_fault_seen, rec) != 0) {
+        return 0;
+    }
+    shell_fault_seen = rec->seq;
+    return 1;
+}
+
+/* "program X stopped: <why>" on its own line, in the warning colour. */
+static void shell_fault_print(fb_console_t *con, const exo_fault_info_t *rec) {
+    char line[80];
+    shell_fault_format(line, sizeof(line), rec->name, rec->reason);
+    fbcon_set_color(con, 255, 120, 120, 0, 0, 0);
+    fbcon_write(con, line);
+    fbcon_write(con, "\n");
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+}
+
+/* Report every fault not yet reported. Returns how many. */
+static int shell_report_faults(fb_console_t *con) {
+    exo_fault_info_t rec;
+    int n = 0;
+    while (shell_fault_poll(&rec)) {
+        shell_fault_print(con, &rec);
+        n++;
+    }
+    return n;
 }
 
 /*
