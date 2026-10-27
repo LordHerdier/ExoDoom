@@ -161,13 +161,13 @@
 #define EXO_SYS_LAUNCH_START        40
 /* Read-only: what the kernel ended a program for (SCRUM-283). */
 #define EXO_SYS_FAULT_INFO          41
-/* A launcher places a held context's pane on screen (SCRUM-296). */
-#define EXO_SYS_PANE_SET            43
 /* Bind a disk extent read-only, so a reader can share it with a program that
  * holds it read-only (SCRUM-281).  A new number rather than a flag on #26:
  * exo_disk_acquire passes three arguments and leaves the fourth register
  * unset, so a program already built against it would hand the kernel noise. */
 #define EXO_SYS_DISK_ACQUIRE_RO     42
+/* A launcher places a held context's pane on screen (SCRUM-296). */
+#define EXO_SYS_PANE_SET            43
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -369,6 +369,7 @@ typedef struct {
 /* Flag for exo_pane_set's last argument (SCRUM-296): drop the pane instead of
  * setting one; the rect is ignored.  exo_pane_clear() passes it. */
 #define EXO_PANE_CLEAR    1u
+
 /* Flag for exo_launch_pkg's third argument (SCRUM-280): give the program
  * exactly the volume slot in the fifth argument, which must be one of the
  * slots its package names (volume_slot, volume_slots), instead of the first

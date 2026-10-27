@@ -632,13 +632,7 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
     return launch_enter(id, &launch_img, release_fb);
 }
 
-/* #40 -- enter the context #36 built under EXO_LAUNCH_HOLD (SCRUM-235).
- * The other half of launch_enter(): same switch, same framebuffer release
- * after it, but the image already exists. Like #21/#36, control does not
- * come back until something switches back to the caller.
- *   -EXO_ENOENT   `ctx` is not the held context
- *   -EXO_EPERM    the hold was built by another context
- *   -EXO_EINVAL   the switch could not be armed; the held context is gone */
+/* The rule #40 and #43 share: see syscall_launch.h. */
 int64_t launch_hold_check(page_owner_t ctx, page_owner_t launcher)
 {
     if (!launch_held_is_live() || ctx != held.id) {
@@ -650,6 +644,13 @@ int64_t launch_hold_check(page_owner_t ctx, page_owner_t launcher)
     return 0;
 }
 
+/* #40 -- enter the context #36 built under EXO_LAUNCH_HOLD (SCRUM-235).
+ * The other half of launch_enter(): same switch, same framebuffer release
+ * after it, but the image already exists. Like #21/#36, control does not
+ * come back until something switches back to the caller.
+ *   -EXO_ENOENT   `ctx` is not the held context
+ *   -EXO_EPERM    the hold was built by another context
+ *   -EXO_EINVAL   the switch could not be armed; the held context is gone */
 static int64_t sys_launch_start(uint64_t ctx, uint64_t a2, uint64_t a3,
                                 uint64_t a4, uint64_t a5, uint64_t a6)
 {
