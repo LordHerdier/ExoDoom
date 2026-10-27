@@ -142,7 +142,8 @@ quit, the kernel takes back everything Snake held."
 
 **Caption.** Raw resources, each with a named owner.
 
-**Point at.** Snake running; Q returns to the shell.
+**Point at.** Snake idling on its `Press any arrow key to start` banner (it
+starts moving at the first arrow); Q returns to the shell.
 
 **If asked.**
 - *How is that different from Windows or Linux?* The isolation is the same

@@ -460,13 +460,13 @@ _Static_assert(EXO_LAUNCH_PKG_MAX_LEN ==
  * buffer again, and libos_build_image() copies them exactly once.
  */
 static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
-                              uint64_t name_ptr, uint64_t a5, uint64_t a6)
+                              uint64_t name_ptr, uint64_t slot, uint64_t a6)
 {
-    (void)a5; (void)a6;
+    (void)a6;
 
     /* Shape first, like the length: a flag this kernel does not know is a
      * caller that expects behavior it will not get. */
-    if ((flags & ~(uint64_t)EXO_LAUNCH_HOLD) != 0) {
+    if ((flags & ~(uint64_t)(EXO_LAUNCH_HOLD | EXO_LAUNCH_SLOT)) != 0) {
         return -EXO_EINVAL;
     }
     if (len < sizeof(exo_pkg_header_t) || len > EXO_LAUNCH_PKG_MAX_LEN) {
@@ -510,6 +510,20 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
      * row exists rather than after. */
     if (hdr.code_len == 0) {
         return -EXO_EINVAL;
+    }
+
+    /* The slots this launch may assign (SCRUM-280): the package's range, or
+     * the one slot the launcher named, which must be in that range -- so a
+     * launcher can pick among a program's own slots but never hand it
+     * another program's. */
+    uint32_t slot_first = hdr.volume_slot;
+    uint32_t slot_count = exo_pkg_volume_slot_count(&hdr);
+    if (flags & EXO_LAUNCH_SLOT) {
+        if (slot < slot_first || slot - slot_first >= slot_count) {
+            return -EXO_EINVAL;
+        }
+        slot_first = (uint32_t)slot;
+        slot_count = 1;
     }
 
     launch_reclaim_exited();
@@ -559,11 +573,17 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
     /* The manifest's volume request becomes a sector extent the program alone
      * may bind (SCRUM-237). Done after the image exists but before the
      * program runs, and undone with the context if it cannot be granted --
-     * another running program already holds that slot, say. */
+     * every slot it may have is held by another running program, say. The
+     * first free slot of its range wins (SCRUM-280), so a second instance of
+     * a program gets a volume of its own instead of -EXO_EBUSY; only "held"
+     * moves on to the next slot, any other refusal is final. */
     int arc = DISK_BIND_OK;
-    if (hdr.volume_sectors != 0) {
-        arc = disk_binding_assign(id, exo_volume_slot_base(hdr.volume_slot),
+    for (uint32_t s = 0; s < slot_count; s++) {
+        arc = disk_binding_assign(id, exo_volume_slot_base(slot_first + s),
                                   hdr.volume_sectors);
+        if (arc != DISK_BIND_EBUSY) {
+            break;
+        }
     }
     /* Not an else-branch since SCRUM-267: Doom has a private volume for its
      * saves and reads the IWAD off the program volume, both for its whole
@@ -612,6 +632,18 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
     return launch_enter(id, &launch_img, release_fb);
 }
 
+/* The rule #40 and #43 share: see syscall_launch.h. */
+int64_t launch_hold_check(page_owner_t ctx, page_owner_t launcher)
+{
+    if (!launch_held_is_live() || ctx != held.id) {
+        return -EXO_ENOENT;
+    }
+    if (held.owner != launcher) {
+        return -EXO_EPERM;
+    }
+    return 0;
+}
+
 /* #40 -- enter the context #36 built under EXO_LAUNCH_HOLD (SCRUM-235).
  * The other half of launch_enter(): same switch, same framebuffer release
  * after it, but the image already exists. Like #21/#36, control does not
@@ -624,13 +656,15 @@ static int64_t sys_launch_start(uint64_t ctx, uint64_t a2, uint64_t a3,
 {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
 
-    if (!launch_held_is_live() || ctx != held.id) {
-        return -EXO_ENOENT;
-    }
     /* Only the launcher that built it may enter it: the entry displaces the
      * framebuffer holder when the manifest asks (the known gap above). */
-    if (held.owner != syscall_current_context()) {
-        return -EXO_EPERM;
+    if (ctx > (page_owner_t)~0u) {
+        return -EXO_ENOENT;
+    }
+    int64_t hrc = launch_hold_check((page_owner_t)ctx,
+                                    syscall_current_context());
+    if (hrc != 0) {
+        return hrc;
     }
 
     page_owner_t id = held.id;

@@ -287,6 +287,8 @@ static void shell_run_pslist(fb_console_t *con, const char *arg);
 static int shell_cmd_match(const char *line, const char *cmd, const char **rest);
 static int shell_fs_acquire_and_mount(fb_console_t *con);
 static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba);
+static int shell_fs_acquire_and_mount_at_ro(fb_console_t *con,
+                                            uint32_t base_lba);
 static void shell_run_run(fb_console_t *con, const char *arg);
 static int shell_list_programs(fb_console_t *con, exofs_dir_t *dir);
 static void shell_run_programs(fb_console_t *con, const char *arg);
@@ -1252,10 +1254,18 @@ static uint32_t shell_fs_held_dev;
 static exofs_vol_t *shell_cur_vol;
 
 /* Acquire the extent `v` lives in and mount it. Prints its own diagnostic
- * and returns 0 on failure so each caller can just return. */
-static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
-                                          const shell_volref_t *v) {
-    int64_t rc = exo_disk_acquire(v->dev, v->extent_base, v->extent_count);
+ * and returns 0 on failure so each caller can just return.
+ *
+ * `read_only` binds the extent with exo_disk_acquire_ro() (SCRUM-281), which
+ * is what lets a command that only reads run while a program holds the same
+ * extent read-only -- Doom holds the program volume that way for its whole
+ * run. Anything that writes must pass 0 and so still gets -EBUSY then. */
+static int shell_fs_acquire_and_mount_vol_mode(fb_console_t *con,
+                                               const shell_volref_t *v,
+                                               int read_only) {
+    int64_t rc = read_only
+        ? exo_disk_acquire_ro(v->dev, v->extent_base, v->extent_count)
+        : exo_disk_acquire(v->dev, v->extent_base, v->extent_count);
     if (rc != 0) {
         shell_err_report(con, SHELL_OP_DISK, rc);
         return 0;
@@ -1272,6 +1282,11 @@ static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
     return 1;
 }
 
+static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
+                                          const shell_volref_t *v) {
+    return shell_fs_acquire_and_mount_vol_mode(con, v, 0);
+}
+
 static int shell_fs_acquire_and_mount(fb_console_t *con) {
     return shell_fs_acquire_and_mount_at(con, SHELL_FS_BASE_LBA);
 }
@@ -1281,6 +1296,14 @@ static int shell_fs_acquire_and_mount(fb_console_t *con) {
 static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba) {
     shell_volref_t v = shell_sys_volref(base_lba);
     return shell_fs_acquire_and_mount_vol(con, &v);
+}
+
+/* Read-only counterpart of the above, for `run` and `programs`: they only
+ * read the program volume, and must work while a program holds it. */
+static int shell_fs_acquire_and_mount_at_ro(fb_console_t *con,
+                                            uint32_t base_lba) {
+    shell_volref_t v = shell_sys_volref(base_lba);
+    return shell_fs_acquire_and_mount_vol_mode(con, &v, 1);
 }
 
 static void shell_fs_release(void) {
@@ -1501,11 +1524,13 @@ static int shell_admit_report(fb_console_t *con, const exo_pkg_header_t *parsed)
 
 /* Launch a package and log its resource grant first (SCRUM-235): build the
  * context without entering it, read what it holds (exo_grantstat, #39), write
- * that next to what the manifest asked for to COM1, then enter it (#40).
- * Returns what exo_launch_pkg()/exo_launch_start() would. Serial only: the
- * program takes the screen the moment it runs, so an on-screen copy would
- * either vanish unread or need the shell to hold the launch back. */
-static int64_t shell_launch_with_grant(const void *pkg, uint32_t len,
+ * that next to what the manifest asked for to COM1 and to the shell console
+ * (SCRUM-272), then enter it (#40). Returns what
+ * exo_launch_pkg()/exo_launch_start() would. The program takes the screen the
+ * moment it runs, so the on-screen copy is not seen until the shell is shown
+ * again; it stays in the shell's own shadow until then (SCRUM-292), so there
+ * is no pause. */
+static int64_t shell_launch_with_grant(fb_console_t *con, const void *pkg, uint32_t len,
                                        const exo_pkg_header_t *hdr,
                                        const char *prog_name) {
     if (hdr == NULL) {
@@ -1525,9 +1550,11 @@ static int64_t shell_launch_with_grant(const void *pkg, uint32_t len,
         size_t n = exo_grant_format(text, sizeof(text), hdr, &g, &res,
                                     g.fb_owner);
         exo_serial_write(text, n);
+        fbcon_write(con, text);
     } else {
         static const char unavailable[] = "run: grant read-out unavailable\n";
         exo_serial_write(unavailable, sizeof(unavailable) - 1);
+        fbcon_write(con, unavailable);
     }
     return exo_launch_start((uint64_t)ctx);
 }
@@ -1579,7 +1606,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         fbcon_write(con, " (reboot to be offered a format)\n");
         return;
     }
-    if (!shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
+    if (!shell_fs_acquire_and_mount_at_ro(con, LIBOS_WAD_DISK_BASE_LBA)) {
         return;
     }
 
@@ -1727,7 +1754,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         }
     }
 
-    int64_t lrc = shell_launch_with_grant(pkg, st.size, have_hdr ? &hdr : NULL,
+    int64_t lrc = shell_launch_with_grant(con, pkg, st.size, have_hdr ? &hdr : NULL,
                                           prog_name);
     libos_heap_free(pkg);
     if (lrc == 0) {
@@ -1801,7 +1828,11 @@ static void shell_run_mkfs(fb_console_t *con, const char *arg) {
  * from "could not look". Acquires and releases the disk itself; on a failed
  * acquire the code is the acquire's. */
 static int shell_probe_system_volume(void) {
-    int64_t arc = shell_disk_acquire_for(LIBOS_WAD_DISK_BASE_LBA);
+    /* Read-only: `run` probes first, and must not be refused because a
+     * program holds the volume read-only (SCRUM-281). */
+    shell_volref_t pv_ref = shell_sys_volref(LIBOS_WAD_DISK_BASE_LBA);
+    int64_t arc = exo_disk_acquire_ro(pv_ref.dev, pv_ref.extent_base,
+                                      pv_ref.extent_count);
     if (arc != 0) {
         return (int)arc;
     }
@@ -1895,7 +1926,7 @@ static void shell_run_programs(fb_console_t *con, const char *arg) {
         fbcon_write(con, " (reboot to be offered a format)\n");
         return;
     }
-    if (!shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
+    if (!shell_fs_acquire_and_mount_at_ro(con, LIBOS_WAD_DISK_BASE_LBA)) {
         return;
     }
 
@@ -1954,7 +1985,7 @@ static void shell_tab_gather(fb_console_t *con, const char *line,
     case SHELL_COMP_PROGRAM:
         if (shell_firstboot_classify(shell_probe_system_volume()) ==
                 SHELL_FIRSTBOOT_UNFORMATTED ||
-            !shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
+            !shell_fs_acquire_and_mount_at_ro(con, LIBOS_WAD_DISK_BASE_LBA)) {
             return;
         }
         if (exofs_opendir(shell_cur_vol, "/", &dir) == 0) {

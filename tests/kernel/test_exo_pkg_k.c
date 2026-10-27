@@ -41,8 +41,8 @@ static void fill_fixture_header(exo_pkg_header_t *hdr)
     hdr->sound_voices = 2;
     hdr->want_flags = EXO_PKG_WANT_FRAMEBUFFER | EXO_PKG_WANT_KEYBOARD;
     hdr->reserved[0] = 0;
-    hdr->reserved[1] = 0;
     hdr->volume_slot = 0;
+    hdr->volume_slots = 0;
     hdr->volume_sectors = 0;
 }
 
@@ -330,7 +330,7 @@ static void c_stack_over(exo_pkg_header_t *h)
 static void c_params(exo_pkg_header_t *h)
 { h->params_len = h->data_len + 1; }
 static void c_reserved(exo_pkg_header_t *h)
-{ h->reserved[1] = 1; }
+{ h->reserved[0] = 1; }
 static void c_stack_zero(exo_pkg_header_t *h)
 { h->stack_pages = 0; }
 static void c_min_over_rec(exo_pkg_header_t *h)
@@ -358,6 +358,14 @@ static void c_vol_size_over(exo_pkg_header_t *h)
 { c_vol_ok(h); h->volume_sectors = EXO_VOLUME_SLOT_SECTORS + 1; }
 static void c_vol_slot_without_size(exo_pkg_header_t *h)
 { h->want_flags |= EXO_PKG_WANT_DISK; h->volume_slot = 1; }
+/* SCRUM-280: a range of slots, one per concurrent instance. It must end
+ * inside the region and needs a volume to be a range of. */
+static void c_vol_slots_ok(exo_pkg_header_t *h)
+{ c_vol_ok(h); h->volume_slot = EXO_VOLUME_MAX_SLOTS - 2; h->volume_slots = 2; }
+static void c_vol_slots_over(exo_pkg_header_t *h)
+{ c_vol_ok(h); h->volume_slots = 2; }
+static void c_vol_slots_without_size(exo_pkg_header_t *h)
+{ h->want_flags |= EXO_PKG_WANT_DISK; h->volume_slots = 2; }
 
 /* SCRUM-75 program-volume request: a disk resource. Since SCRUM-267 it may
  * accompany a private volume of the program's own (Doom: IWAD + saves). */
@@ -382,11 +390,14 @@ static void test_volume_request_is_validated(void)
     CU_ASSERT_EQUAL(parse_after(c_vol_slot_over), EXO_PKG_EINVAL);
     CU_ASSERT_EQUAL(parse_after(c_vol_size_over), EXO_PKG_EINVAL);
     CU_ASSERT_EQUAL(parse_after(c_vol_slot_without_size), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_vol_slots_ok), 0);
+    CU_ASSERT_EQUAL(parse_after(c_vol_slots_over), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_vol_slots_without_size), EXO_PKG_EINVAL);
 
     /* pack applies the same rules, so a bad request is never written. */
     void (*bad[])(exo_pkg_header_t *) = {
         c_vol_no_disk, c_vol_slot_over, c_vol_size_over,
-        c_vol_slot_without_size,
+        c_vol_slot_without_size, c_vol_slots_over, c_vol_slots_without_size,
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         exo_pkg_header_t hdr;
@@ -416,6 +427,18 @@ static void test_volume_request_round_trips(void)
     CU_ASSERT_EQUAL(exo_pkg_parse(buf, out_len, &parsed, &c, &d), 0);
     CU_ASSERT_EQUAL(parsed.volume_slot, EXO_VOLUME_MAX_SLOTS - 1);
     CU_ASSERT_EQUAL(parsed.volume_sectors, EXO_VOLUME_SLOT_SECTORS);
+    CU_ASSERT_EQUAL(exo_pkg_volume_slot_count(&parsed), 1);
+
+    fill_fixture_header(&hdr);
+    c_vol_slots_ok(&hdr);
+    CU_ASSERT_EQUAL(exo_pkg_pack(buf, sizeof(buf), &hdr, fixture_code,
+                                 fixture_data, &out_len), 0);
+    CU_ASSERT_EQUAL(exo_pkg_parse(buf, out_len, &parsed, &c, &d), 0);
+    CU_ASSERT_EQUAL(parsed.volume_slots, 2);
+    CU_ASSERT_EQUAL(exo_pkg_volume_slot_count(&parsed), 2);
+
+    fill_fixture_header(&hdr);     /* no volume: no slots, whatever 0 means */
+    CU_ASSERT_EQUAL(exo_pkg_volume_slot_count(&hdr), 0);
 }
 
 static void test_parse_rejects_caps(void)

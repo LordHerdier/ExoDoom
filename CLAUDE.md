@@ -140,6 +140,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | doomgeneric platform layer | `src/doomgeneric_exo.c/h` |
 | Doom net stub / fatal-error path / mounted IWAD registry (kernel tests; ring-3 Doom reads the IWAD via FILE* over ExoFS) | `src/doom_net_stub.c`, `src/doom_panic.c/h`, `src/doom_wad.c/h`, `src/doom_wad_disk.c/h` |
 | Shell mount table + path router (`mount`/`umount`, pure logic, TESTING-kernel suite) | `src/shell/shell_mount.c/h` (used from `src/shell/shell_main.c`) |
+| Layout manifest parser (`/etc/layout.cfg`: pane, program, rect, keyboard; pure logic, TESTING-kernel suite) | `src/shell/shell_layout_cfg.c/h` — format in `docs/libos-authoring.md` §8 |
 | LibOS apps | `src/shell/`, `src/libos_wad_viewer/`, `src/libos_clock/`, … |
 | Slide decks (`.exs` format, host packer, viewer LibOS) | `src/exo_slides.h`, `tools/mkslides/`, `src/libos_slides/`, decks in `slides/` → `docs/architecture.md` §7 "Slide decks" |
 | Test framework | `src/kunit.h`, `tests/kernel/*.c`, `tests/kernel/kunit.c`, `tests/kernel/ring3_probe.s` |

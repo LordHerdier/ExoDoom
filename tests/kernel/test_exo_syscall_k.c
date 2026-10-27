@@ -71,16 +71,20 @@ static void test_numbers_match_spec(void)
     CU_ASSERT_EQUAL(EXO_SYS_GRANTSTAT,           39);
     CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_START,        40);
     CU_ASSERT_EQUAL(EXO_SYS_FAULT_INFO,          41);
+    CU_ASSERT_EQUAL(EXO_SYS_DISK_ACQUIRE_RO,     42);
+    CU_ASSERT_EQUAL(EXO_SYS_PANE_SET,            43);
 }
 
 /* The dispatcher will range-check against EXO_SYS_COUNT, so it has to stay one
- * past the last number — 42 as of exo_fault_info (SCRUM-283), after
+ * past the last number — 44 as of exo_pane_set (SCRUM-296), after
+ * exo_disk_acquire_ro (SCRUM-281),
+ * exo_fault_info (SCRUM-283),
  * exo_grantstat/exo_launch_start (SCRUM-235), exo_resstat (SCRUM-232) and the
  * per-program volume extent (SCRUM-237). */
 static void test_count_is_one_past_last(void)
 {
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_FAULT_INFO + 1);
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 42);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_PANE_SET + 1);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 44);
 }
 
 /* Two syscalls sharing a number would route silently to the wrong handler. */
@@ -101,7 +105,8 @@ static void test_numbers_are_unique(void)
         EXO_SYS_SOUND_STREAM_WRITE, EXO_SYS_SOUND_STREAM_STOP,
         EXO_SYS_SOUND_STREAM_VOLUME, EXO_SYS_RTC_READ, EXO_SYS_LAUNCH_PKG,
         EXO_SYS_DISK_EXTENT, EXO_SYS_RESSTAT, EXO_SYS_GRANTSTAT,
-        EXO_SYS_LAUNCH_START, EXO_SYS_FAULT_INFO,
+        EXO_SYS_LAUNCH_START, EXO_SYS_FAULT_INFO, EXO_SYS_DISK_ACQUIRE_RO,
+        EXO_SYS_PANE_SET,
     };
     /* 64-bit so the mask keeps working as the table grows; the assert makes
      * the ceiling explicit rather than letting the shift go undefined. */
@@ -289,7 +294,8 @@ static void *const volatile stub_addresses[] = {
     (void *)exo_sound_stream_volume,
     (void *)exo_rtc_read, (void *)exo_launch_pkg, (void *)exo_disk_extent,
     (void *)exo_resstat, (void *)exo_grantstat, (void *)exo_launch_start,
-    (void *)exo_fault_info,
+    (void *)exo_fault_info, (void *)exo_disk_acquire_ro,
+    (void *)exo_pane_set,
 };
 
 static void test_every_syscall_has_a_stub(void)

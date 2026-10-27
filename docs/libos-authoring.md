@@ -377,3 +377,73 @@ function.
 - [ ] Generated `libos_<name>_layout.h` in `.gitignore`
 - [ ] Booted, `programs` lists it, `run <name>.exo` works, Q returns to the
       shell
+
+---
+
+## 8. Arranging programs on screen: the layout manifest
+
+A package's manifest (§5) says what *one* program needs. Where several
+running programs go on screen, and which keyboard each one reads, is a
+property of the machine, not of any one program, so it lives in a separate
+text file on the shell's volume: `/etc/layout.cfg` by default. It is how the
+dual-Doom split (epic SCRUM-195) is meant to be set up without rebuilding
+anything.
+
+```
+# comments and blank lines are ignored
+pane doom1  program=doom.exo  rect=0,0,100%,50%    input=ps2    volume=2
+pane doom2  program=doom.exo  rect=0,50%,100%,50%  input=usb:0  volume=3
+```
+
+One `pane` line per program instance, `pane <name>` first and then
+`key=value` words in any order, separated by spaces or tabs:
+
+| Key | Required | Value |
+|---|---|---|
+| `<name>` | yes | 1-15 of `A-Z a-z 0-9 . - _`, unique. Fits a context name, so it can double as the name `pslist` shows. |
+| `program=` | yes | A package name as `run` takes it (`.exo` optional), 1-63 characters. |
+| `rect=` | yes | `x,y,w,h`. Each value is pixels (up to 65535) or a percentage of the screen (`50%`, up to 100%): of the width for `x` and `w`, of the height for `y` and `h`. |
+| `input=` | no | `ps2`, `usb:<n>` (the index `lsusb` prints, SCRUM-293, up to 15), `usb:<vvvv>:<pppp>` (vendor and product id, four hex digits each), or `none`. Omitted means `none`. |
+| `volume=` | no | A save-volume slot, `0`-`7` (`EXO_VOLUME_MAX_SLOTS`, `src/exo_volume.h`), for the instance's private volume (SCRUM-280). |
+
+**Decisions the format makes, and why.**
+
+- **Two ways to name a USB keyboard.** `usb:<n>` is the enumeration index:
+  short, and what `lsusb` prints, but it can change when keyboards move
+  between ports. `usb:<vvvv>:<pppp>` names the device model, which survives
+  that but cannot tell two identical keyboards apart. Both are accepted;
+  which one a layout should use depends on the hardware.
+- **No two panes share a keyboard.** A keyboard's event ring has exactly one
+  consumer (`src/kbd_ring.h`), so binding it twice is refused at parse time.
+  Any number of panes may have `none`. `usb:0` in one pane and the
+  vendor:product of that same keyboard in another can only be caught when
+  the layout is applied, since only then is it known which device is which.
+- **No two panes share a volume slot.** Two writers on one ExoFS volume would
+  corrupt it.
+- **Panes may not overlap.** The kernel pane table (`src/fb_layout.h`) would
+  allow it and draw the later pane on top, but in a manifest an overlap is far
+  more likely to be a typo than a wish, so it is refused.
+- **Percentages are resolved when the layout is applied**, against the real
+  screen, not when it is parsed, so one file works at 640x480 and at
+  1024x768. A percentage is `floor(pct * size / 100)`. When `x` and `w` are
+  both percentages the right edge is computed as one percentage too
+  (`w = edge(x + w) - edge(x)`), so `0,0,50%,100%` and `50%,0,50%,100%`
+  tile an odd-width screen with no gap; likewise for `y` and `h`. A rect
+  that comes out empty or runs off the screen is refused then, naming the
+  screen size.
+- **Keys and keywords are lowercase**, matching `mount`'s `diskN:volM`.
+- **Strict characters.** Outside a comment a line may hold only printable
+  ASCII and tabs, and at most 255 characters; a comment may hold anything.
+  Every error names its line and quotes the offending word, which is
+  therefore always safe to print.
+
+Errors stop at the first one and read like the shell's other messages:
+`/etc/layout.cfg line 2: unknown setting 'colour' (expected program=, rect=,
+input= or volume=)`.
+
+**What exists today.** The parser, its validation and the pixel resolver:
+`src/shell/shell_layout_cfg.c/h` (SCRUM-294), pure logic linked into the shell
+and, under `TESTING=1`, into the kernel for `tests/kernel/test_shell_layout_cfg_k.c`.
+Reading the file and launching what it says is `layout apply` (SCRUM-298),
+which needs pane assignment (`exo_pane_set`, SCRUM-296) and keyboard binding
+(`exo_kbd_bind`, SCRUM-297) from the kernel first.

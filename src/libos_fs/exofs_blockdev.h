@@ -84,6 +84,14 @@ int exofs_bdev_acquire(uint32_t dev);
 int exofs_bdev_acquire_extent(uint32_t dev, uint32_t base, uint32_t count);
 
 /*
+ * Same, held read-only (exo_disk_acquire_ro, #42, SCRUM-281): shares with
+ * other read-only holders such as a program given the program volume, is
+ * refused by a read-write holder, and every write through it is -EXO_EROFS.
+ * For code that only reads a volume, so it works while a program holds it.
+ */
+int exofs_bdev_acquire_extent_ro(uint32_t dev, uint32_t base, uint32_t count);
+
+/*
  * Give the binding of device `dev` back (#27, SCRUM-189); other devices this
  * context holds stay held.
  *

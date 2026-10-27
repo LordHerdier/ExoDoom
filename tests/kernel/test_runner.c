@@ -100,6 +100,7 @@ void suite_shell_install_tests(CU_pSuite s);
 void suite_doom_wad_disk_tests(CU_pSuite s);
 void suite_launch_multi_tests(CU_pSuite s);
 void suite_launch_pkg_tests(CU_pSuite s);
+void suite_syscall_pane_tests(CU_pSuite s);
 void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
 void suite_usb_topology_tests(CU_pSuite s);
@@ -124,6 +125,7 @@ void suite_shell_help_tests(CU_pSuite s);
 void suite_shell_err_tests(CU_pSuite s);
 void suite_shell_hist_tests(CU_pSuite s);
 void suite_shell_complete_tests(CU_pSuite s);
+void suite_shell_layout_tests(CU_pSuite s);
 void suite_shell_mount_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
@@ -211,6 +213,8 @@ int shell_install_suite_cleanup(void);
 int launch_multi_suite_init(void);
 int launch_multi_suite_cleanup(void);
 int launch_pkg_suite_cleanup(void);
+int syscall_pane_suite_init(void);
+int syscall_pane_suite_cleanup(void);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -679,6 +683,10 @@ int run_tests(void)
     s = CU_add_suite("launch_pkg", NULL, launch_pkg_suite_cleanup);
     suite_launch_pkg_tests(s);
 
+    s = CU_add_suite("syscall_pane", syscall_pane_suite_init,
+                     syscall_pane_suite_cleanup);
+    suite_syscall_pane_tests(s);
+
     /* Next to "ata" above: the other driver that talks to real emulated
      * hardware rather than to a model of it (SCRUM-209). */
     s = CU_add_suite("pci", NULL, NULL);
@@ -821,6 +829,9 @@ int run_tests(void)
 
     s = CU_add_suite("shell_complete", NULL, NULL);
     suite_shell_complete_tests(s);
+
+    s = CU_add_suite("shell_layout", NULL, NULL);
+    suite_shell_layout_tests(s);
 
     s = CU_add_suite("shell_mount", shell_mount_suite_init,
                      shell_mount_suite_cleanup);

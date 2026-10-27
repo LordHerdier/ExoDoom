@@ -24,8 +24,8 @@ client's list) is `docs/demo-narration.md`.
    on `main` at `23380ef`.
 3. **Present with `make run-blank`.** This gives a QEMU window plus the serial
    console in the terminal. Arrange the window and the terminal **side by
-   side**: beat 4's resource grant is printed on the serial console, not on
-   screen (§"Rules"). Every run starts from a freshly zeroed disk. To start
+   side if you want the serial log too; beat 4's resource grant is also
+   written to the shell's screen (§"Rules"). Every run starts from a freshly zeroed disk. To start
    over, close QEMU and run it again: it rebuilds, then boots to the format
    prompt in about 8 s.
 
@@ -47,7 +47,7 @@ USB stick until USB mass storage lands (SCRUM-247); say so if asked.
 | 3 | **Install Snake from USB** | `install snake`, then `programs` | `installed /snake.exo (N bytes)`, about 9 KB; `programs` lists `doom.exo`, `snake.exo` | | 3 s |
 | | *(prep, unnarrated)* | `install voldemoa`, `install voldemob`, `install top` | three `installed` lines | | 5 s |
 | 4 | **Program specs vs. what is free** | `run snake.exo` | Snake starts | `granted: context N` / `pages 20 (asked min 24, rec 40)` / `fb …` / `disk none` / `sound none asked for` | 2 s |
-| 5 | **Run it** | play, then `q` | Snake (arrows steer). If it ends: `GAME OVER`, and any key returns to the shell | | ~30 s |
+| 5 | **Run it** | play, then `q` | Snake idles on `Press any arrow key to start` until an arrow is pressed (arrows steer). If it ends: `GAME OVER`; `R` restarts, any other key returns to the shell | | ~30 s |
 | 6 | **Two programs, two filesystems, one disk** | `run voldemoa` | `volume A`, extent `LBA 262144 +8192 sectors`, `first launch -- formatted a new volume`, root lists `launches` and `hello-a.txt`; under `reaching for what is not mine:` volumes B–H, `shell-scratch` and `program-volume` each `refused (-22)`, and `whole disk: refused (-1)` | `voldemo[A] …` lines; grant shows `disk volume slot 0` | 5 s |
 | | | `q`, `run voldemob` | the same for `volume B`, `LBA 270336`, `hello-b.txt` | `voldemo[B] …` | 5 s |
 | | | `q`, `run voldemoa` | `mounted existing volume`, `launches 2`: A's files survived B, and B never saw them | `voldemo[A] launches=2` | 5 s |
@@ -68,10 +68,11 @@ in front of the client.
    *anything* while Doom is up answers `another program is using the disk -- Ctrl+Tab to it, or quit it first`. Launch the
    dashboard first, then use Ctrl+Tab to reach it. (Extents of different
    owners may not overlap, read-only or not; see `docs/syscall_spec.md` §3.5a.)
-2. **The grant is on serial only.** `run` builds the program, prints what it
-   was granted next to what its package asked for (on COM1), then starts it.
-   The program takes the screen immediately, so an on-screen copy would
-   vanish unread. Keep the terminal visible for beat 4.
+2. **The grant is on the shell's screen and on serial.** `run` builds the program, prints what it
+   was granted next to what its package asked for (on COM1 and in the shell), then starts it.
+   The program takes the screen immediately, so the shell's copy is read when
+   the shell is next shown (quit the program, or Ctrl+Tab back); it stays in the
+   shell's scrollback. There is no pause.
 3. **`pages` in the grant can be below `asked min`, and that is expected.**
    `pages` is what the program holds the moment it is built. `asked min` and
    `rec` are what its package says it needs to run, which the shell checked
@@ -88,8 +89,9 @@ in front of the client.
    Ctrl+Tab or Q shows an empty prompt, so earlier output is gone.
 7. **Ctrl+Tab cycles through every live program**, shell included, in launch
    order. With `top` and Doom running, two presses get from Doom to `top`.
-8. **Snake ends within seconds if nobody steers**: `GAME OVER`, then any key
-   returns to the shell. Play it, or press `q` straight away.
+8. **Snake waits for the first arrow key.** It draws the board and idles
+   (`Press any arrow key to start`) as long as you like, so it is safe to talk
+   over the grant output first. `q` or Esc quits from that screen.
 9. **Q or Esc quits the small programs.** Doom quits from its own menu
    (Esc → Quit Game), but it never needs to quit during the demo.
 
