@@ -54,10 +54,9 @@
 .global sse_ring3_probe_end
 sse_ring3_probe:
     /* ── 1. SSE arithmetic at CPL 3 ──────────────────────────────────
-     * If CR4.OSFXSR were clear the addss below would raise #UD, which
-     * idt_init() leaves on default_stub -- a bare iretq back to the
-     * faulting instruction, so the probe would hang rather than reach the
-     * compare.  test_sse_k.c asserts the control-register bits before ever
+     * If CR4.OSFXSR were clear the addss below would raise #UD, which now
+     * ends this program (SCRUM-283; it used to loop on default_stub), so the
+     * probe would never reach the compare.  test_sse_k.c asserts the control-register bits before ever
      * launching this, so that path is unreachable by the time we get here;
      * the compare guards against the instruction executing and being
      * *wrong*, not against it being absent. */

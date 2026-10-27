@@ -273,6 +273,19 @@ The raw call plus the loop keeps that path valid. On exit the kernel reclaims
 your pages, framebuffer, disk bindings and sound; there is nothing to free by
 hand.
 
+### 4.9a Crashing
+
+If your program takes a CPU exception (an address that is not mapped or not
+yours, a privileged instruction such as `cli`, `hlt` or port I/O, a divide by
+zero, an illegal instruction), the kernel ends it as if it had called
+`exo_exit`: your pages, framebuffer, disk bindings and sound are reclaimed and
+the next ready program, normally the shell, runs. You get no chance to clean
+up or handle it, so there is no signal to catch. The shell then prints
+`program <name> stopped: <why>`, and `exo_fault_info` (#41) gives the same
+record (vector, faulting `rip`, address) to any program that wants it. A
+program that crashes as the only one running is replaced by a fresh shell.
+`run crash` (`src/libos_crash/`) does it on purpose.
+
 ### 4.10 You share the CPU
 
 ExoDoom switches programs cooperatively. A switch happens at a syscall: your
@@ -338,8 +351,10 @@ function.
   `exo_serial_write` yourself. `make docker-run-kernel` shows serial in the
   terminal.
 - **A fault in your program prints a report on serial**: the faulting
-  address (`cr2`), `rip`, the error bits, and "ring 3 (LibOS)". Look `rip` up
-  in `build/libos_<name>.elf` with `x86_64-elf-addr2line -e`.
+  address (`cr2`), `rip`, the error bits, and "ring 3 (LibOS) id N "name" --
+  terminating: <why>". The program is then ended and the shell says so on
+  screen (§4.9a). Look `rip` up in `build/libos_<name>.elf` with
+  `x86_64-elf-addr2line -e`.
 - **`make docker-build DEBUG=1`** builds at `-O0` with symbols. For GDB, see
   `docs/debugging.md`.
 - **`top`** (`run top.exo`) shows what each program holds, live.

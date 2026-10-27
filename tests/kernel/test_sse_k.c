@@ -13,9 +13,9 @@
  * ── Why the cases are ordered the way they are ─────────────────────────────
  *
  * Executing an SSE instruction when the bits are NOT set raises #UD on vector
- * 6, where idt_init() (src/idt.c) leaves default_stub -- a bare `iretq`
- * straight back to the faulting instruction, i.e. an infinite loop. That
- * surfaces as a CI timeout with no failing assertion at all, which is the
+ * 6. In ring 0 exception_handler() (src/fault.c) reports it on serial and
+ * halts (SCRUM-283; it used to be default_stub, an infinite loop). Either way
+ * that surfaces as a CI timeout with no failing assertion at all, which is the
  * worst signal this tree can produce and exactly the silent-failure mode
  * KUNIT_MAX_SUITES' own comment (src/kunit.h) warns about.
  *
@@ -174,9 +174,9 @@ static void test_mxcsr_masks_every_simd_exception(void) {
 
     /* Stated separately from the exact-value check above because this is the
      * part that is load-bearing: OSXMMEXCPT is set, so an *unmasked* SIMD
-     * exception would be delivered on vector 19, which idt_init() leaves on
-     * default_stub -- a bare iretq back to the faulting instruction, i.e. a
-     * hang. Whoever first unmasks one of these owes vector 19 a handler. */
+     * exception would be delivered on vector 19, whose handler is
+     * exception_handler() (SCRUM-283): ring 3 ends the program, ring 0 halts.
+     * Whoever first unmasks one of these owes it a policy for the program. */
     CU_ASSERT_EQUAL(mxcsr & MXCSR_ALL_MASKS, MXCSR_ALL_MASKS);
 }
 

@@ -15,8 +15,9 @@
  * fault was therefore a silent infinite loop -- not a triple fault, but not a
  * diagnostic either.  pf_stub + page_fault_handler replace that on vector 14
  * with CR2, the decoded error code, the faulting RIP, and what the live page
- * tables actually say about the address, printed to COM1 before the machine
- * halts.
+ * tables actually say about the address, printed to COM1.  Since SCRUM-283 a
+ * fault from ring 3 then ends that program and resumes another
+ * (fault_terminate_current, below); from ring 0 the machine halts.
  *
  * Vector 13 (#GP) reuses the same frame, describer and TESTING hook via
  * gp_fault_handler/gpf_stub (SCRUM-56) -- a ring-3 IN/OUT hits it because
