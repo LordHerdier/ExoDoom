@@ -1716,7 +1716,10 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
                                           prog_name);
     libos_heap_free(pkg);
     if (lrc == 0) {
-        fbcon_clear(con);
+        /* Back from the program (SCRUM-292). Nothing to redraw: the shell's
+         * framebuffer is its own shadow (src/fb_shadow.h), which the program
+         * never touched, so the earlier output is still there. Clearing here
+         * was left over from the single shared framebuffer. */
     } else if (lrc == -EXO_ENOMEM) {
         /* The check passed on a snapshot taken before #36 loaded the IWAD
          * (doom_wad_disk_get() allocates it on first use), so the kernel's
