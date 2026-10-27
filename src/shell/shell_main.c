@@ -109,6 +109,7 @@
 #include "ps2.h"
 #include "shell/shell_complete.h"
 #include "shell/shell_err.h"
+#include "shell/shell_run_args.h"
 #include "shell/shell_firstboot.h"
 #include "shell/shell_help.h"
 #include "shell/shell_hist.h"
@@ -211,6 +212,9 @@ static char shell_firstboot_done_text[] =
     "system volume formatted; no programs installed\n";
 static char shell_programs_none_text[] = "no programs installed\n";
 static char shell_run_nosuch_text[] = "run: no such program: ";
+static char shell_run_noargs_text[] = "run: this program takes no arguments\n";
+static char shell_run_argslong_text[] = "run: arguments too long -- the limit is ";
+static char shell_run_argslong_tail_text[] = " characters\n";
 static char shell_run_hint_text[] = "installed programs:\n";
 static char shell_install_nodev_text[] = "install: no source disk\n";
 static char shell_install_novol_text[] = "install: source disk has no volume\n";
@@ -662,10 +666,12 @@ static const shell_cmd_t shell_cmds[] = {
         "usage: rm <path>\n" },
       shell_run_rm, 1 },
     { { "run", SHELL_GRP_APPS, "Launch a program package",
-        "usage: run <package>\n"
+        "usage: run <package> [arguments]\n"
         "     <package>  A .exo file on the program volume, e.g. run snake.exo\n"
         "                The .exo may be left off and case is ignored: run snake,\n"
-        "                run SNAKE. A file named exactly as typed wins.\n" },
+        "                run SNAKE. A file named exactly as typed wins.\n"
+        "     arguments  Passed to the program, for those that take any:\n"
+        "                run doom -iwad doom2.wad\n" },
       shell_run_run, 1 },
     { { "snake", SHELL_GRP_APPS, "Launch Snake",
         "usage: snake\n"
@@ -1517,13 +1523,16 @@ static int shell_admit_report(fb_console_t *con, const exo_pkg_header_t *parsed)
  * is no pause. */
 static int64_t shell_launch_with_grant(fb_console_t *con, const void *pkg, uint32_t len,
                                        const exo_pkg_header_t *hdr,
-                                       const char *prog_name) {
+                                       const char *prog_name,
+                                       const uint8_t *params) {
     if (hdr == NULL) {
         /* Not ours to judge; the kernel reports the format error. */
         return exo_launch_pkg(pkg, len, 0, prog_name);
     }
 
-    int64_t ctx = exo_launch_pkg(pkg, len, EXO_LAUNCH_HOLD, prog_name);
+    int64_t ctx = params != NULL
+        ? exo_launch_pkg_params(pkg, len, EXO_LAUNCH_HOLD, prog_name, params)
+        : exo_launch_pkg(pkg, len, EXO_LAUNCH_HOLD, prog_name);
     if (ctx <= 0) {
         return ctx < 0 ? ctx : -EXO_EINVAL;
     }
@@ -1566,6 +1575,9 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         shell_print_usage(con, "run");
         return;
     }
+    /* shell_next_token() leaves p on the text after the name: the program's
+     * arguments (SCRUM-301), checked against the package once it is parsed. */
+    const char *prog_args = p;
     /* Deliberately not shell_resolve_path(): shell_cwd names a directory on
      * the shell's scratch volume, and this is a different volume. A name is
      * relative to the program volume's root; a leading '/' is accepted and
@@ -1714,6 +1726,38 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
     const void *code, *data;
     int have_hdr = exo_pkg_parse(pkg, st.size, &hdr, &code, &data) == 0;
 
+    /* SCRUM-301: the arguments become the launch params the package declared
+     * (params_len). The WAD viewer's params are the kernel's to fill, so a
+     * package asking for the WAD takes no arguments from here. A package that
+     * did not parse is left to the kernel to refuse. */
+    uint8_t launch_params[EXO_LAUNCH_PARAMS_MAX];
+    const uint8_t *params = NULL;
+    uint32_t params_len = (have_hdr && !(hdr.want_flags & EXO_PKG_WANT_WAD))
+                              ? hdr.params_len : 0;
+    if (have_hdr) {
+        if (params_len > EXO_LAUNCH_PARAMS_MAX) {
+            libos_heap_free(pkg);
+            shell_err_report(con, SHELL_OP_RUN, -EXO_EINVAL);
+            return;
+        }
+        int arc = shell_run_args_fill(prog_args, params_len, launch_params);
+        if (arc == SHELL_RUN_ARGS_NO_PARAMS) {
+            libos_heap_free(pkg);
+            fbcon_write(con, shell_run_noargs_text);
+            return;
+        }
+        if (arc == SHELL_RUN_ARGS_TOO_LONG) {
+            libos_heap_free(pkg);
+            fbcon_write(con, shell_run_argslong_text);
+            shell_write_u32(con, params_len - 1u);
+            fbcon_write(con, shell_run_argslong_tail_text);
+            return;
+        }
+        if (params_len != 0) {
+            params = launch_params;
+        }
+    }
+
     if (!shell_admit_report(con, have_hdr ? &hdr : NULL)) {
         libos_heap_free(pkg);
         return;
@@ -1740,7 +1784,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
     }
 
     int64_t lrc = shell_launch_with_grant(con, pkg, st.size, have_hdr ? &hdr : NULL,
-                                          prog_name);
+                                          prog_name, params);
     libos_heap_free(pkg);
     if (lrc == 0) {
         /* Back from the program (SCRUM-292). Nothing to redraw: the shell's

@@ -239,7 +239,7 @@ The kernel preserves every register except `RAX`, `RCX` and `R11`.
 | 19 | `exo_yield()` | Let another ready program run |
 | 20 | `exo_exit(code)` | End the caller; everything it holds is reclaimed |
 | 21 | `exo_launch(app_id)` | Start one of the programs built into the kernel image |
-| 36 | `exo_launch_pkg(pkg, len, flags, name)` | Start a program from a package read off the disk |
+| 36 | `exo_launch_pkg(pkg, len, flags, name, slot, params)` | Start a program from a package read off the disk, optionally with launch arguments |
 | 40 | `exo_launch_start(ctx)` | Start a program prepared with #36's "hold" flag |
 | **Introspection** |||
 | 22 | `exo_memstat(out)` | Page usage across the whole machine |

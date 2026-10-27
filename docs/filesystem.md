@@ -728,6 +728,24 @@ summary line closes the run. Matching and listing
 (`shell_install_glob_match()`/`shell_install_matches()`) are in
 `src/shell/shell_install.c`, tested with the rest of the suite.
 
+**Testing Doom against other IWADs.** `tools/import-wads.sh <archive.zip>`
+extracts a curated set (`doom`, `doom1`, `doom2`, `plutonia`, `tnt`, `chex`,
+`hacx`) into the git-ignored `wads/`, under the lowercase names
+`src/doom/d_iwad.c` searches for. `build.sh` puts every `wads/*.wad` on the
+install disk and, so there is room to install them, formats the system volume
+out to the end of its region (`MKEXOFSIMG_MIN_SECTORS`, read by
+`tools/mkexofsimg`) instead of sizing it to freedoom2 plus the packages. Then
+`install doom2.wad` and `run doom`. Which IWAD Doom uses is chosen with its
+own `-iwad` argument (SCRUM-301): `run doom -iwad freedoom2.wad`, `run doom
+-iwad hacx.wad`. The text after the program name is passed to the program as
+launch params (`docs/libos-authoring.md` §4.3), so Doom's other options work
+too (`run doom -warp 1 1 -skill 4`). Without `-iwad` it is the first name in
+`d_iwad.c`'s search order that is on the volume (`doom2.wad` before
+`freedoom2.wad`). A program that declares no params refuses arguments
+(`run snake foo`). The shell's command line is 64 characters, which is the
+practical limit on the text. The install disk is one volume, capped at `EXOFS_MAX_BLOCKS` (128 MiB)
+including freedoom2 and the packages, which is what bounds the set.
+
 The shell holds both disks for the whole copy (device 1 whole, the program
 volume's extent on device 0, `docs/syscall_spec.md` §3.5a).
 `shell_copy_between()` in `src/shell/shell_install.c` mounts the source and the

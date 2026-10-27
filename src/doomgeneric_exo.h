@@ -67,3 +67,20 @@ int dg_save_result(void);
  * a scratch ExoFS volume.
  */
 int dg_check_iwad(const char *name);
+
+/*
+ * Doom's launch arguments (SCRUM-301): the text after `run doom`, as the
+ * launcher put it in the package's launch params. DG_LAUNCH_ARGS_MAX is the
+ * size of the params struct, which is the package's --params-len
+ * (docker/scripts/build.sh reads it from here, so there is one number); the
+ * text is NUL-terminated inside it, so the longest argument line is one less.
+ *
+ * The buffer is the first global in src/doomgeneric_exo.c, which is the first
+ * file in the Doom link, which puts it at offset 0 of .data where the
+ * kernel's libos_launch_patch_params() writes (docs/libos-authoring.md 4.3).
+ * Unlaunched (a kernel test, or a launch with no arguments) it reads as empty.
+ */
+#define DG_LAUNCH_ARGS_MAX 128u
+
+const char *dg_launch_args(void);
+

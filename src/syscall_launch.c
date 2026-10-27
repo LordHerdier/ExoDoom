@@ -460,13 +460,13 @@ _Static_assert(EXO_LAUNCH_PKG_MAX_LEN ==
  * buffer again, and libos_build_image() copies them exactly once.
  */
 static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
-                              uint64_t name_ptr, uint64_t slot, uint64_t a6)
+                              uint64_t name_ptr, uint64_t slot,
+                              uint64_t params_ptr)
 {
-    (void)a6;
-
     /* Shape first, like the length: a flag this kernel does not know is a
      * caller that expects behavior it will not get. */
-    if ((flags & ~(uint64_t)(EXO_LAUNCH_HOLD | EXO_LAUNCH_SLOT)) != 0) {
+    if ((flags & ~(uint64_t)(EXO_LAUNCH_HOLD | EXO_LAUNCH_SLOT |
+                             EXO_LAUNCH_PARAMS)) != 0) {
         return -EXO_EINVAL;
     }
     if (len < sizeof(exo_pkg_header_t) || len > EXO_LAUNCH_PKG_MAX_LEN) {
@@ -496,14 +496,34 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
         return -EXO_EINVAL;
     }
     /* The header can declare a params struct (first global in .data) for the
-     * launcher to patch, but no patch is wired for packages yet -- Doom and
-     * the WAD viewer still launch through #21. Launching such a package
-     * would start it with a zero-filled params struct and let it misbehave
-     * later, so refuse it now rather than run it half-configured. */
+     * launcher to fill in. Two authors, never both: the kernel writes the
+     * WAD viewer's (EXO_PKG_WANT_WAD, exactly libos_wad_params_t), and for
+     * every other package the launcher does, through EXO_LAUNCH_PARAMS
+     * (SCRUM-301). A program that expects params it was not given would start
+     * with its sentinels and misbehave later, so each mismatch is refused
+     * here rather than run half-configured: params declared but not
+     * supplied, supplied but not declared, or supplied to the WAD viewer. */
     int wants_wad = (hdr.want_flags & EXO_PKG_WANT_WAD) != 0;
-    if (wants_wad ? hdr.params_len != sizeof(libos_wad_params_t)
-                  : hdr.params_len != 0) {
+    int has_params = (flags & EXO_LAUNCH_PARAMS) != 0;
+    if (wants_wad) {
+        if (hdr.params_len != sizeof(libos_wad_params_t) || has_params) {
+            return -EXO_EINVAL;
+        }
+    } else if (has_params ? (hdr.params_len == 0 ||
+                             hdr.params_len > EXO_LAUNCH_PARAMS_MAX)
+                          : hdr.params_len != 0) {
         return -EXO_EINVAL;
+    }
+    /* The buffer is checked and copied now, before anything is allocated,
+     * and never read again: what lands in the image is this copy. */
+    uint8_t launch_params[EXO_LAUNCH_PARAMS_MAX];
+    if (has_params) {
+        if (!exo_range_in_user_window(params_ptr, hdr.params_len) ||
+            !exo_user_range_mapped(params_ptr, hdr.params_len, 0)) {
+            return -EXO_EFAULT;
+        }
+        memcpy(launch_params, (const void *)(uintptr_t)params_ptr,
+               hdr.params_len);
     }
     /* A package with no code has nothing for entry_vaddr to point at;
      * libos_build_image() would refuse it, but refuse it before a context
@@ -607,6 +627,18 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
         if (wrc != 0) {
             return wrc;
         }
+    }
+
+    if (has_params &&
+        libos_launch_patch_params(&launch_img, launch_params,
+                                  hdr.params_len) != VMM_OK) {
+        /* Cannot happen for a header exo_pkg_parse() accepted (params_len
+         * is bounded by data_len and by the cap above), but a failed patch
+         * must not leave a half-configured program running. */
+        libos_destroy_image(id, &launch_img);
+        disk_binding_forget(id);
+        context_destroy(id);
+        return -EXO_EINVAL;
     }
 
     /* libos_build_image() maps LIBOS_LAUNCH_STACK_PAGES regardless, so the

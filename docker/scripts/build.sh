@@ -449,10 +449,12 @@ echo "[2c/7] Build shell LibOS (SCRUM-110)"
 # src/shell/shell_layout_cfg.c (the layout manifest parser), likewise, for
 # test_shell_layout_cfg_k.c; nothing in the shell calls it until `layout apply`
 # (SCRUM-298), but linking it here keeps it building as ring-3 code.
+# SCRUM-301 adds src/shell/shell_run_args.c (`run` argument text to launch
+# params), likewise, for test_shell_run_args_k.c.
 build_ring3_link_target shell src/shell "" "" \
   src/shell/shell_main.c src/shell/shell_help.c src/shell/shell_install.c \
   src/shell/shell_mount.c src/shell/shell_err.c src/shell/shell_hist.c src/shell/shell_complete.c \
-  src/shell/shell_layout_cfg.c \
+  src/shell/shell_layout_cfg.c src/shell/shell_run_args.c \
   src/fb.c src/fb_console.c src/libos_fb.c \
   src/stdlib.c src/stdio.c src/string.c src/ctype.c \
   src/errno.c src/fpconv.c src/libos_heap.c src/libos_page_alloc.c \
@@ -640,7 +642,7 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/fpconv.c src/doom_net_stub.c \
   src/doom_wad.c src/wad.c src/doom_panic.c src/doom_keymap.c \
   src/doom_sound.c src/doom_sfx_tone.c \
-  src/doom_sound_pcm.c src/doom_dmx.c \
+  src/doom_sound_pcm.c src/doom_dmx.c src/doom_args.c \
   src/libos_doom/doom_midi.c src/libos_doom/doom_genmidi.c \
   src/libos_doom/doom_opl.c src/nuked_opl3/opl3.c \
   src/libos_doom/doom_sound_music.c \
@@ -652,6 +654,28 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/libos_fs/exo_file.c src/libos_fs/exo_file_stdio.c \
   src/libos_fs/exofs_attach.c \
   src/doom/*.c
+
+# SCRUM-301: Doom's launch arguments are patched over offset 0 of .data
+# (docs/libos-authoring.md 4.3), and that offset belongs to whichever global
+# the link puts first. Assert it is g_dg_launch_args rather than trust the
+# source order: a misplaced one patches some other variable, and Doom starts
+# with the arguments silently lost.
+doom_data_vma="$(x86_64-elf-objdump -h build/libos_doom.elf | awk '$2 == ".data" { print $4 }')"
+doom_args_sym="$(nm_symbol_value build/libos_doom.elf g_dg_launch_args)"
+if [[ -z "$doom_data_vma" || -z "$doom_args_sym" ||
+      $(( 16#$doom_data_vma )) -ne $(( 16#$doom_args_sym )) ]]; then
+  echo "    ERROR: g_dg_launch_args is not at offset 0 of libos_doom's .data"
+  echo "           (.data at 0x${doom_data_vma:-?}, g_dg_launch_args at 0x${doom_args_sym:-?})."
+  echo "           It must be the first variable in src/doomgeneric_exo.c, and"
+  echo "           that file first in the link, or run's arguments never arrive."
+  exit 1
+fi
+doom_params_len="$(sed -n 's/^#define DG_LAUNCH_ARGS_MAX \([0-9]*\)u\?$/\1/p' \
+                   src/doomgeneric_exo.h)"
+if [[ -z "$doom_params_len" ]]; then
+  echo "    ERROR: could not read DG_LAUNCH_ARGS_MAX from src/doomgeneric_exo.h"
+  exit 1
+fi
 
 echo "[2g/7] Package ring-3 targets and write the disk image (SCRUM-230, SCRUM-231)"
 # Ordering: this step must stay AFTER every target it packages (the disk image
@@ -706,8 +730,11 @@ package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,k
 # slots, so a second Doom running alongside the first gets saves of its own
 # rather than -EBUSY. EXO_VOLUME_SLOT_DOOM/EXO_VOLUME_SLOTS_DOOM in
 # src/exo_volume.h: change both together.
+# SCRUM-301: --params-len is the launch arguments buffer (DG_LAUNCH_ARGS_MAX in
+# src/doomgeneric_exo.h), which `run doom -iwad doom2.wad` fills in.
 package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd,progvol \
-  --sound-voices 8 --volume-slot 2 --volume-slots 2 --volume-sectors 8192
+  --sound-voices 8 --volume-slot 2 --volume-slots 2 --volume-sectors 8192 \
+  --params-len "$doom_params_len"
 # SCRUM-237: one program, two packages, each requesting a private volume
 # (docs/architecture.md, src/exo_volume.h). Only the slot differs.
 package_ring3_target libos_voldemo    src/libos_voldemo    voldemoa.exo fb,disk,kbd \
@@ -720,7 +747,25 @@ pkg_args=()
 for f in build/packages/*.exo; do
   pkg_args+=("$f" "$(basename "$f")")
 done
-build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba" \
+# Extra IWADs for testing Doom against something other than freedoom2:
+# tools/import-wads.sh fills wads/ (git-ignored) from an archive. They go on
+# the install disk below, not the system volume -- `install doom2.wad` copies
+# one across -- and when any exist the system volume is formatted out to the
+# end of its region, so there is room to install them.
+wad_args=()
+sys_min_sectors=""
+for f in wads/*.wad; do
+  [[ -f "$f" ]] || continue
+  wad_args+=("$f" "$(basename "$f")")
+done
+if (( ${#wad_args[@]} > 0 )); then
+  prog_vol_end="$(sed -n 's/^#define EXO_VOLUME_REGION_BASE_LBA \([0-9]*\)u\?$/\1/p' \
+                  src/exo_volume.h)"
+  sys_min_sectors=$(( prog_vol_end - wad_base_lba ))
+  echo "    $(( ${#wad_args[@]} / 2 )) extra WAD(s) from wads/ staged on the install disk"
+fi
+MKEXOFSIMG_MIN_SECTORS="$sys_min_sectors" \
+  build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba" \
   "${pkg_args[@]}"
 
 # SCRUM-237: the per-program volume slots (src/exo_volume.h) sit past the
@@ -756,7 +801,7 @@ fi
 # output), because the multidisk and shell_install KUnit suites reformat the
 # whole drive on a test boot; the next build puts the packages back.
 build/mkexofsimg build/exodoom_disk2.img "$WAD_PATH" "$wad_file" 0 \
-  "${pkg_args[@]}"
+  "${pkg_args[@]}" "${wad_args[@]}"
 
 echo "[3/7] Compile C sources"
 
@@ -1035,6 +1080,13 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   x86_64-elf-gcc -c src/shell/shell_layout_cfg.c -o build/shell_layout_cfg.o \
     "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
   objs+=("build/shell_layout_cfg.o")
+
+  # `run` argument text to launch params (SCRUM-301), for
+  # tests/kernel/test_shell_run_args_k.c. Pure logic: no syscalls, no libc.
+  echo "    CC shell_run_args.c (run arguments)"
+  x86_64-elf-gcc -c src/shell/shell_run_args.c -o build/shell_run_args.o \
+    "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  objs+=("build/shell_run_args.o")
 
   echo "[3b5/7] Gate: ExoFS still builds as a ring-3 target (SCRUM-189)"
   # Step [3a/7] above (now unconditional, SCRUM-190) compiles ExoFS one way
