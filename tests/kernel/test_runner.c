@@ -126,6 +126,8 @@ void suite_shell_hist_tests(CU_pSuite s);
 void suite_shell_complete_tests(CU_pSuite s);
 void suite_shell_layout_tests(CU_pSuite s);
 void suite_shell_mount_tests(CU_pSuite s);
+void suite_shell_run_args_tests(CU_pSuite s);
+void suite_doom_args_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -831,6 +833,12 @@ int run_tests(void)
     s = CU_add_suite("shell_mount", shell_mount_suite_init,
                      shell_mount_suite_cleanup);
     suite_shell_mount_tests(s);
+
+    s = CU_add_suite("shell_run_args", NULL, NULL);
+    suite_shell_run_args_tests(s);
+
+    s = CU_add_suite("doom_args", NULL, NULL);
+    suite_doom_args_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not

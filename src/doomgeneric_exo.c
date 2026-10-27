@@ -40,6 +40,7 @@
 #include "doomgeneric_exo.h"
 #include "exo_syscall.h"
 
+#include "doom_args.h"
 #include "doom_wad.h"
 #include "libos_fs/exo_file.h"
 #include "libos_fs/exo_file_stdio.h"
@@ -53,6 +54,19 @@
 #endif
 
 #include <stdint.h>
+
+/*
+ * The launch params (SCRUM-301). MUST stay the first variable defined in this
+ * file: see DG_LAUNCH_ARGS_MAX. A single space rather than "": a
+ * zero-initialised global goes to .bss, which has no bytes in the image for
+ * the kernel to patch.
+ */
+static char g_dg_launch_args[DG_LAUNCH_ARGS_MAX] = " ";
+
+const char *dg_launch_args(void)
+{
+    return g_dg_launch_args;
+}
 
 /*
  * The IWAD's name on the program volume (SCRUM-66, SCRUM-190). Must be a name
@@ -414,7 +428,16 @@ void DG_Init(void)
     int rc = dg_mount_program_volume();
 
     if (rc == 0) {
-        rc = dg_check_iwad(DOOM_IWAD_NAME);
+        /* The file Doom is about to look for: -iwad's value if it was given
+         * one, else the build's default. Read-only: Doom's own d_iwad.c does
+         * the choosing, this only keeps the report about the same file. */
+        char iwad[DG_LAUNCH_ARGS_MAX];
+        const char *name = DOOM_IWAD_NAME;
+        if (doom_args_value(g_dg_launch_args, DG_LAUNCH_ARGS_MAX, "-iwad",
+                            iwad, sizeof(iwad))) {
+            name = iwad;
+        }
+        rc = dg_check_iwad(name);
     }
     g_dg_init_result = rc;
 

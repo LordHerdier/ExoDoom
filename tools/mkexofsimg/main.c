@@ -174,6 +174,22 @@ int main(int argc, char **argv)
     if (vol_sectors < EXOFS_MIN_SECTORS) {
         vol_sectors = EXOFS_MIN_SECTORS;
     }
+    /* MKEXOFSIMG_MIN_SECTORS: format at least this many sectors, so the
+     * volume has room for files installed later (docker/scripts/build.sh
+     * sets it when wads/ holds extra IWADs for `install`). Unset or empty
+     * leaves the volume sized to its contents. */
+    const char *min_env = getenv("MKEXOFSIMG_MIN_SECTORS");
+    if (min_env && *min_env) {
+        uint32_t min_sectors;
+        if (parse_base_lba(min_env, &min_sectors) != 0) {
+            fprintf(stderr, "mkexofsimg: invalid MKEXOFSIMG_MIN_SECTORS '%s'\n",
+                    min_env);
+            return 1;
+        }
+        if (vol_sectors < min_sectors) {
+            vol_sectors = min_sectors;
+        }
+    }
     /* The whole file spans [0, base_lba + vol_sectors): everything below
      * base_lba is left zeroed, reserved scratch space for the fixtures
      * described above, not part of this volume. */

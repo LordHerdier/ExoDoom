@@ -136,7 +136,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | Freestanding libc | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`, `src/fpconv.c/h`; header-only shims `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/*.h` |
 | Fixed-point trigonometry | `src/fixed_math.c/h` |
 | Vendored Doom engine (`libos_doom` ring-3 target) | `src/doom/`, `src/libos_doom/` |
-| doomgeneric platform layer | `src/doomgeneric_exo.c/h` |
+| doomgeneric platform layer, Doom's launch arguments (`run doom -iwad ...`, argv from the launch params) | `src/doomgeneric_exo.c/h`, `src/doom_args.c/h` |
 | Doom net stub / fatal-error path / mounted IWAD registry (kernel tests; ring-3 Doom reads the IWAD via FILE* over ExoFS) | `src/doom_net_stub.c`, `src/doom_panic.c/h`, `src/doom_wad.c/h`, `src/doom_wad_disk.c/h` |
 | Shell mount table + path router (`mount`/`umount`, pure logic, TESTING-kernel suite) | `src/shell/shell_mount.c/h` (used from `src/shell/shell_main.c`) |
 | Layout manifest parser (`/etc/layout.cfg`: pane, program, rect, keyboard; pure logic, TESTING-kernel suite) | `src/shell/shell_layout_cfg.c/h` — format in `docs/libos-authoring.md` §8 |

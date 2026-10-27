@@ -186,9 +186,25 @@ land on your struct:
   ```
 - the package must declare its size: `--params-len 16` for that struct.
 
-Today only the `wad` request uses it, to hand the WAD viewer the address and
-size of the mapped IWAD (`src/libos_wad_viewer/libos_wad_viewer.c`). Treat the
-struct as your own mutable state once the program runs.
+Two kinds of launch fill it in:
+
+- the `wad` request: the *kernel* hands the WAD viewer the address and size of
+  the mapped IWAD (`src/libos_wad_viewer/libos_wad_viewer.c`), and the launcher
+  passes nothing;
+- everything else (SCRUM-301): the *launcher* supplies the bytes with
+  `exo_launch_pkg_params()` (`EXO_LAUNCH_PARAMS`, `docs/syscall_spec.md` #36).
+  Declare `--params-len N` (at most `EXO_LAUNCH_PARAMS_MAX`, 256) and the
+  launcher must pass exactly N bytes; a package with `--params-len` cannot be
+  launched without them, and one without cannot be given any. Doom is the
+  example: its params are one NUL-terminated argument string
+  (`g_dg_launch_args` in `src/doomgeneric_exo.c`, `DG_LAUNCH_ARGS_MAX`
+  bytes), which `src/doom_args.c` splits into Doom's argv, so
+  `run doom -iwad doom2.wad` reaches the engine's own `-iwad`. Initialise the
+  buffer to a non-zero default (a single space) so it lands in `.data`.
+  `docker/scripts/build.sh` checks that the global really is at offset 0 of
+  Doom's `.data`.
+
+Treat the struct as your own mutable state once the program runs.
 
 ### 4.4 Your own directory, and no `-DEXO_KERNEL`
 

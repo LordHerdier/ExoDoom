@@ -410,7 +410,7 @@ static void test_footprint_formula_matches_a_real_launch(void)
     unmap_scratch(paddr);
 }
 
-/* ---- params_len: no patch exists for packages, so it is refused ------- */
+/* ---- params_len: a package that declares params needs them supplied ---- */
 
 static void test_package_declaring_a_params_struct_is_refused(void)
 {
@@ -418,8 +418,9 @@ static void test_package_declaring_a_params_struct_is_refused(void)
     page_owner_t fg = make_foreground();
 
     /* A valid package with 8 bytes of .data whose first 4 are a params
-     * struct. exo_pkg_check_header() accepts this; the launcher must not,
-     * because nothing would fill the struct in. */
+     * struct. exo_pkg_check_header() accepts this; a launch without
+     * EXO_LAUNCH_PARAMS must not (SCRUM-301), because nothing would fill the
+     * struct in. */
     exo_pkg_header_t h = good_header(probe_len());
     h.data_len   = 8;
     h.params_len = 4;
@@ -1265,6 +1266,138 @@ static void test_a_hold_belongs_to_its_launcher(void)
     unmap_scratch(paddr);
 }
 
+/* ---- Launch params from the launcher (SCRUM-301) --------------------- */
+
+/* Where the params buffer sits in the scratch page, clear of the package at
+ * its start (header + the probe + a few hundred bytes of data). */
+#define PARAMS_BUF (PKG_SCRATCH + 0xC00ULL)
+
+/* Pack the probe with `data_len` bytes of data (0x55-filled) whose first
+ * `params_len` are the params struct, at PKG_SCRATCH; returns the length. */
+static size_t write_params_package(uint32_t data_len, uint32_t params_len,
+                                   uint32_t want_flags)
+{
+    exo_pkg_header_t h = good_header(probe_len());
+    h.data_len    = data_len;
+    h.params_len  = params_len;
+    h.want_flags  = want_flags;
+    uint8_t data[512];
+    memset(data, 0x55, sizeof(data));
+    size_t total = 0;
+    CU_ASSERT_EQUAL(exo_pkg_pack((void *)(uintptr_t)PKG_SCRATCH, 0xC00, &h,
+                                 (const void *)&libos_launch_probe, data,
+                                 &total), 0);
+    return total;
+}
+
+static int64_t do_launch_params(size_t total, uint64_t flags, uint64_t params)
+{
+    return exo_syscall_dispatch(EXO_SYS_LAUNCH_PKG, PKG_SCRATCH, total,
+                                flags | EXO_LAUNCH_PARAMS, 0, 0, params);
+}
+
+/* The first `n` bytes of `ctx`'s .data, as the program will see them. */
+static int data_head_is(page_owner_t ctx, const void *want, size_t n)
+{
+    uint64_t pa = 0;
+    if (vmm_translate_in((uint64_t *)(uintptr_t)context_pml4(ctx),
+                         LIBOS_LAUNCH_DATA_VADDR, &pa, NULL) != 0)
+        return 0;
+    return memcmp((const void *)(uintptr_t)pa, want, n) == 0;
+}
+
+static void test_launch_params_are_patched_into_the_programs_data(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    size_t total = write_params_package(16, 8, 0);
+
+    /* Params sit after the package in the same page; they must survive the
+     * launch untouched and arrive byte for byte, with the rest of .data left
+     * as the package had it. */
+    static const char args[8] = "-iwad\0\0";
+    memcpy((void *)(uintptr_t)PARAMS_BUF, args, sizeof(args));
+
+    context_info_t before[CONTEXT_MAX];
+    uint32_t n = context_list(before, CONTEXT_MAX);
+    CU_ASSERT_EQUAL(do_launch_params(total, 0, PARAMS_BUF), 0);
+    page_owner_t child = new_context(before, n);
+    CU_ASSERT_NOT_EQUAL(child, PAGE_OWNER_FREE);
+
+    uint8_t want[16];
+    memset(want, 0x55, sizeof(want));
+    memcpy(want, args, sizeof(args));
+    CU_ASSERT_TRUE(data_head_is(child, want, sizeof(want)));
+
+    /* The copy is the program's own: scribbling on the launcher's buffer
+     * afterwards changes nothing. */
+    memset((void *)(uintptr_t)PARAMS_BUF, 0xFF, sizeof(args));
+    CU_ASSERT_TRUE(data_head_is(child, want, sizeof(want)));
+
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+static void test_launch_params_refusals_take_nothing(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+
+    /* Each case: (data_len, params_len, want_flags, flag?, buffer). A refused
+     * launch takes no page and no context row. */
+    struct {
+        uint32_t data_len, params_len, want;
+        uint64_t buf;
+        int64_t  expect;
+    } cases[] = {
+        /* params supplied to a package that declared none */
+        { 16, 0, 0,                PARAMS_BUF,                       -EXO_EINVAL },
+        /* declared more than a launcher may fill in */
+        { 512, EXO_LAUNCH_PARAMS_MAX + 1, 0, PARAMS_BUF,             -EXO_EINVAL },
+        /* the WAD viewer's struct is the kernel's, never the launcher's */
+        { 16, 16, EXO_PKG_WANT_WAD, PARAMS_BUF,                      -EXO_EINVAL },
+        /* a buffer outside the window, unmapped, or running off the page */
+        { 16, 8, 0, 0x1000,                                          -EXO_EFAULT },
+        { 16, 8, 0, PKG_UNMAPPED,                                    -EXO_EFAULT },
+        { 16, 8, 0, PKG_SCRATCH + VMM_PAGE_SIZE - 4,                 -EXO_EFAULT },
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        size_t total = write_params_package(cases[i].data_len,
+                                            cases[i].params_len,
+                                            cases[i].want);
+        uint32_t free_before = free_pages_now();
+        uint32_t ctx_before  = context_count();
+        CU_ASSERT_EQUAL(do_launch_params(total, 0, cases[i].buf),
+                        cases[i].expect);
+        CU_ASSERT_EQUAL(free_pages_now(), free_before);
+        CU_ASSERT_EQUAL(context_count(), ctx_before);
+        CU_ASSERT_EQUAL(context_switch_pending, 0);
+    }
+
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+static void test_launch_params_work_with_a_hold(void)
+{
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    size_t total = write_params_package(16, 8, 0);
+    static const char args[8] = "-warp\0\0";
+    memcpy((void *)(uintptr_t)PARAMS_BUF, args, sizeof(args));
+
+    int64_t id = do_launch_params(total, EXO_LAUNCH_HOLD, PARAMS_BUF);
+    CU_ASSERT_TRUE(id > 0);
+    CU_ASSERT_EQUAL(context_switch_pending, 0);
+    CU_ASSERT_TRUE(id > 0 && data_head_is((page_owner_t)id, args, sizeof(args)));
+
+    destroy_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
 static void test_unknown_launch_flags_are_refused(void)
 {
     uint64_t paddr = map_scratch();
@@ -1274,7 +1407,7 @@ static void test_unknown_launch_flags_are_refused(void)
     uint32_t n_before = context_count();
 
     CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_LAUNCH_PKG, PKG_SCRATCH, total,
-                                         4, 0, 0, 0), -EXO_EINVAL);
+                                         8, 0, 0, 0), -EXO_EINVAL);
     CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_LAUNCH_PKG, PKG_SCRATCH, total,
                                          EXO_LAUNCH_HOLD | 0x100, 0, 0, 0),
                     -EXO_EINVAL);
@@ -1303,6 +1436,12 @@ void suite_launch_pkg_tests(CU_pSuite s)
                 test_launched_package_is_fully_reclaimable);
     CU_add_test(s, "the footprint formula matches a real launch",
                 test_footprint_formula_matches_a_real_launch);
+    CU_add_test(s, "launch params are patched into the program's data",
+                test_launch_params_are_patched_into_the_programs_data);
+    CU_add_test(s, "bad launch params are refused before anything is taken",
+                test_launch_params_refusals_take_nothing);
+    CU_add_test(s, "launch params compose with a hold",
+                test_launch_params_work_with_a_hold);
     CU_add_test(s, "a package declaring a params struct is refused",
                 test_package_declaring_a_params_struct_is_refused);
     CU_add_test(s, "the framebuffer is released only by a launch that happens",

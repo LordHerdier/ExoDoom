@@ -54,6 +54,7 @@
 #include "exo_syscall.h"
 #include "doomgeneric_exo.h"
 #include "libos_fb.h"
+#include "doom_args.h"
 #include "doom_keymap.h"
 #include "doom_wad.h"
 #include "doom/doomgeneric.h"
@@ -74,14 +75,19 @@ void doomgeneric_Tick(void);
 /*
  * Doom's own argv. doomgeneric_Create() stashes these in myargc/myargv for
  * M_CheckParm(), which every -foo option in the engine reads through. There
- * is no command line to inherit here, so it is the program name alone:
- * M_CheckParm returns 0 for everything, which is the vanilla default path.
+ * is no command line to inherit, so it is the program name followed by the
+ * launch arguments (SCRUM-301): `run doom -iwad doom2.wad` puts the text after
+ * "doom" in the launch params (dg_launch_args(), src/doomgeneric_exo.c), and
+ * doom_args_split() turns it into tokens here. With no arguments that is the
+ * program name alone, for which M_CheckParm returns 0 for everything: the
+ * vanilla default path.
  *
  * Non-const because myargv is `char **` and M_FindResponseFile() writes
  * through it.
  */
 static char  arg0[] = "exodoom";
-static char *doom_argv[] = { arg0, NULL };
+static char *doom_argv[DOOM_ARGV_SLOTS(DG_LAUNCH_ARGS_MAX)];
+static char  doom_argv_store[DG_LAUNCH_ARGS_MAX + 1];
 
 /*
  * The framebuffer, mapped once on the first frame (SCRUM-77).
@@ -443,7 +449,10 @@ void libos_doom_main(void)
      * I_Error, both of which go through doom_panic_begin() (SCRUM-83) and
      * halt without coming back.
      */
-    doomgeneric_Create(1, doom_argv);
+    int doom_argc = doom_args_split(arg0, dg_launch_args(), DG_LAUNCH_ARGS_MAX,
+                                    doom_argv_store, sizeof(doom_argv_store),
+                                    doom_argv, DOOM_ARGV_SLOTS(DG_LAUNCH_ARGS_MAX));
+    doomgeneric_Create(doom_argc > 0 ? doom_argc : 1, doom_argv);
 
     for (;;) {
         doomgeneric_Tick();

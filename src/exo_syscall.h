@@ -376,6 +376,19 @@ typedef struct {
  * free one.  exo_launch_pkg_slot() passes it. */
 #define EXO_LAUNCH_SLOT   2u
 
+/* Flag for exo_launch_pkg's third argument (SCRUM-301): the sixth argument
+ * points at the launch params for the program, exactly the package's
+ * params_len bytes, which the kernel copies over the first global in the
+ * program's .data (docs/libos-authoring.md 4.3).  Required for a package that
+ * declares params_len (except the WAD viewer's kernel-filled struct) and
+ * refused for one that does not.  exo_launch_pkg_params() passes it. */
+#define EXO_LAUNCH_PARAMS 4u
+
+/* Largest params_len a launcher may fill in with EXO_LAUNCH_PARAMS (SCRUM-301).
+ * The kernel copies the buffer to its own stack before it looks at anything
+ * else, so the cap is a stack budget as much as a policy. */
+#define EXO_LAUNCH_PARAMS_MAX 256u
+
 /* exo_rtc_read(out) — #35.  Calendar date and time from the CMOS RTC, which
  * the kernel treats as UTC (no time zones).  unix_secs is seconds since
  * 1970-01-01 00:00:00 and is derived from the other fields. */
@@ -1024,7 +1037,7 @@ static inline int64_t exo_launch_pkg(const void *pkg, uint64_t len,
                                      uint64_t flags, const char *name)
 {
     return exo_syscall4(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len,
-                        flags & ~(uint64_t)EXO_LAUNCH_SLOT,
+                        flags & ~(uint64_t)(EXO_LAUNCH_SLOT | EXO_LAUNCH_PARAMS),
                         (uint64_t)(uintptr_t)name);
 }
 
@@ -1040,6 +1053,24 @@ static inline int64_t exo_launch_pkg_slot(const void *pkg, uint64_t len,
     return exo_syscall5(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len,
                         flags | EXO_LAUNCH_SLOT, (uint64_t)(uintptr_t)name,
                         (uint64_t)slot);
+}
+
+/* #36 with launch params (SCRUM-301): `params` is the package's params_len
+ * bytes, copied over the first global in its .data before it runs.  The
+ * launcher learns params_len from the header it parsed.  Combine with
+ * EXO_LAUNCH_HOLD as usual; a package that wants a particular volume slot is
+ * not expressible with this stub (no launcher needs both yet).  Errors as #36,
+ * plus -EXO_EINVAL for a package whose params_len is 0, over
+ * EXO_LAUNCH_PARAMS_MAX, or the WAD viewer's, and -EXO_EFAULT for a `params`
+ * buffer that is not entirely inside the LibOS window and mapped. */
+static inline int64_t exo_launch_pkg_params(const void *pkg, uint64_t len,
+                                            uint64_t flags, const char *name,
+                                            const void *params)
+{
+    return exo_syscall6(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len,
+                        (flags & ~(uint64_t)EXO_LAUNCH_SLOT) | EXO_LAUNCH_PARAMS,
+                        (uint64_t)(uintptr_t)name, 0,
+                        (uint64_t)(uintptr_t)params);
 }
 
 /* #40 — enter a context #36 built with EXO_LAUNCH_HOLD.  Like exo_launch, on
