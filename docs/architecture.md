@@ -1301,6 +1301,16 @@ focus and the active framebuffer.
 > (`ENOENT` on `run` vs `install`). A code with no sentence of its own prints
 > the op's generic one followed by `(err=N)`, so it stays greppable. The
 > sentence does not name which program holds the disk.
+>
+> ✅ **SCRUM-273:** the shell keeps the last 16 submitted commands. Up recalls
+> older ones, Down newer ones, and Down past the newest restores the line
+> being typed. The ring lives in `src/shell/shell_hist.c` (pure logic, also
+> compiled into the TESTING kernel for `tests/kernel/test_shell_hist_k.c`);
+> the key loop in `shell_main()` handles `KEY_UP`/`KEY_DOWN` before
+> `shell_key_to_ascii()` and redraws the input row with `shell_backspace()`.
+> Empty lines and a repeat of the previous command are not stored. A recalled
+> line is an ordinary edit buffer (Backspace and typing work), but pressing
+> Up/Down again replaces it, edits included. Not persisted, no Left/Right.
 
 ---
 

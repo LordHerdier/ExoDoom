@@ -443,9 +443,11 @@ echo "[2c/7] Build shell LibOS (SCRUM-110)"
 # SCRUM-266 adds src/shell/shell_mount.c (the mount table and path router),
 # likewise, for tests/kernel/test_shell_mount_k.c. SCRUM-271 adds
 # src/shell/shell_err.c (errno wording), likewise, for test_shell_err_k.c.
+# SCRUM-273 adds src/shell/shell_hist.c (command history), likewise, for
+# test_shell_hist_k.c.
 build_ring3_link_target shell src/shell "" "" \
   src/shell/shell_main.c src/shell/shell_help.c src/shell/shell_install.c \
-  src/shell/shell_mount.c src/shell/shell_err.c \
+  src/shell/shell_mount.c src/shell/shell_err.c src/shell/shell_hist.c \
   src/fb.c src/fb_console.c src/libos_fb.c \
   src/stdlib.c src/stdio.c src/string.c src/ctype.c \
   src/errno.c src/fpconv.c src/libos_heap.c src/libos_page_alloc.c \
@@ -995,6 +997,13 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   x86_64-elf-gcc -c src/shell/shell_err.c -o build/shell_err.o \
     "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
   objs+=("build/shell_err.o")
+
+  # The shell's command history ring (SCRUM-273), for
+  # tests/kernel/test_shell_hist_k.c. Pure logic: no syscalls, no libc.
+  echo "    CC shell_hist.c (shell history)"
+  x86_64-elf-gcc -c src/shell/shell_hist.c -o build/shell_hist.o \
+    "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  objs+=("build/shell_hist.o")
 
   echo "[3b5/7] Gate: ExoFS still builds as a ring-3 target (SCRUM-189)"
   # Step [3a/7] above (now unconditional, SCRUM-190) compiles ExoFS one way
