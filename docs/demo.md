@@ -47,7 +47,7 @@ USB stick until USB mass storage lands (SCRUM-247); say so if asked.
 | 3 | **Install Snake from USB** | `install snake`, then `programs` | `installed /snake.exo (N bytes)`, about 9 KB; `programs` lists `doom.exo`, `snake.exo` | | 3 s |
 | | *(prep, unnarrated)* | `install voldemoa`, `install voldemob`, `install top` | three `installed` lines | | 5 s |
 | 4 | **Program specs vs. what is free** | `run snake.exo` | Snake starts | `granted: context N` / `pages 20 (asked min 24, rec 40)` / `fb …` / `disk none` / `sound none asked for` | 2 s |
-| 5 | **Run it** | play, then `q` | Snake (arrows steer). If it ends: `GAME OVER`, and any key returns to the shell | | ~30 s |
+| 5 | **Run it** | play, then `q` | Snake idles on `Press any arrow key to start` until an arrow is pressed (arrows steer). If it ends: `GAME OVER`; `R` restarts, any other key returns to the shell | | ~30 s |
 | 6 | **Two programs, two filesystems, one disk** | `run voldemoa` | `volume A`, extent `LBA 262144 +8192 sectors`, `first launch -- formatted a new volume`, root lists `launches` and `hello-a.txt`; under `reaching for what is not mine:` volumes B–H, `shell-scratch` and `program-volume` each `refused (-22)`, and `whole disk: refused (-1)` | `voldemo[A] …` lines; grant shows `disk volume slot 0` | 5 s |
 | | | `q`, `run voldemob` | the same for `volume B`, `LBA 270336`, `hello-b.txt` | `voldemo[B] …` | 5 s |
 | | | `q`, `run voldemoa` | `mounted existing volume`, `launches 2`: A's files survived B, and B never saw them | `voldemo[A] launches=2` | 5 s |
@@ -88,8 +88,9 @@ in front of the client.
    Ctrl+Tab or Q shows an empty prompt, so earlier output is gone.
 7. **Ctrl+Tab cycles through every live program**, shell included, in launch
    order. With `top` and Doom running, two presses get from Doom to `top`.
-8. **Snake ends within seconds if nobody steers**: `GAME OVER`, then any key
-   returns to the shell. Play it, or press `q` straight away.
+8. **Snake waits for the first arrow key.** It draws the board and idles
+   (`Press any arrow key to start`) as long as you like, so it is safe to talk
+   over the grant output first. `q` or Esc quits from that screen.
 9. **Q or Esc quits the small programs.** Doom quits from its own menu
    (Esc → Quit Game), but it never needs to quit during the demo.
 
