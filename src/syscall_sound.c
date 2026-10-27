@@ -268,8 +268,8 @@ static int64_t sys_sound_pcm(uint64_t buf, uint64_t num_samples,
      * with every voice silent still costs ~47 interrupts a second forever
      * (docs/drivers/hda.md §12), and on most boots nobody ever asks for a
      * sound. hda_pcm_start() is idempotent while streaming, but checking
-     * first keeps the boot tone's own mode alone until there is really
-     * something to play. */
+     * first leaves the stream alone until there is really something to
+     * play. */
     if (!hda_pcm_is_streaming() && hda_pcm_start() != HDA_OK) {
         staging_free(staging, pages);
         return -EXO_ENODEV;
