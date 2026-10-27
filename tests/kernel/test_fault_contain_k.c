@@ -13,7 +13,7 @@
  * Reuses context_switch_k's hand-built contexts (two context_create()'d
  * address spaces, one page each for code/data/stack) rather than
  * libos_build_image(), which binds the address space to its own owner.
- * Vectors other than #PF/#GP are SCRUM-283 step 4.
+ * Covers #PF, #GP, #DE and #UD; the other vectors share exception_handler().
  */
 
 #include "kunit.h"
@@ -33,8 +33,8 @@ extern void fault_contain_survivor(void);
 extern void fault_contain_survivor_end(void);
 
 #define SURVIVOR_MARKER 0x600DC0DEULL /* must match fault_contain_probe.s */
-#define FAULT_KINDS     5             /* selector values the victim handles */
-#define LOOP_ROUNDS     25            /* 5 rounds of every kind */
+#define FAULT_KINDS     7             /* selector values the victim handles */
+#define LOOP_ROUNDS     28            /* 4 rounds of every kind */
 
 #define CLEANUP_SCAN_IDS 4096
 

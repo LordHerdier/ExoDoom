@@ -24,7 +24,7 @@
  * CR2 and no useful error-code bits for an IN/OUT trap (the error code here
  * is 0 unless the fault relates to a specific selector), so
  * gp_fault_handler skips print_mapping() and the bit-decoded error line.
- * The other eight error-code vectors still use plain error_stub.
+ * Every other vector has an exc_stub_N/exception_handler since SCRUM-283.
  */
 
 /*
@@ -80,6 +80,11 @@ void gp_fault_handler(exception_frame_t *f);
  */
 void fault_terminate_current(const exception_frame_t *f, const char *why)
     __attribute__((noreturn));
+
+/* Every other CPU exception vector (SCRUM-283), from isr.s's exc_stub_N with
+ * the vector number.  Ring 3 ends the program via fault_terminate_current();
+ * ring 0, #DF and #MC halt with a diagnostic.  Never returns. */
+void exception_handler(exception_frame_t *f, uint64_t vector);
 
 #ifdef TESTING
 /*

@@ -278,3 +278,69 @@ void gp_fault_handler(exception_frame_t *f)
     /* Not reached: fault_terminate_current() halts or switches away. */
     halt_forever();
 }
+
+/* What the log and the shell call each remaining vector (SCRUM-283). `why`
+ * is the plain-language reason a ring-3 program was stopped. */
+static const char *exception_name(uint64_t vector, const char **why)
+{
+    switch (vector) {
+    case 0:  *why = "divided by zero";                return "DIVIDE ERROR (#DE)";
+    case 1:  *why = "unexpected debug trap";          return "DEBUG (#DB)";
+    case 3:  *why = "unexpected breakpoint";          return "BREAKPOINT (#BP)";
+    case 4:  *why = "arithmetic overflow trap";       return "OVERFLOW (#OF)";
+    case 5:  *why = "bound range exceeded";           return "BOUND RANGE (#BR)";
+    case 6:  *why = "illegal instruction";            return "INVALID OPCODE (#UD)";
+    case 7:  *why = "floating-point unit unavailable"; return "DEVICE NOT AVAILABLE (#NM)";
+    case 8:  *why = "double fault";                   return "DOUBLE FAULT (#DF)";
+    case 10: *why = "invalid task state";             return "INVALID TSS (#TS)";
+    case 11: *why = "segment not present";            return "SEGMENT NOT PRESENT (#NP)";
+    case 12: *why = "stack fault";                    return "STACK FAULT (#SS)";
+    case 16: *why = "floating-point error";           return "x87 FLOATING POINT (#MF)";
+    case 17: *why = "misaligned memory access";       return "ALIGNMENT CHECK (#AC)";
+    case 18: *why = "machine check";                  return "MACHINE CHECK (#MC)";
+    case 19: *why = "floating-point error";           return "SIMD FLOATING POINT (#XM)";
+    case 20: *why = "virtualization exception";       return "VIRTUALIZATION (#VE)";
+    case 21: *why = "control-flow protection fault";  return "CONTROL PROTECTION (#CP)";
+    default: *why = "unexpected processor exception"; return "EXCEPTION";
+    }
+}
+
+void exception_handler(exception_frame_t *f, uint64_t vector)
+{
+    if (in_fault) {
+        serial_print("\nexception while handling a fault -- halting\n");
+        halt_forever();
+    }
+    in_fault = 1;
+
+    const char *why;
+    const char *name = exception_name(vector, &why);
+
+    serial_print("\n=== ");
+    serial_print(name);
+    serial_print(", vector ");
+    serial_print_hex64(vector);
+    serial_print(" ===\n");
+
+    serial_print("  error:     0x");
+    serial_print_hex64(f->error_code);
+    serial_print("\n  rip:       0x");
+    serial_print_hex64(f->rip);
+    serial_print("\n  cs:rsp:    0x");
+    serial_print_hex64(f->cs);
+    serial_print(":0x");
+    serial_print_hex64(f->rsp);
+    serial_print("\n  rflags:    0x");
+    serial_print_hex64(f->rflags);
+    serial_print("\n");
+
+    /* #DF and #MC are not something to resume from whichever ring raised
+     * them: the CPU state is no longer trustworthy. */
+    if (vector == 8 || vector == 18) {
+        serial_print("  context:   abort-class exception -- fatal\n");
+        serial_print("=== halted ===\n");
+        halt_forever();
+    }
+
+    fault_terminate_current(f, why);
+}

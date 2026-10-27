@@ -304,3 +304,60 @@ gpf_stub:
     POP_ALL_REGS
     add  $8, %rsp        // discard the CPU-pushed error code
     iretq
+
+/*
+ * ── exc_stub_N — every remaining CPU exception vector (SCRUM-283) ──────────
+ *
+ * Until now vectors 0, 6, 7, 16, 19 and the rest were on default_stub, a bare
+ * `iretq` back to the faulting instruction -- a silent infinite loop for a
+ * ring-3 divide by zero or ud2.  These stubs build the same exception_frame_t
+ * pf_stub/gpf_stub use and hand it to exception_handler(frame, vector), which
+ * ends a ring-3 program or halts for ring 0.
+ *
+ * Vectors with no hardware error code push a 0 first, so the frame is uniform
+ * and the shared `add $8, %rsp` tail is correct for both kinds.  Like
+ * pf_stub, the POP/iretq tail is only reachable if the handler returns, which
+ * it never does today; it is written correctly anyway.
+ *
+ * Vectors left alone on purpose: 2 (NMI, no policy for it), 9 and 15 (not
+ * raised by current CPUs), 14/13 (own stubs above), and 32+ (IRQs).
+ */
+.extern exception_handler
+
+.macro EXC_STUB vec, has_err
+.global exc_stub_\vec
+exc_stub_\vec:
+.if !\has_err
+    push $0
+.endif
+    PUSH_ALL_REGS
+    mov  %rsp, %rdi
+    mov  $\vec, %esi
+    ALIGN_CALL_STACK
+    call exception_handler
+    RESTORE_CALL_STACK
+    POP_ALL_REGS
+    add  $8, %rsp        // discard the (real or dummy) error code
+    iretq
+.endm
+
+EXC_STUB 0,  0
+EXC_STUB 1,  0
+EXC_STUB 3,  0
+EXC_STUB 4,  0
+EXC_STUB 5,  0
+EXC_STUB 6,  0
+EXC_STUB 7,  0
+EXC_STUB 8,  1
+EXC_STUB 10, 1
+EXC_STUB 11, 1
+EXC_STUB 12, 1
+EXC_STUB 16, 0
+EXC_STUB 17, 1
+EXC_STUB 18, 0
+EXC_STUB 19, 0
+EXC_STUB 20, 0
+EXC_STUB 21, 1
+EXC_STUB 28, 0
+EXC_STUB 29, 1
+EXC_STUB 30, 1

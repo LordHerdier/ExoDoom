@@ -15,8 +15,10 @@
  *   2  cli                 (#GP)
  *   3  hlt                 (#GP)
  *   4  in %dx, %al         (#GP, I/O bitmap denies)
- * No selector value is expected to fall through; the trailing ud2 only
- * bounds the copy and would turn a missed fault into a visible #UD.
+ *   5  divide by zero      (#DE)
+ *   6  ud2                 (#UD)
+ * An unknown selector falls into a ud2 as well; a handled fault never falls
+ * through, and the final ud2 only bounds the copy.
  */
 
 #include "exo_syscall.h"
@@ -44,6 +46,8 @@ fault_contain_victim:
     je  4f
     cmpq $4, %rax
     je  5f
+    cmpq $5, %rax
+    je  6f
     ud2
 1:  xorl %eax, %eax
     movq (%rax), %rax              /* NULL read */
@@ -57,6 +61,11 @@ fault_contain_victim:
     ud2
 5:  movw $0x80, %dx
     inb %dx, %al
+    ud2
+6:  xorl %edx, %edx
+    movl $1, %eax
+    xorl %ecx, %ecx
+    divl %ecx                      /* #DE */
     ud2
 fault_contain_victim_end:
     ud2
