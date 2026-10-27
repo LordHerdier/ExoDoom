@@ -34,6 +34,9 @@
 #include "exo_volume.h"
 #include "libos_fb.h"
 #include "libos_heap.h"
+
+/* The program volume lives on block device 0, the system disk. */
+#define SLIDES_DEV 0u
 #include "libos_fs/exofs.h"
 #include "fb.h"
 #include "fb_console.h"
@@ -138,11 +141,11 @@ static int slides_has_ext(const char *name)
 /* ---- loading ------------------------------------------------------------ */
 
 /* Fill slides_names[] with the decks in the volume root. Volume mounted. */
-static uint32_t slides_find_decks(void)
+static uint32_t slides_find_decks(exofs_vol_t *vol)
 {
     exofs_dir_t dir;
     uint32_t count = 0;
-    if (exofs_opendir("/", &dir) != 0) {
+    if (exofs_opendir(vol, "/", &dir) != 0) {
         return 0;
     }
     for (;;) {
@@ -175,10 +178,10 @@ static uint32_t slides_find_decks(void)
 }
 
 /* Read all of `path` into a fresh heap buffer. Volume mounted. */
-static int slides_read_file(const char *path, uint8_t **out, uint32_t *out_len)
+static int slides_read_file(exofs_vol_t *vol, const char *path, uint8_t **out, uint32_t *out_len)
 {
     exofs_stat_t st;
-    int rc = exofs_stat(path, &st);
+    int rc = exofs_stat(vol, path, &st);
     if (rc != 0) {
         return rc;
     }
@@ -191,7 +194,7 @@ static int slides_read_file(const char *path, uint8_t **out, uint32_t *out_len)
     }
 
     exofs_file_t f;
-    rc = exofs_open(path, EXOFS_O_READ, &f);
+    rc = exofs_open(vol, path, EXOFS_O_READ, &f);
     uint32_t have = 0;
     if (rc == 0) {
         while (have < st.size) {
@@ -252,22 +255,23 @@ static uint32_t slides_pick(uint32_t count)
  * disk back. Returns only with a deck in the heap. */
 static void slides_load_deck(uint8_t **deck, uint32_t *deck_len, const char **name)
 {
-    int64_t rc = exo_disk_acquire(LIBOS_WAD_DISK_BASE_LBA,
+    int64_t rc = exo_disk_acquire(SLIDES_DEV, LIBOS_WAD_DISK_BASE_LBA,
                                   EXO_VOLUME_REGION_BASE_LBA -
                                       LIBOS_WAD_DISK_BASE_LBA);
     if (rc != 0) {
         slides_fail("cannot bind the program volume", rc);
     }
-    int mrc = exofs_mount(LIBOS_WAD_DISK_BASE_LBA);
+    exofs_vol_t *vol = NULL;
+    int mrc = exofs_mount(SLIDES_DEV, LIBOS_WAD_DISK_BASE_LBA, &vol);
     if (mrc != 0) {
-        exo_disk_release();
+        exo_disk_release(SLIDES_DEV);
         slides_fail("cannot mount the program volume", mrc);
     }
 
-    uint32_t count = slides_find_decks();
+    uint32_t count = slides_find_decks(vol);
     if (count == 0) {
-        exofs_unmount();
-        exo_disk_release();
+        exofs_unmount(vol);
+        exo_disk_release(SLIDES_DEV);
         slides_fail("no .exs decks on the program volume -- see tools/mkslides",
                     -EXO_ENOENT);
     }
@@ -285,9 +289,9 @@ static void slides_load_deck(uint8_t **deck, uint32_t *deck_len, const char **na
     fbcon_write(&g_con, slides_names[pick] + 1);
     fbcon_write(&g_con, " ...\n");
 
-    int frc = slides_read_file(slides_names[pick], deck, deck_len);
-    exofs_unmount();
-    exo_disk_release();
+    int frc = slides_read_file(vol, slides_names[pick], deck, deck_len);
+    exofs_unmount(vol);
+    exo_disk_release(SLIDES_DEV);
     if (frc != 0) {
         slides_fail("cannot read the deck", frc);
     }
