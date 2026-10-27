@@ -43,6 +43,9 @@
  * The one exception is `run` (SCRUM-230): it mounts the program volume at
  * LIBOS_WAD_DISK_BASE_LBA to read a package, and only stats/opens/reads
  * before unmounting -- every other command still mounts SHELL_FS_BASE_LBA.
+ * `run`, `programs` and Tab completion of program names bind it read-only
+ * (SCRUM-281), so they still work while a program that holds it read-only
+ * (Doom) is running; `install` writes it and must wait.
  * `dd read` may read any LBA, the IWAD volume included; `dd write` is
  * confined to [0, SHELL_FS_BASE_LBA) so it can reach neither volume -- see
  * shell_run_dd_write()'s own comment.
@@ -287,6 +290,7 @@ static void shell_run_pslist(fb_console_t *con, const char *arg);
 static int shell_cmd_match(const char *line, const char *cmd, const char **rest);
 static int shell_fs_acquire_and_mount(fb_console_t *con);
 static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba);
+static int shell_fs_mount_programs(fb_console_t *con);
 static void shell_run_run(fb_console_t *con, const char *arg);
 static int shell_list_programs(fb_console_t *con, exofs_dir_t *dir);
 static void shell_run_programs(fb_console_t *con, const char *arg);
@@ -1236,11 +1240,14 @@ static uint32_t shell_fs_held_dev;
  * one, so it is kept here rather than threaded through every helper. */
 static exofs_vol_t *shell_cur_vol;
 
-/* Acquire the extent `v` lives in and mount it. Prints its own diagnostic
- * and returns 0 on failure so each caller can just return. */
-static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
-                                          const shell_volref_t *v) {
-    int64_t rc = exo_disk_acquire(v->dev, v->extent_base, v->extent_count);
+/* Acquire the extent `v` lives in, with EXO_DISK_ACQ_* `flags`, and mount
+ * it. Prints its own diagnostic and returns 0 on failure so each caller can
+ * just return. */
+static int shell_fs_acquire_and_mount_flags(fb_console_t *con,
+                                            const shell_volref_t *v,
+                                            uint32_t flags) {
+    int64_t rc = exo_disk_acquire_flags(v->dev, v->extent_base,
+                                        v->extent_count, flags);
     if (rc != 0) {
         shell_err_report(con, SHELL_OP_DISK, rc);
         return 0;
@@ -1257,12 +1264,26 @@ static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
     return 1;
 }
 
+static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
+                                          const shell_volref_t *v) {
+    return shell_fs_acquire_and_mount_flags(con, v, 0);
+}
+
+/* The program volume, bound read-only (SCRUM-281). A program packaged with
+ * `progvol` (Doom) holds it read-only for as long as it runs, and a
+ * read-write bind cannot share with that, so a read-write `run` would be
+ * -EXO_EBUSY until the program quit. Reading packages needs nothing more. */
+static int shell_fs_mount_programs(fb_console_t *con) {
+    shell_volref_t v = shell_sys_volref(LIBOS_WAD_DISK_BASE_LBA);
+    return shell_fs_acquire_and_mount_flags(con, &v, EXO_DISK_ACQ_RO);
+}
+
 static int shell_fs_acquire_and_mount(fb_console_t *con) {
     return shell_fs_acquire_and_mount_at(con, SHELL_FS_BASE_LBA);
 }
 
-/* Same, for a volume other than the shell's scratch one -- `run` reads
- * program packages off the program volume at LIBOS_WAD_DISK_BASE_LBA. */
+/* Same, for either of the shell's two compile-time volumes, read-write.
+ * Readers of the program volume use shell_fs_mount_programs() instead. */
 static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba) {
     shell_volref_t v = shell_sys_volref(base_lba);
     return shell_fs_acquire_and_mount_vol(con, &v);
@@ -1564,7 +1585,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         fbcon_write(con, " (reboot to be offered a format)\n");
         return;
     }
-    if (!shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
+    if (!shell_fs_mount_programs(con)) {
         return;
     }
 
@@ -1784,9 +1805,12 @@ static void shell_run_mkfs(fb_console_t *con, const char *arg) {
 /* Mount result for the system volume with the raw code exposed, which
  * shell_fs_acquire_and_mount_at() hides: first boot must tell "no superblock"
  * from "could not look". Acquires and releases the disk itself; on a failed
- * acquire the code is the acquire's. */
+ * acquire the code is the acquire's. Read-only, like shell_fs_mount_programs()
+ * and for the same reason: `run` probes first. */
 static int shell_probe_system_volume(void) {
-    int64_t arc = shell_disk_acquire_for(LIBOS_WAD_DISK_BASE_LBA);
+    shell_volref_t v = shell_sys_volref(LIBOS_WAD_DISK_BASE_LBA);
+    int64_t arc = exo_disk_acquire_flags(v.dev, v.extent_base, v.extent_count,
+                                         EXO_DISK_ACQ_RO);
     if (arc != 0) {
         return (int)arc;
     }
@@ -1880,7 +1904,7 @@ static void shell_run_programs(fb_console_t *con, const char *arg) {
         fbcon_write(con, " (reboot to be offered a format)\n");
         return;
     }
-    if (!shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
+    if (!shell_fs_mount_programs(con)) {
         return;
     }
 
@@ -1939,7 +1963,7 @@ static void shell_tab_gather(fb_console_t *con, const char *line,
     case SHELL_COMP_PROGRAM:
         if (shell_firstboot_classify(shell_probe_system_volume()) ==
                 SHELL_FIRSTBOOT_UNFORMATTED ||
-            !shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
+            !shell_fs_mount_programs(con)) {
             return;
         }
         if (exofs_opendir(shell_cur_vol, "/", &dir) == 0) {

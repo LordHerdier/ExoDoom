@@ -646,6 +646,154 @@ static void test_ro_assignment_refuses_a_private_volume_overlap(void)
     disk_binding_forget(PAGE_OWNER_LIBOS);
 }
 
+/* ── Read-only acquire by an unassigned context (SCRUM-281) ──────────────── */
+
+/* The bug: Doom holds the program volume read-only, and the shell's `run`
+ * binds it read-write to read a package, which can never share with a
+ * reader. A read-only acquire can. */
+static void test_unassigned_reader_shares_with_ro_assignee(void)
+{
+    page_owner_t doom = OTHER_LIBOS, shell = PAGE_OWNER_LIBOS;
+
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(doom, 5000, 64), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(doom, 0, 5000, 64),
+                    DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(shell, 0, 5000, 64),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(shell, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_range(shell, 0, 5000, 64), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_write(shell, 0, 5000, 1),
+                    DISK_BIND_EROFS);
+    CU_ASSERT_EQUAL(disk_binding_check_range(shell, 0, 5064, 1),
+                    DISK_BIND_ERANGE);
+
+    /* A third context still cannot write while either reader holds it. */
+    page_owner_t writer = (page_owner_t)(PAGE_OWNER_LIBOS + 2);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(writer, 0, 5000, 64),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(shell, 0);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(writer, 0, 5000, 64),
+                    DISK_BIND_EBUSY);   /* Doom still reads it */
+    disk_binding_release(doom, 0);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(writer, 0, 5000, 64),
+                    DISK_BIND_OK);
+    disk_binding_release(writer, 0);
+    disk_binding_forget(doom);
+}
+
+static void test_ro_acquire_never_shares_with_a_writer(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(PAGE_OWNER_LIBOS, 0, 5010,
+                                                   4),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(OTHER_LIBOS, 0);
+
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(PAGE_OWNER_LIBOS, 0, 5010,
+                                                   4),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS, 0), DISK_BIND_EBUSY);
+    /* Two unassigned readers share, overlapping without matching. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(OTHER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+    disk_binding_release(OTHER_LIBOS, 0);
+}
+
+/* The same extent in the other mode is a different binding: a reader that
+ * could turn itself into a writer in place would skip the overlap check. */
+static void test_reacquire_in_the_other_mode_is_busy(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(PAGE_OWNER_LIBOS, 0, 5000,
+                                                   64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(PAGE_OWNER_LIBOS, 0, 5000,
+                                                   64),
+                    DISK_BIND_OK);   /* same mode: a re-acquire */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_check_write(PAGE_OWNER_LIBOS, 0, 5000, 1),
+                    DISK_BIND_EROFS);  /* still the reader it was */
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(PAGE_OWNER_LIBOS, 0, 5000,
+                                                   64),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_check_write(PAGE_OWNER_LIBOS, 0, 5000, 1),
+                    DISK_BIND_OK);
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+}
+
+/* Read-only reaches nothing a plain acquire could not: a private volume
+ * stays private, and an assigned context is still held to its volumes. */
+static void test_ro_acquire_keeps_the_other_rules(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(OTHER_LIBOS, 5000, 64), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(PAGE_OWNER_LIBOS, 0, 5000,
+                                                   64),
+                    DISK_BIND_EBUSY);
+
+    /* The assignee may bind its own private volume read-only... */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(OTHER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_write(OTHER_LIBOS, 0, 5000, 1),
+                    DISK_BIND_EROFS);
+    /* ...and nothing else. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(OTHER_LIBOS, 0, 9000, 8),
+                    DISK_BIND_EPERM);
+    disk_binding_release(OTHER_LIBOS, 0);
+    disk_binding_forget(OTHER_LIBOS);
+
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(PAGE_OWNER_LIBOS, 0, 5, 0),
+                    DISK_BIND_ERANGE);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(PAGE_OWNER_FREE, 0, 0, 8),
+                    DISK_BIND_EBUSY);
+}
+
+static int64_t do_disk_acquire_flags(uint64_t base, uint64_t count,
+                                     uint64_t flags)
+{
+    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, base, count, flags,
+                                0, 0);
+}
+
+/* #26's flags register: EXO_DISK_ACQ_RO reaches the read-only acquire, 0 is
+ * the read-write one it always was, and an unknown bit is refused. */
+static void test_acquire_syscall_flags(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(OTHER_LIBOS, 5000, 64), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(do_disk_acquire_flags(5000, 64, 0), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(do_disk_acquire_flags(5000, 64, 2), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_acquire_flags(5000, 64,
+                                          EXO_DISK_ACQ_RO | (1ull << 32)),
+                    -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_acquire_flags(5000, 64, EXO_DISK_ACQ_RO), 0);
+    CU_ASSERT_EQUAL(do_disk_write(5000, 0, 1), -EXO_EROFS);
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+    disk_binding_release(OTHER_LIBOS, 0);
+    disk_binding_forget(OTHER_LIBOS);
+
+    CU_ASSERT_EQUAL(do_disk_acquire_flags(5000, 64, 0), 0);
+    CU_ASSERT_EQUAL(disk_binding_check_write(PAGE_OWNER_LIBOS, 0, 5000, 1),
+                    DISK_BIND_OK);
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+}
+
 /* ── A private volume alongside the program volume (SCRUM-267) ──────────── */
 
 /* Doom's shape: the shared read-only program volume for the IWAD, a private
@@ -802,6 +950,15 @@ void suite_disk_binding_tests(CU_pSuite s)
                 test_ro_holders_share_but_never_with_a_writer);
     CU_add_test(s, "read-only assignment does not fence others out",
                 test_ro_assignment_does_not_fence_others_out);
+    CU_add_test(s, "unassigned reader shares with a read-only assignee",
+                test_unassigned_reader_shares_with_ro_assignee);
+    CU_add_test(s, "read-only acquire never shares with a writer",
+                test_ro_acquire_never_shares_with_a_writer);
+    CU_add_test(s, "re-acquire in the other mode is busy",
+                test_reacquire_in_the_other_mode_is_busy);
+    CU_add_test(s, "read-only acquire keeps the other rules",
+                test_ro_acquire_keeps_the_other_rules);
+    CU_add_test(s, "acquire syscall flags", test_acquire_syscall_flags);
     CU_add_test(s, "revoke pending is per owner",
                 test_revoke_pending_is_per_owner);
     CU_add_test(s, "owner is free with several holders",

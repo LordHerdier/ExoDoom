@@ -165,8 +165,8 @@ int disk_binding_acquire(page_owner_t who, uint32_t dev)
     return disk_binding_acquire_extent(who, dev, 0, 0);
 }
 
-int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
-                                uint32_t count)
+static int acquire(page_owner_t who, uint32_t dev, uint32_t base,
+                   uint32_t count, int want_ro)
 {
     if (!disk_binding_present(dev))
         return DISK_BIND_ENODEV;
@@ -195,8 +195,11 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
     disk_extent_t *own = find_assigned_exact(who, dev, base, count);
     if (assigned_any && !own)
         return DISK_BIND_EPERM;
-    /* A read-only assignment grants no exclusivity, so it keeps nobody out. */
-    int ro = own != NULL && own->read_only;
+    /* A read-only assignment grants no exclusivity, so it keeps nobody out.
+     * Its binding is read-only whether or not the caller asked; anyone may
+     * ask for a read-only binding of what it is otherwise allowed to bind
+     * (SCRUM-281). */
+    int ro = (own != NULL && own->read_only) || want_ro;
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
         if (assigned[i].owner != PAGE_OWNER_FREE && assigned[i].owner != who &&
             !assigned[i].read_only && assigned[i].dev == dev &&
@@ -208,13 +211,15 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
      * caller has not let go of. The exception is a context with assignments
      * (SCRUM-267): every extent it can reach here is one the launcher gave
      * it, so holding both its volumes at once is what it was granted, not a
-     * swap. Everyone else keeps one extent per device. */
+     * swap. Everyone else keeps one extent per device. The same extent in
+     * the other mode is a different binding (SCRUM-281): upgrading a reader
+     * to a writer in place would skip the overlap check below. */
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++) {
         disk_extent_t *e = &extents[i];
         if (e->owner != who || e->dev != dev)
             continue;
         if (e->base == base && e->count == count)
-            return DISK_BIND_OK;
+            return !!e->read_only == ro ? DISK_BIND_OK : DISK_BIND_EBUSY;
         if (!assigned_any)
             return DISK_BIND_EBUSY;
     }
@@ -250,6 +255,18 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
     free_slot->read_only     = ro;
 
     return DISK_BIND_OK;
+}
+
+int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
+                                uint32_t count)
+{
+    return acquire(who, dev, base, count, 0);
+}
+
+int disk_binding_acquire_extent_ro(page_owner_t who, uint32_t dev,
+                                   uint32_t base, uint32_t count)
+{
+    return acquire(who, dev, base, count, 1);
 }
 
 int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count)

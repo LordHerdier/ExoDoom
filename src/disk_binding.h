@@ -115,6 +115,23 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
                                 uint32_t count);
 
 /*
+ * disk_binding_acquire_extent(), but the binding is read-only (SCRUM-281):
+ * disk_binding_check_write() answers DISK_BIND_EROFS for it, and in return it
+ * may overlap other read-only extents (never a read-write one, in either
+ * direction). Every other rule is the same, so it reaches nothing a plain
+ * acquire could not. What it is for: a context with no assignment of its own
+ * (the shell) reading the program volume while a program it launched holds
+ * that volume read-only (EXO_PKG_WANT_PROGRAM_RO, SCRUM-75), where a
+ * read-write acquire is DISK_BIND_EBUSY until the program exits.
+ *
+ * A context that already holds the same extent in the other mode gets
+ * DISK_BIND_EBUSY (release first), as for a different extent. A context's
+ * read-only *assignment* is always bound read-only, by either call.
+ */
+int disk_binding_acquire_extent_ro(page_owner_t who, uint32_t dev,
+                                   uint32_t base, uint32_t count);
+
+/*
  * Assign `who` the extent [base, base + count) of device 0 as its volume
  * (SCRUM-237; always device 0 -- the slot region is a system-disk layout).
  * Set by the launcher from the package manifest before the program runs.

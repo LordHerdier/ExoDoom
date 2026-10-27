@@ -449,6 +449,12 @@ typedef struct {
 #define EXO_DISK_EXTENT_PRIVATE 1u
 #define EXO_DISK_EXTENT_PROGRAM 2u
 
+/* #26 fourth argument, `flags` (SCRUM-281); exo_disk_acquire_flags(). */
+#define EXO_DISK_ACQ_RO    0x1u  /* read-only binding: exo_disk_write is
+                                  * -EXO_EROFS, and it may share sectors with
+                                  * other read-only holders */
+#define EXO_DISK_ACQ_VALID EXO_DISK_ACQ_RO
+
 /* EXO_PSLIST_MAX *is* CONTEXT_MAX (src/context.h) — included here rather than
  * restated as a separate literal, so the two can never drift the way they
  * did across SCRUM-193: that ticket raised VMM_MAX_ADDRESS_SPACES (and so
@@ -774,17 +780,35 @@ static inline int64_t exo_disk_write(uint32_t dev, uint32_t lba,
  * conflict. count == 0 (and base == 0) claims the whole device, which is
  * what the argument-less call did before ranges existed. Must succeed before
  * exo_disk_read/exo_disk_write will do anything for this caller, and those
- * then refuse any sector outside [base, base + count). Returns 0 (including a
- * re-acquire of the same extent), -EXO_EBUSY if the extent overlaps another
- * context's on this device or the caller already holds a different one of
- * it, -EXO_EINVAL for a malformed extent, -EXO_EPERM if the caller has an
- * assigned volume and this is not it, -EXO_ENOMEM if the extent table is
- * full, or -EXO_ENODEV if there is no such device. */
+ * then refuse any sector outside [base, base + count).
+ *
+ * `flags` is EXO_DISK_ACQ_* bits. EXO_DISK_ACQ_RO binds the extent read-only:
+ * writes through it are -EXO_EROFS, and it may overlap other contexts'
+ * read-only extents, though never a read-write one. That is how a reader (the
+ * shell's `run`) shares the program volume with a program that holds it
+ * read-only (SCRUM-75), which a read-write acquire cannot do.
+ *
+ * Returns 0 (including a re-acquire of the same extent in the same mode),
+ * -EXO_EBUSY if the extent overlaps another context's on this device in a way
+ * the modes do not allow, or the caller already holds a different extent of
+ * it or this one in the other mode, -EXO_EINVAL for a malformed extent or an
+ * unknown flag, -EXO_EPERM if the caller has an assigned volume and this is
+ * not it, -EXO_ENOMEM if the extent table is full, or -EXO_ENODEV if there is
+ * no such device. */
+static inline int64_t exo_disk_acquire_flags(uint32_t dev, uint32_t base,
+                                             uint32_t count, uint32_t flags)
+{
+    return exo_syscall4(EXO_SYS_DISK_ACQUIRE, (uint64_t)dev, (uint64_t)base,
+                        (uint64_t)count, (uint64_t)flags);
+}
+
+/* #26 for a read-write binding: exo_disk_acquire_flags(dev, base, count, 0).
+ * Always through the four-argument stub, so the flags register is 0 rather
+ * than whatever was left in it. */
 static inline int64_t exo_disk_acquire(uint32_t dev, uint32_t base,
                                        uint32_t count)
 {
-    return exo_syscall3(EXO_SYS_DISK_ACQUIRE, (uint64_t)dev, (uint64_t)base,
-                        (uint64_t)count);
+    return exo_disk_acquire_flags(dev, base, count, 0);
 }
 
 /* #27 — give the binding of device `dev` back (SCRUM-189, device SCRUM-244);

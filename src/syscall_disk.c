@@ -184,25 +184,34 @@ static int64_t sys_disk_write(uint64_t dev, uint64_t lba, uint64_t buf,
 }
 
 /* #26 -- bind sectors [base, base + count) of device `dev` to the caller;
- * count == 0 means the whole device (SCRUM-237, device SCRUM-244). The
+ * count == 0 means the whole device (SCRUM-237, device SCRUM-244). `flags`
+ * (SCRUM-281) is EXO_DISK_ACQ_* bits: EXO_DISK_ACQ_RO asks for a read-only
+ * binding, which may share sectors with other read-only holders. The
  * arguments arrive as full 64-bit values for the same reason
  * validate_disk_shape()'s do: truncating a raw-ABI caller's high bits would
- * turn an invalid extent into a valid one. A missing device is -EXO_ENODEV
- * ahead of the extent's shape, the precedence #24/#25 use. */
+ * turn an invalid extent into a valid one, and an unknown flag bit is refused
+ * rather than ignored so it can be given a meaning later. A missing device is
+ * -EXO_ENODEV ahead of the extent's shape, the precedence #24/#25 use. */
 static int64_t sys_disk_acquire(uint64_t dev, uint64_t base, uint64_t count,
-                                uint64_t a4, uint64_t a5, uint64_t a6)
+                                uint64_t flags, uint64_t a5, uint64_t a6)
 {
-    (void)a4; (void)a5; (void)a6;
+    (void)a5; (void)a6;
 
     if (disk_dev(dev) == NULL)
         return -EXO_ENODEV;
 
-    if (base > UINT32_MAX || count > UINT32_MAX)
+    if (base > UINT32_MAX || count > UINT32_MAX ||
+        (flags & ~(uint64_t)EXO_DISK_ACQ_VALID) != 0)
         return -EXO_EINVAL;
 
-    switch (disk_binding_acquire_extent(syscall_current_context(),
-                                        (uint32_t)dev, (uint32_t)base,
-                                        (uint32_t)count)) {
+    int rc = (flags & EXO_DISK_ACQ_RO)
+        ? disk_binding_acquire_extent_ro(syscall_current_context(),
+                                         (uint32_t)dev, (uint32_t)base,
+                                         (uint32_t)count)
+        : disk_binding_acquire_extent(syscall_current_context(),
+                                      (uint32_t)dev, (uint32_t)base,
+                                      (uint32_t)count);
+    switch (rc) {
     case DISK_BIND_OK:      return 0;
     case DISK_BIND_EBUSY:   return -EXO_EBUSY;
     case DISK_BIND_ERANGE:  return -EXO_EINVAL;
