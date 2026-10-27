@@ -420,14 +420,15 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 38 | `exo_resstat(out)` | Introspection | ✅ | Write a free-resource snapshot to `out`, an `exo_resstat_t` (`free_pages`, `free_contexts` = `CONTEXT_MAX` − live contexts, `sound_voices_free` = `PCM_MIXER_VOICES` − sounding, `fb_held` = 1 if some context holds the framebuffer binding, `reserved[4]` zeroed; 32 bytes). **Reports, does not decide:** it is what a launcher compares a package manifest against (`src/exo_admit.h`: grant / grant-degraded / refuse), so the policy stays in ring 3. Unscoped introspection like #22, and a snapshot — it can be stale by the time a launch happens, which is why #36 keeps its own `min_pages` check. **User-pointer validation:** the `exo_range_in_user_window` + `exo_user_range_mapped(…, writable)` pair #22 runs; `*out` is written only on success. Returns `0` or `-EXO_EFAULT`. Implemented in SCRUM-232 (`src/syscall_stat.c`; `tests/kernel/test_syscall_stat_k.c`). |
 | 39 | `exo_grantstat(ctx, out)` | Introspection | ✅ | Write what context `ctx` holds to `out`, an `exo_grant_t` (`ctx_id`, `pages` = `page_count_owned`, `fb_owner` = the context holding the framebuffer binding or 0, `disk_base`/`disk_sectors` = its private volume or 0/0, `sound_voices` = mixer voices it started that still hold a staging buffer, `sound_stream` = 1 if it holds the music stream, `prog_base`/`prog_sectors` = the shared read-only program volume it was assigned or 0/0, `reserved` zeroed; 40 bytes). A context can have both volumes (§3.5a "Both at once"), so each is read out under its own name; before SCRUM-267 the struct was 32 bytes and `disk_*` held whichever single assignment the context had, so a program-volume-only context now reports `disk_sectors == 0` and fills `prog_*` instead. The size is ABI: a binary built against the 32-byte struct hands the kernel a buffer 8 bytes short. **A read-out, nothing is tracked for it:** every field comes from the table that already enforces it (page ownership, `fb_binding`, `disk_binding`, the `syscall_sound.c` rows). Unscoped introspection like #22/#38, and a snapshot. `fb_owner` is the current holder, not "did this context get it": the binding moves when a program is entered (#40), so a launcher compares it with the manifest. Sound is owned at play time, so `sound_voices` is 0 at launch; the launcher reports voices *available* from #38. **User-pointer validation:** pointer first (`exo_range_in_user_window` + `exo_user_range_mapped(…, writable)`), then the id; `*out` is written only on success. Returns `0`, `-EXO_EFAULT`, or `-EXO_ENOENT` (`ctx` names no live context). Implemented in SCRUM-235 (`src/syscall_stat.c`; `tests/kernel/test_launch_pkg_k.c`). |
 | 40 | `exo_launch_start(ctx)` | Lifecycle | ✅ | Enter the context #36 built under `EXO_LAUNCH_HOLD`: mark it `READY`, then the switch #21/#36 arm, then the manifest's framebuffer release, in that order so a refused start leaves the holder untouched. Like #21/#36, control does not return until something switches back. Only the context that built the hold may start it. Returns `0`, `-EXO_ENOENT` (`ctx` is not the outstanding hold: never held, already started, dropped by a later launch, or its row is gone), `-EXO_EPERM` (the hold belongs to a different context; it is left in place), or `-EXO_EINVAL` (the switch could not be armed; the held context is destroyed). Implemented in SCRUM-235 (`src/syscall_launch.c`). |
+| 41 | `exo_fault_info(after_seq, out)` | Introspection | ✅ | Write the oldest fault record with `seq > after_seq` to `out`, an `exo_fault_info_t` (56 bytes: `seq`, `ctx_id`, `rip`, `addr` = the faulting address for a page fault else 0, `vector`, `reason` = `EXO_FAULT_REASON_MEMORY`/`PRIVILEGED`/`ARITHMETIC`/`ILLEGAL`/`OTHER`, and the program's `name`). One record is added each time the kernel ends a ring-3 program for a CPU exception (§3.4a, SCRUM-283). The log is a ring of the last `EXO_FAULT_LOG_MAX` (8), kept apart from the context table so a record outlives the dead program's row. `seq` starts at 1 and never repeats, so a launcher remembers the last `seq` it handled and asks for "newer than that": it learns of every fault since it last looked, from whichever program, and if more than 8 happened in between it is handed the oldest still held. Pass `after_seq = 0` to read from the beginning, or `EXO_FAULT_NEWEST` (`~0`) for just the newest record: a shell the kernel has just (re)started uses that, since only the latest record explains why it exists and the older ones were reported by its predecessor. **A read-out, unscoped** like #22/#38/#39: it says that a program was ended, not what it held. `*out` is written only on success. **User-pointer validation:** `exo_range_in_user_window` + `exo_user_range_mapped(…, writable)`. Returns `0`, `-EXO_EFAULT`, or `-EXO_ENOENT` (nothing newer than `after_seq`). Implemented in SCRUM-283 (`src/syscall_fault.c`, `src/fault_record.c`; `tests/kernel/test_fault_record_k.c`, `tests/kernel/test_fault_contain_k.c`). The shell calls it after every command, at startup and while idle, and prints `program X stopped: <why>`. |
 
-**Introspection leaks a global view.** #22, #23, #38 and #39 are deliberately
+**Introspection leaks a global view.** #22, #23, #38, #39 and #41 are deliberately
 unscoped: any caller can read every context's pages, bindings and sound voices.
 That is fine for a demo and is what the `top` LibOS (SCRUM-236) is built
 on, but it means these calls are not what a normally unprivileged program would
 get; a real isolation boundary would scope or gate them.
 
-**Total: 41 syscalls.** This is the complete interface needed to run Doom with
+**Total: 42 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking, plus the single
 argument-based LibOS-launch syscall (#21) that backs the shell's interactive
 demo commands and its package-based sibling (#36, SCRUM-230) that launches a
@@ -740,11 +741,75 @@ the second is the one that will actually happen:
 
 **`MXCSR` and vector 19.** `CR4.OSXMMEXCPT` is set, which means an *unmasked*
 SIMD floating-point exception is delivered as `#XM` on vector 19 instead of
-`#UD`. `idt_init()` leaves `default_stub` there — a bare `iretq` that returns
-to the faulting instruction and faults again forever. `boot.s` loads `MXCSR` =
-`0x1F80`, masking all six exceptions, which makes that vector unreachable;
-`test_sse_k.c` asserts the mask bits. **Anything that unmasks a SIMD exception
-owes vector 19 a real handler first.**
+`#UD`. Vector 19 has `exception_handler()` (SCRUM-283), which ends a ring-3
+program and halts on a ring-0 one; before that it sat on `default_stub`, a bare
+`iretq` that re-entered the faulting instruction forever. `boot.s` loads
+`MXCSR` = `0x1F80`, masking all six exceptions, which makes that vector
+unreachable; `test_sse_k.c` asserts the mask bits. **Anything that unmasks a
+SIMD exception turns a float error into a terminated program, so decide
+whether that is the policy first.** `#NM` (7) is handled the same way, but
+`CR0.TS` is never set, so it is not expected in normal operation.
+
+**Exceptions from ring 3 end the program (SCRUM-283).** A fault taken at CPL 3
+no longer halts the machine. `page_fault_handler`, `gp_fault_handler` and
+`exception_handler` (`src/fault.c`) all end in `fault_terminate_current()`,
+which logs the context id and name on COM1, records the fault for #41,
+reclaims everything the program holds through `context_teardown()`
+(`src/syscall_exit.c`, the same function `exo_exit` calls, so the two cannot
+drift: framebuffer binding and shadow, sound, disk binding, owned pages), marks
+the dead row `BLOCKED` exactly as `exo_exit` does (SCRUM-111) and resumes the
+next `READY` context. Where the switch is concerned there are three things to
+know:
+
+- **It is not the syscall switch.** The exception arrives on the stack named by
+  `TSS.RSP0`, not `syscall_stack_end`, and it never touches `saved_user_rsp`,
+  so `context_switch_tail`'s *capture* half (which reads the `syscall_entry.s`
+  push layout) cannot run and does not need to: the outgoing context is dead,
+  there is nothing to save. `context_switch_tail` was split into that capture
+  half and a *resume* half (CR3 swap, `context_set_current`, restore, `iretq`),
+  and the fault path enters the resume half directly through
+  `context_resume_noreturn()` (`src/context_switch.s`). One definition of the
+  `iretq` frame serves both. `context_resume_noreturn` aligns the stack for the
+  `call` the resume half makes and clears `context_switch_pending`, so a
+  Ctrl+Tab armed just before the fault cannot fire later against the dead row.
+- **A switch armed before the fault is honoured.** Ctrl+Tab arms one from IRQ1
+  (`src/ps2.c`), marking its target `RUNNING`; the next syscall return would
+  have taken it. If the program faults first, `fault_terminate_current()`
+  resumes that target instead of picking one with `context_next_ready()`
+  (which only chooses `READY` rows and would skip it) and
+  `context_resume_noreturn()` clears the flag. Dropping the request would
+  leave the target `RUNNING` and never scheduled again. Tested by
+  `test_pending_switch_target_is_resumed`.
+- **No per-context kernel stack is needed, and SCRUM-176 is not a blocker.**
+  `TSS.RSP0` is one stack, rewound by the CPU at every CPL 3 → CPL 0 entry, so
+  abandoning the fault frame by `iretq`ing away is safe, and the syscall path's
+  single global slot is not involved at all. It stays safe only while there is
+  one CPU and an interrupt gate keeps `IF` clear for the duration. Preemption
+  (SCRUM-127) changes that and belongs to SCRUM-176's per-CPU rework.
+- **Ring 0 stays fatal.** A fault taken at CPL 0 — including one inside a
+  syscall handler — prints its report and halts, as do `#DF` and `#MC` from
+  either ring. A second fault while one is being handled hits the `in_fault`
+  guard (`#PF while handling #PF -- halting`). `#DB` and `#BP` are in this
+  class too: a stray `int3` or trap-flag step inside the kernel used to be
+  skipped over by `default_stub` and now halts with a report. From ring 3,
+  `int3` arrives as `#GP` (the gates are DPL 0), so it ends the program like
+  any other privileged instruction. A ring-3 fault with no context
+  row (the legacy directly-entered LibOS) also halts: there is nothing to
+  switch away from.
+
+**When the faulting program was the last ready one**, `fault_terminate_current()`
+builds a fresh shell (`shell_launch_context()`, `src/shell_launch.c`) as a
+`READY` context and switches to it, then reaps the dead row itself, since
+nothing will launch over it. If even that fails (no row, no pages) the
+machine halts with a message on serial. The relaunched shell starts with
+nothing seen, so it reports the crash that replaced its predecessor.
+
+**Reaping.** Otherwise the dead row stays resourceless and `BLOCKED` until the
+next launch: `launch_reclaim_exited()` (`src/syscall_launch.c`) already sweeps
+every `BLOCKED` row, whichever program it belonged to.
+`tests/kernel/test_launch_multi_k.c` and `tests/kernel/test_fault_contain_k.c`
+run launch/fault loops and check that free pages and context rows return to
+baseline.
 
 ### 3.5 Framebuffer binding (SCRUM-154)
 
@@ -1464,19 +1529,23 @@ A page belonging to the kernel or to another context is still refused.
   `LIBOS_LAUNCH_STACK_PAGES`, `LIBOS_WAD_MAX_BYTES`). `exo_page_unmap` is
   also untouched — the split it can trigger stays unowned/unlimited too,
   since unmapping was never the exhaustion vector this ticket closes.
-- **A page fault reports, from either ring, but nothing recovers.**
+- **A page fault reports from either ring; ring 3 is ended, ring 0 halts.**
   SCRUM-17 put a real handler on vector 14: an access to an unmapped address
-  now yields CR2, the decoded error code, the faulting RIP and the live
-  mapping state on COM1 instead of a silent loop in `error_stub`. A CPL 3 →
-  CPL 0 exception needs `TSS.RSP0`; SCRUM-46 loads a TSS with a valid one, so
-  a ring-3 fault reaches the handler and reports instead of triple-faulting
+  yields CR2, the decoded error code, the faulting RIP and the live mapping
+  state on COM1 instead of a silent loop in `error_stub`. A CPL 3 → CPL 0
+  exception needs `TSS.RSP0`; SCRUM-46 loads a TSS with a valid one, so a
+  ring-3 fault reaches the handler and reports instead of triple-faulting
   (`tests/kernel/test_tss_k.c` drives one for real, and
   `tests/kernel/test_libos_launch_k.c` drives one from a genuine, separate
-  LibOS address space rather than the kernel's own). What is still missing is
-  policy on top of that report: the handler halts either way today.
-  Terminating a faulting LibOS and reclaiming its resources instead still
-  needs building, now that SCRUM-47/48 supply the address space and launch
-  mechanism it would act on.
+  LibOS address space rather than the kernel's own). The policy on top of that
+  report landed in SCRUM-283: a ring-3 fault terminates the faulting LibOS,
+  reclaims what it holds and runs the next context (§3.4a, "Exceptions from
+  ring 3 end the program"), so the access is refused *and* the machine keeps
+  going. A fault at CPL 0 still halts. The `fault_set_hook()` resume
+  mechanism is TESTING-only and runs first, so the suites that fault on
+  purpose (`test_kernel_mem_fault_k.c`, `test_port_io_fault_k.c`) are
+  unchanged; `tests/kernel/test_fault_contain_k.c` installs no hook and
+  exercises the real path.
 
 ### 3.5c Music stream: bound, not shared (SCRUM-219)
 

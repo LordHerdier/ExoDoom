@@ -72,7 +72,7 @@ are all LibOS code in ExoDoom, not kernel code.
 | | |
 |---|---|
 | Kernel | freestanding C and x86-64 assembly, no external libraries; 935 KiB image |
-| System calls | 41 numbers, 33 bound; the rest are reserved and deliberately unbound (§5) |
+| System calls | 42 numbers, 34 bound; the rest are reserved and deliberately unbound (§5) |
 | Programs | a shell, Doom, a WAD/map viewer, a clock, Snake, a live resource monitor (`top`), and a filesystem isolation demo, all ring-3 LibOS programs |
 | Doom | the doomgeneric engine, 79 source files of which 4 carry small changes, on a 6-function platform layer and a C library shim (§11) |
 | Multitasking | up to 15 programs at once, switched cooperatively; Ctrl+Tab brings another to the foreground |
@@ -246,6 +246,7 @@ The kernel preserves every register except `RAX`, `RCX` and `R11`.
 | 23 | `exo_pslist(out, max)` | The running programs: id, name, state, pages |
 | 38 | `exo_resstat(out)` | Free pages, program slots and sound voices, for admission checks |
 | 39 | `exo_grantstat(ctx, out)` | Everything one program currently holds |
+| 41 | `exo_fault_info(after_seq, out)` | The oldest record, newer than `after_seq`, of a program the kernel ended for a fault |
 | **Debug** |||
 | 8 | `exo_serial_write(buf, len)` | Write bytes to the serial port |
 | **Reserved** |||
@@ -300,7 +301,7 @@ program's resource.
 
 | Limit | Consequence | Why, and what would fix it |
 |---|---|---|
-| **A faulting program stops the machine** | If a program touches memory it may not, or runs a privileged instruction, the access is refused, but no program runs afterwards. A page fault or protection fault is reported on the serial line and the kernel halts; any other CPU exception (divide by zero, invalid instruction) re-enters the faulting instruction indefinitely | The fault handlers have no per-program teardown yet. Isolation holds, because the access never succeeds, but availability does not. The fix is to end the faulting program through the same reclaim path `exo_exit` uses |
+| **A fault in the kernel itself stops the machine** | A program that faults is ended (SCRUM-283): the access is refused, its pages, framebuffer, disk and sound are reclaimed by the `exo_exit` path, the next ready program runs, and the shell says `program X stopped: illegal memory access`. A fault taken in ring 0, and the abort-class exceptions (double fault, machine check), still print a report on serial and halt; the kernel has nothing safe to resume | A kernel bug is not something to recover from by killing a program, and #DF/#MC would need their own interrupt stacks (IST) to be reported reliably. Only the last 8 ended programs are remembered for `exo_fault_info` (#41), and there is no core dump |
 | **No preemption** | A program that never makes a syscall keeps the CPU; the others wait | Switching is cooperative (§7). Ctrl+Tab still switches the foreground, but only at the spinning program's next syscall. Timer-driven preemption is planned (SCRUM-127) |
 | **Vector registers are not saved per program** | A program built with SSE could read, or disturb, another SSE program's XMM registers across a switch | A switch saves the general-purpose registers only. The kernel itself cannot touch XMM state (it is built without SSE, and a test checks that XMM survives every kernel entry), but two SSE programs would share it. Only Doom is built with SSE today, so no shipped pair is affected. The fix is `fxsave`/`fxrstor` in the context switch |
 | **Introspection is global** | Any program can see every program's page counts and bindings (#22, #23, #38, #39) | Deliberate, for `top` and admission checks; a hardened system would scope or gate them |
@@ -466,9 +467,11 @@ per program, a limit of its own bookkeeping, not of the kernel.
 
 - **Interrupts.** The legacy PIC is remapped to vectors 32–47. Vectors 39 and
   47 have real spurious-interrupt handlers, because the PIC can raise them
-  without a device having asked. Page faults and general-protection faults
-  have handlers that report the error code and registers on the serial line,
-  and for a page fault also the faulting address and how it is mapped.
+  without a device having asked. Every CPU exception has a handler that
+  reports the error code and registers on the serial line, and for a page
+  fault also the faulting address and how it is mapped. Taken from ring 3, it
+  then ends that program and switches to the next ready one; taken from ring
+  0 it halts (§6).
 - **Timer.** The PIT runs at 1 kHz. Its interrupt advances the millisecond
   count, ends PC-speaker tones on time, polls USB, and sets a flag every 16 ms
   that asks for the screen to be composited. The copy itself happens later,
@@ -910,10 +913,9 @@ lines, fails the build, so a change that breaks isolation cannot be merged.
 
 The experiments show that the stated mechanisms work and that the tested
 violations fail. They do not show that no *untested* path exists. Three
-gaps are known and listed in §6: a faulting program stops the machine
-(availability, not isolation); vector registers are shared between SSE
-programs across a switch; and the introspection calls give every program a
-global view by design. The kernel also does not use the NX, SMEP or SMAP
+gaps are known and listed in §6: vector registers are shared between SSE
+programs across a switch; the introspection calls give every program a
+global view by design; and a fault in the kernel itself halts the machine. The kernel also does not use the NX, SMEP or SMAP
 hardware features, so its protection relies entirely on its page-table
 permissions and its pointer checks.
 
@@ -1084,7 +1086,7 @@ matter most. Beyond them:
 
 | Area | Today | Next step |
 |---|---|---|
-| Fault containment | A faulting program halts the machine | End the program and reclaim its resources through the `exo_exit` path |
+| Fault containment | A ring-3 fault ends the program through the `exo_exit` reclaim path, the next program runs, and the shell reports it (SCRUM-283). When it was the last program the shell is relaunched | Give #DF and #MC their own interrupt stacks so they can be reported reliably; a fault in the kernel itself stays fatal by design |
 | Scheduling | Cooperative; a program that never yields keeps the CPU | Timer-driven preemption (SCRUM-127), which first needs the syscall path's single global stack slot replaced with per-CPU state (SCRUM-176) |
 | Vector state | Shared between SSE programs across a switch | `fxsave`/`fxrstor` in the context switch |
 | Doom config | Settings persist: Doom reads `.default.cfg` from its private volume at start and writes it on a menu quit (SCRUM-269) | Done; verify with a settings change across `make run-keep` boots |
@@ -1165,6 +1167,7 @@ Error values match Linux `errno` numbers: `EPERM` 1, `ENOENT` 2, `EIO` 5,
 | 38 | `exo_resstat` | 0 | `EFAULT` |
 | 39 | `exo_grantstat` | 0 | `EFAULT`; `ENOENT` no such program |
 | 40 | `exo_launch_start` | does not return until switched back | `ENOENT` not the outstanding hold; `EPERM` someone else's hold; `EINVAL` |
+| 41 | `exo_fault_info` | 0 | `EFAULT`; `ENOENT` no record newer than `after_seq` |
 
 → `docs/syscall_spec.md` §3.2 has the exact validation order for every call.
 

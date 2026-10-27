@@ -101,6 +101,8 @@
 .section .text
 
 .global context_switch_tail
+.global context_resume_noreturn
+.extern context_switch_pending
 .extern context_switch_out_regs
 .extern context_switch_in_regs
 .extern context_switch_in_pml4
@@ -156,6 +158,9 @@ context_switch_tail:
     movq SAVED_R9_OFF(%rsp), %rcx
     movq %rcx, CTX_REGS_OFF_R9(%rax)
 
+    /* Fall through into the resume half. Split out by SCRUM-283 so the
+     * ring-3 fault path can enter it with no capture (see below). */
+context_resume:
     /* Swap address spaces. Safe to do here, before loading the incoming
      * context's own registers below: kernel memory (this code, these
      * globals, saved_user_rsp) lives under the shared PML4[0] link every
@@ -224,3 +229,28 @@ context_switch_tail:
      * CTX_REGS_OFF_*(%rax) read above, since this clobbers the pointer. */
     movq CTX_REGS_OFF_RAX(%rax), %rax
     iretq
+
+/*
+ * void context_resume_noreturn(void)  (SCRUM-283)
+ *
+ * The incoming half of context_switch_tail with the capture half skipped:
+ * for a caller whose outgoing context is dead, so there is nothing to save --
+ * the ring-3 fault path (src/fault.c), which runs on the TSS.RSP0 exception
+ * stack where neither saved_user_rsp nor the syscall_entry.s push layout
+ * context_switch_tail's capture reads exist. Inputs are the same globals
+ * context_switch_request() fills: context_switch_in_regs/_pml4/_id. Never
+ * returns; it ends in the same iretq as the tail, so the incoming frame shape
+ * has exactly one definition.
+ *
+ * Entered by `call` from C, so %rsp is 8 mod 16 here, but the resume half
+ * `call`s context_set_current and expects the 16-aligned %rsp the syscall
+ * path hands it -- align down (safe: the abandoned stack is never returned
+ * to). Clears context_switch_pending too: syscall_entry.s clears it before
+ * jumping to the tail, but nothing does on this path, and a stale armed
+ * request (e.g. Ctrl+Tab raced the fault) would fire at the next syscall
+ * return with an out_regs pointer into the dead row.
+ */
+context_resume_noreturn:
+    andq $-16, %rsp
+    movq $0, context_switch_pending(%rip)
+    jmp  context_resume

@@ -8,7 +8,11 @@
  */
 
 #include "fault.h"
+#include "context.h"
+#include "fault_record.h"
 #include "serial.h"
+#include "shell_launch.h"
+#include "syscall_exit.h"
 #include "vmm.h"
 
 /* Append as much of `s` as fits.  *pos is the write cursor; on return it is
@@ -73,6 +77,172 @@ void fault_set_hook(fault_hook_t h)
     last_resume_rip = 0;
 }
 #endif
+
+/* What the log and the shell call each CPU exception (SCRUM-283): `why` is
+ * the plain-language reason a ring-3 program was stopped, `reason` the
+ * exo_fault_info reason code the shell turns into wording of its own. */
+static const char *exception_name(uint64_t vector, const char **why,
+                                  uint32_t *reason)
+{
+    *reason = EXO_FAULT_REASON_OTHER;
+    switch (vector) {
+    case 0:  *why = "divided by zero";                *reason = EXO_FAULT_REASON_ARITHMETIC; return "DIVIDE ERROR (#DE)";
+    case 1:  *why = "unexpected debug trap";          return "DEBUG (#DB)";
+    case 3:  *why = "unexpected breakpoint";          return "BREAKPOINT (#BP)";
+    case 4:  *why = "arithmetic overflow trap";       *reason = EXO_FAULT_REASON_ARITHMETIC; return "OVERFLOW (#OF)";
+    case 5:  *why = "bound range exceeded";           *reason = EXO_FAULT_REASON_MEMORY;     return "BOUND RANGE (#BR)";
+    case 6:  *why = "illegal instruction";            *reason = EXO_FAULT_REASON_ILLEGAL;    return "INVALID OPCODE (#UD)";
+    case 7:  *why = "floating-point unit unavailable"; *reason = EXO_FAULT_REASON_ILLEGAL;   return "DEVICE NOT AVAILABLE (#NM)";
+    case 8:  *why = "double fault";                   return "DOUBLE FAULT (#DF)";
+    case 10: *why = "invalid task state";             return "INVALID TSS (#TS)";
+    case 11: *why = "segment not present";            *reason = EXO_FAULT_REASON_MEMORY;     return "SEGMENT NOT PRESENT (#NP)";
+    case 12: *why = "stack fault";                    *reason = EXO_FAULT_REASON_MEMORY;     return "STACK FAULT (#SS)";
+    case 13: *why = "privileged or illegal operation"; *reason = EXO_FAULT_REASON_PRIVILEGED; return "GENERAL PROTECTION FAULT (#GP)";
+    case 14: *why = "illegal memory access";          *reason = EXO_FAULT_REASON_MEMORY;     return "PAGE FAULT (#PF)";
+    case 16: *why = "floating-point error";           *reason = EXO_FAULT_REASON_ARITHMETIC; return "x87 FLOATING POINT (#MF)";
+    case 17: *why = "misaligned memory access";       *reason = EXO_FAULT_REASON_MEMORY;     return "ALIGNMENT CHECK (#AC)";
+    case 18: *why = "machine check";                  return "MACHINE CHECK (#MC)";
+    case 19: *why = "floating-point error";           *reason = EXO_FAULT_REASON_ARITHMETIC; return "SIMD FLOATING POINT (#XM)";
+    case 20: *why = "virtualization exception";       return "VIRTUALIZATION (#VE)";
+    case 21: *why = "control-flow protection fault";  return "CONTROL PROTECTION (#CP)";
+    default: *why = "unexpected processor exception"; return "EXCEPTION";
+    }
+}
+
+/* Nothing left to hand the machine to, and no way to make something. */
+static void no_survivor(const char *msg)
+{
+    serial_print("  ");
+    serial_print(msg);
+    serial_print(" -- halting\n");
+    serial_print("=== halted ===\n");
+    halt_forever();
+}
+
+/* What to run when the faulting program was the last ready context: build a
+ * fresh READY context and return its id, or PAGE_OWNER_FREE if that failed.
+ * Production relaunches the shell; tests substitute their own. */
+static page_owner_t relaunch_shell(void)
+{
+    page_owner_t id;
+    return shell_launch_context(&id) == 0 ? id : PAGE_OWNER_FREE;
+}
+
+static fault_relaunch_fn relaunch = relaunch_shell;
+
+#ifdef TESTING
+void fault_set_relaunch(fault_relaunch_fn fn)
+{
+    relaunch = fn ? fn : relaunch_shell;
+}
+#endif
+
+void fault_terminate_current(const exception_frame_t *f, uint64_t vector,
+                             uint64_t addr)
+{
+    serial_print("  context:   ");
+
+    /* CPL comes from the low two bits of the saved CS. A fault at CPL 0 is a
+     * kernel bug: nothing to terminate, nothing safe to resume. */
+    if ((f->cs & 3) != 3) {
+        serial_print("ring 0 (kernel) -- fatal\n");
+        serial_print("=== halted ===\n");
+        halt_forever();
+    }
+
+    /* Only a context with a real table row can be torn down and switched
+     * away from; the boot-time PAGE_OWNER_LIBOS default (a LibOS entered
+     * directly, with no row) has neither a register save area nor a row for
+     * context_switch_request() to find, so it keeps the old behaviour. */
+    page_owner_t owner = context_current();
+    context_t *ctx = context_lookup(owner);
+    if (ctx == NULL) {
+        serial_print("ring 3 (LibOS) with no context row -- cannot terminate, halting\n");
+        serial_print("=== halted ===\n");
+        halt_forever();
+    }
+
+    const char *why;
+    uint32_t reason;
+    (void)exception_name(vector, &why, &reason);
+
+    serial_print("ring 3 (LibOS) id ");
+    serial_print_hex64(owner);
+    serial_print(" \"");
+    serial_print(ctx->name);
+    serial_print("\" -- terminating: ");
+    serial_print(why);
+    serial_print("\n");
+
+    /* The row may be gone by the time the record is written (a relaunch
+     * reaps it), so keep the name now. The record itself is written only
+     * once the hand-off is certain, below, so a halt path leaves none. */
+    char name[CONTEXT_NAME_MAX];
+    for (unsigned i = 0; i < sizeof name; i++)
+        name[i] = ctx->name[i];
+
+    /* The same reclaim exo_exit runs (SCRUM-155), so the two cannot drift. */
+    if (context_teardown(owner) != 0) {
+        serial_print("  teardown refused -- halting\n");
+        serial_print("=== halted ===\n");
+        halt_forever();
+    }
+
+    /* The outgoing context is dead, so there is nothing to capture: arm the
+     * switch only to fill in context_switch_in_*, then resume without the
+     * syscall-path capture (context_resume_noreturn, src/context_switch.s).
+     * context_switch_request() marks the outgoing row READY; override it as
+     * sys_exit does (SCRUM-111) so round-robin never re-enters freed pages.
+     *
+     * A switch may already be armed: Ctrl+Tab (src/ps2.c) arms one from IRQ1,
+     * marking its target RUNNING, and only the next syscall return would have
+     * taken it. context_resume_noreturn() clears the pending flag, so the
+     * armed target is the one to resume -- dropping it would leave that
+     * context RUNNING and never scheduled again. */
+    page_owner_t next;
+    int relaunched = 0;
+    if (context_switch_pending != 0 &&
+        context_lookup((page_owner_t)context_switch_in_id) != NULL &&
+        (page_owner_t)context_switch_in_id != owner) {
+        next = (page_owner_t)context_switch_in_id;
+    } else {
+        next = context_next_ready(owner);
+        if (next == PAGE_OWNER_FREE) {
+            /* The crashed program was the last one running: bring the shell
+             * back rather than leave a machine with nothing to show or type
+             * into. */
+            serial_print("  no other program is ready -- relaunching the shell\n");
+            next = relaunch();
+            if (next == PAGE_OWNER_FREE)
+                no_survivor("could not relaunch the shell");
+            relaunched = 1;
+        }
+        if (context_switch_request(next) != CONTEXT_OK)
+            no_survivor("could not switch to the next context");
+    }
+    context_set_state(owner, CONTEXT_STATE_BLOCKED);
+
+    /* Recorded for exo_fault_info (#41), after the point where this can still
+     * end in a halt. */
+    fault_record_add(owner, name, (uint32_t)vector, reason, f->rip, addr);
+
+    if (relaunched) {
+        /* Nothing will launch over this row, so reap it here: the switch
+         * request is armed and context_resume_noreturn() never reads the
+         * outgoing row. Leave the dead address space first -- destroying the
+         * page tables CR3 still points at would pull them out from under us. */
+        vmm_switch_address_space(vmm_kernel_pml4());
+        context_destroy(owner);
+    }
+
+    serial_print("  resuming context id ");
+    serial_print_hex64(next);
+    serial_print("\n");
+
+    /* Handled: a later fault is a new event, not a fault inside this one. */
+    in_fault = 0;
+    context_resume_noreturn();
+}
 
 /* Report what the live tables say about the faulting address.  This is what
  * separates "faulted at X" from "faulted at X, which is unmapped" versus
@@ -156,27 +326,12 @@ void page_fault_handler(exception_frame_t *f)
 
     print_mapping(cr2);
 
-    /* CPL comes from the low two bits of the saved CS.
-     *
-     * The ring-3 arm is reachable now that tss_init() loads a TSS with a
-     * valid RSP0 (SCRUM-46): idt_set_gate's gates are all IST=0, so a CPL 3
-     * exception loads that RSP0 rather than faulting for want of one.
-     * tests/kernel/test_tss_k.c drives it deliberately; no LibOS runs in
-     * ring 3 on a normal boot yet (SCRUM-47), so in practice this still only
-     * fires under test.
-     *
-     * A real LibOS fault still just halts, because there is no policy yet
-     * for what should happen instead -- this is where a faulting LibOS gets
-     * terminated and its resources reclaimed via revoke_all(), once that
-     * policy exists. */
-    serial_print("  context:   ");
-    if ((f->cs & 3) != 0) {
-        serial_print("ring 3 (LibOS) -- no per-context teardown yet, halting\n");
-    } else {
-        serial_print("ring 0 (kernel) -- fatal\n");
-    }
+    /* A ring-3 fault ends that program and carries on (SCRUM-283); a CPL 0
+     * fault is a kernel bug and halts. Either way the diagnostic above has
+     * already been printed. */
+    fault_terminate_current(f, 14, cr2);
 
-    serial_print("=== halted ===\n");
+    /* Not reached: fault_terminate_current() halts or switches away. */
     halt_forever();
 }
 
@@ -218,15 +373,60 @@ void gp_fault_handler(exception_frame_t *f)
     serial_print_hex64(f->rflags);
     serial_print("\n");
 
-    /* See page_fault_handler's own comment: a real LibOS fault still just
-     * halts, because there is no teardown policy yet (SCRUM-147/revoke_all). */
-    serial_print("  context:   ");
-    if ((f->cs & 3) != 0) {
-        serial_print("ring 3 (LibOS) -- no per-context teardown yet, halting\n");
-    } else {
-        serial_print("ring 0 (kernel) -- fatal\n");
+    /* See page_fault_handler: ring 3 is terminated, ring 0 halts. */
+    fault_terminate_current(f, 13, 0);
+
+    /* Not reached: fault_terminate_current() halts or switches away. */
+    halt_forever();
+}
+
+void exception_handler(exception_frame_t *f, uint64_t vector)
+{
+    if (in_fault) {
+        serial_print("\nexception while handling a fault -- halting\n");
+        halt_forever();
+    }
+    in_fault = 1;
+
+#ifdef TESTING
+    /* Same resume hook as #PF/#GP, so a test can take a deliberate ring-0
+     * exception (a divide by zero, say) and carry on past it. */
+    if (test_hook && f->rip != last_resume_rip && test_hook(f, 0)) {
+        last_resume_rip = f->rip;
+        in_fault = 0;
+        return;
+    }
+#endif
+
+    const char *why;
+    uint32_t reason;
+    const char *name = exception_name(vector, &why, &reason);
+
+    serial_print("\n=== ");
+    serial_print(name);
+    serial_print(", vector ");
+    serial_print_hex64(vector);
+    serial_print(" ===\n");
+
+    serial_print("  error:     0x");
+    serial_print_hex64(f->error_code);
+    serial_print("\n  rip:       0x");
+    serial_print_hex64(f->rip);
+    serial_print("\n  cs:rsp:    0x");
+    serial_print_hex64(f->cs);
+    serial_print(":0x");
+    serial_print_hex64(f->rsp);
+    serial_print("\n  rflags:    0x");
+    serial_print_hex64(f->rflags);
+    serial_print("\n");
+
+    /* #DF and #MC are not something to resume from whichever ring raised
+     * them: the CPU state is no longer trustworthy. */
+    if (vector == 8 || vector == 18) {
+        serial_print("  context:   abort-class exception -- fatal\n");
+        serial_print("=== halted ===\n");
+        halt_forever();
     }
 
-    serial_print("=== halted ===\n");
-    halt_forever();
+    fault_terminate_current(f, vector, 0);
 }

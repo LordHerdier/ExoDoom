@@ -11,6 +11,7 @@
 #ifndef EXODOOM_SHELL_ERR_H
 #define EXODOOM_SHELL_ERR_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* What the shell was doing when it failed. Picks the lead word and the
@@ -33,5 +34,16 @@ const char *shell_err_lead(shell_op_t op);
  * op's generic fallback -- the caller then appends the numeric code so it
  * stays greppable. */
 const char *shell_err_text(shell_op_t op, int64_t err, int *mapped);
+
+/* What a program was ended for, from an exo_fault_info reason code
+ * (EXO_FAULT_REASON_*, SCRUM-283): a phrase that completes "program X
+ * stopped: ...". Never NULL; unknown codes get a generic phrase. */
+const char *shell_fault_text(uint32_t reason);
+
+/* Write "program <name> stopped: <phrase>" (no newline) into buf[0..n),
+ * NUL-terminated and truncated to fit; an empty or NULL name reads "a
+ * program". Returns the length written, excluding the NUL. */
+size_t shell_fault_format(char *buf, size_t n, const char *name,
+                          uint32_t reason);
 
 #endif /* EXODOOM_SHELL_ERR_H */

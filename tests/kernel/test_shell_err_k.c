@@ -9,6 +9,7 @@
 #include "kunit.h"
 #include "shell/shell_err.h"
 #include "exo_errno.h"
+#include "exo_syscall.h"
 
 #include <stddef.h>
 
@@ -72,6 +73,42 @@ static void test_every_op_has_text(void)
     CU_ASSERT_TRUE(streq(shell_err_lead(SHELL_OP_RUN), "run"));
 }
 
+static void test_fault_wording(void)
+{
+    char buf[64];
+
+    CU_ASSERT_EQUAL(shell_fault_format(buf, sizeof buf, "doom",
+                                       EXO_FAULT_REASON_MEMORY),
+                    sizeof "program doom stopped: illegal memory access" - 1);
+    CU_ASSERT_TRUE(streq(buf, "program doom stopped: illegal memory access"));
+
+    /* No name: the launcher did not give one. */
+    shell_fault_format(buf, sizeof buf, "", EXO_FAULT_REASON_ILLEGAL);
+    CU_ASSERT_TRUE(streq(buf, "a program stopped: illegal instruction"));
+    shell_fault_format(buf, sizeof buf, NULL, EXO_FAULT_REASON_PRIVILEGED);
+    CU_ASSERT_TRUE(streq(buf, "a program stopped: tried a privileged operation"));
+
+    /* Unknown code still reads as a sentence. */
+    shell_fault_format(buf, sizeof buf, "x", 9999);
+    CU_ASSERT_TRUE(streq(buf, "program x stopped: crashed"));
+
+    /* Every defined reason has its own phrase. */
+    for (uint32_t r = EXO_FAULT_REASON_MEMORY; r <= EXO_FAULT_REASON_ARITHMETIC; r++) {
+        CU_ASSERT_FALSE(streq(shell_fault_text(r), shell_fault_text(9999)));
+    }
+}
+
+static void test_fault_format_truncates(void)
+{
+    char buf[12];
+    size_t len = shell_fault_format(buf, sizeof buf, "doom",
+                                    EXO_FAULT_REASON_MEMORY);
+    CU_ASSERT_EQUAL(len, sizeof buf - 1);
+    CU_ASSERT_EQUAL(buf[sizeof buf - 1], '\0');
+    CU_ASSERT_TRUE(streq(buf, "program doo"));
+    CU_ASSERT_EQUAL(shell_fault_format(buf, 0, "x", 1), 0);
+}
+
 void suite_shell_err_tests(CU_pSuite s)
 {
     CU_add_test(s, "EBUSY says what to do", test_busy_has_advice);
@@ -79,4 +116,6 @@ void suite_shell_err_tests(CU_pSuite s)
     CU_add_test(s, "either sign of errno", test_sign_is_ignored);
     CU_add_test(s, "unmapped code falls back", test_unmapped_falls_back);
     CU_add_test(s, "every op has a fallback", test_every_op_has_text);
+    CU_add_test(s, "fault wording names the program and the cause", test_fault_wording);
+    CU_add_test(s, "fault message truncates safely", test_fault_format_truncates);
 }
