@@ -237,14 +237,11 @@
 #define HDA_MIN_HZ          20u
 #define HDA_MAX_HZ          20000u
 
-/* The tone kernel_main plays once on a normal boot, as the audible half of
- * SCRUM-210's acceptance. 440 Hz because it is unmistakably a deliberate
- * note rather than a fault beep, and 600 ms because that is long enough to
- * hear as a tone (and to cross a BDL entry boundary, so the completion
- * interrupt fires on a real boot too) while being short enough not to talk
- * over the rest of the boot. */
+/* The reference test tone the KUnit suites play. kernel_main no longer plays
+ * it on boot (SCRUM-287): a normal boot is silent until a LibOS asks for
+ * sound. 440 Hz because it is unmistakably a deliberate note rather than a
+ * fault beep. */
 #define HDA_BOOT_TONE_HZ    440u
-#define HDA_BOOT_TONE_MS    600u
 
 /* ── Status codes ──────────────────────────────────────────────────────── */
 #define HDA_OK           0
