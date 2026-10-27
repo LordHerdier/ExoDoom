@@ -1,0 +1,58 @@
+# 07 Context switch: how control moves between LibOS programs. Cooperative:
+# a switch is requested by anything, performed on the outgoing context's next
+# syscall return.
+# Sources: src/context.c/h, src/context_switch.s, src/syscall_entry.s,
+#          src/syscall_yield.c, src/syscall_exit.c, src/syscall_launch.c,
+#          src/ps2.c, src/fb_compositor.c
+...@style
+grid-columns: 1
+grid-gap: 14
+
+title: "ExoDoom: context switch\nHow the shell, Doom and the other programs take turns. Cooperative and single-CPU: no timer preemption." {
+  class: note
+  style.font-size: 18
+  style.italic: false
+  style.font-color: "#111827"
+}
+
+path: "Request, then switch" {
+  class: zone
+  style.stroke: "#4F46E5"
+  style.font-color: "#4F46E5"
+  direction: right
+
+  trig: "Anything can ask" {
+    class: k
+    style.fill: "#F5F5FE"
+    grid-columns: 1
+    grid-gap: 6
+    t1: "exo_yield  #19\nnext READY context, round-robin" {class: k}
+    t2: "Ctrl+Tab in the IRQ1 handler\nkey swallowed, never queued" {class: k}
+    t3: "exo_exit  #20\nreclaim, then hand off" {class: k}
+    t4: "exo_launch · exo_launch_pkg · exo_launch_start\nbuild the context, then enter it" {class: k}
+  }
+  req: "context_switch_request(to)\ntarget must be a live READY context\nflip outgoing / incoming states\nstash the incoming regs and PML4\ncontext_switch_pending = 1\ncontext_current() NOT changed yet" {class: k; style.stroke-width: 2}
+  epi: "syscall_entry epilogue\nafter exo_syscall_dispatch returns\nif pending: clear it,\njmp context_switch_tail" {class: k}
+  tail: "context_switch_tail\n1 save outgoing: RAX result, RSP, RIP (from RCX slot),\n  RFLAGS (from R11 slot), callee-saved, arg regs\n2 CR3 ← incoming PML4\n3 context_set_current(incoming)\n4 load incoming registers\n5 push SS CS RFLAGS RSP RIP, iretq" {class: k}
+  inc: "Incoming LibOS resumes\nin ring 3 with its own address space\n(a never-run context starts from a\nprimed iretq frame: entry, stack)" {class: u}
+
+  trig -> req: "request" {class: flow}
+  req -> epi: "armed" {class: flow}
+  epi -> tail: "next syscall return" {class: flow}
+  tail -> inc: "iretq" {class: flow}
+}
+
+facts: "" {
+  style.fill: transparent
+  style.stroke: transparent
+  grid-rows: 1
+  grid-columns: 4
+  grid-gap: 10
+
+  states: "Context states\n(context_t, 15 slots)\n\nREADY → RUNNING  switched in\nRUNNING → READY  yield, Ctrl+Tab\nRUNNING → BLOCKED  exo_exit\nBLOCKED → READY  only via #40\n(a held launch waits as BLOCKED)" {class: k}
+  policy: "Policy: context_next_ready()\nscan from the slot after the caller,\nwrap once, skip BLOCKED rows.\nNothing READY: exo_yield returns 0\nand the caller carries on.\nNo priorities, no preemption." {class: k}
+  display: "Who is on screen\nthe foreground is context_current().\nOn the next ~60 Hz tick the compositor,\ncalled from syscall dispatch, copies that\ncontext's private framebuffer to the\nreal one." {class: k}
+  late: "Why the swap waits for a syscall\nIRQ1 only arms the request: the entry\npath keeps one saved_user_rsp slot and\nis not reentrant. Every LibOS polls each\nloop, so the swap lands within a frame." {class: warn}
+}
+
+note: "A freshly exited context's row stays but is marked BLOCKED, so round-robin never re-enters freed pages (the SCRUM-111 bug). The next launch of that app destroys the row." {class: note; style.font-size: 15}

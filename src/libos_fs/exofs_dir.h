@@ -18,8 +18,7 @@
  * looks them up in the directory like any other name, so they mean whatever
  * the directory says they mean. The cost is two slots and two name records
  * per directory, and the obligation that anything which ever moves a
- * directory must fix its "..". Nothing moves directories yet; a future
- * rename owns that.
+ * directory must fix its "..". exofs_rename() (SCRUM-240) is that thing.
  *
  * The root's ".." points at the root. There is nowhere above it, and a
  * self-loop makes "/.." resolve to "/" the way every other filesystem

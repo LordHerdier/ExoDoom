@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include "page_alloc.h"   /* page_owner_t */
+#include "exo_pkg.h"      /* EXO_PKG_MAX_* -- asserted against the caps below */
 #endif
 
 /*
@@ -112,6 +113,19 @@
  * The guard page sits between data+bss and the stack, i.e. below the
  * stack's lowest address, which is the direction a stack grows. */
 #define LIBOS_LAUNCH_STACK_PAGES    16
+
+#ifndef __ASSEMBLER__
+/* The on-disk package format (src/exo_pkg.h, SCRUM-229) restates these three
+ * caps as plain integers so that header stays host-includable. This is what
+ * keeps the two from drifting: raise a cap here without the format and the
+ * build fails rather than the format admitting images the loader refuses. */
+_Static_assert(EXO_PKG_MAX_CODE_PAGES == LIBOS_LAUNCH_MAX_CODE_PAGES,
+               "exo_pkg.h code-page cap out of sync with the loader");
+_Static_assert(EXO_PKG_MAX_DATA_PAGES == LIBOS_LAUNCH_MAX_DATA_PAGES,
+               "exo_pkg.h data-page cap out of sync with the loader");
+_Static_assert(EXO_PKG_MAX_STACK_PAGES == LIBOS_LAUNCH_STACK_PAGES,
+               "exo_pkg.h stack-page cap out of sync with the loader");
+#endif
 
 /* Selectors and RFLAGS values shared between src/libos_enter.s and
  * src/context_switch.s (SCRUM-108): both build an iretq frame into the same

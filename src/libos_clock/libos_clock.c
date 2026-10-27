@@ -8,10 +8,10 @@
  * with no libc shim linked in (stays comfortably inside
  * LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES the same way the shell does).
  *
- * There is no RTC/CMOS driver in this kernel and exo_get_ticks (#5) is the
- * only clock source a LibOS has (docs/syscall_spec.md §3, src/exo_syscall.h)
- * -- so "live time display" here is a ticks-since-boot stopwatch rendered as
- * HH:MM:SS, not wall-clock time.
+ * Shows the wall-clock date and time (UTC) from exo_rtc_read (#35,
+ * SCRUM-249) and, below it, an uptime stopwatch from exo_get_ticks (#5)
+ * rendered as HH:MM:SS. If the RTC is unavailable the wall-clock line says
+ * so and the stopwatch carries on.
  *
  * Framebuffer multiplexing (SCRUM-112, docs/architecture.md §5.5) means
  * exo_fb_acquire() always hands back a private virtual framebuffer -- no
@@ -80,7 +80,9 @@ static void write_2digit(fb_console_t *con, uint32_t val)
     fbcon_write(con, buf);
 }
 
+/* `wall` is NULL when exo_rtc_read failed. */
 static void render_clock_face(fb_console_t *con, framebuffer_t *fb,
+                              const exo_rtc_time_t *wall,
                               uint32_t hours, uint32_t minutes,
                               uint32_t seconds)
 {
@@ -91,6 +93,29 @@ static void render_clock_face(fb_console_t *con, framebuffer_t *fb,
     fbcon_write(con, clock_banner);
     fbcon_set_color(con, 60, 60, 60, 0, 0, 0);
     fbcon_write(con, "-----------------\n");
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+    fbcon_write(con, "date    ");
+    fbcon_set_color(con, 255, 220, 80, 0, 0, 0);
+    if (wall) {
+        write_u32(con, wall->year);
+        fbcon_write(con, "-");
+        write_2digit(con, wall->month);
+        fbcon_write(con, "-");
+        write_2digit(con, wall->day);
+        fbcon_write(con, "\n");
+        fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+        fbcon_write(con, "time    ");
+        fbcon_set_color(con, 255, 220, 80, 0, 0, 0);
+        write_2digit(con, wall->hour);
+        fbcon_write(con, ":");
+        write_2digit(con, wall->minute);
+        fbcon_write(con, ":");
+        write_2digit(con, wall->second);
+        fbcon_write(con, " UTC\n");
+    } else {
+        fbcon_write(con, "unavailable (no RTC)\n");
+    }
+
     fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
     fbcon_write(con, "uptime  ");
 
@@ -161,8 +186,8 @@ void libos_clock_main(void)
              * gate as fast as the CPU can go
              * measurably starves the PIT: IA32_FMASK clears IF for the
              * duration of every syscall (docs/syscall_spec.md §3.4,
-             * CLAUDE.md's own note on exo_serial_write() being a DoS risk
-             * against IRQs for the same reason), and with no pacing at all
+             * and the exo_serial_write() length cap, which exists for the
+             * same reason), and with no pacing at all
              * between calls, the aggregate time IF spends off is enough to
              * lose a real fraction of the 1000 Hz PIT's edges -- this
              * exact loop, unthrottled, measured at ~83% of real speed
@@ -185,7 +210,11 @@ void libos_clock_main(void)
         uint32_t minutes = (total_seconds / 60) % 60;
         uint32_t hours   = total_seconds / 3600;
 
-        render_clock_face(&con, &fb, hours, minutes, seconds);
+        exo_rtc_time_t wall;
+        int have_wall = exo_rtc_read(&wall) == 0;
+
+        render_clock_face(&con, &fb, have_wall ? &wall : NULL,
+                          hours, minutes, seconds);
 
         /* Ring 3 cannot execute `hlt` -- backing off between polls (above)
          * rather than a tight spin on exo_get_ticks() is the timing

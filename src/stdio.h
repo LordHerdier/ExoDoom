@@ -1,6 +1,7 @@
 #pragma once
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /*
  * Freestanding stdio stub (SCRUM-20).
@@ -61,12 +62,18 @@ int kvprintf(void (*emit)(int c, void *ctx), void *ctx,
  *     module the kernel mapped at LIBOS_WAD_VADDR -- 28 MB that is never
  *     copied, because there is nowhere to copy it to.
  *   - fread/fseek/ftell/feof are offset arithmetic over that window.
- *   - fopen() for WRITING FAILS, and that is deliberate. Doom writes a
+ *
+ * (SCRUM-75: that is the default. A program that has mounted ExoFS installs
+ * a backend, exo_stdio_set_backend below, and the same calls then read real
+ * files; ring-3 Doom reads its IWAD that way and registers no blob.)
+ *   - fopen() for WRITING needs a backend with a write op (SCRUM-42). With
+ *     none installed it FAILS (EROFS), and that is deliberate: Doom writes a
  *     config file and savegames; a write that silently went nowhere would
  *     surface much later as a config that never persists or a savegame that
  *     reloads as garbage. Returning NULL puts the failure at the open, where
  *     M_SaveDefaults and P_SaveGame already handle it. Same reasoning for
- *     remove/rename/mkdir, which report EROFS rather than claiming success.
+ *     remove/rename, which report EROFS rather than claiming success, and
+ *     for mkdir when the backend has no mkdir op.
  *   - fwrite/fprintf/vfprintf to stdout or stderr go to COM1. Those are the
  *     65 fprintf(stderr, ...) diagnostics the audit counted, and they need
  *     no file at all.
@@ -75,11 +82,8 @@ int kvprintf(void (*emit)(int c, void *ctx), void *ctx,
  * Nothing under src/doom/ reaches into it -- every use is through a
  * `FILE *` -- so the layout stays free to change without touching a caller.
  *
- * The one thing still missing is fscanf's scanset ("%99[^\n]"), used once,
- * to read the config file. fscanf returns EOF, which is what C99 specifies
- * for input failure before any conversion and what M_LoadDefaults' loop
- * already treats as end-of-file; it is also unreachable, since fopen cannot
- * produce a config file to read.
+ * fscanf supports the scanset ("%99[^\n]", m_config.c's config read); ranges
+ * such as "a-z" are not interpreted, which Doom never needs.
  */
 typedef struct _exo_file FILE;
 
@@ -175,3 +179,55 @@ int exo_file_register_blob(const char *name, const void *data, size_t size);
 /* Forget every registered blob. For tests, which register a series of them
  * and must not leave one behind for the next suite. */
 void exo_file_reset_blobs(void);
+
+/*
+ * ---------------------------------------------------------------------------
+ * exo_stdio_set_backend -- NOT a standard stdio function (SCRUM-75/42).
+ * ---------------------------------------------------------------------------
+ *
+ * Where a real file comes from. A program that has mounted a filesystem
+ * installs a backend, and fopen("r") then opens through it instead of
+ * looking in the blob table; a name the backend does not have fails with
+ * the errno its open reported, it does not fall back to a blob. With no
+ * backend installed (the default, and every program that does not link a
+ * filesystem) fopen behaves exactly as it always has.
+ *
+ * The backend is a table of functions rather than a direct call into
+ * src/libos_fs/exo_file.h so that src/stdio.c, which every ring-3 target and
+ * the kernel link, does not drag ExoFS into all of them.
+ * src/libos_fs/exo_file_stdio.c supplies the ExoFS one.
+ *
+ * open, read, seek and close are required; write, mkdir, remove and rename
+ * are optional. A backend without write makes every write mode fail EROFS,
+ * which is how the table stayed read-only until SCRUM-42; one without remove
+ * or rename makes those fail EROFS too (SCRUM-267). Both take paths the same
+ * way open does and return 0 or a negative EXO_E* code.
+ *
+ * All of them return a negative EXO_E* code (numerically the errno value) on
+ * failure; open returns a handle >= 0, read/write the byte count (read 0 at
+ * end of file), seek the new absolute position, close and mkdir 0.
+ * `flags` to open is a mask of EXO_STDIO_*, derived from fopen's mode string.
+ * A backend's write is a plain write at the handle's current position (at
+ * end of file under EXO_STDIO_APPEND); the position is set with seek first.
+ */
+#define EXO_STDIO_READ    0x01
+#define EXO_STDIO_WRITE   0x02
+#define EXO_STDIO_CREATE  0x04   /* create if absent              */
+#define EXO_STDIO_TRUNC   0x08   /* discard existing contents     */
+#define EXO_STDIO_APPEND  0x10   /* every write goes to the end   */
+
+typedef struct {
+    int     (*open)(const char *path, unsigned flags);
+    int64_t (*read)(int handle, void *buf, size_t n);
+    int64_t (*seek)(int handle, int64_t off, int whence);
+    int     (*close)(int handle);
+    int64_t (*write)(int handle, const void *buf, size_t n);   /* optional */
+    int     (*mkdir)(const char *path);                        /* optional */
+    int     (*remove)(const char *path);                       /* optional */
+    int     (*rename)(const char *oldpath, const char *newpath); /* optional */
+} exo_stdio_backend_t;
+
+/* Install (or, with NULL, remove) the backend. Streams already open keep the
+ * backend they were opened with. */
+void exo_stdio_set_backend(const exo_stdio_backend_t *backend);
+

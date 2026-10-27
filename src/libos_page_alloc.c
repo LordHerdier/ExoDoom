@@ -60,7 +60,18 @@
 /* Base of the virtual window this allocator hands out of: comfortably clear
  * of the fixed libos_launch region and its documented
  * EXO_USER_VA_BASE + 0x20000 fault-target invariant (src/libos_launch.h). */
+#ifdef EXO_KERNEL
+/* The kernel-built copy (ring 0 -- doom_wad_disk_get() mounting the IWAD
+ * volume from inside exo_launch) maps its pages into whichever LibOS's
+ * address space is current, i.e. the *caller's*. Sharing the ring-3 base
+ * would put its slots on top of that LibOS's own heap (the shell's, after
+ * `mkfs`), exo_page_map would refuse with EEXIST, and the launch would die
+ * with "libos_heap: out of pages". A disjoint window (still clear of
+ * libos_fb's LIBOS_FB_VADDR at +0x4000000) keeps the two heaps apart. */
+#define LIBOS_HEAP_VADDR_BASE (EXO_USER_VA_BASE + 0x2000000ULL)
+#else
 #define LIBOS_HEAP_VADDR_BASE (EXO_USER_VA_BASE + 0x1000000ULL)
+#endif
 #define PAGE_SIZE 0x1000ULL
 
 #ifdef EXO_KERNEL

@@ -6,12 +6,12 @@
  * exo_page_map via src/libos_fb.c's libos_fb_map() for the screen,
  * exo_kbd_poll for input, exo_get_ticks for timing, exo_serial_write for
  * diagnostics), launched from the shell's "snake" command
- * (src/shell/shell_main.c) via exo_launch(EXO_LAUNCH_APP_SNAKE) (#21, src/syscall_launch.c)
+ * (src/shell/shell_main.c) as `run snake.exo` via exo_launch_pkg() (#36, SCRUM-230)
  * rather than kernel_main hardcoding it as the boot-time LibOS.
  *
  * Simpler than the WAD viewer in two ways: there is no external resource to
  * stage before launch (no WAD mapping step), and no launch-time parameters
- * at all, so src/syscall_launch.c's sys_launch_snake() has no
+ * at all, so the package's manifest carries no
  * libos_launch_patch_params() call and this file has no params struct.
  *
  * Like the WAD viewer's automap loop, this LibOS's main loop never returns
@@ -257,7 +257,8 @@ static void draw_cell(framebuffer_t *fb, const board_geom_t *g,
  * here would scroll the cursor onto the board area on the very next
  * render_hud() call, since fb_console_t has no independent notion of "HUD
  * row" vs "board row". */
-static void render_hud(fb_console_t *con, framebuffer_t *fb, uint32_t cur_score)
+static void render_hud(fb_console_t *con, framebuffer_t *fb, uint32_t cur_score,
+                       int is_waiting)
 {
     fb_fill_rect(fb, 0, 0, fb->width, HUD_HEIGHT_PX, 0, 0, 0);
     con->cursor_x = 0;
@@ -270,7 +271,12 @@ static void render_hud(fb_console_t *con, framebuffer_t *fb, uint32_t cur_score)
     fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
     write_u32(con, cur_score);
     fbcon_set_color(con, 60, 60, 60, 0, 0, 0);
-    fbcon_write(con, " | arrows to move, Q/Esc to quit");
+    if (is_waiting) {
+        fbcon_set_color(con, 255, 220, 100, 0, 0, 0);
+        fbcon_write(con, " | Press any arrow key to start (Q/Esc quits)");
+    } else {
+        fbcon_write(con, " | arrows to move, Q/Esc to quit");
+    }
 }
 
 static void render_board(framebuffer_t *fb, const board_geom_t *g)
@@ -295,15 +301,27 @@ static void render_game_over(fb_console_t *con, framebuffer_t *fb,
     fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
     fbcon_write(con, "  final score: ");
     write_u32(con, final_score);
-    fbcon_write(con, "\npress any key to return to the shell\n");
+    fbcon_write(con, "\npress R to restart, any other key to return to the shell\n");
 }
 
 /* ---- input --------------------------------------------------------------
  *
  * Buffers the latest direction key each poll and rejects a direct reversal
  * (down when already moving up, etc.) -- reversing into your own neck is an
- * instant, uninteresting death, not a real player choice. Returns 1 if Q/Esc
- * was pressed (caller should quit). */
+ * instant, uninteresting death, not a real player choice. While `waiting`
+ * is set the first accepted arrow (a rejected reversal does not count) sets
+ * the initial direction and clears it, which is what starts the game clock.
+ * Returns 1 if Q/Esc was pressed (caller should quit). */
+static int waiting;
+
+static void steer(dir_t want, dir_t forbidden)
+{
+    if (direction == forbidden)
+        return;
+    direction = want;
+    waiting = 0;
+}
+
 static int poll_input(void)
 {
     exo_kbd_event_t ev;
@@ -311,10 +329,10 @@ static int poll_input(void)
         if (!ev.pressed)
             continue;
         switch (ev.key) {
-        case KEY_UP:    if (direction != DIR_DOWN)  direction = DIR_UP;    break;
-        case KEY_DOWN:  if (direction != DIR_UP)    direction = DIR_DOWN;  break;
-        case KEY_LEFT:  if (direction != DIR_RIGHT) direction = DIR_LEFT;  break;
-        case KEY_RIGHT: if (direction != DIR_LEFT)  direction = DIR_RIGHT; break;
+        case KEY_UP:    steer(DIR_UP,    DIR_DOWN);  break;
+        case KEY_DOWN:  steer(DIR_DOWN,  DIR_UP);    break;
+        case KEY_LEFT:  steer(DIR_LEFT,  DIR_RIGHT); break;
+        case KEY_RIGHT: steer(DIR_RIGHT, DIR_LEFT);  break;
         case KEY_Q:
         case KEY_ESC:
             return 1;
@@ -326,14 +344,15 @@ static int poll_input(void)
 }
 
 /* Drains and discards keyboard events until one press is seen, so the game-
- * over screen doesn't exit on a stale queued event from mid-game. */
-static void wait_for_keypress(void)
+ * over screen doesn't exit on a stale queued event from mid-game. Returns 1
+ * if that press was R (restart), 0 for any other key. */
+static int wait_for_keypress(void)
 {
     exo_kbd_event_t ev;
     for (;;) {
         while (exo_kbd_poll(&ev) > 0) {
             if (ev.pressed)
-                return;
+                return ev.key == KEY_R;
         }
     }
 }
@@ -371,17 +390,29 @@ void libos_snake_main(void)
     rng_seed((uint32_t)seed ^ 0x9e3779b9u);
 
     snake_reset();
+    waiting = 1;
 
     ring3_log("ring3 snake: entering game loop\n");
 
     int64_t last_move = ticks_now();
-    render_hud(&con, &fb, score);
+    render_hud(&con, &fb, score, waiting);
     render_board(&fb, &geom);
 
     for (;;) {
+        int was_waiting = waiting;
         if (poll_input()) {
             ring3_log("ring3 snake: quit, handing off to the shell\n");
             snake_exit_or_yield();
+        }
+
+        /* Idle until the first arrow: the game clock does not run. The
+         * first arrow restarts it so the first move is a full tick away. */
+        if (waiting)
+            continue;
+        if (was_waiting) {
+            last_move = ticks_now();
+            render_hud(&con, &fb, score, waiting);
+            continue;
         }
 
         int64_t now = ticks_now();
@@ -410,8 +441,15 @@ void libos_snake_main(void)
         if (hit_wall || hit_self) {
             ring3_log("ring3 snake: collision, game over\n");
             render_game_over(&con, &fb, &geom, score);
-            wait_for_keypress();
-            snake_exit_or_yield();
+            if (!wait_for_keypress())
+                snake_exit_or_yield();
+            ring3_log("ring3 snake: restart\n");
+            snake_reset();
+            waiting = 1;
+            fb_clear(&fb, 0, 0, 0);
+            render_hud(&con, &fb, score, waiting);
+            render_board(&fb, &geom);
+            continue;
         }
 
         snake_advance(new_head, grow);
@@ -421,7 +459,7 @@ void libos_snake_main(void)
         }
 
         render_board(&fb, &geom);
-        render_hud(&con, &fb, score);
+        render_hud(&con, &fb, score, waiting);
 
         /* Ring 3 cannot execute `hlt` -- a tight poll loop is the only
          * option when nothing else needs the CPU between ticks. */

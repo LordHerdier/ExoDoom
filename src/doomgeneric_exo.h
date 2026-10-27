@@ -49,3 +49,21 @@
 #define DG_INIT_NOT_RUN 1 /* distinct from every DOOM_WAD_* code, all <= 0 */
 
 int dg_init_result(void);
+
+/*
+ * The private volume's outcome (SCRUM-267): DG_INIT_NOT_RUN before DG_Init(),
+ * then 0 if Doom's own volume is mounted (and is where fopen writes), or a
+ * negative -EXO_E* code if it could not be (no volume granted, not bindable,
+ * will not mount). Never fatal: Doom runs without saves.
+ */
+int dg_save_result(void);
+
+/*
+ * Check that `name` is on the mounted volume and starts like a WAD
+ * (SCRUM-75): opens it with fopen, reads the 12-byte header and reports on
+ * serial. Returns DOOM_WAD_OK, DOOM_WAD_ENOENT (not there), DOOM_WAD_EINVAL
+ * (not a WAD) or DOOM_WAD_ETOOBIG. This is the half of DG_Init that does not
+ * need a granted volume, so tests/kernel/test_dg_init_k.c can drive it over
+ * a scratch ExoFS volume.
+ */
+int dg_check_iwad(const char *name);

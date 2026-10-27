@@ -59,16 +59,34 @@
  * exo_fb_acquire already documents. Geometry is read from
  * fb_binding_geometry() (src/fb_binding.h), the one published source of
  * truth for the real framebuffer's dimensions; FB_SHADOW_ENODEV if that is
- * NULL. The buffer is zeroed before being handed back, so the first frame a
+ * NULL. If `who` has a pane in src/fb_layout.h (SCRUM-197) the buffer is
+ * sized to that pane instead and info_out reports the pane's width, height
+ * and pitch. A later call returns the buffer that exists, whatever the layout
+ * says by then. The buffer is zeroed before being handed back, so the first frame a
  * newly-launched context is composited from is blank rather than whatever
  * garbage the PMM pages last held.
  */
 int fb_shadow_acquire(page_owner_t who, exo_fb_info_t *info_out);
 
 /*
+ * fb_shadow_acquire(), then overwrite the buffer with whatever the real
+ * framebuffer shows right now (SCRUM-192), so the first frame composited
+ * for `who` is the current screen rather than black. Same return codes.
+ *
+ * Only correct while what is on screen belongs to no other context: it
+ * copies those pixels into memory `who` will map. kernel_main() uses it
+ * exactly once, for the boot shell, while the screen still holds the
+ * kernel's own boot console. Anywhere else it would hand one LibOS another's
+ * frame, so every other launch keeps fb_shadow_acquire()'s zeroed buffer.
+ */
+int fb_shadow_seed_from_screen(page_owner_t who);
+
+/*
  * Drop `who`'s directory entry and free the underlying pages (SCRUM-187) —
  * see this header's own top comment. A no-op if `who` never acquired one, so
- * exit and revocation paths can call it unconditionally.
+ * exit and revocation paths can call it unconditionally. Also drops `who`'s
+ * pane in src/fb_layout.h (SCRUM-197), acquired or not, so a split never
+ * outlives the context in it.
  */
 void fb_shadow_release(page_owner_t who);
 
@@ -78,3 +96,19 @@ void fb_shadow_release(page_owner_t who);
  * already released).
  */
 int fb_shadow_lookup(page_owner_t who, uint64_t *phys_base_out);
+
+/*
+ * fb_shadow_lookup(), plus the buffer's own dimensions (SCRUM-197). The
+ * compositor needs them because a buffer is no longer always screen-sized:
+ * one acquired by a context with a pane (src/fb_layout.h) is exactly that
+ * pane's size, tightly pitched. 0 and fills *info_out, nonzero if `who` holds
+ * no shadow.
+ */
+typedef struct {
+    uint64_t phys_base;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;   /* bytes per row of THIS buffer */
+} fb_shadow_info_t;
+
+int fb_shadow_lookup_info(page_owner_t who, fb_shadow_info_t *info_out);

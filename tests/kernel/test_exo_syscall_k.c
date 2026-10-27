@@ -61,14 +61,28 @@ static void test_numbers_match_spec(void)
     CU_ASSERT_EQUAL(EXO_SYS_SOUND_PCM_STOP, 29);
     CU_ASSERT_EQUAL(EXO_SYS_SOUND_PCM_PARAMS, 30);
     CU_ASSERT_EQUAL(EXO_SYS_DISK_STAT,     31);
+    CU_ASSERT_EQUAL(EXO_SYS_SOUND_STREAM_WRITE,  32);
+    CU_ASSERT_EQUAL(EXO_SYS_SOUND_STREAM_STOP,   33);
+    CU_ASSERT_EQUAL(EXO_SYS_SOUND_STREAM_VOLUME, 34);
+    CU_ASSERT_EQUAL(EXO_SYS_RTC_READ,            35);
+    CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_PKG,          36);
+    CU_ASSERT_EQUAL(EXO_SYS_DISK_EXTENT,         37);
+    CU_ASSERT_EQUAL(EXO_SYS_RESSTAT,             38);
+    CU_ASSERT_EQUAL(EXO_SYS_GRANTSTAT,           39);
+    CU_ASSERT_EQUAL(EXO_SYS_LAUNCH_START,        40);
+    CU_ASSERT_EQUAL(EXO_SYS_FAULT_INFO,          41);
+    CU_ASSERT_EQUAL(EXO_SYS_DISK_ACQUIRE_RO,     42);
 }
 
 /* The dispatcher will range-check against EXO_SYS_COUNT, so it has to stay one
- * past the last number — 32 as of exo_diskstat (SCRUM-202). */
+ * past the last number — 43 as of exo_disk_acquire_ro (SCRUM-281), after
+ * exo_fault_info (SCRUM-283),
+ * exo_grantstat/exo_launch_start (SCRUM-235), exo_resstat (SCRUM-232) and the
+ * per-program volume extent (SCRUM-237). */
 static void test_count_is_one_past_last(void)
 {
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_DISK_STAT + 1);
-    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 32);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, EXO_SYS_DISK_ACQUIRE_RO + 1);
+    CU_ASSERT_EQUAL(EXO_SYS_COUNT, 43);
 }
 
 /* Two syscalls sharing a number would route silently to the wrong handler. */
@@ -86,6 +100,10 @@ static void test_numbers_are_unique(void)
         EXO_SYS_DISK_READ,    EXO_SYS_DISK_WRITE,  EXO_SYS_DISK_ACQUIRE,
         EXO_SYS_DISK_RELEASE, EXO_SYS_SOUND_PCM,   EXO_SYS_SOUND_PCM_STOP,
         EXO_SYS_SOUND_PCM_PARAMS, EXO_SYS_DISK_STAT,
+        EXO_SYS_SOUND_STREAM_WRITE, EXO_SYS_SOUND_STREAM_STOP,
+        EXO_SYS_SOUND_STREAM_VOLUME, EXO_SYS_RTC_READ, EXO_SYS_LAUNCH_PKG,
+        EXO_SYS_DISK_EXTENT, EXO_SYS_RESSTAT, EXO_SYS_GRANTSTAT,
+        EXO_SYS_LAUNCH_START, EXO_SYS_FAULT_INFO, EXO_SYS_DISK_ACQUIRE_RO,
     };
     /* 64-bit so the mask keeps working as the table grows; the assert makes
      * the ceiling explicit rather than letting the shift go undefined. */
@@ -184,10 +202,11 @@ static void test_memstat_layout(void)
 
 static void test_ps_info_layout(void)
 {
-    CU_ASSERT_EQUAL(sizeof(exo_ps_info_t), 8);
+    CU_ASSERT_EQUAL(sizeof(exo_ps_info_t), 24);
     CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, id),         0);
     CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, state),      2);
     CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, page_count), 4);
+    CU_ASSERT_EQUAL(__builtin_offsetof(exo_ps_info_t, name),       8);
 
     /* EXO_PSLIST_MAX is CONTEXT_MAX itself (src/exo_syscall.h #include's
      * context.h rather than restating the number) -- this is a tautology by
@@ -201,15 +220,8 @@ static void test_ps_info_layout(void)
 
 static void test_argument_constants(void)
 {
-    CU_ASSERT_EQUAL(EXO_O_RDONLY, 0);
-    CU_ASSERT_EQUAL(EXO_O_WRONLY, 1);
-    CU_ASSERT_EQUAL(EXO_O_RDWR,   2);
-
-    /* Same ordering as stdio's SEEK_*, so the FILE* shim can pass them
-     * straight through. */
-    CU_ASSERT_EQUAL(EXO_SEEK_SET, 0);
-    CU_ASSERT_EQUAL(EXO_SEEK_CUR, 1);
-    CU_ASSERT_EQUAL(EXO_SEEK_END, 2);
+    /* exo_file_* open flags and whence values moved to
+     * src/libos_fs/exo_file.h with SCRUM-44; test_exo_file_k.c checks them. */
 
     /* Page flags are a mask, not an enum. */
     CU_ASSERT_EQUAL(EXO_PAGE_READ | EXO_PAGE_WRITE | EXO_PAGE_USER
@@ -258,13 +270,16 @@ static void *const volatile raw_stub_addresses[] = {
     (void *)exo_syscall5_thunk,
     (void *)exo_syscall6_thunk,
 };
+/* #9-#16 (EXO_SYS_FILE_*) are reserved and never bound, so they have no stub:
+ * exo_file_* is a LibOS library (src/libos_fs/exo_file.h, SCRUM-44). */
+#define RESERVED_UNSTUBBED_NUMBERS \
+    (EXO_SYS_FILE_RENAME - EXO_SYS_FILE_OPEN + 1)
+
 static void *const volatile stub_addresses[] = {
     (void *)exo_page_alloc,   (void *)exo_page_free,   (void *)exo_page_map,
     (void *)exo_page_unmap,   (void *)exo_fb_acquire,  (void *)exo_get_ticks,
     (void *)exo_kbd_poll,     (void *)exo_mouse_poll,  (void *)exo_serial_write,
-    (void *)exo_file_open,    (void *)exo_file_close,  (void *)exo_file_read,
-    (void *)exo_file_write,   (void *)exo_file_seek,   (void *)exo_file_stat,
-    (void *)exo_file_remove,  (void *)exo_file_rename, (void *)exo_sound_tone,
+    (void *)exo_sound_tone,
     (void *)exo_sound_stop,   (void *)exo_yield,       (void *)exo_exit,
     (void *)exo_launch,            (void *)exo_memstat,
     (void *)exo_pslist,            (void *)exo_disk_read,
@@ -272,13 +287,19 @@ static void *const volatile stub_addresses[] = {
     (void *)exo_disk_release,      (void *)exo_sound_pcm,
     (void *)exo_sound_pcm_stop,    (void *)exo_sound_pcm_params,
     (void *)exo_diskstat,
+    (void *)exo_sound_stream_write, (void *)exo_sound_stream_stop,
+    (void *)exo_sound_stream_volume,
+    (void *)exo_rtc_read, (void *)exo_launch_pkg, (void *)exo_disk_extent,
+    (void *)exo_resstat, (void *)exo_grantstat, (void *)exo_launch_start,
+    (void *)exo_fault_info, (void *)exo_disk_acquire_ro,
 };
 
 static void test_every_syscall_has_a_stub(void)
 {
     unsigned i;
 
-    CU_ASSERT_EQUAL(sizeof(stub_addresses) / sizeof(stub_addresses[0]),
+    CU_ASSERT_EQUAL(sizeof(stub_addresses) / sizeof(stub_addresses[0])
+                    + RESERVED_UNSTUBBED_NUMBERS,
                     EXO_SYS_COUNT);
 
     for (i = 0; i < sizeof(stub_addresses) / sizeof(stub_addresses[0]); i++) {
@@ -304,12 +325,10 @@ static void test_every_syscall_has_a_stub(void)
 static void test_launch_app_ids_are_dense_and_ordered(void)
 {
     CU_ASSERT_EQUAL(EXO_LAUNCH_APP_WAD_VIEWER, 0);
-    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_CLOCK,      1);
-    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_SNAKE,      2);
-    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_DOOM,       3);
+    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_DOOM,       1);
 
     CU_ASSERT_EQUAL(EXO_LAUNCH_APP_COUNT, EXO_LAUNCH_APP_DOOM + 1);
-    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_COUNT, 4);
+    CU_ASSERT_EQUAL(EXO_LAUNCH_APP_COUNT, 2);
 }
 
 /*

@@ -1606,9 +1606,15 @@ static const int scantokey[128] =
 };
 
 
+/* ExoDoom (SCRUM-269): ORIGCODE is undefined in this build, which compiled
+ * SaveDefaultCollection/LoadDefaultCollection down to nothing.  They only
+ * need stdio over the ExoFS backend, so enable just these two; the rest of
+ * ORIGCODE (SDL, directory handling) stays off. */
+#define EXO_CONFIG_IO 1
+
 static void SaveDefaultCollection(default_collection_t *collection)
 {
-#if ORIGCODE
+#if ORIGCODE || EXO_CONFIG_IO
     default_t *defaults;
     int i, v;
     FILE *f;
@@ -1770,7 +1776,7 @@ static void SetVariable(default_t *def, char *value)
 
 static void LoadDefaultCollection(default_collection_t *collection)
 {
-#if ORIGCODE
+#if ORIGCODE || EXO_CONFIG_IO
     FILE *f;
     default_t *def;
     char defname[80];

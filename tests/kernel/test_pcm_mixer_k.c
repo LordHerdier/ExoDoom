@@ -26,7 +26,7 @@
 
 /*
  * Render buffers.  Static rather than on the stack: the kernel stack is
- * 16 KiB (CLAUDE.md) and a few hundred stereo frames of int16_t is already a
+ * 16 KiB (docs/architecture.md §4) and a few hundred stereo frames of int16_t is already a
  * meaningful slice of it.
  */
 #define RENDER_FRAMES 512u

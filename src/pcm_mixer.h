@@ -45,7 +45,7 @@
  *
  * ── Integer only ───────────────────────────────────────────────────────
  *
- * Every C file under src/ compiles -mno-sse -mno-sse2 (see CLAUDE.md), so a
+ * Every C file under src/ compiles -mno-sse -mno-sse2 (see docs/syscall_spec.md §3.4a), so a
  * `float` here would not build -- the same wall that made src/fixed_math.c
  * fixed-point.  Phases are 16.16, sums are int32_t, and the only division is
  * by a constant.

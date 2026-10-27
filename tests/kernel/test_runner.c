@@ -47,7 +47,11 @@ int syscall_sound_suite_cleanup(void);
 void suite_syscall_sound_pcm_tests(CU_pSuite s);
 int syscall_sound_pcm_suite_init(void);
 int syscall_sound_pcm_suite_cleanup(void);
+void suite_syscall_sound_stream_tests(CU_pSuite s);
+int syscall_sound_stream_suite_init(void);
+int syscall_sound_stream_suite_cleanup(void);
 void suite_syscall_pit_tests(CU_pSuite s);
+void suite_rtc_tests(CU_pSuite s);
 void suite_doomgeneric_timer_tests(CU_pSuite s);
 void suite_libos_main_tests(CU_pSuite s);
 void suite_libos_c_probe_tests(CU_pSuite s);
@@ -57,6 +61,8 @@ void suite_libos_heap_tests(CU_pSuite s);
 void suite_libos_heap_stress_tests(CU_pSuite s);
 void suite_port_io_fault_tests(CU_pSuite s);
 void suite_kernel_mem_fault_tests(CU_pSuite s);
+void suite_fault_contain_tests(CU_pSuite s);
+void suite_fault_record_tests(CU_pSuite s);
 void suite_irq_entry_tests(CU_pSuite s);
 void suite_context_tests(CU_pSuite s);
 void suite_fb_console_tests(CU_pSuite s);
@@ -64,9 +70,10 @@ void suite_context_switch_tests(CU_pSuite s);
 void suite_sse_tests(CU_pSuite s);
 void suite_syscall_yield_tests(CU_pSuite s);
 void suite_shell_libos_tests(CU_pSuite s);
-void suite_clock_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
 void suite_fb_shadow_tests(CU_pSuite s);
+void suite_fb_layout_tests(CU_pSuite s);
+void suite_fb_compositor_tests(CU_pSuite s);
 void suite_fixed_math_tests(CU_pSuite s);
 void suite_doom_panic_tests(CU_pSuite s);
 void suite_dg_init_tests(CU_pSuite s);
@@ -74,7 +81,6 @@ void suite_fpconv_tests(CU_pSuite s);
 void suite_libc_gaps_tests(CU_pSuite s);
 void suite_syscall_fuzz_tests(CU_pSuite s);
 void suite_syscall_bench_tests(CU_pSuite s);
-void suite_libos_snake_tests(CU_pSuite s);
 void suite_doom_keymap_tests(CU_pSuite s);
 void suite_doom_sfx_tone_tests(CU_pSuite s);
 void suite_doom_sound_tests(CU_pSuite s);
@@ -82,19 +88,42 @@ void suite_libos_doom_tests(CU_pSuite s);
 void suite_doom_net_tests(CU_pSuite s);
 void suite_syscall_stat_tests(CU_pSuite s);
 void suite_ata_tests(CU_pSuite s);
+void suite_blkdev_tests(CU_pSuite s);
 void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
 void suite_exofs_tests(CU_pSuite s);
+void suite_exo_file_tests(CU_pSuite s);
+void suite_stdio_exofs_tests(CU_pSuite s);
+void suite_multidisk_tests(CU_pSuite s);
+void suite_exofs_multivol_tests(CU_pSuite s);
+void suite_shell_install_tests(CU_pSuite s);
 void suite_doom_wad_disk_tests(CU_pSuite s);
 void suite_launch_multi_tests(CU_pSuite s);
+void suite_launch_pkg_tests(CU_pSuite s);
 void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
+void suite_usb_topology_tests(CU_pSuite s);
+void suite_usb_kbd_report_tests(CU_pSuite s);
+void suite_usb_tests(CU_pSuite s);
 void suite_doom_dmx_tests(CU_pSuite s);
+void suite_doom_midi_tests(CU_pSuite s);
+void suite_doom_genmidi_tests(CU_pSuite s);
+void suite_doom_opl_tests(CU_pSuite s);
 void suite_pcm_mixer_tests(CU_pSuite s);
 void suite_pcm_mixer_music_tests(CU_pSuite s);
 void suite_hda_pcm_tests(CU_pSuite s);
 void suite_doom_sound_pcm_tests(CU_pSuite s);
+void suite_doom_sound_music_tests(CU_pSuite s);
 void suite_exo_pkg_tests(CU_pSuite s);
+void suite_exo_admit_tests(CU_pSuite s);
+void suite_exo_grant_tests(CU_pSuite s);
+void suite_shell_firstboot_tests(CU_pSuite s);
+void suite_acpi_tests(CU_pSuite s);
+void suite_shell_help_tests(CU_pSuite s);
+void suite_shell_err_tests(CU_pSuite s);
+void suite_shell_hist_tests(CU_pSuite s);
+void suite_shell_complete_tests(CU_pSuite s);
+void suite_shell_mount_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -110,6 +139,18 @@ int suite_hda_cleanup(void);
  * process-global state shared with the dg_init suite (SCRUM-211). */
 int suite_doom_dmx_init(void);
 int suite_doom_dmx_cleanup(void);
+
+/* Mounts the freedoom2 module for the real-lump tests and installs the
+ * mus2mid-backed MUS converter; cleanup unmounts and uninstalls it, since both
+ * are process-global (SCRUM-215). */
+int suite_doom_midi_init(void);
+int suite_doom_midi_cleanup(void);
+
+/* Mounts the freedoom2 module for the real GENMIDI tests (SCRUM-216). */
+int suite_doom_genmidi_init(void);
+int suite_doom_genmidi_cleanup(void);
+int suite_doom_opl_init(void);
+int suite_doom_opl_cleanup(void);
 
 /* Voices are process-global state; a voice left sounding by one test would
  * mix into the next one's assertions (SCRUM-212). */
@@ -133,6 +174,8 @@ int suite_hda_pcm_cleanup(void);
  * table as it found them (SCRUM-214). */
 int suite_doom_sound_pcm_init(void);
 int suite_doom_sound_pcm_cleanup(void);
+int suite_doom_sound_music_init(void);
+int suite_doom_sound_music_cleanup(void);
 
 /* Acquires the disk binding for the suite's own context before the round-
  * trip/hardware tests run and releases it afterward (SCRUM-188). */
@@ -148,11 +191,25 @@ int disk_binding_suite_cleanup(void);
 int exofs_suite_init(void);
 int exofs_suite_cleanup(void);
 
+/* exo_file_* sits on ExoFS, so the same binding requirement (SCRUM-44). */
+int exo_file_suite_init(void);
+int exo_file_suite_cleanup(void);
+int multidisk_suite_init(void);
+int exofs_multivol_suite_init(void);
+int exofs_multivol_suite_cleanup(void);
+int multidisk_suite_cleanup(void);
+int shell_install_suite_init(void);
+int shell_mount_suite_init(void);
+int shell_mount_suite_cleanup(void);
+int shell_install_suite_cleanup(void);
+
 /* Same idea as context_launch_rebind_suite_cleanup (SCRUM-196): each test
  * here launches real contexts (with real code/data/stack pages) via the
  * live EXO_SYS_LAUNCH handler and must not leak one into a later suite if an
  * assertion fails mid-test. */
+int launch_multi_suite_init(void);
 int launch_multi_suite_cleanup(void);
+int launch_pkg_suite_cleanup(void);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -164,6 +221,14 @@ int fb_binding_suite_cleanup(void);
  * (SCRUM-112). */
 int fb_shadow_suite_init(void);
 int fb_shadow_suite_cleanup(void);
+
+/* The split-screen suites (SCRUM-197) swap in synthetic geometries too, and
+ * the compositor one borrows a page for a RAM "screen" and sets
+ * context_current(); each restores all of it. */
+int fb_layout_suite_init(void);
+int fb_layout_suite_cleanup(void);
+int fb_compositor_suite_init(void);
+int fb_compositor_suite_cleanup(void);
 
 /* Same idea for the revocation suite: it borrows the framebuffer and allocates
  * pages under a second context id, and must leave neither behind (SCRUM-156). */
@@ -231,6 +296,13 @@ int port_io_fault_suite_cleanup(void);
  * ring-3 kernel-memory-fault test (SCRUM-55). */
 int kernel_mem_fault_suite_cleanup(void);
 
+/* Same idea for the fault_contain suite (SCRUM-283): real context rows and
+ * address spaces around live ring-3 faults, no fault hook. */
+int fault_contain_suite_cleanup(void);
+
+/* The fault log is global state the tests reset (SCRUM-283). */
+int fault_record_suite_cleanup(void);
+
 /* Same idea for the irq_entry suite: it installs the fault hook, a
  * SYS_LIBOS_RETURN handler, and a real address space around its live
  * ring-3 hardware-interrupt test (SCRUM-170). */
@@ -272,18 +344,6 @@ int syscall_yield_suite_cleanup(void);
  * reasoning as libc_shim_probe_suite_init/_cleanup above. */
 int shell_libos_suite_init(void);
 int shell_libos_suite_cleanup(void);
-
-/* Same idea for the clock_libos suite (SCRUM-168): builds the real clock
- * blob under PAGE_OWNER_LIBOS and must restore its boot-time binding, same
- * reasoning as shell_libos_suite_init/_cleanup above. */
-int clock_libos_suite_init(void);
-int clock_libos_suite_cleanup(void);
-
-/* Same idea for the libos_snake suite (SCRUM-182): builds the real Snake
- * blob under PAGE_OWNER_LIBOS and must restore its boot-time binding, same
- * reasoning as shell_libos_suite_init/_cleanup above. */
-int libos_snake_suite_init(void);
-int libos_snake_suite_cleanup(void);
 
 /* Same idea again for libos_doom (SCRUM-66): builds the real Doom image
  * from the embedded blobs, so it needs the same save/restore of
@@ -377,6 +437,14 @@ int run_tests(void)
                      fb_shadow_suite_cleanup);
     suite_fb_shadow_tests(s);
 
+    s = CU_add_suite("fb_layout", fb_layout_suite_init,
+                     fb_layout_suite_cleanup);
+    suite_fb_layout_tests(s);
+
+    s = CU_add_suite("fb_compositor", fb_compositor_suite_init,
+                     fb_compositor_suite_cleanup);
+    suite_fb_compositor_tests(s);
+
     s = CU_add_suite("vmm", NULL, NULL);
     suite_vmm_tests(s);
 
@@ -432,6 +500,10 @@ int run_tests(void)
     s = CU_add_suite("doomgeneric_timer", NULL, NULL);
     suite_doomgeneric_timer_tests(s);
 
+    /* The RTC driver and exo_rtc_read (SCRUM-249). */
+    s = CU_add_suite("rtc", NULL, NULL);
+    suite_rtc_tests(s);
+
     s = CU_add_suite("libos_main", NULL, libos_main_suite_cleanup);
     suite_libos_main_tests(s);
 
@@ -461,6 +533,12 @@ int run_tests(void)
     s = CU_add_suite("kernel_mem_fault", NULL, kernel_mem_fault_suite_cleanup);
     suite_kernel_mem_fault_tests(s);
 
+    s = CU_add_suite("fault_record", NULL, fault_record_suite_cleanup);
+    suite_fault_record_tests(s);
+
+    s = CU_add_suite("fault_contain", NULL, fault_contain_suite_cleanup);
+    suite_fault_contain_tests(s);
+
     s = CU_add_suite("irq_entry", NULL, irq_entry_suite_cleanup);
     suite_irq_entry_tests(s);
 
@@ -483,10 +561,6 @@ int run_tests(void)
                      shell_libos_suite_cleanup);
     suite_shell_libos_tests(s);
 
-    s = CU_add_suite("clock_libos", clock_libos_suite_init,
-                     clock_libos_suite_cleanup);
-    suite_clock_libos_tests(s);
-
     s = CU_add_suite("context_launch_rebind", NULL,
                      context_launch_rebind_suite_cleanup);
     suite_context_launch_rebind_tests(s);
@@ -507,10 +581,6 @@ int run_tests(void)
     s = CU_add_suite("syscall_bench", syscall_bench_suite_init,
                      syscall_bench_suite_cleanup);
     suite_syscall_bench_tests(s);
-
-    s = CU_add_suite("libos_snake", libos_snake_suite_init,
-                     libos_snake_suite_cleanup);
-    suite_libos_snake_tests(s);
 
     /* Pure function over one key -- no hardware, no state, so no suite
      * init/cleanup (SCRUM-40). */
@@ -540,6 +610,13 @@ int run_tests(void)
     s = CU_add_suite("ata", NULL, NULL);
     suite_ata_tests(s);
 
+    /* After "ata": the registry's second half checks what
+     * ata_register_blkdevs() registered against what ata_init() probes, and
+     * ahead of every suite that reaches a disk through the registry
+     * (SCRUM-244). */
+    s = CU_add_suite("blkdev", NULL, NULL);
+    suite_blkdev_tests(s);
+
     s = CU_add_suite("syscall_disk", syscall_disk_suite_init,
                      syscall_disk_suite_cleanup);
     suite_syscall_disk_tests(s);
@@ -554,6 +631,36 @@ int run_tests(void)
     s = CU_add_suite("exofs", exofs_suite_init, exofs_suite_cleanup);
     suite_exofs_tests(s);
 
+    /* After "exofs": the descriptor layer is a thin wrapper, so an ExoFS
+     * failure should be reported there first (SCRUM-44). */
+    s = CU_add_suite("exo_file", exo_file_suite_init, exo_file_suite_cleanup);
+    suite_exo_file_tests(s);
+
+    /* fopen/fread over ExoFS (SCRUM-42/75): same volume fixture as exo_file. */
+    s = CU_add_suite("stdio_exofs", exo_file_suite_init, exo_file_suite_cleanup);
+    suite_stdio_exofs_tests(s);
+
+    /* After "exofs" and "disk_binding": the two-drive acceptance suite
+     * (SCRUM-244) builds an ExoFS volume on each device, so a failure in
+     * either layer should be reported by its own suite first. */
+    s = CU_add_suite("multidisk", multidisk_suite_init,
+                     multidisk_suite_cleanup);
+    suite_multidisk_tests(s);
+
+    /* After "multidisk": it shares that suite's two-drive fixture, and
+     * SCRUM-265's several-volumes-at-once checks build on the single-volume
+     * behaviour "exofs" has already covered. */
+    s = CU_add_suite("exofs_multivol", exofs_multivol_suite_init,
+                     exofs_multivol_suite_cleanup);
+    suite_exofs_multivol_tests(s);
+
+    /* After "multidisk": `install` (SCRUM-233) is that suite's cross-device
+     * copy run in chunks, so a binding or two-drive failure shows up there
+     * first. */
+    s = CU_add_suite("shell_install", shell_install_suite_init,
+                     shell_install_suite_cleanup);
+    suite_shell_install_tests(s);
+
     /* After "exofs": doom_wad_disk_get() (src/doom_wad_disk.c) is ExoFS
      * plus a contiguous allocation and a cache on top, mounting the real
      * IWAD's own volume at LIBOS_WAD_DISK_BASE_LBA rather than a throwaway
@@ -561,13 +668,36 @@ int run_tests(void)
     s = CU_add_suite("doom_wad_disk", NULL, NULL);
     suite_doom_wad_disk_tests(s);
 
-    s = CU_add_suite("launch_multi", NULL, launch_multi_suite_cleanup);
+    s = CU_add_suite("launch_multi", launch_multi_suite_init,
+                     launch_multi_suite_cleanup);
     suite_launch_multi_tests(s);
+
+    /* After "launch_multi", whose foreground-context setup it reuses: #36
+     * launches from a package in the caller's memory rather than from a
+     * linked blob (SCRUM-230). */
+    s = CU_add_suite("launch_pkg", NULL, launch_pkg_suite_cleanup);
+    suite_launch_pkg_tests(s);
 
     /* Next to "ata" above: the other driver that talks to real emulated
      * hardware rather than to a model of it (SCRUM-209). */
     s = CU_add_suite("pci", NULL, NULL);
     suite_pci_tests(s);
+
+    /* After "pci": the UHCI controllers docker-test attaches, as seen through
+     * the PCI layer, plus the check that usb_init() took them from the
+     * firmware (SCRUM-245, SCRUM-198). */
+    s = CU_add_suite("usb_topology", NULL, NULL);
+    suite_usb_topology_tests(s);
+
+    /* HID boot report decoding on device-less slots; no hardware. */
+    s = CU_add_suite("usb_kbd_report", NULL, NULL);
+    suite_usb_kbd_report_tests(s);
+
+    /* The live bus usb_init() enumerated, and the acceptance test: two USB
+     * keyboards typed into separately over QMP by docker/scripts/
+     * qmp-keys.sh (SCRUM-198). */
+    s = CU_add_suite("usb", NULL, NULL);
+    suite_usb_tests(s);
 
     /* After "pci", which it depends on: hda_init() finds the controller
      * through pci_find_class() and maps its BAR (SCRUM-210). The cleanup
@@ -581,6 +711,23 @@ int run_tests(void)
      * for its reference data, hence the mount/unmount pair (SCRUM-211). */
     s = CU_add_suite("doom_dmx", suite_doom_dmx_init, suite_doom_dmx_cleanup);
     suite_doom_dmx_tests(s);
+
+    /* The music side of the same WAD: MUS/MIDI lumps to a timed event stream,
+     * the front end the OPL3 synthesizer will consume (SCRUM-215). */
+    s = CU_add_suite("doom_midi", suite_doom_midi_init, suite_doom_midi_cleanup);
+    suite_doom_midi_tests(s);
+
+    /* The instruments those events name: the IWAD's GENMIDI OPL patch table,
+     * which the OPL3 synthesizer will program voices from (SCRUM-216). */
+    s = CU_add_suite("doom_genmidi", suite_doom_genmidi_init, suite_doom_genmidi_cleanup);
+    suite_doom_genmidi_tests(s);
+
+    /* Where those events and instruments meet: the MIDI-to-OPL voice
+     * allocator over the vendored Nuked-OPL3 core, rendering 48 kHz stereo
+     * for the mixer's music voice, plus the epic's render-cost number on
+     * serial (SCRUM-217). */
+    s = CU_add_suite("doom_opl", suite_doom_opl_init, suite_doom_opl_cleanup);
+    suite_doom_opl_tests(s);
 
     /* What joins those two ends: N voices resampled, summed and clipped into
      * one stereo stream.  Hardware-free by construction -- src/pcm_mixer.c
@@ -613,6 +760,12 @@ int run_tests(void)
                      syscall_sound_pcm_suite_cleanup);
     suite_syscall_sound_pcm_tests(s);
 
+    /* exo_sound_stream_* (SCRUM-219): the bound music stream, over the
+     * mixer's music voice (SCRUM-218). */
+    s = CU_add_suite("syscall_sound_stream", syscall_sound_stream_suite_init,
+                     syscall_sound_stream_suite_cleanup);
+    suite_syscall_sound_stream_tests(s);
+
     /* And what Doom itself plays through all of that: the sound module's PCM
      * leg, decoding DSSHOTGN out of the mounted WAD and checking the samples
      * on the voice are the lump's own bytes. After syscall_sound_pcm because
@@ -622,12 +775,51 @@ int run_tests(void)
                      suite_doom_sound_pcm_cleanup);
     suite_doom_sound_pcm_tests(s);
 
+    /* And its music counterpart (SCRUM-220): RegisterSong -> PlaySong ->
+     * Poll x N -> StopSong against the real mixer and the mounted WAD's
+     * D_* and GENMIDI lumps. After doom_sound_pcm for the same reason
+     * (shared controller, mixer and mount). */
+    s = CU_add_suite("doom_sound_music", suite_doom_sound_music_init,
+                     suite_doom_sound_music_cleanup);
+    suite_doom_sound_music_tests(s);
+
     /* The ExoDoom program package format (SCRUM-229): pure buffer logic, no
      * device or syscall dependency, so (NULL, NULL) the same way "pci" is.
      * Placed ahead of syscall_fuzz deliberately -- see that suite's own
      * comment on running last. */
     s = CU_add_suite("exo_pkg", NULL, NULL);
     suite_exo_pkg_tests(s);
+
+    s = CU_add_suite("exo_admit", NULL, NULL);
+    suite_exo_admit_tests(s);
+
+    s = CU_add_suite("exo_grant", NULL, NULL);
+    suite_exo_grant_tests(s);
+
+    s = CU_add_suite("shell_firstboot", NULL, NULL);
+    suite_shell_firstboot_tests(s);
+
+    s = CU_add_suite("acpi", NULL, NULL);
+    suite_acpi_tests(s);
+
+    /* The shell's help matcher (SCRUM-263): pure string logic, no device or
+     * syscall dependency. */
+    s = CU_add_suite("shell_help", NULL, NULL);
+    suite_shell_help_tests(s);
+
+    /* The shell's errno wording (SCRUM-271): pure string logic. */
+    s = CU_add_suite("shell_err", NULL, NULL);
+    suite_shell_err_tests(s);
+
+    s = CU_add_suite("shell_hist", NULL, NULL);
+    suite_shell_hist_tests(s);
+
+    s = CU_add_suite("shell_complete", NULL, NULL);
+    suite_shell_complete_tests(s);
+
+    s = CU_add_suite("shell_mount", shell_mount_suite_init,
+                     shell_mount_suite_cleanup);
+    suite_shell_mount_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not

@@ -59,6 +59,9 @@ typedef enum {
 typedef struct {
     revoke_kind_t kind;
     uint64_t      paddr;      /* REVOKE_PAGE only; ignored otherwise */
+    page_owner_t  owner;      /* REVOKE_DISK only: whose extent -- with
+                               * several holders (SCRUM-237) "is the disk
+                               * marked" has no answer without it */
 } revoke_res_t;
 
 /*
@@ -81,6 +84,7 @@ static inline revoke_res_t revoke_res_page(uint64_t paddr)
 
     r.kind  = REVOKE_PAGE;
     r.paddr = paddr;
+    r.owner = PAGE_OWNER_FREE;
 
     return r;
 }
@@ -91,16 +95,18 @@ static inline revoke_res_t revoke_res_fb(void)
 
     r.kind  = REVOKE_FRAMEBUFFER;
     r.paddr = 0;
+    r.owner = PAGE_OWNER_FREE;
 
     return r;
 }
 
-static inline revoke_res_t revoke_res_disk(void)
+static inline revoke_res_t revoke_res_disk(page_owner_t who)
 {
     revoke_res_t r;
 
     r.kind  = REVOKE_DISK;
     r.paddr = 0;
+    r.owner = who;
 
     return r;
 }

@@ -36,11 +36,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* src/doomgeneric_exo.c's params global -- the struct the kernel-side
- * launcher patches via libos_launch_patch_params().  Writing it directly is
- * what stands in for that patch here. */
-extern libos_wad_params_t g_doom_params;
-
 /* ---- synthetic WADs --------------------------------------------------- */
 
 /*
@@ -243,86 +238,29 @@ static void test_strerror_is_always_a_string(void)
 /* ---- DG_Init itself ---------------------------------------------------- */
 
 /*
- * Each DG_Init case writes g_doom_params directly.  On a real launch the
- * kernel-side handler patches that struct through img.data_paddrs[0]
- * (libos_launch_patch_params(), src/libos_launch.h); from ring 0 the global
- * is simply in reach, so this exercises the identical code path DG_Init
- * takes without needing a LibOS launch.
+ * Since SCRUM-75 DG_Init reads the IWAD off the program volume through FILE*
+ * instead of mounting a preloaded buffer, so what it needs is a volume the
+ * kernel granted this program. A ring-0 test has none, and that is the case
+ * worth pinning: DG_Init reports it and returns, it does not halt and does
+ * not leave a stale WAD mounted. The header check itself (dg_check_iwad) is
+ * driven over a scratch ExoFS volume in test_stdio_exofs_k.c.
  */
-static void set_params(uint64_t vaddr, uint64_t size)
-{
-    g_doom_params.wad_vaddr = vaddr;
-    g_doom_params.wad_size  = size;
-}
-
-static void test_dg_init_mounts_a_good_wad(void)
+static void test_dg_init_reports_no_volume_granted(void)
 {
     doom_wad_unmount();
-    make_good_wad("IWAD");
-    set_params((uint64_t)(uintptr_t)fake_wad, FAKE_WAD_LEN);
-
-    DG_Init();
-
-    CU_ASSERT_EQUAL(dg_init_result(), DOOM_WAD_OK);
-    CU_ASSERT_PTR_NOT_NULL(doom_wad_mounted());
-
-    doom_wad_unmount();
-}
-
-static void test_dg_init_reports_unpatched_params(void)
-{
-    /*
-     * The sentinel case: nobody called libos_launch_patch_params(), most
-     * likely because src/doomgeneric_exo.c was not first in the link order
-     * for the Doom target, so its params global did not land at offset 0 of
-     * .data.
-     *
-     * This gets its own outcome rather than being allowed to fall through to
-     * a mount attempt, because a sentinel address dereferenced as a WAD
-     * header is a fault, not a diagnosis -- and it is a launcher bug, which
-     * sends you to a completely different file than a bad WAD would.
-     */
-    doom_wad_unmount();
-    set_params(0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL);
 
     DG_Init();
 
     CU_ASSERT_EQUAL(dg_init_result(), DOOM_WAD_ENOENT);
     CU_ASSERT_PTR_NULL(doom_wad_mounted());
-}
 
-static void test_dg_init_reports_oversize_before_truncating(void)
-{
-    /*
-     * wad_t is 32-bit throughout (a WAD directory stores 32-bit file
-     * offsets), so DG_Init has to narrow the 64-bit param.  The guard runs
-     * first so an absurd size is reported as absurd rather than silently
-     * wrapping into a plausible one -- 0x1_0000_0100 truncates to 256, which
-     * is exactly FAKE_WAD_LEN and would otherwise have mounted cleanly.
-     */
-    doom_wad_unmount();
-    make_good_wad("IWAD");
-    set_params((uint64_t)(uintptr_t)fake_wad, 0x100000100ULL);
-
-    DG_Init();
-
-    CU_ASSERT_EQUAL(dg_init_result(), DOOM_WAD_ETOOBIG);
-    CU_ASSERT_PTR_NULL(doom_wad_mounted());
-}
-
-static void test_dg_init_reports_a_bad_wad(void)
-{
-    doom_wad_unmount();
-    make_wad("JUNK", 2, 64);
-    set_params((uint64_t)(uintptr_t)fake_wad, FAKE_WAD_LEN);
-
-    DG_Init();
-
-    /* Reports and returns -- it does not halt.  A missing or malformed IWAD
-     * is what Doom's own D_DoomMain/W_AddFile path exists to diagnose, with
-     * engine context this layer does not have. */
-    CU_ASSERT_EQUAL(dg_init_result(), DOOM_WAD_EINVAL);
-    CU_ASSERT_PTR_NULL(doom_wad_mounted());
+    /* SCRUM-267: and with no private volume granted either, DG_Init reports
+     * that too and carries on -- Doom then runs without saves. Any failure
+     * will do: from ring 0 the extent query's out-pointer is on the kernel
+     * stack, outside the LibOS window, so the code is -EXO_EFAULT here rather
+     * than the -EXO_ENOENT a ring-3 Doom without a volume request sees. */
+    CU_ASSERT_TRUE(dg_save_result() < 0);
+    CU_ASSERT_NOT_EQUAL(dg_save_result(), DG_INIT_NOT_RUN);
 }
 
 /*
@@ -400,12 +338,8 @@ void suite_dg_init_tests(CU_pSuite s)
                 test_failed_mount_leaves_nothing_behind);
     CU_add_test(s, "strerror is always a string",
                 test_strerror_is_always_a_string);
-    CU_add_test(s, "DG_Init mounts a good WAD", test_dg_init_mounts_a_good_wad);
-    CU_add_test(s, "DG_Init reports unpatched params",
-                test_dg_init_reports_unpatched_params);
-    CU_add_test(s, "DG_Init reports oversize before truncating",
-                test_dg_init_reports_oversize_before_truncating);
-    CU_add_test(s, "DG_Init reports a bad WAD", test_dg_init_reports_a_bad_wad);
+    CU_add_test(s, "DG_Init reports no volume granted",
+                test_dg_init_reports_no_volume_granted);
     CU_add_test(s, "oversize message keeps all 64 bits",
                 test_oversize_message_keeps_all_64_bits);
 }

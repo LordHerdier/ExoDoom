@@ -8,7 +8,7 @@
  * did: an exact upward shift of pixel rows, with the newly exposed bottom
  * row cleared to the console background colour.
  *
- * The framebuffer does not exist during a TESTING boot (CLAUDE.md), so this
+ * The framebuffer does not exist during a TESTING boot (docs/architecture.md §4), so this
  * suite builds a synthetic one over a real, kernel-identity-mapped page from
  * alloc_page() rather than the machine's real MMIO aperture — scroll_up_one_row
  * only ever deals in fb->addr/pitch/width/height, so a RAM-backed
@@ -113,8 +113,82 @@ static void test_scroll_shifts_rows_and_clears_bottom(void)
     CU_ASSERT_TRUE(char_row_is(&fb, 3, bg));
 }
 
+/* Every printable ASCII character draws something. The font used to leave
+ * :;<=>?@ [\]^_` {|}~ blank, so the shell's prompt '>' and SCRUM-263's
+ * `<cmd> ?` rendered as empty cells. */
+static void test_every_printable_glyph_draws(void)
+{
+    framebuffer_t fb;
+    CU_ASSERT_TRUE(fb_init_bgrx8888(&fb, (uintptr_t)fb_page, TEST_FB_PITCH,
+                                     TEST_FB_WIDTH, TEST_FB_HEIGHT, TEST_FB_BPP));
+    fb_console_t con;
+    CU_ASSERT_TRUE(fbcon_init(&con, &fb));
+    fbcon_enable_cursor(&con, false);
+    fbcon_set_color(&con, 255, 255, 255, 0, 0, 0);
+
+    int blank = 0;
+    for (int ch = 33; ch <= 126; ch++) {
+        con.cursor_x = 0;
+        con.cursor_y = 0;
+        fbcon_putc(&con, (char)ch);
+        /* putc clears the cell to the black background before drawing, so
+         * an all-zero cell means the glyph is empty. */
+        if (char_row_is(&fb, 0, 0x00000000u)) {
+            blank++;
+        }
+    }
+    CU_ASSERT_EQUAL(blank, 0);
+}
+
+/*
+ * fb_clear() and fb_fill_rect() fill a row at a time with `rep stosl`
+ * (SCRUM-192). With a pitch wider than the visible row, each fill has to
+ * stop at the row's last pixel: the padding after it, and every pixel
+ * outside a rectangle, must come through untouched.
+ */
+#define PAD_FB_WIDTH  16u
+#define PAD_FB_HEIGHT 16u
+#define PAD_FB_PITCH  (PAD_FB_WIDTH * 4u + 16u)
+#define PAD_SENTINEL  0xA5A5A5A5u
+
+static void test_clear_and_fill_respect_pitch_and_bounds(void)
+{
+    uint32_t *words = (uint32_t *)fb_page;
+    for (uint32_t i = 0; i < PAD_FB_PITCH * PAD_FB_HEIGHT / 4u; i++) {
+        words[i] = PAD_SENTINEL;
+    }
+
+    framebuffer_t fb;
+    CU_ASSERT_TRUE(fb_init_bgrx8888(&fb, (uintptr_t)fb_page, PAD_FB_PITCH,
+                                     PAD_FB_WIDTH, PAD_FB_HEIGHT, 32));
+
+    fb_clear(&fb, 0x12, 0x34, 0x56);
+    fb_fill_rect(&fb, 3, 2, 5, 4, 0xAB, 0xCD, 0xEF);
+
+    int ok = 1;
+    for (uint32_t y = 0; y < PAD_FB_HEIGHT; y++) {
+        const uint32_t *row = (const uint32_t *)(fb.addr + y * fb.pitch);
+        for (uint32_t x = 0; x < PAD_FB_PITCH / 4u; x++) {
+            uint32_t want;
+            if (x >= PAD_FB_WIDTH) {
+                want = PAD_SENTINEL;
+            } else if (x >= 3 && x < 8 && y >= 2 && y < 6) {
+                want = 0x00ABCDEFu;
+            } else {
+                want = 0x00123456u;
+            }
+            if (row[x] != want) ok = 0;
+        }
+    }
+    CU_ASSERT_TRUE(ok);
+}
+
 void suite_fb_console_tests(CU_pSuite s)
 {
     CU_add_test(s, "scroll shifts rows and clears bottom",
                 test_scroll_shifts_rows_and_clears_bottom);
+    CU_add_test(s, "every printable glyph draws",
+                test_every_printable_glyph_draws);
+    CU_add_test(s, "clear and fill respect pitch and bounds",
+                test_clear_and_fill_respect_pitch_and_bounds);
 }

@@ -51,7 +51,7 @@ int exofs_dirent_read(exofs_volume_t *v, const exofs_entry_ref_t *ref,
     uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     if (buf == NULL) return -EXO_ENOMEM;
 
-    int rc = exofs_read_block(ref->block, buf);
+    int rc = exofs_read_block(v, ref->block, buf);
     if (rc == 0) {
         memcpy(out, buf + (size_t)ref->index * sizeof(exofs_dirent_t),
                sizeof(exofs_dirent_t));
@@ -70,11 +70,11 @@ int exofs_dirent_write(exofs_volume_t *v, const exofs_entry_ref_t *ref,
     if (buf == NULL) return -EXO_ENOMEM;
 
     /* Read-modify-write: 15 other entries share this block. */
-    int rc = exofs_read_block(ref->block, buf);
+    int rc = exofs_read_block(v, ref->block, buf);
     if (rc == 0) {
         memcpy(buf + (size_t)ref->index * sizeof(exofs_dirent_t), in,
                sizeof(exofs_dirent_t));
-        rc = exofs_write_block(ref->block, buf);
+        rc = exofs_write_block(v, ref->block, buf);
     }
 
     libos_heap_free(buf);
@@ -152,7 +152,7 @@ static int dir_cursor_next(exofs_volume_t *v, dir_cursor_t *c, uint8_t *buf,
     for (;;) {
         if (c->index < EXOFS_ENTS_PER_BLOCK) {
             if (!c->loaded) {
-                int rc = exofs_read_block(c->block, buf);
+                int rc = exofs_read_block(v, c->block, buf);
                 if (rc < 0) return rc;
                 c->loaded = 1;
             }
@@ -341,7 +341,7 @@ int exofs_dir_lookup(exofs_volume_t *v, uint32_t dir_head, const char *name,
     if (v == NULL || name == NULL) return -EXO_EINVAL;
 
     size_t want = strlen(name);
-    if (want == 0 || want > EXOFS_MAX_NAME) return -EXO_EINVAL;
+    if (!exofs_name_len_valid(want)) return -EXO_EINVAL;
 
     int rc = dir_scan_for_name(v, dir_head, name, want, ref, out, NULL, NULL);
     if (rc < 0) return rc;
@@ -358,7 +358,7 @@ int exofs_dir_add(exofs_volume_t *v, uint32_t dir_head, const char *name,
     if (v == NULL || name == NULL) return -EXO_EINVAL;
 
     size_t len = strlen(name);
-    if (len == 0 || len > EXOFS_MAX_NAME) return -EXO_EINVAL;
+    if (!exofs_name_len_valid(len)) return -EXO_EINVAL;
 
     /* One pass: is the name already here, and if not, where is the first
      * free slot? Before anything is allocated, so a rejected create has cost
@@ -452,4 +452,127 @@ int exofs_dir_remove(exofs_volume_t *v, const exofs_entry_ref_t *ref)
     e.flags = EXOFS_ENT_FREE;
 
     return exofs_dirent_write(v, ref, &e);
+}
+
+/* ---- Rename and move (SCRUM-240) ---------------------------------------- */
+
+int exofs_dir_rename_entry(exofs_volume_t *v, uint32_t dir_head,
+                           const exofs_entry_ref_t *ref, const char *name)
+{
+    if (!ref_valid(v, ref) || name == NULL) return -EXO_EINVAL;
+
+    exofs_dirent_t e;
+    int rc = exofs_dirent_read(v, ref, &e);
+    if (rc < 0) return rc;
+    if (!exofs_dirent_is_live(&e)) return -EXO_ENOENT;
+
+    size_t len = strlen(name);
+
+    exofs_entry_ref_t found;
+    rc = dir_scan_for_name(v, dir_head, name, len, &found, NULL, NULL, NULL);
+    if (rc < 0) return rc;
+    if (rc == 1) {
+        /* "a" -> "a" (or an alias of it) is a rename to itself. */
+        if (found.block == ref->block && found.index == ref->index) return 0;
+        return -EXO_EEXIST;
+    }
+
+    uint32_t nblk; uint16_t noff;
+    rc = exofs_name_alloc(v, name, (uint32_t)len, &nblk, &noff);
+    if (rc < 0) return rc;
+
+    uint32_t old_blk = e.name_block;
+    uint16_t old_off = e.name_off;
+    uint16_t old_len = e.name_len;
+
+    e.name_block = nblk;
+    e.name_off   = noff;
+    e.name_len   = (uint16_t)len;
+
+    /* The rename is this one slot write. */
+    rc = exofs_dirent_write(v, ref, &e);
+    if (rc < 0) {
+        (void)exofs_name_free(v, nblk, noff);
+        return rc;
+    }
+
+    /* Old record released only now, the reverse of exofs_dir_remove()'s
+     * order, because here the slot stays live: released first, an
+     * interruption would leave a live entry whose name cannot be read. This
+     * way it leaves one unreferenced record of at most EXOFS_MAX_NAME bytes,
+     * and the file reachable under its new name. */
+    if (old_len != 0) return exofs_name_free(v, old_blk, old_off);
+    return 0;
+}
+
+int exofs_dir_move(exofs_volume_t *v, const exofs_entry_ref_t *from,
+                   uint32_t to_head, const char *name,
+                   exofs_entry_ref_t *to_out)
+{
+    if (!ref_valid(v, from) || name == NULL) return -EXO_EINVAL;
+
+    exofs_dirent_t e;
+    int rc = exofs_dirent_read(v, from, &e);
+    if (rc < 0) return rc;
+    if (!exofs_dirent_is_live(&e)) return -EXO_ENOENT;
+
+    size_t len = strlen(name);
+
+    /* 1. A slot in the destination, and no duplicate there -- the same one
+     *    pass exofs_dir_add() makes, and for the same reason: before
+     *    anything is allocated. */
+    exofs_entry_ref_t slot;
+    int have_free;
+    rc = dir_scan_for_name(v, to_head, name, len, NULL, NULL,
+                           &slot, &have_free);
+    if (rc < 0) return rc;
+    if (rc == 1) return -EXO_EEXIST;
+
+    if (!have_free) {
+        uint32_t fresh;
+        rc = exofs_chain_extend(v, to_head, &fresh);
+        if (rc < 0) return rc;
+        slot.block = fresh;
+        slot.index = 0;
+    }
+
+    /* 2. The new name record. After this nothing left can run out of
+     *    space; what remains is two slot writes and a release. */
+    uint32_t nblk; uint16_t noff;
+    rc = exofs_name_alloc(v, name, (uint32_t)len, &nblk, &noff);
+    if (rc < 0) return rc;
+
+    exofs_dirent_t moved = e;
+    moved.name_block = nblk;
+    moved.name_off   = noff;
+    moved.name_len   = (uint16_t)len;
+
+    /* 3. Unlink, then 4. link: docs/filesystem.md §1.4. Interrupted between
+     *    the two, the entry's chain is leaked -- nothing names it. The
+     *    other order leaves two live entries naming one chain, and the
+     *    first unlink of either frees storage the other still points at. */
+    exofs_dirent_t tomb;
+    memset(&tomb, 0, sizeof(tomb));
+    tomb.flags = EXOFS_ENT_FREE;
+
+    rc = exofs_dirent_write(v, from, &tomb);
+    if (rc < 0) {
+        (void)exofs_name_free(v, nblk, noff);
+        return rc;
+    }
+
+    rc = exofs_dirent_write(v, &slot, &moved);
+    if (rc < 0) {
+        /* Put the original back rather than leave the entry unreachable.
+         * Best effort: a second device error here has nothing left to try,
+         * and is the leaked-chain case above. */
+        (void)exofs_dirent_write(v, from, &e);
+        (void)exofs_name_free(v, nblk, noff);
+        return rc;
+    }
+
+    /* 5. The old name, now referenced by nothing. */
+    if (to_out != NULL) *to_out = slot;
+    if (e.name_len != 0) return exofs_name_free(v, e.name_block, e.name_off);
+    return 0;
 }

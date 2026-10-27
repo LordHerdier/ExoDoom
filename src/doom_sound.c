@@ -170,6 +170,8 @@ int doom_sound_current_step(void)
 #include "doom/i_sound.h"
 #include "doom/sounds.h"
 #include "doom_sound_pcm.h"
+#include "libos_doom/doom_sound_music.h"
+#include "stdio.h"
 
 uint32_t DG_GetTicksMs(void);
 
@@ -346,19 +348,80 @@ sound_module_t DG_sound_module = {
     .CacheSounds       = NULL,   /* nothing to cache */
 };
 
-/* Music: the one voice belongs to sound effects. FEATURE_SOUND makes
- * i_sound.c install this module unconditionally and call every pointer
- * except Poll without a NULL check, so each is a real no-op. */
+/* Music (SCRUM-220): the logic is src/libos_doom/doom_sound_music.c, where a
+ * ring-0 suite can drive it; this is only the table i_sound.c wants.
+ * FEATURE_SOUND makes i_sound.c install it unconditionally and call every
+ * pointer except Poll without a NULL check, so none of these may be NULL --
+ * and Poll, the one that may be, is now the per-frame hook that feeds the
+ * stream.  A machine or WAD that cannot play music makes each of them a quiet
+ * no-op (RegisterSong returning NULL costs that level only). */
+#ifdef AUDIO_PROFILE
+/* Music timing profile -> serial, every MUS_PROF_PERIOD_MS of play and when
+ * the song stops.  Greppable: "MUSPROF".  See doom_sound_music.h. */
+#define MUS_PROF_PERIOD_MS 10000u
+static uint32_t g_prof_last_report;
+
+static void mus_prof_report(void)
+{
+    doom_music_prof_t p;
+
+    doom_music_prof_get(&p);
+    if (p.polls == 0)
+        return;
+    printf("MUSPROF poll: n=%u dt min/avg/max=%u/%u/%u ms  "
+           "hist(<=20,40,80,170,>)=%u,%u,%u,%u,%u  cost max/avg=%u/%u ms\n",
+           p.polls, p.dt_min, p.dt_sum / p.polls, p.dt_max,
+           p.dt_hist[0], p.dt_hist[1], p.dt_hist[2], p.dt_hist[3],
+           p.dt_hist[4], p.cost_max, p.costs ? p.cost_sum / p.costs : 0);
+    printf("MUSPROF ring: fill min/avg/max=%u/%u/%u frames  starved=%u  "
+           "underruns=%u\n",
+           p.fill_min, p.fills ? p.fill_sum / p.fills : 0, p.fill_max,
+           p.starved, p.underruns);
+    if (p.notes)
+        printf("MUSPROF notes: n=%u late min/avg/max=%u/%u/%u us  "
+               "hist(<1,2,4,>=4ms)=%u,%u,%u,%u\n",
+               p.notes, p.late_min, p.late_sum / p.notes, p.late_max,
+               p.late_hist[0], p.late_hist[1], p.late_hist[2],
+               p.late_hist[3]);
+}
+
+#else
+#define mus_prof_report() ((void)0)
+#endif
+
 static boolean mus_init(void) { return true; }
-static void    mus_shutdown(void) { }
-static void    mus_set_volume(int volume) { (void)volume; }
-static void    mus_pause(void) { }
-static void    mus_resume(void) { }
-static void   *mus_register(void *data, int len) { (void)data; (void)len; return NULL; }
-static void    mus_unregister(void *handle) { (void)handle; }
-static void    mus_play(void *handle, boolean looping) { (void)handle; (void)looping; }
-static void    mus_stop(void) { }
-static boolean mus_is_playing(void) { return false; }
+static void    mus_shutdown(void) { doom_music_reset(); }
+static void    mus_set_volume(int volume) { doom_music_set_volume(volume); }
+static void    mus_pause(void) { doom_music_pause(DG_GetTicksMs()); }
+static void    mus_resume(void) { doom_music_resume(DG_GetTicksMs()); }
+static void   *mus_register(void *data, int len) { return doom_music_register(data, len); }
+static void    mus_unregister(void *handle) { doom_music_unregister(handle); }
+static void    mus_play(void *handle, boolean looping)
+{
+    doom_music_play(handle, looping ? 1 : 0, DG_GetTicksMs());
+}
+static void    mus_stop(void) { mus_prof_report(); doom_music_stop(); }
+static boolean mus_is_playing(void) { return doom_music_is_playing() ? true : false; }
+#ifdef AUDIO_PROFILE
+static void    mus_poll(void)
+{
+    uint32_t t0 = DG_GetTicksMs();
+
+    doom_music_poll(t0);
+    if (!doom_music_is_playing())
+        return;
+
+    uint32_t t1 = DG_GetTicksMs();
+
+    doom_music_prof_note_cost(t1 - t0);
+    if (t1 - g_prof_last_report >= MUS_PROF_PERIOD_MS) {
+        g_prof_last_report = t1;
+        mus_prof_report();
+    }
+}
+#else
+static void    mus_poll(void) { doom_music_poll(DG_GetTicksMs()); }
+#endif
 
 music_module_t DG_music_module = {
     .sound_devices     = NULL,
@@ -373,7 +436,7 @@ music_module_t DG_music_module = {
     .PlaySong          = mus_play,
     .StopSong          = mus_stop,
     .MusicIsPlaying    = mus_is_playing,
-    .Poll              = NULL,
+    .Poll              = mus_poll,
 };
 
 #endif /* !EXO_KERNEL */

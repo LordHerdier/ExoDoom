@@ -18,7 +18,8 @@ rather than restating the format in a script.
 > layer (superblock/format/mount/FAT cache), the FAT layer, the name area,
 > directory entries, path resolution, the directory operations
 > (mkdir/rmdir/opendir/readdir) and the file operations
-> (open/read/write/seek/stat/unlink). What remains on the ticket is wiring
+> (open/read/write/seek/stat/unlink), plus `rename` (SCRUM-240, §1.4). What
+> remains on the ticket is wiring
 > and documentation, not filesystem behaviour.
 
 ---
@@ -50,6 +51,19 @@ This is also why zeroing is not left to the caller as an option. A caller
 that forgets it does not get a slightly untidy block; it gets a directory
 that appears to contain another file's entries.
 
+**One exception: whole-block file appends (SCRUM-233).**
+`exofs_fat_alloc_run()` claims a run of consecutive free blocks *without*
+zeroing them, and only `exofs_write()`'s append path calls it. It is still
+"data before claim", because the claim lives only in the in-RAM FAT until
+the next flush. The append writes every byte of the run in one transfer, then
+links it onto the chain. If that write fails, it frees the run before anything
+can flush. So an interrupted append leaves at most free blocks with new bytes
+in them, the same outcome as the "zero, then claim" row above. The point is
+cost. Per-block allocation wrote each block twice (zeros, then data) and
+walked the whole chain to find its tail, which made the 28 MB IWAD take
+minutes to write from the shell's `install`. Directory blocks, partial blocks,
+overwrites and writes past the end still go through `exofs_fat_alloc()`.
+
 ### 1.2 Chain teardown validates before it frees
 
 `exofs_chain_free()` walks the chain **twice** — once to validate it end to
@@ -75,11 +89,65 @@ there is no magic on the disk, so `exofs_mount()` refuses the volume — which
 is the honest answer for one whose FAT was only half written. The opposite
 order yields a *mountable* volume with a garbage FAT.
 
+### 1.4 Rename prepares, then unlinks, then links
+
+`exofs_rename()` (SCRUM-240, `src/libos_fs/exofs_dir.c`) re-links a directory
+entry and never touches the entry's data chain. How many writes that takes
+depends on whether the entry changes directory.
+
+**Within one directory it is one slot write.** The entry stays in its slot
+and only its name reference changes. So the rename is atomic, and an open
+handle on the file keeps working: a handle remembers its slot, not its name.
+The new name record is allocated before that write and the old one released
+after it. An interruption therefore leaves at most one unreferenced name
+record, and the file reachable under one of its two names. Releasing first
+would risk a live entry whose name cannot be read.
+
+**Between directories it is two slot writes, and their order is chosen.**
+`exofs_dir_move()` (`src/libos_fs/exofs_dirent.c`) first settles everything
+that can fail for want of space: a free slot in the destination (extending
+it if needed) and the new name record. `-EXO_ENOSPC` and `-EXO_EEXIST`
+therefore change nothing visible. Then:
+
+| Order | If it is interrupted between the two writes |
+|---|---|
+| **clear the old slot, then write the new one** (what ExoFS does) | Nothing names the entry's chain. It is leaked: invisible, harmless, reclaimed by a reformat. |
+| write the new slot, then clear the old one | Two live entries name one chain. The first `unlink` of either frees storage the other still points at, which is the "two files sharing storage" case from §6b. |
+
+If the second write fails with a device error, the original entry is written
+back before returning.
+
+**A moved directory's `..` is repointed last**, once the entry is in its new
+parent. If that lookup or write fails, `exofs_rename()` moves the entry back
+to its old parent before returning the error. That move-back is best effort:
+if it fails too, the directory is left under its new parent with `..` still
+naming the old one, and a later `rmdir` of the old parent would leave that
+`..` dangling. It takes two device errors in a row. Two more rules apply only
+to directories:
+
+- A directory may not move into itself or anywhere below itself
+  (`-EXO_EINVAL`), or it and its contents would become unreachable from the
+  root. This is checked by climbing `..` from the destination to the root,
+  which costs the tree's depth rather than the size of the subtree.
+- An entry with an open handle may not change directory (`-EXO_EBUSY`). The
+  handle would flush its size into the slot the entry just left.
+
+There is **no replace-on-rename**: an existing target is `-EXO_EEXIST`, and a
+caller that wants to overwrite removes the target first. The shell's `mv`
+does exactly that for a file onto a file (§8 "Mounts").
+
 ---
 
 ## 2. Geometry
 
-A volume starts at a caller-supplied base LBA, not at LBA 0:
+A volume lives on a caller-supplied **block device** and starts at a
+caller-supplied base LBA, not at LBA 0. The device (SCRUM-244) is the index
+the kernel's `exo_disk_*` syscalls take — 0 is reserved for the system disk,
+other disks are 1 and up (`exo_diskstat`, #31, enumerates them). `exofs_format(dev, base, sectors)` and
+`exofs_mount(dev, base)` take it, the mounted volume records it
+(`exofs_volume_t::dev`), and every transfer goes to it. It is **not** in the
+superblock: a volume does not know which disk it is carried on, so the same
+volume reads the same on a stick and on the system disk.
 
 ```
 base_lba + 0                    superblock (exactly one sector)
@@ -97,8 +165,8 @@ become an LBA with one addition.
 
 `exofs_format()` still takes the sector count from its caller — not because
 there is no disk-capacity syscall (`exo_diskstat`, #31,
-`docs/syscall_spec.md` §3.2, surfaces `ata_init()`'s IDENTIFY sector count via
-`ata_get_sector_count()`, SCRUM-202), but because several fixed-base-LBA
+`docs/syscall_spec.md` §3.2, surfaces each device's IDENTIFY sector count,
+SCRUM-202/244), but because several fixed-base-LBA
 volumes can share one disk (§2 above; the shell's scratch volume and the
 WAD's own, `src/doom_wad_disk.h`), so "the whole disk" is never the right
 size for one of them. `exofs_region_sectors()` (`src/libos_fs/exofs.h`,
@@ -106,7 +174,7 @@ SCRUM-203) is the caller-side computation — `min(next region's base,
 disk capacity) - this volume's base` — that the shell's `mkfs`/`disk`
 commands use instead of a hardcoded constant. The geometry derived from
 whatever sector count results is recorded in the superblock, so
-`exofs_mount()` needs only the base.
+`exofs_mount()` needs only the device and the base.
 
 ---
 
@@ -326,8 +394,8 @@ what lets path resolution handle them with no special case at all: it looks
 them up in the directory like any other name, so they mean whatever the
 directory says they mean. The cost is two slots and two name records per
 directory, plus the obligation that anything which ever *moves* a directory
-must fix its `..` — nothing moves directories yet, and a future rename owns
-that.
+must fix its `..`. That is `exofs_rename()` (§1.4), which repoints `..`
+whenever it moves a directory to a new parent.
 
 The root's `..` points at the root. There is nowhere above it, and a
 self-loop makes `/..` resolve to `/` the way every other filesystem behaves,
@@ -415,10 +483,24 @@ call makes sequential I/O O(blocks²) — for SCRUM-190's ~28 MB IWAD that is
 block it touched and its chain index, so a forward step costs one link and
 only a backwards seek pays for a re-walk.
 
+**Whole-block appends are batched (SCRUM-233).** When a write reaches a
+block-aligned position exactly one past the end of the chain, `append_run()`
+claims up to `WRITE_BATCH_BLOCKS` (128) consecutive free blocks with
+`exofs_fat_alloc_run()` (§1.1). It writes them with one `exofs_bdev_write()`
+through an in-window scratch buffer, and links them on from the cached tail.
+That is the write-side mirror of `exofs_read()`'s `READ_BATCH_BLOCKS`. A run
+stops at the first occupied block, and the next one picks up in the next gap.
+Anything else falls back to one block at a time: an overwrite of existing
+blocks, a write past the end that leaves a hole, or a leading or trailing
+partial block. `tests/kernel/test_exofs_k.c` pins this: fragmented free space,
+overwrite, holes, a full volume, and one disk write per appended block.
+
 **Holes are free.** Seeking past the end and writing leaves a gap that reads
 as zeros, with no hole tracking anywhere — every block is zeroed when
 allocated (§1.1), so unwritten bytes inside an allocated block are already
-zero.
+zero. The append path's unzeroed runs never contain a hole, because each of
+their blocks is written in full, and a write past the end does not take that
+path.
 
 ### Durability
 
@@ -439,6 +521,82 @@ where a deferred metadata write would be unsafe rather than merely lossy.
 ordering and for the same reason as `rmdir` (§6b). It refuses a directory
 with `-EXO_EISDIR`: that is `rmdir`'s job, and quietly removing a tree here
 is help nobody asked for.
+
+---
+
+## 6d. Descriptors (`exo_file_*`)
+
+`exofs.h` hands out caller-allocated `exofs_file_t` handles and has no
+descriptor table on purpose. `exo_file.c` (SCRUM-44) is that table, the layer
+a libc-style caller sits on. The `FILE*` shim (SCRUM-42, `src/libos_fs/exo_file_stdio.c`) is built on it:
+`exo_file_stdio_install()` points `fopen`/`fread`/`fwrite`/`fseek`/`mkdir` at it,
+which is how Doom reads the IWAD (`docs/architecture.md` §7). Like the rest of this directory it is **LibOS code, not a syscall**:
+dispatcher numbers #9–16 were once reserved for kernel file syscalls and are
+now permanently unbound (`docs/syscall_spec.md` §3.2, §4).
+
+It is deliberately thin. A descriptor is an index into a static array of
+`EXO_FILE_MAX_FDS` (8) handles, and each call is the matching `exofs_*` call
+on that slot. A slot is free exactly when its handle's `open` is 0, so there
+is no second in-use flag to fall out of step. The flag and whence constants
+are aliases of `EXOFS_O_*`/`EXOFS_SEEK_*`, so they pass straight through.
+
+**Two "table full" errors, from two tables.** `-EXO_EMFILE` means this
+program's descriptor table is full. `-EXO_ENFILE` comes from ExoFS's own
+open-entry table (`EXOFS_MAX_OPEN_HANDLES`, also 8) and is passed through
+unchanged. The descriptor table is the same size as ExoFS's, so in practice
+`-EXO_EMFILE` is the one a caller sees. Making it bigger would only move the
+failure to the other table.
+
+**Close before unmount.** Durability is ExoFS's, unchanged (§6c): a size
+reaches the disk on close. The descriptor table outlives a mount, so a caller
+that unmounts with descriptors open loses those files' sizes, and its next
+mount starts with stale slots occupied. `exo_file_close_all()` exists for
+exactly that point. Call it before `exofs_unmount()`.
+
+**No mount policy, one default volume.** The path-taking calls
+(`exo_file_open`, `exo_file_stat`, `exo_file_remove`, `exo_file_rename`, and `mkdir` through the stdio backend) take
+no volume, so they resolve against the one the program named with
+`exo_file_set_volume()` after mounting. An open descriptor keeps the volume it
+was opened on, so changing the default does not move it. A default that has
+been unmounted reads as unset (the generation check, §8), and with no default
+ExoFS answers `-EXO_EINVAL`, which this layer passes through. A program with
+several volumes mounted uses `exofs_*` on the handles directly for the others.
+
+**stdio writes are buffered a block at a time.** ExoFS caches no data blocks
+(§4), so `src/stdio.c` holds up to 512 bytes per stream (`WBUF_SIZE`, one
+`EXOFS_BLOCK_SIZE`) and calls `exo_file_write` when it fills, on `fflush`,
+`fseek`, and before an `fread`; a write of a block or more with an empty buffer
+goes straight through so ExoFS can batch it (§6c). Doom's savegame code writes
+one byte per `fwrite`, which unbuffered would be a sector read-modify-write per
+byte. **`fclose` is the durability point**: `fflush` pushes the bytes out but
+the directory entry (size, chain head) is only rewritten by `exo_file_close`
+(§6c Durability), so close every `FILE` before `exofs_unmount()`.
+
+**`exo_file_remove` / `exo_file_rename`** (SCRUM-106) are one-line wrappers
+over `exofs_unlink` and `exofs_rename` (§1.4) on the default volume; errors
+pass through unchanged. Remove refuses a directory (`-EXO_EISDIR`) and an open
+file (`-EXO_EBUSY`), so close first. Rename never replaces (`-EXO_EEXIST`;
+remove the target first) and never copies data; within a directory an open
+descriptor stays valid. libc `remove()`/`rename()` on the `FILE*` shim go
+through them (SCRUM-267): the stdio backend has optional `remove` and `rename`
+ops, the ExoFS one resolves both paths the way `fopen` does and calls these,
+and a backend without them (or no backend) still answers `EROFS`. Doom's
+savegame rotation is `remove(save); rename(temp, save)`, which is why rename
+not replacing matters: the first save's `remove` finds nothing and fails
+`ENOENT`, which Doom ignores, and every later one removes the old file first.
+
+**A second volume to read from** (SCRUM-267). `exo_file_stdio_set_fallback(vol)`
+names a volume that a read-only `fopen` tries when the default volume does not
+have the name, opened with `exo_file_open_on(vol, path, flags)` -- `exo_file_open`
+on a named volume, which leaves the default volume alone. Anything that could
+write (`w`, `a`, `+`) never falls through, so a program can change only the
+default volume. A file on both is read from
+the default one. Like the default, it reads as unset once unmounted. It exists
+because a program with a private volume *and* a shared read-only one (Doom,
+"Doom's volumes" in §8) needs "writes here, reads from either" and the
+descriptor layer has one default volume; it also does not depend on which
+volume is current when a file is first opened, which matters because Doom
+opens its config before it looks for the IWAD.
 
 ---
 
@@ -467,12 +625,48 @@ difference.
 
 ## 8. Limits and scope
 
-- **One volume at a time.** The mounted volume is a single static state.
-  This is not a simplification awaiting removal: the disk binding
-  (SCRUM-188) is exclusive, so only one context can reach the disk at all,
-  and that context has one disk.
-- **Unmount before releasing the binding.** `exofs_bdev_release()`
-  (`exo_disk_release`, #27) drops the binding immediately; it cannot know a
+- **Several volumes at once, through handles (SCRUM-265).** `exofs_mount()`
+  returns an opaque `exofs_vol_t *` and every call that takes a path takes it
+  first; an open `exofs_file_t` or `exofs_dir_t` remembers the volume it was
+  opened on. Up to `EXOFS_MAX_VOLUMES` (3) may be mounted together, on any
+  mix of devices, from a static pool in `exofs_volume.c`. Three rules keep
+  that safe:
+  - *The same volume cannot be mounted twice* (`-EXO_EBUSY`, same device and
+    base LBA): two resident copies of one FAT would each write back over the
+    other. A full pool is `-EXO_ENFILE`.
+  - *A handle is good until its unmount.* Each mount gets a generation number
+    that never repeats, copied into every file and directory opened on it, so
+    use after `exofs_unmount()` is `-EXO_EBADF` rather than a read through
+    whatever volume took the slot next. Unmount does not flush open files:
+    close them first (§6c "Durability").
+  - *Each mounted volume pays for its whole FAT in the LibOS heap* (up to
+    1 MiB at `EXOFS_MAX_BLOCKS`, below). Three worst-case volumes are 3 MiB of
+    the 16 MiB window (`LIBOS_PAGE_ALLOC_MAX_PAGES`); a mount that does not
+    fit is `-EXO_ENOMEM`, as before.
+  `exofs_format()` needs one free slot for the root bootstrap, refuses only
+  the volume it is formatting if that one is mounted, and leaves the others
+  alone. `exofs_unmount_all()` drops every volume (teardown and test fixtures).
+  Since SCRUM-237 programs also each hold an extent of their own and link
+  their own copy of `src/libos_fs/`, so their pools are theirs alone. A
+  volume must fit inside the extent its holder acquired (`exo_disk_extent`,
+  #37, says what that is for a program with an assigned volume); every
+  transfer outside it is refused by the kernel, not by ExoFS. The reference
+  consumer is `src/libos_voldemo/`: one program, packaged twice with
+  different slots, that formats on first launch, mounts thereafter, and
+  probes the sectors it must not reach.
+- **The disk binding, not ExoFS, still limits copies on one disk.** A program
+  may hold an extent on each of several devices (SCRUM-244) but only one
+  extent per device (`docs/syscall_spec.md` §3.5a). Two volumes of the same
+  disk can be mounted together if one extent covers both; two separate
+  extents on one disk cannot be held, which is why the shell refuses a `cp`
+  between two volumes of the same disk.
+- **The descriptor API names one default volume.** `exo_file_open()` and
+  `exo_file_stat()` take no volume, so they resolve against the one set with
+  `exo_file_set_volume()` (Doom's `DG_Init`, `doom_wad_disk.c`). An open
+  descriptor keeps its own volume if the default changes. It is not a mount
+  table: nothing routes a path between volumes below the shell.
+- **Unmount before releasing the binding.** `exofs_bdev_release(dev)`
+  (`exo_disk_release`, #27) drops the binding on that device immediately; it cannot know a
   filesystem was mounted on top of it. The FAT is resident and written back
   a sector at a time as it changes (§1), so releasing with dirty FAT
   sectors still cached loses them silently, and the next holder of the disk
@@ -493,6 +687,218 @@ difference.
 
 ---
 
+### First boot (SCRUM-234)
+
+The shell checks the system volume (the program volume at
+`LIBOS_WAD_DISK_BASE_LBA`) once at startup: acquire, `exofs_mount()`, unmount,
+release. Only `-EXO_EINVAL` (no superblock) means "unformatted" and gets the
+`no system volume -- format? [y/N]` prompt; a busy disk, `-EXO_ENOMEM` or an
+I/O error is reported and **never** offers a format. `y` runs `exofs_format()`
+over `[LIBOS_WAD_DISK_BASE_LBA, EXO_VOLUME_REGION_BASE_LBA)`, re-mounts to
+check, and the shell carries on without a reboot; anything else declines. The
+decisions are in `src/shell/shell_firstboot.h` (tested by
+`tests/kernel/test_shell_firstboot_k.c`); the prompt itself is manual-test
+only. `programs` lists the `*.exo` files on the volume and says `no programs
+installed` on a fresh one. A first-boot check must not assert "one block
+used": a fresh volume has two (§6b).
+
+To try it, `make docker-run-blank` boots on a zero-filled image the size of
+the real one (regenerated every run, `build/exodoom_disk.img` untouched):
+expect the prompt, `y`, then `programs` reporting `no programs installed`.
+
+### Install (SCRUM-233)
+
+`install <name>` copies one file from the install disk onto the system
+volume; `install` alone lists the install disk. The install disk is block
+device 1 (the second IDE drive until USB mass storage, SCRUM-247), with an
+ExoFS volume at LBA 0 that `docker/scripts/build.sh` rewrites on every build:
+the IWAD plus every `.exo`. A name with no `.` means `<name>.exo`, so
+`install doom` is `/doom.exo`; the IWAD is just another file
+(`install freedoom2.wad`), not pulled in by the package that needs it. After
+a copy, `programs` lists it and `run` launches it, no reboot.
+
+A `*` in the name makes it a pattern over the files at the top of the install
+disk. `*` stands for any run of characters, matching is case-sensitive, and
+directories never match. The no-extension rule applies first, so
+`install *` means `*.exo`, i.e. every package. `install *.wad` brings the
+IWAD, and `install *.*` copies everything. The matches are listed in full
+before the first copy, up to 64. More than that installs nothing rather than
+a truncated list. A file that fails is reported, the rest still copy, and a
+summary line closes the run. Matching and listing
+(`shell_install_glob_match()`/`shell_install_matches()`) are in
+`src/shell/shell_install.c`, tested with the rest of the suite.
+
+The shell holds both disks for the whole copy (device 1 whole, the program
+volume's extent on device 0, `docs/syscall_spec.md` §3.5a).
+`shell_copy_between()` in `src/shell/shell_install.c` mounts the source and the
+destination together (§8), then `shell_copy_vols()` reads one chunk at its
+offset from the first and writes it at the same offset on the second, a chunk
+at a time through a `libos_heap_alloc()` buffer (1 MiB, or 64 KiB if the heap
+cannot spare that). Each FAT is read once for the whole copy. Before SCRUM-265
+only one volume could be mounted, so the copy unmounted and remounted for every
+chunk, re-reading both FATs each time, and the large buffer was there to keep
+the IWAD to a few dozen mount pairs. With `exofs_write()`'s batched appends
+(§6c) the whole IWAD installs in a few seconds under QEMU. Before them, it took
+over three minutes. `shell_copy_vols()` is the same copy over volumes the
+caller already has mounted, and also accepts the same handle on both sides.
+Two rules a change here must keep:
+
+- **Stat the source before touching the destination.** A name the install
+  disk does not have is `-EXO_ENOENT` with the system volume untouched;
+  opening the destination with `EXOFS_O_TRUNC` first would wipe an installed
+  package of that name on a typo.
+- **A failed copy unlinks the destination.** A half-written package would
+  otherwise sit on the volume for `run` to trip over. An existing file of the
+  same name is replaced, so a failed *reinstall* leaves no copy at all, not
+  the old one.
+
+The copy returns with nothing mounted, so the releases that follow never drop
+a binding under a mounted volume. `tests/kernel/test_shell_install_k.c` covers
+name resolution and the copy (multi-chunk, exact-multiple and empty files,
+reinstall, missing source, `-EXO_ENOSPC` cleanup, directories). A test boot
+reformats device 1, so a QEMU line run after `make docker-test` without a
+rebuild finds an empty install disk.
+
+### Doom's volumes (SCRUM-267)
+
+Doom is the first real program with a private volume. Its package asks for
+both volumes (`docker/scripts/build.sh`): `progvol`, the read-only program
+volume holding the IWAD, and `--volume-slot 2 --volume-sectors 8192`, a 4 MiB
+slot of its own (`EXO_VOLUME_SLOT_DOOM`, `src/exo_volume.h`). The kernel assigns
+both at launch (`docs/syscall_spec.md` §3.5a "Both at once"), so Doom holds
+both extents for its whole run and can reach nothing else on the disk.
+
+`DG_Init` (`src/doomgeneric_exo.c`) mounts them in this order:
+
+1. The program volume (`exo_disk_extent` with `EXO_DISK_EXTENT_PROGRAM`), made
+   the default, and checks the IWAD's header on it.
+2. The private volume (`EXO_DISK_EXTENT_PRIVATE`), through `exofs_attach()`
+   (`src/libos_fs/exofs_attach.c`), made the default; the program volume
+   becomes the fallback for reads (§6d).
+
+`exofs_attach` mounts the volume if it will, and **formats it only if its first
+sector is all zero**. A volume that fails to mount but holds data is reported
+and left alone: `exofs_mount` answers `-EXO_EINVAL` for a blank slot and a
+damaged one alike, and formatting on that answer would erase a player's saves
+over one bad sector (the voldemo does format on any failure; Doom's saves are
+worth more than its demo's launch counter). Failure to get the private volume
+at all (no slot requested, not bindable, will not mount) is reported on serial
+and is **not fatal**: Doom runs without saves, with the program volume still
+the default, where every write fails.
+
+Nothing is unmounted at exit. Every file Doom writes is closed by the engine,
+and a close (and every create/remove/rename) ends in `exofs_sync()` (§4), so
+the volume on disk is consistent without one; the kernel reclaims the bindings
+when the program ends. A program that hands the disk to someone else and keeps
+running still has to unmount first (§8 "Unmount before releasing the binding").
+
+What ends up on the slot: savegames are `/.savegame/doomsav0.dsg` to
+`doomsav5.dsg` (about 50 KB each for a Freedoom level; the engine's config
+directory is `.`, which Doom joins into `./.savegame/`). `mount disk0:vol5 <dir>`
+from the shell browses them while Doom is not running; while it is, the slot
+reads as in use.
+
+**Saves outlive a boot, not a build.** The slot is on the disk image, so it
+persists exactly as long as that image does, and most of the make targets
+replace it: `run`, `docker-run*` and `docker-test` go through `docker-build`,
+which recreates `build/exodoom_disk.img` (`mkexofsimg` opens its output
+`"w+b"`), and `run-blank` boots a separate `build/exodoom_blank.img` that it
+re-zeroes on every call. A save made under one is not on the other, and a
+rebuild loses it. To carry saves from one boot to the next, boot the image
+without rebuilding: `make run-keep` (the built image) or
+`make run-keep DISK_IMG=build/exodoom_blank.img` (the image `run-blank` left).
+Delete the image, or `make clean`, to start from empty slots again.
+
+**Config is saved (SCRUM-269).** `M_LoadDefaults` reads and `M_SaveDefaults`
+(an `I_AtExit` hook, run from `I_Quit`) writes `.default.cfg` and
+`doomgenericdoom.cfg` at the volume root; `configdir` is `.` and
+`M_StringJoin` adds no separator. The vendored engine compiled both bodies out
+under `#if ORIGCODE`, which this build `#undef`s (`src/doom/config.h`).
+`src/doom/m_config.c` now widens just those two guards with `EXO_CONFIG_IO`
+(marked `ExoDoom (SCRUM-269)`); the rest of `ORIGCODE` stays off. The load half
+needs `fscanf`'s `%99[^\n]` scanset (in `src/stdio.c`'s `vsscanf_core`) and
+`isprint`. A missing or unreadable file is not an error: defaults apply. Like
+saves, the file survives a reboot only on the same image (`make run-keep`).
+
+### Mounts (SCRUM-266)
+
+`mount diskN:volM <dir>` makes a volume reachable under an existing, empty
+directory, so `ls`, `cat`, `cd`, `cp` and the rest work on a volume other than
+the shell's scratch one. `umount <dir>` takes it away again, and `mount` alone
+lists what is mounted. Mounts are RAM-only: gone at reboot, like the working
+directory.
+
+**It is a table in the shell, not an ExoFS feature.** ExoFS can hold several
+volumes mounted (§8) but has no notion of a path crossing from one to the
+next, so `src/shell/shell_mount.c` keeps a table of `(directory, volume)`
+pairs and every path-taking command asks it which volume its path is on. `shell_route_arg()` in `src/shell/shell_main.c` resolves the
+argument against the working directory, normalizes it (`shell_mount_normalize()`
+collapses `.`, `..` and `//`), and picks the longest mount point that contains
+it. The command then acquires that volume's disk extent, mounts it, runs
+against the path *within* the volume, unmounts and releases, as every shell
+command already did for the scratch volume. Normalizing first is what makes `..`
+work across a mount: ExoFS would resolve `..` through the mounted volume's own
+root, which is its own parent, never the directory the volume is mounted on.
+The cost is one FAT read per command per volume touched (§4), which is
+nothing for `ls` and `cat`.
+
+**Mounted for the command, not for the session.** The shell keeps its policy
+of holding no disk binding while idle (SCRUM-202): a launched program such as
+`run doom` needs the system volume's extent, and a mount the shell kept open
+would hold it. So a command mounts every volume it needs *together* and
+releases them at the end. Today that matters for `cp` and `mv` between volumes
+and for `install`, which no longer unmount either volume part-way through. A
+mount that stayed resident across commands would need that binding released
+around `run`, and is not done.
+
+**Volume names.** `diskN` is the block device index (`disk` prints it; disk 0 is
+the system disk). `volM` is a fixed position on that disk, counted from 1:
+
+| Disk | volM |
+|---|---|
+| 0 | 1 = the shell's scratch volume (`mkfs`), 2 = the system volume (programs and the IWAD), 3-10 = per-program volume slots 0-7 (`src/exo_volume.h`; slots 0 and 1 are the voldemo packages, slot 2 = `vol5` is Doom's saves) |
+| 1 and up | 1 = the volume at LBA 0 (the install disk's) |
+
+A position counts only if a sector at the volume's base holds an ExoFS
+superblock (`shell_mount_sb_valid()`, one sector read rather than a mount). A
+blank or unformatted position is absent from `disk` and cannot be mounted.
+Because numbers are positions, not a running count, `mkfs` creating the shell
+volume does not renumber the system volume. A slot held by a running program
+is listed as in use and refuses to mount, because its extent is exclusively that
+program's (`docs/syscall_spec.md` §3.5a).
+
+**Rules.**
+
+- The mount point must exist, be a directory and hold only `.` and `..`;
+  `/` and an existing mount point are refused. So is mounting the shell's own
+  volume (`disk0:vol1`, which is `/`): it would put the volume under one of
+  its own directories and make every path to it ambiguous. Mounts nest: a directory on a
+  mounted volume can itself be a mount point.
+- `umount` is refused (`EBUSY`) while the working directory is at or below the
+  mount point, or another mount lies beneath it. `shell_cwd` therefore always
+  holds the normalized absolute path.
+- `rm` and `mv` refuse a mount point itself.
+- Read/write, with no read-only mode.
+- `mv` within a volume is `exofs_rename()` (§1.4), so it moves directories
+  too and copies nothing. For a file onto an existing file it unlinks the
+  target first, as the old copy-based `mv` effectively did. It refuses to move
+  a directory that contains the working directory or a mount point, because
+  both are stored as paths. `cp` within a volume is as before.
+- Between volumes, `cp` and `mv` use
+  `shell_copy_vols()` (the two-path form of `install`'s copy, §8 "Install"):
+  chunked, both volumes mounted for the whole copy, destination removed on
+  failure. This needs both volumes bound at once, and the binding is one
+  extent per owner per device, so
+  **a copy between two volumes of the same disk is refused**; between
+  different disks it works.
+- `mkfs`, `run`, `programs`, `install`, `dd` and first boot keep their fixed
+  volumes and ignore the mount table.
+
+Routing, normalization, the table and the superblock probe are in
+`tests/kernel/test_shell_mount_k.c`, together with tests that route a path to
+the second disk's volume and read a file, the probe on formatted and blanked
+volumes, and the two-path copy.
+
 ## 9. Source map
 
 | File | What it holds |
@@ -501,14 +907,18 @@ difference.
 | `exofs.h` | The public API and its error contract. |
 | `exofs_internal.h` | The mounted volume's in-memory state, shared between ExoFS's own translation units. Not for the image builder. |
 | `exofs_blockdev.c/.h` | The only file that knows a syscall exists: acquire/release, chunked sector read/write, and the tick source. ExoFS's single `#ifdef EXO_KERNEL`. |
-| `exofs_volume.c` | Superblock, geometry, `format`/`mount`/`sync`/`unmount`, the FAT cache and its writeback. |
+| `exofs_volume.c` | Superblock, geometry, the pool of mounted volumes (`EXOFS_MAX_VOLUMES`), `format`/`mount`/`sync`/`unmount`, the FAT cache and its writeback. |
 | `exofs_fat.c/.h` | Block allocation and chain traversal. |
 | `exofs_name.c/.h` | The variable-length name area (§6). |
-| `exofs_dirent.c/.h` | Entry storage, the positional iterator, lookup/add/remove. |
+| `exofs_dirent.c/.h` | Entry storage, the positional iterator, lookup/add/remove, and in-place rename / cross-directory move of an entry (§1.4). |
 | `exofs_path.c/.h` | Path parsing and resolution (§7). |
-| `exofs_dir.c/.h` | `mkdir`/`rmdir`/`opendir`/`readdir`, and the `.`/`..` bootstrap (§6b). |
+| `exofs_dir.c/.h` | `mkdir`/`rmdir`/`opendir`/`readdir`, `rename` (§1.4), and the `.`/`..` bootstrap (§6b). |
 | `exofs_file.c` | `open`/`read`/`write`/`seek`/`stat`/`unlink` (§6c). |
-| `tests/kernel/test_exofs_k.c` | The whole suite, 66 tests, ending in the ticket's end-to-end acceptance path. |
+| `exo_file.c/.h` | The descriptor table over `exofs_file.c`: `exo_file_open`/`open_on`/`close`/`read`/`write`/`seek`/`stat`/`remove`/`rename`/`close_all`, and the default volume they resolve paths against, `exo_file_set_volume` (§6d, SCRUM-44, SCRUM-265). |
+| `exofs_attach.c/.h` | Mount a program's own volume, formatting it only when its first sector is blank (SCRUM-267). Knows only `exofs_*` and the LibOS heap; the caller binds the disk. |
+| `tests/kernel/test_exofs_multivol_k.c` | Several volumes mounted at once: interleaved I/O, the pool limit, the same volume twice, stale handles, and a copy between two mounted volumes. |
+| `tests/kernel/test_exofs_k.c` | The whole suite, 105 tests, ending in the ticket's end-to-end acceptance path. |
+| `tests/kernel/test_exo_file_k.c` | The `exo_file` suite: descriptor errors, the access/seek/truncate/append pass-throughs, durability across a remount, remove/rename (SCRUM-106), and SCRUM-44's acceptance path. |
 
 ### Building it
 
@@ -526,11 +936,61 @@ SCRUM-202 is now the first real ring-3 consumer: the shell LibOS
 (`src/shell/shell_main.c`, step `[2c/7]`) links `src/libos_fs/*.c` plus the
 small slice of the libc shim it needs (`src/string.c`, `src/libos_heap.c`,
 `src/libos_page_alloc.c`) as its `mkfs`/`mkdir`/`ls`/`cat`/`rm` commands,
-over its own scratch volume — not the one holding the IWAD. SCRUM-44
-(`exo_file_*`) is a still-future second consumer, and the sources needed no
-change to support either: the whole point of step `[3b5/7]`'s gate was that
+over its own scratch volume — not the one holding the IWAD.
+`exo_file.c` (SCRUM-44, §6d) is in this directory too, so both compiles pick
+it up through the `src/libos_fs/*.c` glob and the gate below covers it. The
+shell's explicit source list does not include it, because the shell has no
+use for descriptors. The sources needed no change to support any of this: the whole point of step `[3b5/7]`'s gate was that
 porting ExoFS to a ring-3 target would be "a `build_ring3_link_target` call
 and nothing more," and that held.
+
+That claim is enforced rather than asserted. Step `[3b5/7]` compiles the same
+sources with the ring-3 `probe_cflags` and no `-DEXO_KERNEL`, then runs
+`nm -u` over the objects and **fails the build if any undefined symbol is
+neither an `exofs_*` function (which resolves within the library) nor
+something a ring-3 target provides** — today `memcpy`/`memset`/`memcmp`/
+`strlen` and `libos_heap_alloc`/`_free`. Without the gate ExoFS could pick up
+a kernel-only dependency and nobody would find out until the first real ring-3
+consumer.
+
+### Pitfalls when writing code against it
+
+- **`exofs_blockdev.c` is the only file with an `#ifdef EXO_KERNEL`**, and it
+  is the same dual-compile seam `src/libos_page_alloc.c` documents at length:
+  the kernel build calls `exo_syscall_dispatch()` directly so a ring-0 KUnit
+  suite can drive the whole filesystem, and the ring-3 build uses the inline
+  `syscall` stubs. It is a necessity and not a convenience: a stub's `sysretq`
+  forces CPL 3 on return, so a ring-0 caller executing one would drop the rest
+  of the boot to ring 3.
+- **Disk buffers come from `libos_heap_alloc()`, never `malloc()`.**
+  `exo_disk_read` rejects any buffer outside
+  `[EXO_USER_VA_BASE, EXO_USER_VA_END)` with `-EXO_EFAULT`, and it does so
+  under `EXO_KERNEL` too, because it is the same handler. Under the kernel
+  build `malloc()` is `kmalloc()` and returns a kernel address from outside
+  that window. This is the single most likely thing to go wrong when adding a
+  test.
+- **Every `exofs_*` call takes its volume** (SCRUM-265), and a file or
+  directory handle must not outlive the `exofs_unmount()` of the volume it was
+  opened on: it fails with `-EXO_EBADF` rather than reading, but an unclosed
+  writer's size is lost (§6c Durability). Close first, unmount second, release
+  the disk binding last. A test that keeps its volume in a file-static (every
+  suite here does) should reset with `exofs_unmount_all()`, or a failed test
+  strands a pool slot for the suites after it.
+- **A fresh volume has two blocks in use, not one:** the root directory and
+  one name block (§6b — `exofs_format()` mounts what it wrote so it can create
+  the root's `.`/`..`, and creating an entry allocates a name record). Keep
+  that in mind when asserting on FAT contents or free-block counts.
+- **Costs are asserted, not assumed (SCRUM-223).** `exofs_volume_t` counts its
+  own data-block transfers (`stat_block_reads`/`stat_block_writes`, bumped in
+  `exofs_read_block()`/`exofs_write_block()`), and the suite states costs as
+  numbers — "storing a name reads one block" — because every disk read is a
+  syscall with interrupts off and a chain re-walk is invisible to a test that
+  only checks results. The name allocator is what that first caught (§6).
+- **Write ordering is load-bearing** (§1). Allocation zeroes a block before
+  claiming it (the append path writes its data before linking instead, §1.1), chain teardown validates before it frees, `format` writes the
+  superblock last, and `rmdir`/`unlink` unlink from the parent before freeing
+  blocks. Reversing any of them turns a harmless leak into two files sharing
+  storage; do not "tidy" them into a more natural-looking order.
 
 ## 10. Mounting a volume on the build host (`tools/exofsfuse`)
 

@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "page_alloc.h"
+
 /*
  * fault — CPU exception diagnostics (SCRUM-17).
  *
@@ -13,8 +15,9 @@
  * fault was therefore a silent infinite loop -- not a triple fault, but not a
  * diagnostic either.  pf_stub + page_fault_handler replace that on vector 14
  * with CR2, the decoded error code, the faulting RIP, and what the live page
- * tables actually say about the address, printed to COM1 before the machine
- * halts.
+ * tables actually say about the address, printed to COM1.  Since SCRUM-283 a
+ * fault from ring 3 then ends that program and resumes another
+ * (fault_terminate_current, below); from ring 0 the machine halts.
  *
  * Vector 13 (#GP) reuses the same frame, describer and TESTING hook via
  * gp_fault_handler/gpf_stub (SCRUM-56) -- a ring-3 IN/OUT hits it because
@@ -24,7 +27,7 @@
  * CR2 and no useful error-code bits for an IN/OUT trap (the error code here
  * is 0 unless the fault relates to a specific selector), so
  * gp_fault_handler skips print_mapping() and the bit-decoded error line.
- * The other eight error-code vectors still use plain error_stub.
+ * Every other vector has an exc_stub_N/exception_handler since SCRUM-283.
  */
 
 /*
@@ -69,7 +72,38 @@ void page_fault_handler(exception_frame_t *f);
  * idt.c).  Same hook/halt behaviour as page_fault_handler, no CR2. */
 void gp_fault_handler(exception_frame_t *f);
 
+/*
+ * End the program that took `f` and resume the next ready context
+ * (SCRUM-283).  Ring 3: logs the context id and name, reclaims through
+ * context_teardown() (the exo_exit path), marks the dead row BLOCKED and
+ * resumes the next READY context via context_resume_noreturn(); the row is
+ * left for the next launch to context_destroy().  If no other context is ready
+ * the shell is relaunched instead (and the dead row reaped on the spot).
+ * Ring 0, a ring-3 fault with no context row, or a failed relaunch: halts with
+ * a diagnostic.
+ * Never returns.  `vector` is the CPU exception number and `addr` the
+ * faulting address (CR2 for #PF, else 0); both go into the fault log
+ * (src/fault_record.h) that exo_fault_info reads.
+ */
+void fault_terminate_current(const exception_frame_t *f, uint64_t vector,
+                             uint64_t addr) __attribute__((noreturn));
+
+/* Every other CPU exception vector (SCRUM-283), from isr.s's exc_stub_N with
+ * the vector number.  Ring 3 ends the program via fault_terminate_current();
+ * ring 0, #DF and #MC halt with a diagnostic.  Never returns. */
+void exception_handler(exception_frame_t *f, uint64_t vector);
+
+/* What the fault path runs when the crashed program was the last ready
+ * context: returns the id of a new READY, primed context, or PAGE_OWNER_FREE
+ * for "could not" (production: shell_launch_context(), src/shell_launch.c). */
+typedef page_owner_t (*fault_relaunch_fn)(void);
+
 #ifdef TESTING
+/*
+ * Replace the relaunch function; NULL restores the shell relaunch.
+ */
+void fault_set_relaunch(fault_relaunch_fn fn);
+
 /*
  * Test hook.  Called before anything is printed; returning nonzero makes the
  * handler return instead of halting, which lets a test recover from a

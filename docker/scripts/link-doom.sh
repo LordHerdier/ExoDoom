@@ -85,9 +85,33 @@ SHIM_SOURCES=(
   # caller it has ever had.
   src/doom_sound_pcm.c
   src/doom_dmx.c
+  # SCRUM-215's music reader, the only caller of mus2mid().
+  src/libos_doom/doom_midi.c
+  # SCRUM-216's GENMIDI instrument decoder, for the OPL3 synth.
+  src/libos_doom/doom_genmidi.c
+  # SCRUM-217's OPL3 synth: the MIDI-to-OPL driver and vendored Nuked-OPL3.
+  src/libos_doom/doom_opl.c
+  src/nuked_opl3/opl3.c
+  # SCRUM-220: Doom music_module_t logic over doom_midi + doom_opl + the stream.
+  src/libos_doom/doom_sound_music.c
   src/libos_heap.c
   src/libos_page_alloc.c
   src/libos_fb.c
+  # SCRUM-75: DG_Init mounts the program volume and installs the FILE*
+  # backend over it, so Doom links ExoFS and the stdio glue like the shell.
+  src/libos_fs/exofs_volume.c
+  src/libos_fs/exofs_fat.c
+  src/libos_fs/exofs_name.c
+  src/libos_fs/exofs_dirent.c
+  src/libos_fs/exofs_path.c
+  src/libos_fs/exofs_dir.c
+  src/libos_fs/exofs_file.c
+  src/libos_fs/exofs_blockdev.c
+  src/libos_fs/exo_file.c
+  src/libos_fs/exo_file_stdio.c
+  # SCRUM-267: DG_Init also mounts Doom's private volume, formatting it the
+  # first time (exofs_attach).
+  src/libos_fs/exofs_attach.c
 )
 
 # Symbols that are allowed to remain undefined, each with the ticket that

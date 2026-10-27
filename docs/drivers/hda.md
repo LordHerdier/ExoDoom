@@ -19,6 +19,7 @@
 10. [Design decisions and gotchas](#10-design-decisions-and-gotchas)
 11. [Where the samples come from](#11-where-the-samples-come-from)
 12. [Streaming mode: the software mixer](#12-streaming-mode-the-software-mixer)
+    (12.12: [audio timing profile](#1212-audio-timing-profile-audio_profile1))
 
 ---
 
@@ -73,7 +74,7 @@ Two consequences worth internalising:
 
 Everything the controller touches by DMA — CORB, RIRB, BDL, samples — comes
 from `alloc_pages_contig_owned()` (`src/page_alloc.c`), never `kmalloc`: the
-bump allocator is finished once `page_alloc_init()` has run (see `CLAUDE.md`),
+bump allocator is finished once `page_alloc_init()` has run (see `docs/memory.md` §5),
 and the BDL names *physical* addresses, so the pages have to be contiguous.
 The kernel map is an identity map, so the pointer the driver writes through is
 the address the controller is given.
@@ -224,13 +225,10 @@ SDnCTL  |= RUN                     ; go
 reads, which is the cheapest available proof that DMA is really happening
 rather than merely configured.
 
-`hda_init()` programs all of this but starts nothing. `kernel_main` plays the
-boot test tone from the normal-boot tail, *after* `sti` — not next to
-`hda_init()` — because the duration is enforced by `hda_tick()` from
-`irq0_handler`, so a tone started with interrupts still masked would sound
-until whenever they were enabled. That placement also keeps the tone out of
-`TESTING` builds, which exit through `run_tests()` and drive
-`hda_play_tone()` themselves.
+`hda_init()` programs all of this but starts nothing, and `kernel_main` starts
+nothing either: a normal boot is silent until a LibOS asks for sound. (A
+440 Hz boot test tone used to play from the normal-boot tail; SCRUM-287
+removed it. The KUnit suites drive `hda_play_tone()` themselves.)
 
 ---
 
@@ -269,6 +267,13 @@ without completion interrupts instead. There is no shared-IRQ dispatch in this
 kernel — one vector, one handler — so a controller routed onto one of those
 would have this driver's stub replace the timer's or the keyboard's. A silent
 tone is recoverable; a dead timer is not.
+
+The same rule is why the USB host controllers never wire their INTx line,
+even though QEMU can route one of them onto this controller's line (it does
+with today's device list). They run with `USBINTR = 0` and are polled from
+`irq0_handler()`, so this stub stays the only one on the line
+(`docs/drivers/usb.md` §3). With today's list, QEMU's default e1000 shares
+the line too, but nothing drives it, so it never raises the line.
 
 Timed tones follow `src/speaker.c` exactly: `hda_play_tone()` records a
 deadline and returns, and `hda_tick()` — called from `irq0_handler()` right
@@ -339,12 +344,15 @@ asserts is the chain up to the point samples leave RAM.
 
 Two ways to go further, both worth knowing:
 
-- **Listen to it.** `kernel_main` plays a 440 Hz / 600 ms tone on a normal
-  boot once `hda_init()` has succeeded and interrupts are on
-  (`HDA_BOOT_TONE_HZ`/`_MS`). Use `make run` (host QEMU) with a real backend
-  in place of `-audiodev none,id=snd0` — `pipewire`, `pa`, `alsa` or `sdl`,
+- **Listen to it.** A normal boot is silent, so run Doom (sfx and music play
+  through the mixer, §12). Use `make run` (host QEMU) with a real backend
+  in place of `-audiodev none,id=snd0` — `pipewire`, `pa` or `alsa`,
   whichever the host runs; `qemu-system-x86_64 -audiodev help` lists what the
-  binary supports.
+  binary supports. **Avoid `sdl` for anything timing-sensitive:** measured
+  with the §12.12 profiler it drains the stream at ~52 kHz (about 8% fast,
+  wandering ±0.6% window to window) where `pipewire`, `pa` and `alsa` hold
+  48.0 kHz — the music's tempo is the DAC's consumption rate, so SDL makes
+  it fast and uneven.
 - **Capture it, which is reproducible and needs no speaker.**
   `-audiodev wav,id=snd0,path=out.wav` writes what the codec received to a
   WAV file on exit. That is how the amp-gain bug in §10 was found and fixed:
@@ -412,6 +420,20 @@ Two ways to go further, both worth knowing:
   written as 0 deliberately, not by omission: on a 256 MiB machine every page
   is below 4 GiB, and the code that computes them (`phys >> 32`) is correct
   for a machine where they are not.
+- **A completion cleared while IF is off makes the slave PIC raise a spurious
+  IRQ15 (SCRUM-227).** IRQ11 is level-triggered at the slave but reaches the
+  master on edge-triggered IRQ2. When `SDnSTS.BCIS` latches with interrupts
+  off and `stream_program()` clears it before `sti`, the master still holds
+  the request and the slave doesn't. This is normal 8259 behaviour, not a
+  driver bug, so the fix belongs at the PIC: `docs/drivers/pic.md` §9's
+  vector-0x2F handler EOIs the master. Before that existed, the spurious IRQ
+  hit `default_stub`, IRQ2 stayed in service, and HDA's completion interrupt
+  stopped for the rest of the boot. The failure: DMA advancing, the PIT
+  ticking, and the refill count frozen at 0, roughly one test boot in ten.
+  If refills stall again, `test_hda_pcm_k.c`'s refill assertions now print a
+  dump on failure (controller, PCI INTx status per function, PIC
+  IRR/ISR/IMR/ELCR, and handler entries vs. counted completions). An `isr`
+  with bit 2 set is this bug.
 - **No FPU or XMM state is involved.** This driver is integer-only and names
   no XMM register, so the "nothing saves FPU/XMM on kernel entry" invariant
   (`docs/syscall_spec.md` §3.4a) is untouched — including inside
@@ -433,7 +455,7 @@ are decoded by a separate module, `src/doom_dmx.c/h` (SCRUM-211). The two are
 joined by `src/pcm_mixer.c/h` and the streaming mode described in §12
 (SCRUM-212), and reached from ring 3 through `exo_sound_pcm` (§12.5,
 SCRUM-213) — which is now the only thing on a normal boot that starts a
-stream, the boot tone aside.
+stream.
 
 The gap that mixer has to close, which is the reason it exists at all:
 
@@ -461,6 +483,34 @@ including the 16 padding samples stripped at each end. The corollary is a
 lifetime rule: **a voice must not outlive its mount**, so anything calling
 `doom_wad_unmount()` calls `pcm_mixer_reset()` first.
 
+### 11.1 The decoder (`src/doom_dmx.c/h`, SCRUM-211)
+
+A `DS*` DMX lump is an 8-byte header (format tag, rate, sample count) followed
+by 8-bit *unsigned* mono PCM. Three properties of the decoder are
+load-bearing:
+
+- **It is zero-copy, deliberately.** `doom_dmx_t.samples` points into the
+  mounted IWAD — the same "there is nowhere to copy 28 MiB to" reasoning
+  `src/doom_wad.h` gives for the mount itself. Nothing is allocated and nothing
+  freed; `doom_dmx_to_s16()` is the one call that writes, and only into a buffer
+  the caller supplies.
+- **The 16 padding samples at each end are dropped**, which is why
+  `num_samples` is the header count minus 32. They are not silence (DSPISTOL's
+  raw body starts 145, 144, 141; its first audible sample is 156), so keeping
+  them clicks at both ends of every effect.
+- **The rate is reported, never assumed** — see the histogram above. HDA output
+  is pinned at 48 kHz, so resampling is the mixer's job, per voice.
+
+The sfx lookup is **name-based** (`doom_dmx_find_sfx(wad, "pistol", …)`), not
+`sfxenum_t`-based, because the enum → name mapping lives only in
+`src/doom/sounds.c`'s `S_sfx[]` and `doom_dmx.c` is globbed into *shipped*
+kernels, where nothing from `src/doom/` links. To still prove the enum leg,
+`build.sh` compiles `src/doom/sounds.c` under `TESTING` — the second instance
+of the narrow exception `src/doom/tables.c` already is (see
+`docs/syscall_spec.md` §2.4, which lists all four vendored files the kernel
+image links). Rewiring Doom's sound module onto the decoder is §12.6, not
+this section.
+
 ---
 
 ## 12. Streaming mode: the software mixer
@@ -471,6 +521,23 @@ lump at its own rate, summed and clipped into the interleaved stereo frames
 this driver DMAs. It is the *second* of two mutually exclusive modes on the
 same stream descriptor and the same 64 KiB buffer; `hda_play_tone()` is the
 first.
+
+**It is two files for a reason.** `src/pcm_mixer.c` includes no device header;
+the streaming loop that feeds the controller (`hda_pcm_*`) lives in
+`src/hda.c`. That is the same split `src/doom_sfx_tone.c` has from
+`src/speaker.c`, and it is what lets `tests/kernel/test_pcm_mixer_k.c` assert
+the *exact samples* with no controller present. A mixer written inside the IRQ
+handler could only ever be checked by "`SDnLPIB` moved and nothing crashed" —
+precisely the assertion that misses a phase step computed the wrong way round.
+The cost is that `PCM_MIXER_RATE_HZ`/`_CHANNELS` restate
+`HDA_SAMPLE_RATE_HZ`/`HDA_CHANNELS`; `test_hda_pcm_k.c` sees both headers and
+asserts they agree.
+
+Each voice reads its lump in place, resampled by its own 16.16 phase
+accumulator with linear interpolation; voices are summed in `int32_t` and
+**saturated**, not wrapped, to `int16_t`. `pcm_mixer_render()` writes *every*
+frame it is given — silence for an empty mixer — which is also what stops a
+finished effect looping in the cyclic buffer.
 
 ### 12.1 Why the BDL is diced differently
 
@@ -583,8 +650,9 @@ driver playing that lump rather than a voice having been started.
 Still open on this line: revocation (`src/revoke.c`) has no sound leg — an
 exiting LibOS loses its voices via `syscall_sound_release()`, a revoked one does
 not — and Doom's music is still silent, since `DG_music_module` is MUS/MIDI
-rather than PCM. The mixer end of the music path now exists (§12.7); what
-feeds it does not yet.
+rather than PCM. Both ends of the music path now exist, the mixer's voice
+(§12.7) and a synth rendering into its format (§12.8–§12.10); the stream syscalls join them
+(SCRUM-219, `docs/syscall_spec.md` §3.5c) and SCRUM-220 wires Doom to them.
 
 ### 12.7 The music voice (SCRUM-218)
 
@@ -640,6 +708,12 @@ producer is the render interrupt, which only consumes from the front of the
 ring, so the free region past the write position is the producer's alone
 until it publishes the new count in a single guarded store.
 
+**The write position is derived, `(rd + count) mod cap`, not stored.** A ring
+that is off by one at the wrap is a tick once per lap forever, and one less
+field is one less thing for the wrap to keep consistent.
+`test_pcm_mixer_music_k.c` feeds a *counter* rather than a tone, so a lost,
+repeated or stale frame is a wrong number rather than something to hear.
+
 **Latency, end to end.** The fill level of this ring is one delay; the refill
 policy of §12.2 is another, and a larger one: an entry is re-rendered just
 after the DMA engine has finished with it, so what is rendered now is heard
@@ -652,3 +726,313 @@ still play out.
 but a counter — every frame carries its own index, differently per channel —
 so a repeated, skipped, swapped or stale frame is a wrong number at a known
 position rather than something that would have to be heard.
+
+### 12.8 Where the music comes from: the song reader (SCRUM-215)
+
+§12.7 is the mixer end of the music path. The other end is
+`src/libos_doom/doom_midi.c/h`:
+the counterpart of `doom_dmx.c` (§11.1) that turns a `D_*` lump into a timed
+stream of MIDI events. It decides what note happens when and nothing about how
+it sounds; the GENMIDI decoder (SCRUM-216) and OPL3 synth (SCRUM-217) sit
+behind it. It runs in ring 3 and is built into the `libos_doom` link; a
+`TESTING` kernel also compiles it explicitly so the `doom_midi` suite can run
+it from ring 0. A shipped kernel does not carry it.
+
+- **Two input formats, sniffed.** Commercial IWADs store DMX MUS; the pinned
+  freedoom2 v0.13.0 stores raw SMF (all 35 `D_*` lumps, 1,258,992 bytes, begin
+  `MThd`). `doom_midi_open()` reads the first four bytes: `MThd` is parsed in
+  place, `MUS\x1a` is converted first.
+- **Why it lives in `src/libos_doom/`.** MUS goes through the vendored
+  `src/doom/mus2mid.c`, which allocates through Doom's zone allocator, and
+  nothing under `src/doom/` links into a shipped kernel. A subdirectory is out
+  of reach of the kernel's `src/` glob, so the reader can call `mus2mid()`
+  directly instead of through an installable hook. Under `TESTING` the reader,
+  the converter and `memio.c` are compiled into the kernel image
+  (`build.sh` step 3b3) with `tests/kernel/z_zone_shim.c` backing
+  `Z_Malloc`/`Z_Free` by `kmalloc`/`kfree`. The shim halts on an exhausted
+  heap rather than return NULL, matching the real allocator's contract
+  (`I_Error`, never NULL), which `memio.c` depends on.
+- **`mus2mid` output relies on the default tempo.** It writes division 70 and
+  no tempo meta, so the SMF spec's 120 BPM default is what makes a MUS tick
+  exactly 1/140 s. It also emits an all-notes-off controller (`B0 7B 00`) the
+  first time each channel is used, so a converted song has events the MUS
+  lump does not.
+- **Every track is validated end to end at open**, on a scratch copy, so a
+  song that opens can be advanced without meeting a malformed byte. The bytes
+  are inside the read-only mapped IWAD and a runaway parse walks into the next
+  lump; every read goes through a cursor that stops at the track's end, a
+  varlen is capped at four bytes, and a chunk length is checked against what
+  remains. A missing end-of-track is `ETRUNC`.
+- **Time is exact integers.** Ticks convert to microseconds with the tempo in
+  force at that point, carrying the remainder in 1/division µs so a division
+  that does not divide the tempo (7, say) does not drift; no floating point.
+  Format-1 tracks merge lazily — the unfinished track with the earliest next
+  tick wins, ties to the lower index, which keeps a conductor track ahead of
+  the notes it shares a tick with.
+- **Looping restarts at the longest track's end-of-track** and resets the tempo
+  to the default. Event times stay on one song clock that does not reset at a
+  loop, so they never run backwards, even when one `doom_midi_advance()` call
+  spans a wrap. Since every pass is identical, any pass the clock has wholly
+  overtaken (a long stall, or a loop shorter than the call's interval) is
+  skipped arithmetically rather than replayed: no burst of stale notes, and no
+  call whose cost scales with interval / loop length. A song of zero length
+  finishes instead of looping, as it has nothing to repeat.
+- **`mus2mid` is patched to reset its file-scope state** (`queuedtime`,
+  `channelvelocities`) on entry. Upstream converts once per song change and
+  relies on the initialisers, so a failed conversion's queued delay and every
+  song's last channel volumes would otherwise leak into the next song.
+- **Not supported, rejected as `EFORMAT`:** SMF format 2, SMPTE division, a
+  format-0 header declaring other than one track, and a zero tempo.
+- **Running status survives a meta event, not a sysex.** The spec says both
+  cancel it, but files that carry on with running status after a track name or
+  marker are common and players accept them, so rejecting the song would only
+  silence a PWAD. More than `DOOM_MIDI_MAX_TRACKS` (32) tracks is `ETOOMANY`.
+
+`tests/kernel/test_doom_midi_k.c` is the suite: synthetic songs for exact
+times and for every rejection (including that every proper prefix of a valid
+song is refused), a hand-written MIDI twin for a MUS lump, and all 35 real
+lumps opened and played to the end with the count asserted.
+
+### 12.9 What the notes sound like: the GENMIDI instrument table (SCRUM-216)
+
+A §12.8 event says "program 48, note 60"; the OPL3 synth (SCRUM-217) needs to
+know what program 48 *is*. Doom answers that from the IWAD's `GENMIDI` lump,
+decoded by `src/libos_doom/doom_genmidi.c/h`. The header carries the full byte
+map, including which OPL register each operator byte is written to.
+
+- **Layout.** 8-byte `#OPL_II#` magic, 175 × 36-byte records (128 GM programs,
+  then 47 percussion instruments for GM notes 35..81), then 175 × 32-byte names:
+  11,908 bytes, exactly freedoom2 v0.13.0's lump. A record is a flags word
+  (`0x1` fixed pitch, `0x4` two-voice; `0x2` is unused by Doom), a fine-tune
+  byte for the second voice's detune, a fixed-note byte, and two 16-byte voices,
+  each a modulator and carrier operator, a feedback/connection byte and a signed
+  base-note offset.
+- **Same contract as the DMX decoder (§11.1).** The table stays in the mounted
+  IWAD and must not outlive the mount; a failure leaves `*out` untouched; result
+  codes are distinct. Records are returned *decoded by value*, not overlaid,
+  because a lump's offset is arbitrary and the `int16` offset need not be
+  aligned.
+- **The length check is exact.** The lump has no count field, so anything but
+  11,908 bytes is `EINVAL`, checked before the magic so a short lump is never
+  read. chocolate-doom accepts a larger lump and ignores the tail; a PWAD that
+  ships one would be refused here.
+- **No `GENMIDI` is `ENOENT`, not an error.** A PWAD-only mount has no
+  instruments; what to do about that is the synth's decision.
+- **Ring 3 only**, for the reason the reader is: its only consumer is the synth
+  in `libos_doom`. A `TESTING` kernel compiles it in `build.sh` step 3b3; a
+  shipped kernel carries none of it.
+- **What freedoom's table holds**, asserted by the suite: flags `0x4` × 94,
+  `0x0` × 32, `0x1` × 25, `0x5` × 24; 46 of the 47 percussion records are fixed
+  pitch. The 47th, record 162 (note 69), is a "Null Instrument" with both voices
+  at the silent filler (output level `0x3f`, no envelope), so a synth must
+  tolerate an instrument that sounds nothing. Single-voice records fill
+  voice 1 with the same filler.
+
+`tests/kernel/test_doom_genmidi_k.c` is the suite: a synthetic lump at an odd
+address for byte-exact decoding and every rejection (bad magic at each byte,
+six wrong sizes, NULLs, out-of-range lookups, a 32-character name, a hand-built
+PWAD with no `GENMIDI`), then the real lump with five records asserted field by
+field.
+
+### 12.10 What the notes sound like, audibly: the OPL3 synth (SCRUM-217)
+
+§12.8 says *when*, §12.9 says *with what*. `src/libos_doom/doom_opl.c/h`
+plays those events on an emulated YMF262 and renders 48 kHz stereo, ready for
+the §12.7 music voice. Like its two producers it is ring-3 code: built into
+`libos_doom`, and compiled into a `TESTING` kernel (`build.sh` step 3b3) so the
+`doom_opl` suite can drive it from ring 0.
+
+- **The emulator is vendored Nuked-OPL3** (`src/nuked_opl3/`, LGPL-2.1+,
+  unmodified, pinned in its `README.md`). It is what chocolate-doom uses, and
+  it was chosen because it is integer-only. The test kernel compiles it with
+  `-mno-sse`, so DOSBox's `double`-based OPL would not build there. The driver
+  calls only `OPL3_Reset`, `OPL3_WriteReg` and `OPL3_Generate` at the native
+  49716 Hz.
+- **The driver is DMX's behaviour, from chocolate-doom's `i_oplmusic.c`.** That
+  includes its frequency curve, which sits an octave high and is why GENMIDI
+  records carry `base_note_offset = -12`. It also includes its volume curve,
+  the MSB-only pitch bend at 32 steps a semitone, the fine-tune detune of a
+  two-voice record's second half, channel 9 as percussion (GM notes 35..81, the
+  rest dropped), and its reversed OPL3 stereo pan. It departs from DMX in two
+  places. Channel volume (CC7), expression (CC11) and the master volume
+  *multiply*, where DMX clamps channel volume to the master and has no
+  expression at all. And a key already sounding on its channel is retriggered,
+  not doubled.
+- **Voice allocation: 18 OPL3 channels, one per note**, two for a
+  `FLAG_2VOICE` record. When all 18 are busy, a note-on steals the oldest
+  *second* voice if any is sounding, those being the non-essential half,
+  otherwise the oldest note. A second voice never steals, it is skipped. A
+  stolen note's later note-off finds nothing to release, so it cannot key off
+  its successor.
+- **Resampling is an exact rational step**, not 16.16. Each output frame adds
+  49716 to an accumulator in units of 1/48000 of a native sample, so 48,000
+  frames consume exactly 49,716 native samples. A truncated 16.16 step (67875)
+  would run 0.006% flat and drift three samples a second. Interpolation between
+  adjacent native samples is linear, with a 16-bit weight taken by multiply.
+  The mixer does no resampling of its own for this voice (§12.7).
+- **Silence is exact zero.** A fully attenuated operator does not output 0.
+  The chip's sine is one's complement, so it reads −1 on the negative half of
+  its phase. A released channel's phase keeps running, which leaves a 1–2 LSB
+  square wave, and Nuked reproduces that faithfully. Freezing the phase would
+  park it at 0 or −1 at random, which is a DC offset. So whenever no operator
+  is keyed and every envelope is at full attenuation, the renderer writes true
+  zeros. A master volume of 0 is also rendered as zeros, while the chip keeps
+  running, so turning the volume up again resumes mid-note.
+- **No GENMIDI means no music.** On a PWAD-only mount `doom_genmidi_find()`
+  returns `ENOENT` (§12.9). The caller then has no table to give
+  `doom_opl_init()` and keeps music off.
+- **Memory.** `doom_opl_t` is caller-allocated and allocation-free, like the
+  mixer. It is ~20 KB, mostly Nuked's unused 1024-entry write buffer, so it
+  belongs in static storage or a heap, never on the 16 KiB kernel stack.
+
+**What it costs: the epic's risk, measured.** The suite plays one second of
+`D_OPENIN` the way Doom will: per 35 Hz tic, advance the song, apply the
+events, render that tic's frames. Under the CI configuration (QEMU TCG, no
+KVM, `-O2 -mno-sse` kernel build) that is **169 ms per second of music: 4.8 ms
+of every 28.57 ms tic, ~17%**. That covers 336 events with a peak of 16
+voices. The same loop natively on a desktop host is ~21 ms (~2%). It fits the
+budget without amortising across frames. The number is printed, not asserted,
+because a timing assertion would fail on a slow CI host rather than on a slow
+synth. One lever is unused if it is ever needed: Nuked emulates all 36
+operators every sample whether or not they are sounding.
+
+`tests/kernel/test_doom_opl_k.c` is the suite. A synthetic GENMIDI holds a pure
+sine with instant attack and release. Against it the suite asserts 440 rising
+zero crossings a second for A4, exact silence after a release, 49,716 native
+samples per 48,000 frames, 18-then-steal-the-oldest, the two-voice and
+percussion rules, and the volume controllers. A real freedoom2 piano note is
+asserted against a recorded FNV-1a checksum (`0xe9c13c5b`): a regression
+guard, not a proof. The suite then prints the render cost above.
+
+The stream syscalls (SCRUM-219, #32–#34) now carry rendered frames into ring 0
+and own the ring's pages.
+
+### 12.11 Doom plays it: the music module (SCRUM-220)
+
+`DG_music_module` (`src/doom_sound.c`) is now eleven one-line calls into
+`src/libos_doom/doom_sound_music.c/h`, which is where the logic lives so a
+ring-0 suite can drive it — the same split SCRUM-214 made for effects, and for
+the same reason it sits in `src/libos_doom/` beside its producers (the kernel
+glob must not see `doom_opl`). `Poll` is no longer `NULL`: `i_sound.c` calls it
+from `I_UpdateSound`, once per rendered frame via `S_UpdateSounds`.
+
+- **`RegisterSong`** opens the lump with `doom_midi_open` (MUS or MIDI is
+  sniffed there) into one static song slot — Doom holds one song at a time — and
+  returns NULL for anything unparseable, which costs that level its music and
+  nothing else. **`PlaySong`** finds `GENMIDI` once in the mounted WAD, resets
+  the synth, rewinds and sets looping. **`StopSong`** keys everything off and
+  releases the stream (`exo_sound_stream_stop`), so a level change starts clean.
+- **Pacing is the ring, not the frame rate.** A poll renders only what the
+  stream has room for, up to a fill target of `DOOM_MUSIC_TARGET_FRAMES` (8192,
+  170 ms of the 256 ms ring) and at most `DOOM_MUSIC_MAX_POLL_FRAMES` (4096,
+  85 ms) per call, so a stalled frame is caught up over the next few rather
+  than in one hitch, and a poll that finds the ring full does no work at all.
+  **The song clock is frames rendered**, so the music cannot drift against
+  the DAC; the wall clock is never the song's time. Events are applied
+  **sample-accurately**: `render_step` fetches the events due by the end of the
+  step (rounded up to a whole ms for `doom_midi_advance`), then splits the
+  render at each event's own output frame (`ceil(time_us * 48000 / 1e6)`) and
+  applies it there. Events fetched past the step's end stay queued for the step
+  they belong to, and the release tail starts only once that queue is empty.
+  (Applying every due event at the start of a 256-frame step, from a
+  whole-ms clock, put notes 0–6 ms late by a different amount each time — an
+  audibly uneven pulse that looked like a pacing bug.) Ring 3 cannot ask how much room there is — the only answer is a write's
+  result (`space` in the high word, `docs/syscall_spec.md` §3.5c) — so it
+  estimates the drain since its last write from wall time and lets each write's
+  answer correct it. An estimate that is too high costs a short write, whose
+  unaccepted frames are kept and sent first on the next poll; one that is too
+  low costs nothing.
+- **Pause drops the queue as well as the notes, and takes the song back with
+  it.** Notes-off alone would leave up to 170 ms of the chord in the ring, so
+  `PauseMusic` also releases the stream. Those frames were rendered but never
+  heard, so the song is put back to where the *listener* had got to: the synth
+  is reset and the events up to that point replayed into it (programs, volumes
+  and the notes that should be sounding, no samples rendered), rather than
+  resuming from the render position and losing whatever fell in the dropped
+  window. Held notes re-attack on resume. `ResumeMusic` then restarts at that
+  position, with no catch-up burst. Pausing in the release tail of a finished
+  song just ends it.
+- **Volume is passed through, not scaled.** The ticket expected Doom's 0..15
+  slider; `S_SetMusicVolume` in fact takes 0..127 (`m_menu.c` multiplies the
+  slider by 8), which is exactly the stream's range, so `SetMusicVolume` calls
+  `exo_sound_stream_volume` directly and the synth's own master stays at 127
+  rather than attenuating twice.
+- **Degradation is a runtime rule, as for effects** (`docs/syscall_spec.md`
+  §6 Option C): no WAD, no `GENMIDI`, or a bad lump silences that song only;
+  *any* error from the stream — `-EXO_ENODEV` on a machine with no HDA
+  controller above all — latches music off for the run, so the game never pays
+  a failed syscall per frame.
+- **Budget.** `libos_doom` is now 106 code pages and 112 data+bss pages against
+  the 192/192 caps (`LIBOS_LAUNCH_MAX_*_PAGES`), so no raise was needed. Cost of
+  a poll is the synth's cost per second of audio it renders — SCRUM-217's
+  169 ms per second under QEMU TCG, 4.8 ms per 35 Hz tic — because a poll
+  renders exactly the audio that has drained since the last one.
+
+`tests/kernel/test_doom_sound_music_k.c` drives
+`Register→Play→Poll×N→Stop` from ring 0 against the real mixer and the mounted
+freedoom2 `D_OPENIN`/`GENMIDI` lumps, with a hand-advanced clock and the test
+itself as the DAC (`pcm_mixer_render`). It asserts the pacing claims by
+counting: a full ring does zero work, draining *n* frames makes the next poll
+render exactly *n*, and frames rendered equals frames consumed plus frames
+queued. Pause, loop/ending, volume, and bad input are covered; the
+`-EXO_ENODEV` latch is not reachable while the suite requires the controller.
+
+### 12.12 Audio timing profile (`AUDIO_PROFILE=1`)
+
+Two serial reports, compiled in only with `make docker-build AUDIO_PROFILE=1`
+(`docker-run-kernel`, `docker-test` and `run` take it the same way; `build.sh`
+adds `-DAUDIO_PROFILE` to `CFLAGS`, which reaches the kernel and the ring-3
+`libos_doom` target). Off by default: the strings are absent from the default
+binaries and nothing in the hot path changes. With it on, each report prints
+every 10 s of play and the music one also at `StopSong`; grep `MUSPROF` /
+`HDAPROF`.
+
+**`MUSPROF`** (ring 3, `src/libos_doom/doom_sound_music.c`; reset by
+`PlaySong`) measures the producer:
+
+```
+MUSPROF poll: n dt min/avg/max ms  hist(<=20,40,80,170,>)  cost max/avg ms
+MUSPROF ring: fill min/avg/max frames  starved  underruns
+MUSPROF notes: n late min/avg/max us  hist(<1,2,4,>=4ms)
+```
+
+- `dt` is wall time between polls. The ring is topped up to 170 ms, so a gap
+  past that starves it (`starved` = polls that found it empty; an estimate in
+  ring 3, exact in ring 0). `underruns` is the mixer's own count, ring 0 only.
+- `late` is how long after its song time a note-on is applied. With sample-
+  accurate delivery (§12.11) it is the sub-sample rounding, under 21 µs; it was
+  0–6 ms before. It cannot see anything downstream of the stream write.
+- `cost` is one poll's wall time at 1 ms resolution.
+
+**`HDAPROF`** (kernel, `src/hda.c`) measures the consumer, which `MUSPROF`
+cannot:
+
+```
+HDAPROF irq: n dt min/avg/max us  sd us  catchup max  multi  fifoe
+HDAPROF rate: Hz over ms (nominal 48000)  tsc=cyc/ms
+HDAPROF clocks: since first report pit=ms  rtc=s (+-1)
+```
+
+- `dt` is the TSC interval between refill interrupts (nominal 21,333 µs),
+  converted with the window's own cycles-per-ms; `catchup`/`multi` count
+  interrupts that refilled more than one entry.
+- **`rate` is the number that matters for tempo.** The song clock counts frames
+  rendered, so the tempo the listener hears is exactly the rate the controller
+  consumes the stream: refills × `HDA_PCM_ENTRY_FRAMES` per PIT second. Its
+  resolution is one entry per window (±100 Hz over 10 s), so 47.9–48.2 kHz is
+  nominal.
+- `clocks` cross-checks the PIT against the CMOS RTC (host-driven), to tell a
+  fast DAC from a PIT that lost ticks under KVM. They agreed to the second over
+  70 s.
+- It is **printed from the stream-write syscall, never from the IRQ** (a
+  serial write there would itself delay the next refill). The syscall runs with
+  IF clear, so each report (a few short lines per 10 s) can delay one refill
+  slightly; the 16-entry ring has ~340 ms of headroom.
+
+**What it found** (the reason this exists): the music was "90% right but
+jittery" with every producer-side number clean. `MUSPROF` showed note delivery
+snapped to a 5.3 ms grid (fixed by §12.11's sample-accurate delivery);
+`HDAPROF` then showed QEMU's `sdl` audio backend draining at ~52 kHz, ±0.6%,
+with 8–29 ms refill-interrupt spread, against 48.0 kHz and a tight interrupt
+interval on `pipewire`, `pa` and `alsa`. That one is the host's, not the
+guest's — nothing in the guest can see or fix it, only the backend choice.

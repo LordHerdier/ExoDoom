@@ -44,6 +44,9 @@
 #include "wad.h"
 #include "doom_wad_disk.h"
 #include "pit.h"
+#include "pic.h"
+#include "pci.h"
+#include "serial.h"
 
 #include <stdint.h>
 
@@ -67,6 +70,71 @@ static void wait_ms_with_irqs(uint32_t ms)
     __asm__ volatile ("cli");
 }
 
+
+/*
+ * SCRUM-227: the refill-count assertions below used to fail one boot in ten
+ * with nothing printed but the expression.  Dump the interrupt path's whole
+ * state when one is about to fail, so a reproduction says *where* the
+ * completion interrupt stopped: at the controller (INTSTS/SDnSTS), at the
+ * PCI pin (status bit 3, per function -- shows who else holds the line), at
+ * the PIC (IRR/ISR/IMR/ELCR), or in the handler (entries vs. counted).
+ */
+static void irq_path_dump(const char *where)
+{
+    serial_print("    irq-path dump @ ");
+    serial_print(where);
+    serial_print("\n      refills=");
+    serial_print_dec(hda_pcm_refills());
+    serial_print(" irq_count=");
+    serial_print_dec(hda_irq_count());
+    serial_print(" irq_entries=");
+    serial_print_dec(hda_irq_entries());
+    serial_print(" lpib=");
+    serial_print_dec(hda_stream_position());
+    serial_print("\n      INTCTL=");
+    serial_print_hex(hda_reg_read32(HDA_REG_INTCTL));
+    serial_print(" INTSTS=");
+    serial_print_hex(hda_reg_read32(HDA_REG_INTSTS));
+    serial_print(" SDnCTL=");
+    serial_print_hex(hda_sd_read32(HDA_SD_CTL));
+    serial_print(" SDnSTS=");
+    serial_print_hex(hda_sd_status());
+    serial_print("\n      PIC irr=");
+    serial_print_hex(pic_read_irr());
+    serial_print(" isr=");
+    serial_print_hex(pic_read_isr());
+    serial_print(" imr=");
+    serial_print_hex(pic_read_imr());
+    serial_print(" elcr=");
+    serial_print_hex(pic_read_elcr());
+    serial_print("\n");
+    for (int i = 0; i < pci_device_count(); i++) {
+        const pci_device_t *d = pci_device_at(i);
+        uint8_t line = pci_config_read8(d->bus, d->device, d->function,
+                                        PCI_OFF_INTERRUPT_LINE);
+        uint16_t st = pci_config_read16(d->bus, d->device, d->function,
+                                        PCI_OFF_STATUS);
+        serial_print("      pci ");
+        serial_print_dec(d->device);
+        serial_print(".");
+        serial_print_dec(d->function);
+        serial_print(" line=");
+        serial_print_dec(line);
+        serial_print(" intx_asserted=");
+        serial_print_dec((st >> 3) & 1u);
+        serial_print("\n");
+    }
+}
+
+/* CU_ASSERT_TRUE, plus the dump above when it is about to fail. */
+#define ASSERT_REFILLS(cond)                         \
+    do {                                             \
+        if (!(cond)) {                               \
+            irq_path_dump(#cond);                    \
+        }                                            \
+        CU_ASSERT_TRUE(cond);                        \
+    } while (0)
+
 /* ── Fixtures ──────────────────────────────────────────────────────────── */
 
 /*
@@ -85,6 +153,12 @@ static int suite_init(void)
 {
     uint64_t paddr = 0, size = 0;
     pcm_mixer_reset();
+    /* SCRUM-227: one line of context for any later irq-path dump. */
+    serial_print("    hda_pcm: irq line ");
+    serial_print_dec(hda_irq_line());
+    serial_print(", PIC elcr=");
+    serial_print_hex(pic_read_elcr());
+    serial_print("\n");
     /* SCRUM-190: via doom_wad_disk_get()/ExoFS now, not the retired
      * mmap_find_module()/GRUB module lookup. */
     if (doom_wad_disk_get(&paddr, &size) == 0) {
@@ -196,7 +270,7 @@ static void test_idle_stream_keeps_running_and_refilling(void)
 
     /* The cadence is real: ~400 ms at ~21 ms an entry is ~18 refills.  A
      * floor of 8 leaves better than a 2x margin for a slow CI host. */
-    CU_ASSERT_TRUE(hda_pcm_refills() >= 8u);
+    ASSERT_REFILLS(hda_pcm_refills() >= 8u);
     CU_ASSERT_TRUE(hda_pcm_is_streaming());
     CU_ASSERT_TRUE(hda_stream_position() > 0);
     CU_ASSERT_EQUAL(hda_pcm_underruns(), 0u);
@@ -241,7 +315,7 @@ static void test_two_overlapping_effects_both_sound(void)
     wait_ms_with_irqs(PCM_TEST_WAIT_MS);
 
     /* The stream carried them: refills happened and DMA advanced. */
-    CU_ASSERT_TRUE(hda_pcm_refills() >= 8u);
+    ASSERT_REFILLS(hda_pcm_refills() >= 8u);
     CU_ASSERT_TRUE(hda_stream_position() > 0);
     /* And nothing the mixer did upset the stream itself. */
     CU_ASSERT_EQUAL(hda_pcm_underruns(), 0u);
@@ -306,7 +380,7 @@ static void test_full_load_does_not_disturb_frame_timing(void)
      */
     uint32_t expected = (PCM_TEST_WAIT_MS * (HDA_SAMPLE_RATE_HZ / 1000u))
                         / HDA_PCM_ENTRY_FRAMES;
-    CU_ASSERT_TRUE(refills >= expected / 2u);
+    ASSERT_REFILLS(refills >= expected / 2u);
     CU_ASSERT_TRUE(refills <= expected * 2u);
 
     /* And the refill kept up with the DMA under full load.  This is the
@@ -341,7 +415,7 @@ static void test_stopping_all_voices_yields_silence(void)
     uint32_t refills = hda_pcm_refills();
     wait_ms_with_irqs(PCM_TEST_WAIT_MS);
     /* Still refilling -- the stream did not stop just because nothing sounds. */
-    CU_ASSERT_TRUE(hda_pcm_refills() > refills);
+    ASSERT_REFILLS(hda_pcm_refills() > refills);
     CU_ASSERT_EQUAL(hda_pcm_underruns(), 0u);
 
     hda_pcm_stop();
@@ -395,6 +469,75 @@ static void test_generic_stop_leaves_streaming_mode(void)
     CU_ASSERT_FALSE(hda_is_playing());
 }
 
+
+/* ── SCRUM-227: a completion cleared while masked ──────────────────────── */
+
+/*
+ * Busy-wait with IF still clear until the stream latches SDnSTS.BCIS, i.e.
+ * until the INTx line is asserted with nobody able to take it.  Bounded in
+ * port-0x80 writes (~1 us each) rather than PIT ticks, which do not advance
+ * with interrupts off; QEMU's DMA does, from its own timer.
+ */
+static int spin_until_bcis_masked(void)
+{
+    for (uint32_t i = 0; i < 2000000u; i++) {
+        if (hda_sd_status() & HDA_SDSTS_BCIS) {
+            return 1;
+        }
+        __asm__ volatile ("outb %%al, $0x80" : : "a"(0));
+    }
+    return 0;
+}
+
+/*
+ * The flake itself, made deterministic.  IRQ11 is level-triggered at the
+ * slave PIC (firmware sets its ELCR bit), but the slave's output reaches the
+ * master on IRQ2, which is edge-triggered.  So when the line rises while IF
+ * is clear, the master latches IRR2 -- and if the driver then clears SDnSTS
+ * before IF is set again (stream_program() does, on every hda_pcm_start() and
+ * hda_play_tone()), the slave forgets the request while the master does not.
+ * At the next sti the CPU acknowledges IRQ2, the slave has nothing to give,
+ * and it answers with its spurious vector, IRQ15.
+ *
+ * That vector used to land on default_stub, whose bare iretq sends no EOI --
+ * which a spurious IRQ15 still needs at the *master*, because the master did
+ * put IRQ2 in service.  IRQ2 then stayed in service for the rest of the boot,
+ * blocking every slave line (HDA's 11 among them) while IRQ0, at higher
+ * priority, kept the clock running.  Which is exactly the observed failure:
+ * DMA advancing, the PIT alive, and the refill count frozen at zero across
+ * four tests at once.  Naturally it needed a BCIS to latch in the few
+ * milliseconds between one test's wait and the next stream_program(), hence
+ * roughly one boot in ten.
+ */
+static void test_completion_cleared_while_masked_does_not_wedge(void)
+{
+    pcm_mixer_reset();
+    uint32_t spurious_before = pic_spurious_irq15_count();
+
+    CU_ASSERT_EQUAL(hda_pcm_start(), HDA_OK);
+    CU_ASSERT_TRUE(spin_until_bcis_masked());
+    /* The setup the race needs: the request is pending at both PICs. */
+    uint16_t irr = pic_read_irr();
+    CU_ASSERT_TRUE((irr & (1u << 11)) != 0);
+    CU_ASSERT_TRUE((irr & (1u << 2)) != 0);
+
+    /* Restart the stream while still masked: its reset clears SDnSTS, the
+     * line drops, and only the master's edge latch remembers it was raised. */
+    CU_ASSERT_EQUAL(hda_pcm_start(), HDA_OK);
+    CU_ASSERT_EQUAL(pic_read_irr() & (1u << 11), 0);
+
+    wait_ms_with_irqs(PCM_TEST_WAIT_MS);
+
+    /* The spurious IRQ15 really happened -- so this test is exercising the
+     * path, not passing because the race did not occur -- and it did not
+     * leave the cascade in service. */
+    CU_ASSERT_TRUE(pic_spurious_irq15_count() > spurious_before);
+    CU_ASSERT_EQUAL(pic_read_isr() & (1u << 2), 0);
+    ASSERT_REFILLS(hda_pcm_refills() >= 8u);
+
+    hda_pcm_stop();
+}
+
 /* ── Registration ──────────────────────────────────────────────────────── */
 
 void suite_hda_pcm_tests(CU_pSuite s)
@@ -419,6 +562,8 @@ void suite_hda_pcm_tests(CU_pSuite s)
                 test_streaming_takes_the_stream_from_a_tone);
     CU_add_test(s, "generic stop leaves streaming mode",
                 test_generic_stop_leaves_streaming_mode);
+    CU_add_test(s, "a completion cleared while masked does not wedge the PIC",
+                test_completion_cleared_while_masked_does_not_wedge);
 }
 
 int suite_hda_pcm_init(void)    { return suite_init(); }

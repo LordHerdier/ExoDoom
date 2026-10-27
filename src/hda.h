@@ -35,7 +35,7 @@
  *
  * Everything the controller touches by DMA (CORB, RIRB, BDL, samples) comes
  * from alloc_pages_contig_owned(), never kmalloc(): the bump allocator is
- * finished once page_alloc_init() has run (see CLAUDE.md), and the pages
+ * finished once page_alloc_init() has run (see docs/memory.md §5), and the pages
  * must be physically contiguous because the BDL names physical addresses.
  * The kernel map is an identity map, so the pointer we write through *is*
  * the address the controller is given.
@@ -237,14 +237,11 @@
 #define HDA_MIN_HZ          20u
 #define HDA_MAX_HZ          20000u
 
-/* The tone kernel_main plays once on a normal boot, as the audible half of
- * SCRUM-210's acceptance. 440 Hz because it is unmistakably a deliberate
- * note rather than a fault beep, and 600 ms because that is long enough to
- * hear as a tone (and to cross a BDL entry boundary, so the completion
- * interrupt fires on a real boot too) while being short enough not to talk
- * over the rest of the boot. */
+/* The reference test tone the KUnit suites play. kernel_main no longer plays
+ * it on boot (SCRUM-287): a normal boot is silent until a LibOS asks for
+ * sound. 440 Hz because it is unmistakably a deliberate note rather than a
+ * fault beep. */
 #define HDA_BOOT_TONE_HZ    440u
-#define HDA_BOOT_TONE_MS    600u
 
 /* ── Status codes ──────────────────────────────────────────────────────── */
 #define HDA_OK           0
@@ -352,6 +349,15 @@ uint32_t hda_pcm_refills(void);
  */
 uint32_t hda_pcm_underruns(void);
 
+#ifdef AUDIO_PROFILE
+/* Refill-cadence profile (see pcm_prof in hda.c): prints a "HDAPROF" report to
+ * serial once per 10 s window while streaming -- refill IRQ interval (TSC,
+ * shown in us), catch-up, and the effective frame rate against the PIT clock.
+ * Call from syscall context with the current ms; a no-op until the window is
+ * up.  Never from the IRQ. */
+void hda_pcm_prof_report(uint32_t now_ms);
+#endif
+
 /* Called from irq0_handler() with kernel_get_ticks_ms(): ends a timed tone
  * once its deadline passes. Wrap-safe, exactly like speaker_tick(). */
 void hda_tick(uint32_t now_ms);
@@ -394,6 +400,7 @@ uint64_t hda_bdl_phys(void);
 uint64_t hda_buf_phys(void);
 uint32_t hda_stream_position(void); /* SDnLPIB                              */
 uint32_t hda_irq_count(void);       /* completion interrupts seen so far    */
+uint32_t hda_irq_entries(void);     /* handler entries, incl. not-ours      */
 uint8_t  hda_stream_errors(void);   /* latched FIFOE/DESE bits from SDnSTS  */
 
 /* Print the controller/codec/stream state on serial. Called from kernel_main

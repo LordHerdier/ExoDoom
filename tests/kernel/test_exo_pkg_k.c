@@ -12,6 +12,7 @@
 #include "kunit.h"
 
 #include "exo_pkg.h"
+#include "pcm_mixer.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -41,8 +42,8 @@ static void fill_fixture_header(exo_pkg_header_t *hdr)
     hdr->want_flags = EXO_PKG_WANT_FRAMEBUFFER | EXO_PKG_WANT_KEYBOARD;
     hdr->reserved[0] = 0;
     hdr->reserved[1] = 0;
-    hdr->reserved[2] = 0;
-    hdr->reserved[3] = 0;
+    hdr->volume_slot = 0;
+    hdr->volume_sectors = 0;
 }
 
 /* ---- round trip ----------------------------------------------------------
@@ -288,11 +289,200 @@ static void test_parse_rejects_bad_version(void)
     CU_ASSERT_EQUAL(rc, EXO_PKG_EVERSION);
 }
 
+/* ---- manifest validation (pack and parse share exo_pkg_check_header) ---- */
+
+_Static_assert(EXO_PKG_MAX_SOUND_VOICES == PCM_MIXER_VOICES,
+               "exo_pkg.h voice cap out of sync with the mixer");
+
+/* Pack a good fixture, then let `corrupt` damage the header bytes in place,
+ * and return what parse says -- parse is the side a hostile or truncated
+ * disk image reaches, so each rejection is proven there. */
+static int parse_after(void (*corrupt)(exo_pkg_header_t *))
+{
+    exo_pkg_header_t hdr;
+    fill_fixture_header(&hdr);
+
+    unsigned char buf[sizeof(exo_pkg_header_t) + sizeof(fixture_code) +
+                       sizeof(fixture_data)];
+    size_t out_len = 0;
+    int rc = exo_pkg_pack(buf, sizeof(buf), &hdr, fixture_code, fixture_data,
+                          &out_len);
+    CU_ASSERT_EQUAL(rc, 0);
+
+    exo_pkg_header_t h;
+    for (size_t i = 0; i < sizeof(h); i++)
+        ((unsigned char *)&h)[i] = buf[i];
+    corrupt(&h);
+    for (size_t i = 0; i < sizeof(h); i++)
+        buf[i] = ((unsigned char *)&h)[i];
+
+    exo_pkg_header_t parsed;
+    const void *c = NULL, *d = NULL;
+    return exo_pkg_parse(buf, out_len, &parsed, &c, &d);
+}
+
+static void c_code_len(exo_pkg_header_t *h)
+{ h->code_len = EXO_PKG_MAX_CODE_PAGES * EXO_PKG_PAGE_SIZE + 1; }
+static void c_data_bss(exo_pkg_header_t *h)
+{ h->data_len = EXO_PKG_MAX_DATA_PAGES * EXO_PKG_PAGE_SIZE; h->bss_len = 1; }
+static void c_stack_over(exo_pkg_header_t *h)
+{ h->stack_pages = EXO_PKG_MAX_STACK_PAGES + 1; }
+static void c_params(exo_pkg_header_t *h)
+{ h->params_len = h->data_len + 1; }
+static void c_reserved(exo_pkg_header_t *h)
+{ h->reserved[1] = 1; }
+static void c_stack_zero(exo_pkg_header_t *h)
+{ h->stack_pages = 0; }
+static void c_min_over_rec(exo_pkg_header_t *h)
+{ h->min_pages = h->recommended_pages + 1; }
+static void c_voices(exo_pkg_header_t *h)
+{ h->sound_voices = EXO_PKG_MAX_SOUND_VOICES + 1; }
+static void c_flags(exo_pkg_header_t *h)
+{ h->want_flags |= 1u << 5; }
+static void c_noop(exo_pkg_header_t *h)
+{ (void)h; }
+
+/* SCRUM-237 volume request. A valid one needs WANT_DISK and a slot/size that
+ * fit the volume region; each of these breaks exactly one rule. */
+static void c_vol_ok(exo_pkg_header_t *h)
+{
+    h->want_flags |= EXO_PKG_WANT_DISK;
+    h->volume_slot = EXO_VOLUME_MAX_SLOTS - 1;
+    h->volume_sectors = EXO_VOLUME_SLOT_SECTORS;
+}
+static void c_vol_no_disk(exo_pkg_header_t *h)
+{ c_vol_ok(h); h->want_flags &= ~EXO_PKG_WANT_DISK; }
+static void c_vol_slot_over(exo_pkg_header_t *h)
+{ c_vol_ok(h); h->volume_slot = EXO_VOLUME_MAX_SLOTS; }
+static void c_vol_size_over(exo_pkg_header_t *h)
+{ c_vol_ok(h); h->volume_sectors = EXO_VOLUME_SLOT_SECTORS + 1; }
+static void c_vol_slot_without_size(exo_pkg_header_t *h)
+{ h->want_flags |= EXO_PKG_WANT_DISK; h->volume_slot = 1; }
+
+/* SCRUM-75 program-volume request: a disk resource. Since SCRUM-267 it may
+ * accompany a private volume of the program's own (Doom: IWAD + saves). */
+static void c_progvol_ok(exo_pkg_header_t *h)
+{ h->want_flags |= EXO_PKG_WANT_DISK | EXO_PKG_WANT_PROGRAM_RO; }
+static void c_progvol_no_disk(exo_pkg_header_t *h)
+{ c_progvol_ok(h); h->want_flags &= ~EXO_PKG_WANT_DISK; }
+static void c_progvol_and_volume(exo_pkg_header_t *h)
+{ c_progvol_ok(h); h->volume_slot = 1; h->volume_sectors = 64; }
+
+static void test_program_volume_request_is_validated(void)
+{
+    CU_ASSERT_EQUAL(parse_after(c_progvol_ok), 0);
+    CU_ASSERT_EQUAL(parse_after(c_progvol_no_disk), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_progvol_and_volume), 0);
+}
+
+static void test_volume_request_is_validated(void)
+{
+    CU_ASSERT_EQUAL(parse_after(c_vol_ok), 0);
+    CU_ASSERT_EQUAL(parse_after(c_vol_no_disk), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_vol_slot_over), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_vol_size_over), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_vol_slot_without_size), EXO_PKG_EINVAL);
+
+    /* pack applies the same rules, so a bad request is never written. */
+    void (*bad[])(exo_pkg_header_t *) = {
+        c_vol_no_disk, c_vol_slot_over, c_vol_size_over,
+        c_vol_slot_without_size,
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        exo_pkg_header_t hdr;
+        fill_fixture_header(&hdr);
+        bad[i](&hdr);
+        unsigned char buf[sizeof(exo_pkg_header_t) + sizeof(fixture_code) +
+                           sizeof(fixture_data)];
+        size_t out_len = 0;
+        CU_ASSERT_EQUAL(exo_pkg_pack(buf, sizeof(buf), &hdr, fixture_code,
+                                     fixture_data, &out_len),
+                        EXO_PKG_EINVAL);
+    }
+}
+
+static void test_volume_request_round_trips(void)
+{
+    exo_pkg_header_t hdr, parsed;
+    fill_fixture_header(&hdr);
+    c_vol_ok(&hdr);
+
+    unsigned char buf[sizeof(exo_pkg_header_t) + sizeof(fixture_code) +
+                       sizeof(fixture_data)];
+    size_t out_len = 0;
+    const void *c = NULL, *d = NULL;
+    CU_ASSERT_EQUAL(exo_pkg_pack(buf, sizeof(buf), &hdr, fixture_code,
+                                 fixture_data, &out_len), 0);
+    CU_ASSERT_EQUAL(exo_pkg_parse(buf, out_len, &parsed, &c, &d), 0);
+    CU_ASSERT_EQUAL(parsed.volume_slot, EXO_VOLUME_MAX_SLOTS - 1);
+    CU_ASSERT_EQUAL(parsed.volume_sectors, EXO_VOLUME_SLOT_SECTORS);
+}
+
+static void test_parse_rejects_caps(void)
+{
+    CU_ASSERT_EQUAL(parse_after(c_code_len), EXO_PKG_ETOOBIG);
+    CU_ASSERT_EQUAL(parse_after(c_data_bss), EXO_PKG_ETOOBIG);
+    CU_ASSERT_EQUAL(parse_after(c_stack_over), EXO_PKG_ETOOBIG);
+    CU_ASSERT_EQUAL(parse_after(c_params), EXO_PKG_ETOOBIG);
+}
+
+static void test_parse_rejects_bad_manifest(void)
+{
+    CU_ASSERT_EQUAL(parse_after(c_noop), 0);
+    CU_ASSERT_EQUAL(parse_after(c_reserved), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_stack_zero), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_min_over_rec), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_voices), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_flags), EXO_PKG_EINVAL);
+}
+
+static void test_pack_rejects_bad_manifest(void)
+{
+    void (*bad[])(exo_pkg_header_t *) = {
+        c_reserved, c_stack_zero, c_min_over_rec, c_voices, c_flags,
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        exo_pkg_header_t hdr;
+        fill_fixture_header(&hdr);
+        bad[i](&hdr);
+        unsigned char buf[sizeof(exo_pkg_header_t) + sizeof(fixture_code) +
+                           sizeof(fixture_data)];
+        size_t out_len = 0;
+        CU_ASSERT_EQUAL(exo_pkg_pack(buf, sizeof(buf), &hdr, fixture_code,
+                                     fixture_data, &out_len),
+                        EXO_PKG_EINVAL);
+    }
+}
+
+static void test_pack_parse_unaligned_buffer(void)
+{
+    exo_pkg_header_t hdr;
+    fill_fixture_header(&hdr);
+
+    /* Odd offset: pack and parse must both work on an unaligned view. */
+    unsigned char raw[1 + sizeof(exo_pkg_header_t) + sizeof(fixture_code) +
+                       sizeof(fixture_data)];
+    size_t out_len = 0;
+    CU_ASSERT_EQUAL(exo_pkg_pack(raw + 1, sizeof(raw) - 1, &hdr, fixture_code,
+                                 fixture_data, &out_len), 0);
+
+    exo_pkg_header_t parsed;
+    const void *c = NULL, *d = NULL;
+    CU_ASSERT_EQUAL(exo_pkg_parse(raw + 1, out_len, &parsed, &c, &d), 0);
+    CU_ASSERT_EQUAL(parsed.recommended_pages, hdr.recommended_pages);
+}
+
 /* ---- registration -------------------------------------------------------
  */
 
 void suite_exo_pkg_tests(CU_pSuite s)
 {
+    CU_add_test(s, "volume request is validated by pack and parse",
+                test_volume_request_is_validated);
+    CU_add_test(s, "program-volume request is validated",
+                test_program_volume_request_is_validated);
+    CU_add_test(s, "volume request round-trips through pack -> parse",
+                test_volume_request_round_trips);
     CU_add_test(s, "pack -> parse round-trips header, code and data bytes",
                 test_round_trip_preserves_header_and_bytes);
     CU_add_test(s, "pack -> parse round-trips a package with no code/data",
@@ -322,4 +512,12 @@ void suite_exo_pkg_tests(CU_pSuite s)
                 test_parse_rejects_bad_magic);
     CU_add_test(s, "parse rejects a corrupted version",
                 test_parse_rejects_bad_version);
+    CU_add_test(s, "parse rejects code/data/stack/params over the caps",
+                test_parse_rejects_caps);
+    CU_add_test(s, "parse rejects a malformed manifest",
+                test_parse_rejects_bad_manifest);
+    CU_add_test(s, "pack rejects a malformed manifest",
+                test_pack_rejects_bad_manifest);
+    CU_add_test(s, "pack and parse work on an unaligned buffer",
+                test_pack_parse_unaligned_buffer);
 }

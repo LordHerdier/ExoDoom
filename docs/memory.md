@@ -752,6 +752,14 @@ multiboot info and the framebuffer all translate correctly **before** writing
 missing mapping surfaces as a serial diagnostic rather than a triple fault with
 nothing on the wire.
 
+### ACPI tables are not mapped (SCRUM-250)
+
+`vmm_init` maps only low memory, the kernel image, usable RAM and the
+framebuffer. ACPI-reclaimable and reserved memory — where the firmware tables
+live — is **not** in the kernel map, so dereferencing a table pointer after
+`vmm_init` page-faults. `acpi_init()` therefore runs before `vmm_init`, on the
+boot map, and copies what later callers need (`docs/drivers/acpi.md`).
+
 ### Still to come (SCRUM-16, SCRUM-48)
 
 1. Per-section kernel permissions: `.text` read-execute, `.rodata` read-only,
@@ -798,6 +806,20 @@ mapped into the upper portion of every LibOS address space (ring 0 only, not
 user-accessible) so that syscall entry doesn't require a separate PML4 switch.
 The LibOS's own code, heap, and stack live in the lower virtual address range.
 The full 64-bit virtual address space provides ample room for separation.
+
+**The primitives (SCRUM-48).** `vmm_create_address_space()` builds a real
+per-LibOS PML4, sharing the kernel's own PML4[0] link so kernel memory needs no
+synchronisation between address spaces; `vmm_destroy_address_space()` tears it
+down; `vmm_switch_address_space()` loads CR3. A `page_owner_t`-keyed registry
+(`vmm_bind_address_space()` / `vmm_address_space_for()`) records which context
+runs on which root, and `exo_page_map`/`exo_page_unmap` in `src/syscall_mem.c`
+already resolve the caller's root through it. The context table
+(`src/context.c`, `docs/architecture.md` §7 "Multi-application") deliberately does not duplicate
+that binding — `vmm.c`'s registry stays the single source of truth for which
+PML4 a context runs on. How an image is placed into one of these address
+spaces, and where, is `docs/libos-authoring.md` §4 and `src/libos_launch.h`.
+The per-syscall ownership and VA-window rules (`may_map_phys()` and friends)
+are `docs/syscall_spec.md` §3.3 and §3.7.
 
 ### Page fault handler (SCRUM-17) ✅
 
@@ -865,8 +887,8 @@ the kernel has no knowledge of it beyond handing out physical pages.
 > the kernel heap (§6b) when defined (every kernel `.c` compile, and every
 > `tests/kernel/*.c` suite compiled through the shared loop), this allocator
 > (`libos_heap_alloc`/`_free`/`_realloc`) when not. The "not" case is the ring-3
-> LibOS link target `tests/kernel/libc_shim_probe/` builds (see CLAUDE.md and
-> `docs/architecture.md` §7) — the same target SCRUM-173 introduced for a
+> LibOS link target `tests/kernel/libc_shim_probe/` builds (see `docs/architecture.md` §9 and
+> §7) — the same target SCRUM-173 introduced for a
 > single throwaway probe function, now also carrying the real
 > `src/stdlib.c`/`src/stdio.c`/`src/string.c`/`src/ctype.c`. `libos_page_alloc.c`
 > itself is gated the same way — see the next paragraph, updated by SCRUM-51.
@@ -891,7 +913,11 @@ The page-granularity layer above is done: `libos_page_alloc()` calls
 `EXO_SYS_PAGE_ALLOC` then `EXO_SYS_PAGE_MAP` to place the new page at a fresh
 virtual address in `[LIBOS_HEAP_VADDR_BASE, LIBOS_HEAP_VADDR_BASE +
 LIBOS_PAGE_ALLOC_MAX_PAGES * 0x1000)` — 16 MiB of window starting 16 MiB into
-the LibOS window, clear of the fixed `libos_launch` region — and
+the LibOS window, clear of the fixed `libos_launch` region (the
+`EXO_KERNEL` build uses a disjoint window 32 MiB in: it maps into the *calling*
+LibOS's address space when `doom_wad_disk_get()` mounts the IWAD volume during
+`exo_launch`, and sharing the base collided with the shell's own heap, failing
+`doom`/`wadview` after `mkfs` with `libos_heap: out of pages`) — and
 `libos_page_free()` reverses it (`EXO_SYS_PAGE_UNMAP` then
 `EXO_SYS_PAGE_FREE`). A small parallel array tracks each slot's physical
 page (mirroring `page_alloc.c`'s own bitmap-PMM shape, one entry per page

@@ -3,13 +3,16 @@
 #include "serial.h"
 #include "memory.h"
 #include "mmap.h"
+#include "acpi.h"
 #include "page_alloc.h"
 #include "syscall_exit.h"
+#include "syscall_fault.h"
 
 #include "idt.h"
 #include "tss.h"
 #include "pic.h"
 #include "pit.h"
+#include "rtc.h"
 #include "speaker.h"
 #include "ps2.h"
 #include "ps2_mouse.h"
@@ -28,6 +31,7 @@
 #include "syscall_kbd.h"
 #include "syscall_mouse.h"
 #include "syscall_pit.h"
+#include "syscall_rtc.h"
 #include "syscall_sound.h"
 #include "syscall_yield.h"
 #include "syscall_launch.h"
@@ -38,11 +42,14 @@
 #include "exo_syscall.h"
 #include "libos_launch.h"
 #include "context.h"
+#include "usb.h"
 #include "shell/shell_layout.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
 extern void irq12_stub();
+extern void irq7_spurious_stub();
+extern void irq15_spurious_stub();
 extern void kbd_init();
 
 /* Embedded shell LibOS code/data blobs -- produced at build time by
@@ -236,6 +243,19 @@ void kernel_main(void *mb2_info_ptr) {
     // reaches ring 3 to exercise it before that (SCRUM-47) on a normal boot.
     tss_init();
 
+    // ── ACPI tables (SCRUM-250) ─────────────────────────────────────────
+    // After idt_init()/tss_init() so a fault while walking firmware-supplied
+    // pointers gets a serial diagnostic, and before vmm_init(): the kernel map
+    // does not map the ACPI-reclaimable/reserved memory the firmware tables
+    // sit in, so they are only readable on the boot map. acpi_init() copies
+    // what later callers (rtc_init(), SCRUM-249) need into statics and needs
+    // nothing but serial. If it ever becomes lazy or re-runs, the
+    // ACPI-reclaimable region must stay out of the page allocator until it has
+    // run. Failure is non-fatal -- the accessors then report "unknown".
+    if (acpi_init(mb) != 0) {
+        serial_print("WARN: acpi_init failed; ACPI-derived values unavailable\n");
+    }
+
     // ── Page allocator (SCRUM-7) ───────────────────────────────────────
     page_alloc_init(mb);
 
@@ -348,6 +368,14 @@ void kernel_main(void *mb2_info_ptr) {
     // where this gets narrated to the console -- later in this same
     // function, once one exists.
     pic_remap();
+    // The two vectors an 8259 answers with when a request vanishes between
+    // INTR and the CPU's acknowledge (SCRUM-227). Unmasking does not gate
+    // them -- a spurious IRQ is delivered whatever the IMR says -- so they
+    // need real handlers from the moment pic_remap() puts the PICs at
+    // 0x20/0x28. A spurious IRQ15 left on default_stub never EOIs the
+    // master's cascade and kills every slave line for the rest of the boot.
+    idt_set_gate(32 + 7,  (uintptr_t)irq7_spurious_stub);
+    idt_set_gate(32 + 15, (uintptr_t)irq15_spurious_stub);
     idt_set_gate(32, (uintptr_t)irq0_stub);
     pit_init(1000);
 
@@ -398,30 +426,71 @@ void kernel_main(void *mb2_info_ptr) {
     // -drive. A missing drive (docker-run/docker-run-kernel, which attach
     // none) is not fatal: ata_init() returns ATA_ENODEV and boot continues,
     // same soft-fail pattern as vmm_init() above.
+    //
+    // SCRUM-244: every IDE position is probed and each disk that answered is
+    // registered as a block device (src/blkdev.h): the primary master in the
+    // slot reserved for the system disk, device 0, the others from 1 up. The
+    // CD-ROM GRUB booted from is skipped.
     int ata_rc = ata_init();
     if (ata_rc != ATA_OK) {
-        serial_print("ATA: no drive detected (rc=");
+        serial_print("ATA: no primary master drive (rc=");
         serial_print_hex64((uint64_t)(int64_t)ata_rc);
         serial_print(")\n");
     } else {
         serial_print("ATA: primary master drive detected\n");
     }
+    int ata_ndevs = ata_register_blkdevs();
+    serial_print("ATA: block devices registered: ");
+    serial_print_hex64((uint64_t)ata_ndevs);
+    serial_print("\n");
+
+    // ── USB: UHCI + HID boot keyboards (SCRUM-198) ───────────────────────
+    // After pci_init() (it walks the PCI table for class 0x0C03) and
+    // page_alloc_init() (frame lists, QHs and TDs are alloc_page() pages).
+    // Ahead of the TESTING branch so the usb suites can reach it. Runs with
+    // interrupts off: enumeration busy-waits on each controller's own frame
+    // counter, and irq0_handler()'s usb_poll() only starts servicing the
+    // keyboards' interrupt pipes once this has returned (docs/drivers/usb.md
+    // section 3). Soft-fail like hda_init()/ata_init() above.
+    int usb_rc = usb_init();
+    if (usb_rc != USB_OK) {
+        serial_print("usb: no host controller (rc=");
+        serial_print_hex64((uint64_t)(int64_t)usb_rc);
+        serial_print(")\n");
+    } else {
+        usb_dump();
+    }
 
     // ── Disk syscalls (SCRUM-103/SCRUM-188) ─────────────────────────────
     // Binds exo_disk_read/_write/_acquire/_release (#24/#25/#26/#27) in
-    // front of the ATA driver above, passing along whether a drive actually
-    // answered so the handlers can return -EXO_ENODEV without re-probing the
-    // bus. Same placement rule as every other syscall *_init(): after
+    // front of the block-device registry, after every driver that registers
+    // disks into it (ATA above; USB mass storage, SCRUM-247, will register
+    // from usb_init()), so the handlers answer -EXO_ENODEV from the registry
+    // without re-probing the bus. Same placement rule as every other syscall *_init(): after
     // syscall_init(), ahead of the TESTING branch. syscall_disk_init() also
     // calls disk_binding_init() before registering any of the three, so the
     // ownership/binding gate (SCRUM-188) is live from the first syscall.
-    syscall_disk_init(ata_rc == ATA_OK);
+    syscall_disk_init();
 
     // ── Timer syscall (SCRUM-172) ────────────────────────────────────────
     // Binds exo_get_ticks (#5). After pit_init() -- the handler reports
     // kernel_get_ticks_ms(), which stays at 0 without it -- and, like the
     // other syscall *_init()s, ahead of the TESTING branch.
     syscall_pit_init();
+
+    // ── Wall-clock time (SCRUM-249) ──────────────────────────────────────
+    // Polled CMOS RTC; the century register comes from the FADT, so this
+    // sits after acpi_init() (which ran before vmm_init()). Binds
+    // exo_rtc_read (#35); ahead of the TESTING branch like every other
+    // syscall *_init().
+    rtc_init();
+    syscall_rtc_init();
+
+    // ── Fault log (SCRUM-283) ────────────────────────────────────────────
+    // Binds exo_fault_info (#41), which reads what src/fault.c records when
+    // it ends a program. Nothing to initialise first; ahead of the TESTING
+    // branch like every other syscall *_init().
+    syscall_fault_init();
 
     // ── Sound syscalls (SCRUM-100) ───────────────────────────────────────
     // Binds exo_sound_tone/exo_sound_stop (#17/#18) in front of the PC
@@ -561,34 +630,6 @@ void kernel_main(void *mb2_info_ptr) {
     __asm__ volatile ("sti");
     klog(&con, 0, "Interrupts enabled (STI)");
 
-    // ── HDA boot test tone (SCRUM-210) ───────────────────────────────────
-    // The audible half of this ticket's acceptance: a synthesized tone
-    // played by the controller's own DMA, out of a buffer in system memory,
-    // through a real codec. The KUnit suite asserts the register/DMA/IRQ
-    // state that makes it work; this is the part a person can hear, and
-    // without it a normal boot programs the stream and then plays nothing.
-    //
-    // Deliberately here, in the normal-boot tail *after* `sti`, and not next
-    // to hda_init() above: the duration is enforced by hda_tick() from
-    // irq0_handler, so a tone started with interrupts still masked would
-    // keep sounding until whenever they were enabled. It also keeps the tone
-    // out of TESTING builds entirely, which exit through run_tests() and
-    // drive hda_play_tone() themselves.
-    //
-    // Needs a real QEMU audio backend to be audible -- `-audiodev none` (what
-    // every docker-* target passes, since headless Docker has none) runs the
-    // whole DMA path and discards the samples. See the `run` target's comment
-    // in the Makefile.
-    if (hda_present()) {
-        if (hda_play_tone(HDA_BOOT_TONE_HZ, HDA_BOOT_TONE_MS) == HDA_OK) {
-            klog(&con, kernel_get_ticks_ms(),
-                 "HDA: boot test tone playing (DMA + codec)");
-        } else {
-            klog(&con, kernel_get_ticks_ms(),
-                 "HDA: boot test tone refused");
-        }
-    }
-
     // ── Shell LibOS launch (SCRUM-110, refactored by SCRUM-178) ─────────
     // The first real LibOS this kernel launches on a normal boot, replacing
     // the kernel-mode keyboard loop that used to sit here. Goes through the
@@ -623,6 +664,20 @@ void kernel_main(void *mb2_info_ptr) {
             __asm__ volatile ("cli; hlt");
         }
     }
+
+    context_set_name(shell_id, "shell");
+
+    // SCRUM-192: give the shell a shadow framebuffer that starts as a copy
+    // of this boot console instead of black. The compositor shows the
+    // current context's shadow from its first syscall on, and the shell's
+    // first stretch is mapping that buffer one page at a time before it can
+    // draw anything -- with a zeroed shadow the screen went black for all of
+    // it, seconds under emulation. Seeded, the boot log (ending in
+    // "Launching shell LibOS..." above) stays up until the shell's
+    // fbcon_init() clears it to draw the banner. Safe only because nothing
+    // but the kernel has drawn yet (fb_shadow.h). Best effort: on failure
+    // the shell's own exo_fb_acquire allocates a zeroed one, as before.
+    (void)fb_shadow_seed_from_screen(shell_id);
 
     size_t shell_code_len = (size_t)(_binary_shell_code_bin_end -
                                      _binary_shell_code_bin_start);

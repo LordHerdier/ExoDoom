@@ -32,9 +32,10 @@
  * Read back what boot.s's _start64 actually programmed.  test_sse_k.c
  * asserts on these *before* executing any SSE instruction: if a future edit
  * drops the enable block, the CR0/CR4 assertions fail cleanly, where an
- * `addss` would instead raise #UD onto idt_init()'s default_stub -- a bare
- * `iretq` back to the faulting instruction, i.e. a silent hang and a CI
- * timeout with no failing assertion.  Order matters in that file. */
+ * `addss` would instead raise #UD in ring 0, which exception_handler()
+ * (src/fault.c) reports on serial and halts on (SCRUM-283; before that it was
+ * default_stub's silent re-entry loop) -- either way no test finishes, so a
+ * CI timeout with no failing assertion.  Order matters in that file. */
 .global sse_probe_read_cr0
 sse_probe_read_cr0:
     mov %cr0, %rax

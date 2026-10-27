@@ -2,7 +2,8 @@
 #include <stdint.h>
 
 /*
- * ata — polled PIO driver for the primary ATA bus, master drive (SCRUM-102).
+ * ata — polled PIO driver for the legacy ATA buses (SCRUM-102; every
+ * position since SCRUM-244).
  *
  * Ring-0 only, and deliberately syscall-free: exo_disk_read/exo_disk_write
  * (SCRUM-103) are a separate ticket that puts a bounds-checked syscall
@@ -14,9 +15,16 @@
  * QEMU's `-drive if=ide` attaches to the primary bus (ports 0x1F0-0x1F7 data/
  * command, 0x3F6 device control) as the master drive -- confirmed as the
  * chosen interface on the Jira ticket (2026-09-19), rejecting SCSI/virtio-scsi
- * as unnecessary complexity for a QEMU-only demo. This driver only ever
- * speaks to that one drive: no slave, no secondary bus, no drive-select
- * parameter on the public API.
+ * as unnecessary complexity for a QEMU-only demo. SCRUM-244 lifted the
+ * one-drive limit: ata_init() probes all four positions (primary/secondary
+ * bus x master/slave, the order QEMU's `index=0..3` numbers them), skips an
+ * ATAPI CD-ROM (QEMU's `-cdrom` is the secondary master), and
+ * ata_register_blkdevs() puts every disk that answered into the block-device
+ * registry (src/blkdev.h), which is how the syscall layer reaches it. The
+ * unsuffixed calls below still mean the primary master, so ring-0 users of
+ * the system disk (and test_ata_k.c) are unchanged; every other drive is
+ * reached only through the block-device ops ata_register_blkdevs()
+ * registers.
  *
  * Polled, not IRQ14-driven: "PIO" here means programmed I/O with a
  * busy-polled status register, matching this ticket's minimal acceptance bar
@@ -30,7 +38,15 @@
 #define ATA_ETIMEOUT (-2)  /* BSY never cleared / DRQ never set             */
 #define ATA_EIO     (-3)   /* ERR bit set in the status register            */
 
-/* Probe the primary master with IDENTIFY. Returns ATA_OK if a drive answered,
+/* Number of IDE positions probed: primary master, primary slave, secondary
+ * master, secondary slave. */
+#define ATA_MAX_DRIVES 4
+
+/* Probe every position with IDENTIFY. Safe to call again (the KUnit suites
+ * do): it re-probes and overwrites the per-drive state, and registers
+ * nothing -- registration is ata_register_blkdevs(), once, at boot.
+ *
+ * The return value is the PRIMARY MASTER's: ATA_OK if a drive answered,
  * ATA_ENODEV if the bus reads back all-zero status (no drive wired), or
  * ATA_ETIMEOUT/ATA_EIO on a drive that responded but faulted. Must be called
  * once before ata_read_sector()/ata_write_sector(); safe to call from a
@@ -67,3 +83,22 @@ int ata_write_sectors(uint32_t lba, const uint8_t *buf, uint32_t count);
  * SCRUM-202's `disk` shell command is the first caller. 0 if ata_init()
  * never succeeded (ATA_ENODEV/timeout) or has not been called yet. */
 uint32_t ata_get_sector_count(void);
+
+/* Sectors per DRQ data block the transfers above use: what ata_init()'s
+ * SET MULTIPLE MODE was accepted with (READ/WRITE MULTIPLE), or 1 if the
+ * drive has no multiple mode (plain READ/WRITE SECTORS). Exposed for the
+ * test suite; nothing else needs to know. */
+uint32_t ata_multiple_block(void);
+
+/* Whether position `drive` (0..ATA_MAX_DRIVES-1) answered the last
+ * ata_init() as an ATA disk, and its sector count (0 if not). */
+int ata_drive_present(unsigned drive);
+uint32_t ata_drive_sector_count(unsigned drive);
+
+/* Register every present position with src/blkdev.h: the primary master in
+ * the reserved system slot (block device 0), the others in position order
+ * from slot 1 -- never in slot 0, even with no primary master. The block
+ * ops are the only way anything above this driver reaches a drive other
+ * than the primary master. Call once from kernel_main after ata_init().
+ * Returns how many were registered. */
+int ata_register_blkdevs(void);

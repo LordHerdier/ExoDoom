@@ -156,11 +156,17 @@ typedef struct {
     uint64_t end;
 } context_va_policy_t;
 
+/* Program name shown by exo_pslist (SCRUM-236): NUL-terminated, at most
+ * CONTEXT_NAME_MAX - 1 characters. Set by the launcher; nothing in the kernel
+ * decides anything from it. */
+#define CONTEXT_NAME_MAX 16
+
 typedef struct {
     page_owner_t        id;
     context_regs_t      regs;
     context_state_t     state;
     context_va_policy_t va_policy;
+    char                name[CONTEXT_NAME_MAX];
 } context_t;
 
 /* Table capacity is VMM_MAX_ADDRESS_SPACES minus one: every context here is
@@ -256,7 +262,13 @@ uint32_t context_count(void);
 typedef struct {
     page_owner_t     id;
     context_state_t  state;
+    char             name[CONTEXT_NAME_MAX];
 } context_info_t;
+
+/* Record `name` for `id`, truncated to CONTEXT_NAME_MAX - 1 characters;
+ * NULL clears it. Returns CONTEXT_OK, or CONTEXT_ENOENT if `id` names no
+ * live context. */
+int context_set_name(page_owner_t id, const char *name);
 
 uint32_t context_list(context_info_t *out, uint32_t max);
 
@@ -395,6 +407,12 @@ extern context_regs_t *context_switch_out_regs;
 extern context_regs_t *context_switch_in_regs;
 extern uint64_t context_switch_in_pml4;
 extern uint64_t context_switch_in_id;
+
+/* SCRUM-283: switch to the context context_switch_request() last armed,
+ * without capturing the caller (which must be dead) and without waiting for a
+ * syscall return. For the ring-3 fault path only; never returns. Clears
+ * context_switch_pending. See src/context_switch.s. */
+void context_resume_noreturn(void) __attribute__((noreturn));
 
 #define CONTEXT_OK      0
 #define CONTEXT_ENOMEM  (-1)

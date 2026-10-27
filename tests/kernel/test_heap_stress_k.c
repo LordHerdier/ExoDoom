@@ -218,7 +218,7 @@ drain:
 /* ---- Phase 2: 10,000 blocks live at once --------------------------------- */
 
 /* .bss, not stack: 10,000 pointers plus their sizes is ~100 KB and the kernel
- * stack is 16 KiB (see CLAUDE.md). */
+ * stack is 16 KiB (see docs/architecture.md §4). */
 static void     *g_blocks[STRESS_BLOCKS];
 static uint16_t  g_sizes [STRESS_BLOCKS];
 

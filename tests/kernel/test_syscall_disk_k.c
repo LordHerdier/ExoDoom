@@ -56,12 +56,27 @@ static int drive_present(void)
 
 static int64_t do_disk_acquire(void)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, 0, 0, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, 0, 0, 0, 0, 0); /* dev 0, whole */
+}
+
+static int64_t do_disk_acquire_extent(uint64_t base, uint64_t count)
+{
+    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, base, count, 0, 0, 0);
+}
+
+static int64_t do_disk_extent(uint64_t out)
+{
+    return exo_syscall_dispatch(EXO_SYS_DISK_EXTENT, out, 0, 0, 0, 0, 0);
+}
+
+static int64_t do_disk_extent_role(uint64_t out, uint64_t role)
+{
+    return exo_syscall_dispatch(EXO_SYS_DISK_EXTENT, out, role, 0, 0, 0, 0);
 }
 
 static int64_t do_disk_release(void)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_RELEASE, 0, 0, 0, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_RELEASE, 0, 0, 0, 0, 0, 0); /* dev 0 */
 }
 
 /* Acquire the binding for this suite's own context before the existing
@@ -87,12 +102,12 @@ int syscall_disk_suite_cleanup(void)
 
 static int64_t do_disk_read(uint64_t lba, uint64_t buf, uint64_t count)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_READ, lba, buf, count, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_READ, 0, lba, buf, count, 0, 0);
 }
 
 static int64_t do_disk_write(uint64_t lba, uint64_t buf, uint64_t count)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_WRITE, lba, buf, count, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_WRITE, 0, lba, buf, count, 0, 0);
 }
 
 static int64_t do_alloc(void)
@@ -233,15 +248,15 @@ static void test_foreign_owner_blocks_read_write(void)
 
     /* syscall_disk_suite_init() already acquired this for `me`; hand it to
      * another context to observe the block, then give it back. */
-    disk_binding_release(me);
-    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_OK);
+    disk_binding_release(me, 0);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS, 0), DISK_BIND_OK);
 
     CU_ASSERT_EQUAL(do_disk_read(TEST_LBA, 0, 1), -EXO_EBUSY);
     CU_ASSERT_EQUAL(do_disk_write(TEST_LBA, 0, 1), -EXO_EBUSY);
 
-    disk_binding_release(OTHER_LIBOS);
+    disk_binding_release(OTHER_LIBOS, 0);
     CU_ASSERT_EQUAL(do_disk_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), me);
 }
 
 /* #27, SCRUM-189. The acquire/release pair is what makes phase 2 of the
@@ -255,14 +270,14 @@ static void test_release_returns_the_binding(void)
     page_owner_t me = syscall_current_context();
 
     CU_ASSERT_EQUAL(do_disk_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), me);
 
     CU_ASSERT_EQUAL(do_disk_release(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), PAGE_OWNER_FREE);
 
     /* Released really means released: somebody else can now take it. */
-    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_OK);
-    disk_binding_release(OTHER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS, 0), DISK_BIND_OK);
+    disk_binding_release(OTHER_LIBOS, 0);
 
     CU_ASSERT_EQUAL(do_disk_acquire(), 0);
 }
@@ -280,10 +295,10 @@ static void test_release_without_binding_is_a_noop(void)
 
     CU_ASSERT_EQUAL(do_disk_release(), 0);
     CU_ASSERT_EQUAL(do_disk_release(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), PAGE_OWNER_FREE);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), PAGE_OWNER_FREE);
 
     CU_ASSERT_EQUAL(do_disk_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), me);
 }
 
 /* Scoped to the caller: releasing while ANOTHER context holds the disk must
@@ -298,14 +313,14 @@ static void test_release_does_not_touch_a_foreign_binding(void)
     page_owner_t me = syscall_current_context();
 
     CU_ASSERT_EQUAL(do_disk_release(), 0);
-    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire(OTHER_LIBOS, 0), DISK_BIND_OK);
 
     CU_ASSERT_EQUAL(do_disk_release(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), OTHER_LIBOS);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), OTHER_LIBOS);
 
-    disk_binding_release(OTHER_LIBOS);
+    disk_binding_release(OTHER_LIBOS, 0);
     CU_ASSERT_EQUAL(do_disk_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), me);
 }
 
 /* A headless machine answers 0, not -EXO_ENODEV: there is no binding to
@@ -325,7 +340,7 @@ static void test_release_without_a_drive_still_succeeds(void)
  * sector count ata_init() already cached at boot. */
 static int64_t do_disk_stat(uint64_t out)
 {
-    return exo_syscall_dispatch(EXO_SYS_DISK_STAT, out, 0, 0, 0, 0, 0);
+    return exo_syscall_dispatch(EXO_SYS_DISK_STAT, 0, out, 0, 0, 0, 0);
 }
 
 static void test_disk_stat_handler_is_bound(void)
@@ -362,8 +377,218 @@ static void test_disk_stat_reports_presence_and_capacity(void)
     CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
 }
 
+/* ---- Sector extents (SCRUM-237) -----------------------------------------
+ *
+ * The isolation guarantee between two LibOS volumes is that a transfer
+ * outside the caller's extent is refused before anything touches the drive.
+ * UNMAPPED stands in for the buffer: an in-extent transfer then gets past the
+ * range check and fails on the pointer (-EXO_EFAULT), while an out-of-extent
+ * one never reaches the pointer (-EXO_EINVAL). So the two codes together say
+ * which check fired. */
+
+#define OTHER_VOLUME_LBA 4096
+
+static void test_extent_confines_transfers(void)
+{
+    if (!drive_present())
+        return;
+
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), 0);
+
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA, UNMAPPED, 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA + 7, UNMAPPED, 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_disk_write(TEST_LBA + 7, UNMAPPED, 1), -EXO_EFAULT);
+
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA - 1, UNMAPPED, 1), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA + 8, UNMAPPED, 1), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA + 7, UNMAPPED, 2), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_write(TEST_LBA - 1, UNMAPPED, 2), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_write(0, UNMAPPED, 1), -EXO_EINVAL);
+
+    /* A caller holding no extent is EBUSY, not out-of-range. */
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_read(TEST_LBA, UNMAPPED, 1), -EXO_EBUSY);
+
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+}
+
+static void test_extent_acquire_arguments(void)
+{
+    if (!drive_present())
+        return;
+
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(1ULL << 32, 8), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(8, 1ULL << 32), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(8, 0), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), PAGE_OWNER_FREE);
+
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), 0);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), 0);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA + 8, 8), -EXO_EBUSY);
+
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+}
+
+/* Two volumes at once, and a write aimed at the other one's sector leaves it
+ * byte-for-byte as it was. Read back through ata_read_sectors() directly --
+ * the one place that does not go through the check being tested. */
+static void test_other_volume_is_untouchable(void)
+{
+    if (!drive_present())
+        return;
+
+    page_owner_t me = syscall_current_context();
+
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), 0);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, OTHER_VOLUME_LBA, 8),
+                    DISK_BIND_OK);
+
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p,
+                          EXO_PAGE_WRITE | EXO_PAGE_USER), 0);
+    uint8_t *page = (uint8_t *)(uintptr_t)SCRATCH;
+
+    static uint8_t before[512], after[512];
+    CU_ASSERT_EQUAL(ata_read_sectors(OTHER_VOLUME_LBA, before, 1), ATA_OK);
+
+    for (int i = 0; i < 512; i++)
+        page[i] = 0xA5;
+    CU_ASSERT_EQUAL(do_disk_write(OTHER_VOLUME_LBA, SCRATCH, 1), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_read(OTHER_VOLUME_LBA, SCRATCH, 1), -EXO_EINVAL);
+
+    CU_ASSERT_EQUAL(ata_read_sectors(OTHER_VOLUME_LBA, after, 1), ATA_OK);
+    int same = 1;
+    for (int i = 0; i < 512; i++)
+        if (before[i] != after[i])
+            same = 0;
+    CU_ASSERT_TRUE(same);
+
+    CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+
+    disk_binding_release(OTHER_LIBOS, 0);
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), me);
+}
+
+static void test_disk_extent_reports_the_assignment(void)
+{
+    if (!drive_present())
+        return;
+
+    page_owner_t me = syscall_current_context();
+
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p,
+                          EXO_PAGE_WRITE | EXO_PAGE_USER), 0);
+
+    CU_ASSERT_EQUAL(do_disk_extent(UNMAPPED), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_disk_extent(0), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_disk_extent(SCRATCH), -EXO_ENOENT);
+
+    CU_ASSERT_EQUAL(disk_binding_assign(me, OTHER_VOLUME_LBA, 16),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(do_disk_extent(SCRATCH), 0);
+    exo_diskextent_t *e = (exo_diskextent_t *)(uintptr_t)SCRATCH;
+    CU_ASSERT_EQUAL(e->base, OTHER_VOLUME_LBA);
+    CU_ASSERT_EQUAL(e->sectors, 16);
+
+    /* A context with a volume gets that volume and no other, and not the
+     * whole device it could take before. */
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire(), -EXO_EPERM);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA, 8), -EXO_EPERM);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(OTHER_VOLUME_LBA, 16), 0);
+
+    disk_binding_forget(me);
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_extent(SCRATCH), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+
+    CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+}
+
+/* SCRUM-267: a context assigned both a private volume and the read-only
+ * program volume can name either, and the kernel judges each transfer by the
+ * extent it falls in. UNMAPPED is the buffer throughout, so a transfer the
+ * access check lets through ends at -EXO_EFAULT before it touches a sector. */
+static void test_disk_extent_role_and_two_volumes(void)
+{
+    if (!drive_present())
+        return;
+
+    page_owner_t me = syscall_current_context();
+    const uint64_t PROG_LBA = TEST_LBA;   /* the "program volume" */
+
+    int64_t p = do_alloc();
+    CU_ASSERT(p > 0);
+    CU_ASSERT_EQUAL(do_map(SCRATCH, (uint64_t)p,
+                          EXO_PAGE_WRITE | EXO_PAGE_USER), 0);
+    exo_diskextent_t *e = (exo_diskextent_t *)(uintptr_t)SCRATCH;
+
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(me, PROG_LBA, 32), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign(me, OTHER_VOLUME_LBA, 16),
+                    DISK_BIND_OK);
+
+    /* ANY keeps its old meaning (the private volume); the roles are exact. */
+    CU_ASSERT_EQUAL(do_disk_extent(SCRATCH), 0);
+    CU_ASSERT_EQUAL(e->base, OTHER_VOLUME_LBA);
+    CU_ASSERT_EQUAL(do_disk_extent_role(SCRATCH, EXO_DISK_EXTENT_PRIVATE), 0);
+    CU_ASSERT_EQUAL(e->base, OTHER_VOLUME_LBA);
+    CU_ASSERT_EQUAL(e->sectors, 16);
+    CU_ASSERT_EQUAL(do_disk_extent_role(SCRATCH, EXO_DISK_EXTENT_PROGRAM), 0);
+    CU_ASSERT_EQUAL(e->base, PROG_LBA);
+    CU_ASSERT_EQUAL(e->sectors, 32);
+    CU_ASSERT_EQUAL(do_disk_extent_role(SCRATCH, 3), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_extent_role(UNMAPPED, 3), -EXO_EFAULT);
+
+    /* Bind both, as Doom does. */
+    do_disk_release();
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(PROG_LBA, 32), 0);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(OTHER_VOLUME_LBA, 16), 0);
+    CU_ASSERT_EQUAL(do_disk_acquire_extent(TEST_LBA + 64, 8), -EXO_EPERM);
+
+    CU_ASSERT_EQUAL(do_disk_read(PROG_LBA, UNMAPPED, 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(do_disk_read(OTHER_VOLUME_LBA, UNMAPPED, 1), -EXO_EFAULT);
+    /* Read-only for the program volume, writable for the private one. */
+    CU_ASSERT_EQUAL(do_disk_write(PROG_LBA, UNMAPPED, 1), -EXO_EROFS);
+    CU_ASSERT_EQUAL(do_disk_write(OTHER_VOLUME_LBA, UNMAPPED, 1), -EXO_EFAULT);
+    /* Outside both, and across the end of either, is out of range. */
+    CU_ASSERT_EQUAL(do_disk_read(0, UNMAPPED, 1), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_read(PROG_LBA + 31, UNMAPPED, 2), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(do_disk_write(OTHER_VOLUME_LBA + 15, UNMAPPED, 2),
+                    -EXO_EINVAL);
+
+    do_disk_release();
+    disk_binding_forget(me);
+    CU_ASSERT_EQUAL(do_disk_extent_role(SCRATCH, EXO_DISK_EXTENT_PROGRAM),
+                    -EXO_ENOENT);
+    CU_ASSERT_EQUAL(do_disk_acquire(), 0);
+
+    CU_ASSERT_EQUAL(do_unmap(SCRATCH), 0);
+    CU_ASSERT_EQUAL(do_free((uint64_t)p), 0);
+}
+
 void suite_syscall_disk_tests(CU_pSuite s)
 {
+    CU_add_test(s, "disk_extent role picks the volume, both bindable",
+               test_disk_extent_role_and_two_volumes);
+    CU_add_test(s, "extent confines transfers",
+               test_extent_confines_transfers);
+    CU_add_test(s, "extent acquire arguments are validated",
+               test_extent_acquire_arguments);
+    CU_add_test(s, "another volume is untouchable",
+               test_other_volume_is_untouchable);
+    CU_add_test(s, "disk_extent reports the assignment",
+               test_disk_extent_reports_the_assignment);
     CU_add_test(s, "handlers are bound", test_handlers_are_bound);
     CU_add_test(s, "zero count is a no-op", test_zero_count_is_a_noop);
     CU_add_test(s, "oversized count rejected", test_oversized_count_rejected);

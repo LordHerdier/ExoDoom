@@ -66,6 +66,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* The volume the tests in this file are working on (SCRUM-265): set by
+ * whichever helper mounts, read by everything after. A slot is zeroed on
+ * unmount, so a stale pointer reads as "not mounted". */
+static exofs_vol_t *g_tv;
+#define TV_MOUNTED() (g_tv != NULL && g_tv->mounted)
+
 /* Base of the region SCRUM-189 owns on the scratch image. See the LBA RANGE
  * note above before moving it. */
 #define EXOFS_TEST_BASE_LBA 8192u
@@ -91,7 +97,8 @@ static int drive_present(void)
 
 int exofs_suite_init(void)
 {
-    exofs_bdev_acquire();
+    exofs_unmount_all();
+    exofs_bdev_acquire(0);
     return 0;
 }
 
@@ -99,8 +106,8 @@ int exofs_suite_cleanup(void)
 {
     /* Leave nothing mounted for the next suite, even if a test failed
      * partway through with a volume up. */
-    exofs_unmount();
-    exofs_bdev_release();
+    exofs_unmount_all();
+    exofs_bdev_release(0);
     return 0;
 }
 
@@ -109,9 +116,9 @@ int exofs_suite_cleanup(void)
  * one left, so a failure names its own cause. */
 static int fresh_volume(void)
 {
-    exofs_unmount();
-    if (exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS) != 0) return 0;
-    if (exofs_mount(EXOFS_TEST_BASE_LBA) != 0) return 0;
+    exofs_unmount(g_tv);
+    if (exofs_format(0, EXOFS_TEST_BASE_LBA, VOL_SECTORS) != 0) return 0;
+    if (exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv) != 0) return 0;
     return 1;
 }
 
@@ -165,8 +172,8 @@ static void test_null_buffer_rejected(void)
     /* Rejected locally, before any syscall: count > 0 with no buffer is a
      * caller bug, and answering -EXO_EFAULT matches what the syscall itself
      * would have said. */
-    CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA, NULL, 1), -EXO_EFAULT);
-    CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA, NULL, 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA, NULL, 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA, NULL, 1), -EXO_EFAULT);
 }
 
 static void test_zero_count_is_a_noop(void)
@@ -174,8 +181,8 @@ static void test_zero_count_is_a_noop(void)
     /* Nothing to transfer, so the loop never runs and NULL is not a problem
      * — mirroring the syscall's own count == 0 contract
      * (docs/syscall_spec.md §3.2 #27). Runs with or without a drive. */
-    CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA, NULL, 0), 0);
-    CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA, NULL, 0), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA, NULL, 0), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA, NULL, 0), 0);
 }
 
 static void test_kernel_buffer_rejected(void)
@@ -187,7 +194,7 @@ static void test_kernel_buffer_rejected(void)
      * above exists to prevent, demonstrated deliberately. */
     uint8_t stack_buf[EXOFS_BLOCK_SIZE];
 
-    CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA, stack_buf, 1), -EXO_EFAULT);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA, stack_buf, 1), -EXO_EFAULT);
 }
 
 /* ---- Round trip ---------------------------------------------------------
@@ -210,8 +217,8 @@ static void test_single_sector_round_trips(void)
         r[i] = 0;
     }
 
-    CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA, w, 1), 0);
-    CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA, r, 1), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA, w, 1), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA, r, 1), 0);
 
     for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) {
         if (r[i] != w[i]) {
@@ -254,8 +261,8 @@ static void test_transfer_larger_than_cap_is_chunked(void)
         r[i] = 0;
     }
 
-    CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA, w, count), 0);
-    CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA, r, count), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA, w, count), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA, r, count), 0);
 
     for (size_t i = 0; i < bytes; i++) {
         if (r[i] != w[i]) {
@@ -269,11 +276,11 @@ static void test_transfer_larger_than_cap_is_chunked(void)
     uint8_t *guard = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     if (guard != NULL) {
         for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) guard[i] = 0xA5;
-        CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA + count, guard, 1), 0);
+        CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA + count, guard, 1), 0);
 
         for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) guard[i] = 0;
-        CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA, w, count), 0);
-        CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA + count, guard, 1), 0);
+        CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA, w, count), 0);
+        CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA + count, guard, 1), 0);
         CU_ASSERT_EQUAL(guard[0], 0xA5);
         libos_heap_free(guard);
     }
@@ -292,9 +299,9 @@ static void test_acquire_is_idempotent(void)
     /* The suite already holds it; re-acquiring must not be punished, so a
      * caller can acquire unconditionally rather than tracking whether it
      * already did (SCRUM-188, docs/syscall_spec.md §3.5a). */
-    CU_ASSERT_EQUAL(exofs_bdev_acquire(), 0);
-    CU_ASSERT_EQUAL(exofs_bdev_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), syscall_current_context());
+    CU_ASSERT_EQUAL(exofs_bdev_acquire(0), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_acquire(0), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), syscall_current_context());
 }
 
 static void test_foreign_owner_blocks_transfers(void)
@@ -310,19 +317,145 @@ static void test_foreign_owner_blocks_transfers(void)
      * through the seam unchanged — -EXO_EBUSY, not a local code. Same
      * "another context" convention test_disk_binding_k.c and
      * test_syscall_disk_k.c use. */
-    disk_binding_release(me);
-    CU_ASSERT_EQUAL(disk_binding_acquire((page_owner_t)(PAGE_OWNER_LIBOS + 1)),
+    disk_binding_release(me, 0);
+    CU_ASSERT_EQUAL(disk_binding_acquire((page_owner_t)(PAGE_OWNER_LIBOS + 1), 0),
                     DISK_BIND_OK);
 
-    CU_ASSERT_EQUAL(exofs_bdev_read(SEAM_LBA, buf, 1), -EXO_EBUSY);
-    CU_ASSERT_EQUAL(exofs_bdev_write(SEAM_LBA, buf, 1), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, SEAM_LBA, buf, 1), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, SEAM_LBA, buf, 1), -EXO_EBUSY);
 
     /* Restore, so later tests in this suite still hold the binding. */
-    disk_binding_release((page_owner_t)(PAGE_OWNER_LIBOS + 1));
-    CU_ASSERT_EQUAL(exofs_bdev_acquire(), 0);
-    CU_ASSERT_EQUAL(disk_binding_owner(), me);
+    disk_binding_release((page_owner_t)(PAGE_OWNER_LIBOS + 1), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_acquire(0), 0);
+    CU_ASSERT_EQUAL(disk_binding_owner(0), me);
 
     libos_heap_free(buf);
+}
+
+/* ---- Per-program volumes (SCRUM-237) ------------------------------------
+ *
+ * Two volumes can be mounted at once (SCRUM-265; test_exofs_multivol_k.c
+ * does that). What this asserts is the half the kernel is responsible for,
+ * on one volume at a time: with a sector extent bound, a volume lives wholly inside
+ * it, one volume's files are not on the other, and ExoFS cannot be pointed at
+ * sectors outside the extent. Both volumes sit inside the region this suite
+ * owns (see the LBA RANGE note above).
+ */
+
+#define VOL_A_BASE (EXOFS_TEST_BASE_LBA)
+#define VOL_B_BASE (EXOFS_TEST_BASE_LBA + 2048u)
+#define VOL_EXT_SECTORS 2048u
+
+static int write_small_file(const char *path)
+{
+    exofs_file_t f;
+    if (exofs_open(g_tv, path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f) != 0)
+        return 0;
+    int64_t n = exofs_write(&f, "x", 1);
+    exofs_close(&f);
+    return n == 1;
+}
+
+/* Bind `base`'s extent, format + mount a volume in it. Returns 0 on success. */
+static int bring_up_volume(uint32_t base)
+{
+    exofs_unmount(g_tv);
+    exofs_bdev_release(0);
+    int rc = exofs_bdev_acquire_extent(0, base, VOL_EXT_SECTORS);
+    if (rc != 0) return rc;
+    rc = exofs_format(0, base, VOL_EXT_SECTORS);
+    if (rc != 0) return rc;
+    return exofs_mount(0, base, &g_tv);
+}
+
+static void restore_whole_device(void)
+{
+    exofs_unmount(g_tv);
+    exofs_bdev_release(0);
+    exofs_bdev_acquire(0);
+}
+
+static void test_volumes_in_separate_extents_do_not_see_each_other(void)
+{
+    if (!drive_present()) return;
+
+    exofs_stat_t st;
+
+    CU_ASSERT_EQUAL(bring_up_volume(VOL_A_BASE), 0);
+    CU_ASSERT_TRUE(write_small_file("/only-in-a"));
+    exofs_unmount(g_tv);
+
+    CU_ASSERT_EQUAL(bring_up_volume(VOL_B_BASE), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/only-in-a", &st), -EXO_ENOENT);
+    CU_ASSERT_TRUE(write_small_file("/only-in-b"));
+    exofs_unmount(g_tv);
+
+    /* Back to A: its file is still there and B's is not. */
+    exofs_bdev_release(0);
+    CU_ASSERT_EQUAL(exofs_bdev_acquire_extent(0, VOL_A_BASE, VOL_EXT_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, VOL_A_BASE, &g_tv), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/only-in-a", &st), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/only-in-b", &st), -EXO_ENOENT);
+
+    restore_whole_device();
+}
+
+static void test_exofs_cannot_reach_the_other_volume(void)
+{
+    if (!drive_present()) return;
+
+    CU_ASSERT_EQUAL(bring_up_volume(VOL_A_BASE), 0);
+    CU_ASSERT_TRUE(write_small_file("/mine"));
+    exofs_unmount(g_tv);
+
+    /* Holding A's extent, ExoFS cannot mount B, and a failed mount must not
+     * leave a half-mounted volume behind. */
+    CU_ASSERT_EQUAL(exofs_mount(0, VOL_B_BASE, &g_tv), -EXO_EINVAL);
+    CU_ASSERT_FALSE(TV_MOUNTED());
+
+    /* Nor format it: refused at the first transfer outside the extent, so B's
+     * superblock is whatever it was. */
+    CU_ASSERT_EQUAL(exofs_format(0, VOL_B_BASE, VOL_EXT_SECTORS), -EXO_EINVAL);
+
+    /* The first sector past the extent is refused at the seam, whatever
+     * ExoFS believes its geometry to be. (exofs_format() of an oversized
+     * volume is *not* refused up front -- it writes only metadata at the start
+     * -- so the kernel's per-transfer bound is what stops an overrun, and
+     * this is the assertion that it does.) */
+    uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
+    CU_ASSERT_PTR_NOT_NULL(buf);
+    if (buf) {
+        CU_ASSERT_EQUAL(exofs_bdev_write(0, VOL_A_BASE + VOL_EXT_SECTORS, buf, 1),
+                        -EXO_EINVAL);
+        CU_ASSERT_EQUAL(exofs_bdev_read(0, VOL_A_BASE + VOL_EXT_SECTORS - 1, buf, 2),
+                        -EXO_EINVAL);
+        libos_heap_free(buf);
+    }
+
+    /* And A is undamaged by all of that. */
+    CU_ASSERT_EQUAL(exofs_mount(0, VOL_A_BASE, &g_tv), 0);
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/mine", &st), 0);
+
+    restore_whole_device();
+}
+
+static void test_another_context_cannot_take_an_overlapping_extent(void)
+{
+    if (!drive_present()) return;
+
+    page_owner_t other = (page_owner_t)(PAGE_OWNER_LIBOS + 1);
+
+    CU_ASSERT_EQUAL(bring_up_volume(VOL_A_BASE), 0);
+
+    /* Held by us; overlapping claims fail, disjoint ones coexist. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(other, 0, VOL_A_BASE + 100, 10),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(other, 0, VOL_B_BASE, VOL_EXT_SECTORS),
+                    DISK_BIND_OK);
+    disk_binding_release(other, 0);
+
+    restore_whole_device();
 }
 
 /* ---- Volume layer: format, superblock, mount ---------------------------- */
@@ -331,12 +464,12 @@ static void test_format_then_mount(void)
 {
     if (!drive_present()) return;
 
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
-    CU_ASSERT_TRUE(exofs_is_mounted());
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, VOL_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
+    CU_ASSERT_TRUE(TV_MOUNTED());
 
     exofs_geometry_t g;
-    CU_ASSERT_EQUAL(exofs_geometry(&g), 0);
+    CU_ASSERT_EQUAL(exofs_geometry(g_tv, &g), 0);
 
     CU_ASSERT_EQUAL(g.base_lba, EXOFS_TEST_BASE_LBA);
     CU_ASSERT_EQUAL(g.root_block, EXOFS_ROOT_BLOCK);
@@ -357,8 +490,8 @@ static void test_format_then_mount(void)
                             / EXOFS_FAT_PER_BLOCK)
                       + (g.total_blocks + 1u) > VOL_SECTORS);
 
-    exofs_unmount();
-    CU_ASSERT_FALSE(exofs_is_mounted());
+    exofs_unmount(g_tv);
+    CU_ASSERT_FALSE(TV_MOUNTED());
 }
 
 static void test_mount_survives_remount(void)
@@ -367,21 +500,21 @@ static void test_mount_survives_remount(void)
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
     exofs_geometry_t first;
-    CU_ASSERT_EQUAL(exofs_geometry(&first), 0);
-    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_geometry(g_tv, &first), 0);
+    exofs_unmount(g_tv);
 
     /* Mounting again reads the same superblock off the disk rather than
      * anything left in memory — which is the property SCRUM-190's
      * prebuilt image depends on entirely. */
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
 
     exofs_geometry_t second;
-    CU_ASSERT_EQUAL(exofs_geometry(&second), 0);
+    CU_ASSERT_EQUAL(exofs_geometry(g_tv, &second), 0);
     CU_ASSERT_EQUAL(first.total_blocks, second.total_blocks);
     CU_ASSERT_EQUAL(first.fat_blocks,   second.fat_blocks);
     CU_ASSERT_EQUAL(first.data_lba,     second.data_lba);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -402,17 +535,17 @@ static void test_mount_unformatted_region_rejected(void)
     if (zero == NULL) return;
     for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) zero[i] = 0;
 
-    exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_bdev_write(blank_lba, zero, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(blank_lba), -EXO_EINVAL);
-    CU_ASSERT_FALSE(exofs_is_mounted());
+    exofs_unmount(g_tv);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, blank_lba, zero, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, blank_lba, &g_tv), -EXO_EINVAL);
+    CU_ASSERT_FALSE(TV_MOUNTED());
 
     /* And garbage that is not merely zero, in case "all zeros" were being
      * special-cased somewhere rather than the magic actually being read. */
     for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) zero[i] = (uint8_t)(i | 1u);
-    CU_ASSERT_EQUAL(exofs_bdev_write(blank_lba, zero, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(blank_lba), -EXO_EINVAL);
-    CU_ASSERT_FALSE(exofs_is_mounted());
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, blank_lba, zero, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, blank_lba, &g_tv), -EXO_EINVAL);
+    CU_ASSERT_FALSE(TV_MOUNTED());
 
     libos_heap_free(zero);
 }
@@ -429,14 +562,14 @@ static void test_mount_inconsistent_geometry_rejected(void)
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
     exofs_geometry_t g;
-    CU_ASSERT_EQUAL(exofs_geometry(&g), 0);
-    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_geometry(g_tv, &g), 0);
+    exofs_unmount(g_tv);
 
     uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     CU_ASSERT_PTR_NOT_NULL(buf);
     if (buf == NULL) return;
 
-    CU_ASSERT_EQUAL(exofs_bdev_read(EXOFS_TEST_BASE_LBA, buf, 1), 0);
+    CU_ASSERT_EQUAL(exofs_bdev_read(0, EXOFS_TEST_BASE_LBA, buf, 1), 0);
     exofs_super_t *sb = (exofs_super_t *)buf;
     CU_ASSERT_EQUAL(sb->magic, EXOFS_MAGIC);
 
@@ -446,27 +579,27 @@ static void test_mount_inconsistent_geometry_rejected(void)
 
     /* fat_blocks that does not match total_blocks. */
     sb->fat_blocks = good_fat + 1u;
-    CU_ASSERT_EQUAL(exofs_bdev_write(EXOFS_TEST_BASE_LBA, sb, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, EXOFS_TEST_BASE_LBA, sb, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), -EXO_EINVAL);
     sb->fat_blocks = good_fat;
 
     /* data_lba that does not follow the FAT. */
     sb->data_lba = good_data + 1u;
-    CU_ASSERT_EQUAL(exofs_bdev_write(EXOFS_TEST_BASE_LBA, sb, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, EXOFS_TEST_BASE_LBA, sb, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), -EXO_EINVAL);
     sb->data_lba = good_data;
 
     /* A version this build does not know. */
     sb->version = (uint16_t)(good_ver + 1u);
-    CU_ASSERT_EQUAL(exofs_bdev_write(EXOFS_TEST_BASE_LBA, sb, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, EXOFS_TEST_BASE_LBA, sb, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), -EXO_EINVAL);
     sb->version = good_ver;
 
     /* Restored, the same sector mounts again — proving the rejections above
      * were about the fields changed and not about the sector being touched. */
-    CU_ASSERT_EQUAL(exofs_bdev_write(EXOFS_TEST_BASE_LBA, sb, 1), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
-    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_bdev_write(0, EXOFS_TEST_BASE_LBA, sb, 1), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
+    exofs_unmount(g_tv);
 
     libos_heap_free(buf);
 }
@@ -476,21 +609,59 @@ static void test_double_mount_rejected(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    /* One volume at a time (exofs.h). A second mount must not silently
-     * leak the first volume's FAT allocation. */
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), -EXO_EBUSY);
-    CU_ASSERT_TRUE(exofs_is_mounted());
+    /* The same volume twice (exofs.h): two resident FATs for one volume
+     * would write back over each other, and the second must not leak. */
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), -EXO_EBUSY);
+    CU_ASSERT_TRUE(TV_MOUNTED());
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_format_rejects_tiny_volume(void)
 {
     /* No drive needed: the size check is ahead of any transfer. */
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, 0), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, 1), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA,
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, 0), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, 1), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA,
                                  EXOFS_MIN_SECTORS - 1u), -EXO_EINVAL);
+}
+
+/*
+ * format() sizes the FAT and mount() insists on exactly that size back
+ * (SCRUM-221), so the two have to agree at every size, and the sizes most
+ * likely to expose a rounding disagreement are the ones where total_blocks
+ * sits on or just past a multiple of EXOFS_FAT_PER_BLOCK -- where one more
+ * data block costs a whole extra FAT sector. Each row's expected
+ * total_blocks is worked by hand from 1 + ceil(T / 128) + T <= sectors, so
+ * a geometry change shows up here as a number, not just as a failed mount.
+ */
+static void test_format_mounts_at_fat_boundaries(void)
+{
+    if (!drive_present()) return;
+
+    static const struct { uint32_t sectors, total_blocks; } rows[] = {
+        { EXOFS_MIN_SECTORS, 6u },   /* 1 + 1 + 6                         */
+        { 130u, 128u },              /* one FAT sector, exactly full      */
+        { 131u, 128u },              /* 129 would need a 2nd FAT sector   */
+        { 132u, 129u },              /* ...which now fits                 */
+        { 259u, 256u },              /* two FAT sectors, exactly full     */
+        { 260u, 256u },
+        { 261u, 257u },
+    };
+
+    for (uint32_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        exofs_unmount(g_tv);
+        CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, rows[i].sectors),
+                        0);
+        CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
+
+        exofs_geometry_t g;
+        CU_ASSERT_EQUAL(exofs_geometry(g_tv, &g), 0);
+        CU_ASSERT_EQUAL(g.total_blocks, rows[i].total_blocks);
+        CU_ASSERT_TRUE(1u + g.fat_blocks + g.total_blocks <= rows[i].sectors);
+    }
+
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -528,16 +699,16 @@ static void test_region_sectors_no_gap_before_next_region(void)
 
 static void test_unmounted_calls_rejected(void)
 {
-    exofs_unmount();
-    CU_ASSERT_FALSE(exofs_is_mounted());
+    exofs_unmount(g_tv);
+    CU_ASSERT_FALSE(TV_MOUNTED());
 
     exofs_geometry_t g;
-    CU_ASSERT_EQUAL(exofs_geometry(&g), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(exofs_sync(), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_geometry(g_tv, &g), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_sync(g_tv), -EXO_EINVAL);
 
     /* And unmounting nothing is a no-op rather than a fault — cleanup paths
      * call it unconditionally. */
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -551,7 +722,7 @@ static void test_fat_writeback_survives_remount(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     CU_ASSERT_PTR_NOT_NULL(v);
     if (v == NULL) return;
 
@@ -566,11 +737,11 @@ static void test_fat_writeback_survives_remount(void)
     v->fat[b] = 1234u;
     exofs_fat_mark_dirty(v, b);
 
-    CU_ASSERT_EQUAL(exofs_sync(), 0);
-    exofs_unmount();
+    CU_ASSERT_EQUAL(exofs_sync(g_tv), 0);
+    exofs_unmount(g_tv);
 
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
-    v = exofs_vol();
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
+    v = g_tv;
     CU_ASSERT_PTR_NOT_NULL(v);
     if (v == NULL) return;
 
@@ -581,7 +752,7 @@ static void test_fat_writeback_survives_remount(void)
      * more than it was asked to would show up here. */
     CU_ASSERT_EQUAL(v->fat[b + 1u], EXOFS_BLOCK_FREE);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* A fresh format leaves the root's chain terminated and every other block
@@ -592,7 +763,7 @@ static void test_fresh_volume_fat_is_empty(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     CU_ASSERT_PTR_NOT_NULL(v);
     if (v == NULL) return;
 
@@ -611,7 +782,7 @@ static void test_fresh_volume_fat_is_empty(void)
     }
     CU_ASSERT_EQUAL(allocated, 1u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* ---- FAT layer: allocation and chains ----------------------------------- */
@@ -623,7 +794,7 @@ static exofs_volume_t *fat_test_volume(void)
 {
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return NULL; }
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     CU_ASSERT_PTR_NOT_NULL(v);
     return v;
 }
@@ -653,7 +824,7 @@ static void test_alloc_and_free_one_block(void)
      * walked twice or a block was double-owned. */
     CU_ASSERT_EQUAL(exofs_fat_free(v, blk), -EXO_EINVAL);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_fat_free_rejects_root_block(void)
@@ -673,7 +844,7 @@ static void test_fat_free_rejects_root_block(void)
     CU_ASSERT_EQUAL(exofs_fat_get(v, 0u, &ent), 0);
     CU_ASSERT_EQUAL(ent, EXOFS_BLOCK_EOC);   /* still owned by the root */
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -696,7 +867,7 @@ static void test_alloc_zeroes_the_block(void)
 
     /* Dirty it thoroughly, then give it back. */
     for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) buf[i] = (uint8_t)(i | 0x80u);
-    CU_ASSERT_EQUAL(exofs_write_block(blk, buf), 0);
+    CU_ASSERT_EQUAL(exofs_write_block(g_tv, blk, buf), 0);
     CU_ASSERT_EQUAL(exofs_fat_free(v, blk), 0);
 
     /* The hint points back at the block just freed, so this reallocates the
@@ -706,14 +877,14 @@ static void test_alloc_zeroes_the_block(void)
     CU_ASSERT_EQUAL(again, blk);
 
     for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) buf[i] = 0xFFu;
-    CU_ASSERT_EQUAL(exofs_read_block(blk, buf), 0);
+    CU_ASSERT_EQUAL(exofs_read_block(g_tv, blk, buf), 0);
 
     for (uint32_t i = 0; i < EXOFS_BLOCK_SIZE; i++) {
         if (buf[i] != 0) { CU_ASSERT_EQUAL(buf[i], 0); break; }
     }
 
     libos_heap_free(buf);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_chain_extend_walk_and_free(void)
@@ -758,7 +929,7 @@ static void test_chain_extend_walk_and_free(void)
     CU_ASSERT_EQUAL(exofs_chain_free(v, head), 0);
     CU_ASSERT_EQUAL(exofs_fat_free_count(v), before);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -798,7 +969,7 @@ static void test_chain_cycle_is_reported_not_hung(void)
     CU_ASSERT_EQUAL(exofs_fat_get(v, b, &ent), 0);
     CU_ASSERT_NOT_EQUAL(ent, EXOFS_BLOCK_FREE);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* A chain link pointing at a free block is corruption too: the chain claims
@@ -820,7 +991,7 @@ static void test_chain_into_free_block_is_reported(void)
     CU_ASSERT_EQUAL(exofs_chain_last(v, a, &out), -EXO_EIO);
     CU_ASSERT_EQUAL(exofs_chain_len(v, a, &out), -EXO_EIO);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* Out-of-range block indices must be refused rather than indexing past the
@@ -847,7 +1018,7 @@ static void test_out_of_range_blocks_rejected(void)
         CU_ASSERT_EQUAL(exofs_fat_get(v, past_end, &out), -EXO_EINVAL);
     }
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -962,7 +1133,7 @@ static void test_chain_last_and_len_agree_on_every_shape(void)
 
     /* The FAT was edited behind the dirty bitmap's back on purpose: none of
      * this reaches the disk, and the next test formats anyway. */
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -998,7 +1169,7 @@ static void test_chain_through_every_block_is_the_longest_legal_one(void)
     expect_chain(v, 0u, -EXO_EIO, 0, 0);
     expect_chain(v, n / 2u, -EXO_EIO, 0, 0);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* Filling the volume must report -EXO_ENOSPC rather than calling exit(),
@@ -1049,7 +1220,7 @@ static void test_exhaustion_reports_enospc(void)
     CU_ASSERT_EQUAL(exofs_fat_get(v, last_free, &ent), 0);
     CU_ASSERT_EQUAL(ent, EXOFS_BLOCK_EOC);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* Chain changes are FAT changes, so they have to survive a sync/remount the
@@ -1069,11 +1240,11 @@ static void test_chain_survives_remount(void)
         CU_ASSERT_EQUAL(exofs_chain_extend(v, head, &want[i]), 0);
     }
 
-    CU_ASSERT_EQUAL(exofs_sync(), 0);
-    exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_sync(g_tv), 0);
+    exofs_unmount(g_tv);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
 
-    v = exofs_vol();
+    v = g_tv;
     CU_ASSERT_PTR_NOT_NULL(v);
     if (v == NULL) return;
 
@@ -1087,7 +1258,7 @@ static void test_chain_survives_remount(void)
         CU_ASSERT_EQUAL(nth, want[i]);
     }
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* ---- Name area: variable-length names -----------------------------------
@@ -1135,7 +1306,7 @@ static void test_name_store_and_read_back(void)
         CU_ASSERT_EQUAL(exofs_name_equals(v, blk, off, len, name), 1);
     }
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* 12 bytes is one past cfat's MAXFILENAME. Called out on its own because
@@ -1157,7 +1328,7 @@ static void test_name_longer_than_cfat_limit(void)
     CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, len, back), 0);
     CU_ASSERT_STRING_EQUAL(back, name);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_name_length_limits(void)
@@ -1176,7 +1347,54 @@ static void test_name_length_limits(void)
     make_name(name, 1u, 0);
     CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 0, &blk, &off), -EXO_EINVAL);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
+}
+
+/*
+ * SCRUM-222: path parsing, directory lookup/add and the name area all apply
+ * the same length rule (exofs_name_len_valid()), so a name is accepted or
+ * refused by all of them together -- never by one and not the next. Checked
+ * at the boundary from both the public API and each internal layer.
+ */
+static void test_name_length_rule_agrees_across_layers(void)
+{
+    CU_ASSERT_FALSE(exofs_name_len_valid(0));
+    CU_ASSERT_TRUE(exofs_name_len_valid(1));
+    CU_ASSERT_TRUE(exofs_name_len_valid(EXOFS_MAX_NAME));
+    CU_ASSERT_FALSE(exofs_name_len_valid(EXOFS_MAX_NAME + 1u));
+
+    if (!drive_present()) return;
+    exofs_volume_t *v = fat_test_volume();
+    if (v == NULL) return;
+
+    /* "/" + name + NUL */
+    char path[EXOFS_MAX_NAME + 3];
+    char comp[EXOFS_MAX_NAME + 1];
+    exofs_path_iter_t it;
+
+    /* 255: every layer takes it. */
+    path[0] = '/';
+    make_name(path + 1, EXOFS_MAX_NAME, 3);
+    CU_ASSERT_EQUAL(exofs_path_validate(path), 0);
+    exofs_path_iter_init(&it, path);
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&it, comp), 1);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, path), 0);
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, EXOFS_ROOT_BLOCK, path + 1,
+                                     NULL, NULL), 0);
+
+    /* 256: every layer refuses it, with the same error. */
+    make_name(path + 1, EXOFS_MAX_NAME + 1u, 3);
+    CU_ASSERT_EQUAL(exofs_path_validate(path), -EXO_EINVAL);
+    exofs_path_iter_init(&it, path);
+    CU_ASSERT_EQUAL(exofs_path_iter_next(&it, comp), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, path), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, EXOFS_ROOT_BLOCK, path + 1,
+                                     NULL, NULL), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_dir_add(v, EXOFS_ROOT_BLOCK, path + 1,
+                                  EXOFS_ATTR_DIRECTORY, EXOFS_NO_BLOCK, 0,
+                                  NULL), -EXO_EINVAL);
+
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -1212,7 +1430,7 @@ static void test_long_names_with_common_prefix_are_distinct(void)
     shorter[100] = '\0';
     CU_ASSERT_EQUAL(exofs_name_equals(v, ablk, aoff, 250u, shorter), 0);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -1255,7 +1473,7 @@ static void test_name_records_are_reused(void)
     CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, 200u, back), 0);
     CU_ASSERT_STRING_EQUAL(back, name);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -1304,7 +1522,7 @@ static void test_freed_records_coalesce(void)
     CU_ASSERT_EQUAL(exofs_name_read(v, bblk, boff, 200u, back), 0);
     CU_ASSERT_STRING_EQUAL(back, big);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* An oversized free record is split, so a short name reusing a long one's
@@ -1347,7 +1565,7 @@ static void test_oversized_record_is_split(void)
     CU_ASSERT_EQUAL(exofs_name_read(v, t3, o3, 100u, back), 0);
     CU_ASSERT_STRING_EQUAL(back, mid);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* More names than one block holds must grow the chain, and every one of
@@ -1382,7 +1600,7 @@ static void test_name_area_spans_multiple_blocks(void)
         }
     }
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* Names and their chain head must survive a remount — the head lives in the
@@ -1398,15 +1616,15 @@ static void test_names_survive_remount(void)
 
     uint32_t blk = 0; uint16_t off = 0;
     CU_ASSERT_EQUAL(exofs_name_alloc(v, name, 180u, &blk, &off), 0);
-    CU_ASSERT_EQUAL(exofs_sync(), 0);
+    CU_ASSERT_EQUAL(exofs_sync(g_tv), 0);
 
     uint32_t head_before = v->name_head;
     CU_ASSERT_NOT_EQUAL(head_before, EXOFS_NO_BLOCK);
 
-    exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    exofs_unmount(g_tv);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
 
-    v = exofs_vol();
+    v = g_tv;
     CU_ASSERT_PTR_NOT_NULL(v);
     if (v == NULL) return;
 
@@ -1416,7 +1634,7 @@ static void test_names_survive_remount(void)
     CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, 180u, back), 0);
     CU_ASSERT_STRING_EQUAL(back, name);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* A dirent carrying a stale or corrupt reference must be refused, not
@@ -1455,7 +1673,7 @@ static void test_bad_name_references_rejected(void)
     /* And freeing it twice. */
     CU_ASSERT_EQUAL(exofs_name_free(v, blk, off), -EXO_EINVAL);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* ---- Name area: what an allocation costs (SCRUM-223) ---------------------
@@ -1518,7 +1736,7 @@ static void test_name_alloc_reads_one_block_per_name(void)
     CU_ASSERT_EQUAL(worst, 1u);
     CU_ASSERT_EQUAL(v->stat_block_reads - reads_at_start, (uint32_t)N);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -1597,7 +1815,7 @@ static void run_name_script(int forget, name_script_result_t *res)
     res->ok = 1;
 
 out:
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_name_room_table_never_changes_placement(void)
@@ -1691,7 +1909,7 @@ static void test_name_free_reopens_a_full_block(void)
     CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, 100u, back), 0);
     CU_ASSERT_STRING_EQUAL(back, name);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -1719,11 +1937,11 @@ static void test_name_room_table_is_rebuilt_after_remount(void)
     CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain), 0);
     CU_ASSERT_TRUE(chain >= 6u);
 
-    CU_ASSERT_EQUAL(exofs_sync(), 0);
-    exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_sync(g_tv), 0);
+    exofs_unmount(g_tv);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
 
-    v = exofs_vol();
+    v = g_tv;
     CU_ASSERT_PTR_NOT_NULL(v);
     if (v == NULL) return;
 
@@ -1745,7 +1963,7 @@ static void test_name_room_table_is_rebuilt_after_remount(void)
     CU_ASSERT_EQUAL(exofs_name_read(v, blk, off, 100u, back), 0);
     CU_ASSERT_STRING_EQUAL(back, name);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -1766,14 +1984,14 @@ static void test_corrupt_name_block_is_not_remembered_as_full(void)
 
     uint8_t *buf = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     CU_ASSERT_PTR_NOT_NULL(buf);
-    if (buf == NULL) { exofs_unmount(); return; }
+    if (buf == NULL) { exofs_unmount(g_tv); return; }
 
     /* The root's "." record is the first thing in the name block. Turn its
      * header into "free, capacity 0", which is no record at all. */
-    CU_ASSERT_EQUAL(exofs_read_block(v->name_head, buf), 0);
+    CU_ASSERT_EQUAL(exofs_read_block(g_tv, v->name_head, buf), 0);
     buf[0] = 0x00u;
     buf[1] = 0x80u;
-    CU_ASSERT_EQUAL(exofs_write_block(v->name_head, buf), 0);
+    CU_ASSERT_EQUAL(exofs_write_block(g_tv, v->name_head, buf), 0);
 
     uint32_t blk = 0; uint16_t off = 0;
     CU_ASSERT_EQUAL(exofs_name_alloc(v, "anything", 8u, &blk, &off), -EXO_EIO);
@@ -1785,7 +2003,7 @@ static void test_corrupt_name_block_is_not_remembered_as_full(void)
     CU_ASSERT_EQUAL(chain, 1u);
 
     libos_heap_free(buf);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* ---- Directory entries --------------------------------------------------
@@ -1881,7 +2099,7 @@ static void test_dirent_add_lookup_remove(void)
     CU_ASSERT_EQUAL(count_real_entries(v, root, &n), 0);
     CU_ASSERT_EQUAL(n, 0u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* Removing an entry must release its name record too, or every create/delete
@@ -1926,7 +2144,7 @@ static void test_remove_releases_the_name(void)
     CU_ASSERT_EQUAL(exofs_name_chain_len(v, &chain_after), 0);
     CU_ASSERT_EQUAL(chain_after, chain_before);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* A removed slot must be reused before the directory is extended — cfat
@@ -1970,7 +2188,7 @@ static void test_freed_slots_are_reused(void)
     CU_ASSERT_EQUAL(exofs_chain_len(v, root, &len_after), 0);
     CU_ASSERT_EQUAL(len_after, 1u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* Past 16 entries the directory has to grow, and every entry must still be
@@ -2012,7 +2230,7 @@ static void test_directory_spans_multiple_blocks(void)
         }
     }
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -2041,7 +2259,7 @@ static void test_entries_with_long_similar_names(void)
     CU_ASSERT_EQUAL(exofs_dir_lookup(v, root, b, NULL, &e), 0);
     CU_ASSERT_EQUAL(e.size, 222u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* Entries survive a remount: the whole point of writing them to disk. */
@@ -2057,11 +2275,11 @@ static void test_entries_survive_remount(void)
 
     CU_ASSERT_EQUAL(exofs_dir_add(v, root, name, EXOFS_ATTR_DIRECTORY,
                                   42u, 7u, NULL), 0);
-    CU_ASSERT_EQUAL(exofs_sync(), 0);
+    CU_ASSERT_EQUAL(exofs_sync(g_tv), 0);
 
-    exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
-    v = exofs_vol();
+    exofs_unmount(g_tv);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
+    v = g_tv;
     CU_ASSERT_PTR_NOT_NULL(v);
     if (v == NULL) return;
 
@@ -2072,7 +2290,7 @@ static void test_entries_survive_remount(void)
     CU_ASSERT_EQUAL(e.size, 7u);
     CU_ASSERT_EQUAL(e.name_len, 255u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* ---- Path parsing and resolution ---------------------------------------- */
@@ -2183,7 +2401,7 @@ static void test_path_resolve(void)
     CU_ASSERT_EQUAL(exofs_path_resolve(v, "relative", NULL, NULL),
                     -EXO_EINVAL);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_path_resolve_parent(void)
@@ -2228,7 +2446,7 @@ static void test_path_resolve_parent(void)
     CU_ASSERT_EQUAL(exofs_path_resolve_parent(v, "/", &parent, leaf),
                     -EXO_EINVAL);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* A directory chain with a cycle must be reported by the iterator, not spun
@@ -2258,7 +2476,7 @@ static void test_directory_cycle_is_reported(void)
     uint32_t n = 0;
     CU_ASSERT_EQUAL(count_entries(v, root, &n), -EXO_EIO);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -2280,11 +2498,11 @@ static void test_directory_walk_is_bounded_by_the_volume(void)
 {
     if (!drive_present()) return;
 
-    exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, 64u), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    exofs_unmount(g_tv);
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, 64u), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     CU_ASSERT_PTR_NOT_NULL(v);
     if (v == NULL) return;
 
@@ -2297,11 +2515,11 @@ static void test_directory_walk_is_bounded_by_the_volume(void)
      * nothing below needs.) */
     uint8_t *zero = libos_heap_alloc(EXOFS_BLOCK_SIZE);
     CU_ASSERT_PTR_NOT_NULL(zero);
-    if (zero == NULL) { exofs_unmount(); return; }
+    if (zero == NULL) { exofs_unmount(g_tv); return; }
     memset(zero, 0, EXOFS_BLOCK_SIZE);
 
     for (uint32_t i = 1; i < n; i++) {
-        if (exofs_write_block(i, zero) != 0) { CU_ASSERT_TRUE(0); break; }
+        if (exofs_write_block(g_tv, i, zero) != 0) { CU_ASSERT_TRUE(0); break; }
     }
     libos_heap_free(zero);
 
@@ -2336,7 +2554,7 @@ static void test_directory_walk_is_bounded_by_the_volume(void)
     CU_ASSERT_TRUE(v->stat_block_reads - before <= 2u * n + 8u);
     CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -2436,7 +2654,7 @@ static void test_free_slots_are_taken_in_chain_order(void)
     CU_ASSERT_EQUAL(exofs_chain_last(v, root, &last), 0);
     CU_ASSERT_EQUAL(grown.block, last);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* ---- Directory entries: what a create and a lookup cost (SCRUM-225) ------
@@ -2559,7 +2777,7 @@ static void test_dir_add_scans_the_directory_once(void)
     CU_ASSERT_EQUAL(live_after, live_before);
     CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -2595,7 +2813,7 @@ static void test_dir_lookup_reads_each_block_once(void)
     CU_ASSERT_EQUAL(found.index, target.index);
     CU_ASSERT_EQUAL(e.name_len, 15u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -2653,7 +2871,7 @@ static void test_dir_add_looks_past_a_hole_for_a_duplicate(void)
     CU_ASSERT_EQUAL(filled.block, hole.block);
     CU_ASSERT_EQUAL(filled.index, hole.index);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* ---- Directory operations ----------------------------------------------- */
@@ -2662,7 +2880,7 @@ static void test_dir_add_looks_past_a_hole_for_a_duplicate(void)
 static int readdir_contains(const char *path, const char *name, int *found)
 {
     exofs_dir_t d;
-    int rc = exofs_opendir(path, &d);
+    int rc = exofs_opendir(g_tv, path, &d);
     if (rc < 0) return rc;
 
     *found = 0;
@@ -2684,7 +2902,7 @@ static void test_fresh_root_has_dot_entries(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     CU_ASSERT_PTR_NOT_NULL(v);
     if (v == NULL) return;
 
@@ -2704,7 +2922,7 @@ static void test_fresh_root_has_dot_entries(void)
     CU_ASSERT_EQUAL(count_real_entries(v, v->root_block, &real), 0);
     CU_ASSERT_EQUAL(real, 0u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_mkdir_and_readdir(void)
@@ -2712,8 +2930,8 @@ static void test_mkdir_and_readdir(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    CU_ASSERT_EQUAL(exofs_mkdir("/docs"), 0);
-    CU_ASSERT_EQUAL(exofs_mkdir("/docs/notes"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/docs"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/docs/notes"), 0);
 
     /* A long name, since that is what this ticket is for. */
     char longname[EXOFS_MAX_NAME + 1];
@@ -2721,7 +2939,7 @@ static void test_mkdir_and_readdir(void)
     char longpath[EXOFS_MAX_NAME + 16];
     longpath[0] = '/';
     memcpy(longpath + 1, longname, 201u);
-    CU_ASSERT_EQUAL(exofs_mkdir(longpath), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, longpath), 0);
 
     int found = 0;
     CU_ASSERT_EQUAL(readdir_contains("/", "docs", &found), 0);
@@ -2738,12 +2956,12 @@ static void test_mkdir_and_readdir(void)
     CU_ASSERT_TRUE(found);
 
     /* And the new directory is reachable by path. */
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     exofs_dirent_t e;
     CU_ASSERT_EQUAL(exofs_path_resolve(v, "/docs/notes", NULL, &e), 0);
     CU_ASSERT_EQUAL(e.attributes, EXOFS_ATTR_DIRECTORY);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_mkdir_errors(void)
@@ -2751,21 +2969,21 @@ static void test_mkdir_errors(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    CU_ASSERT_EQUAL(exofs_mkdir("/a"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/a"), 0);
 
-    CU_ASSERT_EQUAL(exofs_mkdir("/a"), -EXO_EEXIST);
-    CU_ASSERT_EQUAL(exofs_mkdir("/missing/b"), -EXO_ENOENT);
-    CU_ASSERT_EQUAL(exofs_mkdir("relative"), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(exofs_mkdir("/"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/a"), -EXO_EEXIST);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/missing/b"), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "relative"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/"), -EXO_EINVAL);
 
     /* Descending through a non-directory. Built by hand because there are
      * no files yet -- exofs_file.c is the next step. */
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     CU_ASSERT_EQUAL(exofs_dir_add(v, v->root_block, "afile", EXOFS_ATTR_FILE,
                                   EXOFS_NO_BLOCK, 0, NULL), 0);
-    CU_ASSERT_EQUAL(exofs_mkdir("/afile/b"), -EXO_ENOTDIR);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/afile/b"), -EXO_ENOTDIR);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -2777,10 +2995,10 @@ static void test_dotdot_navigates_upward(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    CU_ASSERT_EQUAL(exofs_mkdir("/x"), 0);
-    CU_ASSERT_EQUAL(exofs_mkdir("/x/y"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/x"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/x/y"), 0);
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     exofs_dirent_t root_e, up_e, back_e;
 
     CU_ASSERT_EQUAL(exofs_path_resolve(v, "/", NULL, &root_e), 0);
@@ -2801,7 +3019,7 @@ static void test_dotdot_navigates_upward(void)
     CU_ASSERT_EQUAL(exofs_path_resolve(v, "/x/y", NULL, &back_e), 0);
     CU_ASSERT_EQUAL(up_e.first_block, back_e.first_block);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_rmdir(void)
@@ -2809,23 +3027,23 @@ static void test_rmdir(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     uint32_t free_before = exofs_fat_free_count(v);
 
-    CU_ASSERT_EQUAL(exofs_mkdir("/tmp"), 0);
-    CU_ASSERT_EQUAL(exofs_mkdir("/tmp/inner"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/tmp"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/tmp/inner"), 0);
 
     /* A directory with something in it is refused. */
-    CU_ASSERT_EQUAL(exofs_rmdir("/tmp"), -EXO_ENOTEMPTY);
+    CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/tmp"), -EXO_ENOTEMPTY);
 
     /* The root cannot be removed: it has no parent to be removed from. */
-    CU_ASSERT_EQUAL(exofs_rmdir("/"), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/"), -EXO_EBUSY);
 
     /* Not there. */
-    CU_ASSERT_EQUAL(exofs_rmdir("/nope"), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/nope"), -EXO_ENOENT);
 
-    CU_ASSERT_EQUAL(exofs_rmdir("/tmp/inner"), 0);
-    CU_ASSERT_EQUAL(exofs_rmdir("/tmp"), 0);
+    CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/tmp/inner"), 0);
+    CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/tmp"), 0);
 
     CU_ASSERT_EQUAL(exofs_path_resolve(v, "/tmp", NULL, NULL), -EXO_ENOENT);
 
@@ -2835,7 +3053,7 @@ static void test_rmdir(void)
      * would have had to grow. */
     CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_rmdir_rejects_dot_and_dotdot(void)
@@ -2843,7 +3061,7 @@ static void test_rmdir_rejects_dot_and_dotdot(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
 
     /*
      * "." and ".." are real dirents (exofs_dir.h), so exofs_path_resolve()
@@ -2854,11 +3072,11 @@ static void test_rmdir_rejects_dot_and_dotdot(void)
      * entry dangling over freed blocks; rmdir("/.") on the root would free
      * block 0. Both must be refused outright.
      */
-    CU_ASSERT_EQUAL(exofs_mkdir("/foo"), 0);
-    CU_ASSERT_EQUAL(exofs_rmdir("/foo/."), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(exofs_rmdir("/foo/.."), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(exofs_rmdir("/."), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(exofs_rmdir("/.."), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/foo"), 0);
+    CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/foo/."), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/foo/.."), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/."), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/.."), -EXO_EINVAL);
 
     /* foo itself, and the root, must still be exactly as they were. */
     exofs_dirent_t e;
@@ -2869,9 +3087,9 @@ static void test_rmdir_rejects_dot_and_dotdot(void)
     CU_ASSERT_EQUAL(exofs_fat_get(v, v->root_block, &root_ent), 0);
     CU_ASSERT_EQUAL(root_ent, EXOFS_BLOCK_EOC);
 
-    CU_ASSERT_EQUAL(exofs_rmdir("/foo"), 0);
+    CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/foo"), 0);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -2884,20 +3102,20 @@ static void test_mkdir_rmdir_cycle_leaks_nothing(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
 
     /* One cycle first, so the name area has reached its steady size before
      * the baseline is taken. */
-    CU_ASSERT_EQUAL(exofs_mkdir("/cycle"), 0);
-    CU_ASSERT_EQUAL(exofs_rmdir("/cycle"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/cycle"), 0);
+    CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/cycle"), 0);
 
     uint32_t free_before = exofs_fat_free_count(v);
     uint32_t names_before = 0;
     CU_ASSERT_EQUAL(exofs_name_chain_len(v, &names_before), 0);
 
     for (uint32_t i = 0; i < 30u; i++) {
-        CU_ASSERT_EQUAL(exofs_mkdir("/cycle"), 0);
-        CU_ASSERT_EQUAL(exofs_rmdir("/cycle"), 0);
+        CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/cycle"), 0);
+        CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/cycle"), 0);
     }
 
     CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
@@ -2910,7 +3128,7 @@ static void test_mkdir_rmdir_cycle_leaks_nothing(void)
     CU_ASSERT_EQUAL(count_real_entries(v, v->root_block, &real), 0);
     CU_ASSERT_EQUAL(real, 0u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* A directory tree has to survive a remount -- this is the acceptance
@@ -2926,13 +3144,13 @@ static void test_directories_survive_remount(void)
     longpath[0] = '/';
     memcpy(longpath + 1, longname, 256u);
 
-    CU_ASSERT_EQUAL(exofs_mkdir("/keep"), 0);
-    CU_ASSERT_EQUAL(exofs_mkdir("/keep/deeper"), 0);
-    CU_ASSERT_EQUAL(exofs_mkdir(longpath), 0);
-    CU_ASSERT_EQUAL(exofs_sync(), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/keep"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/keep/deeper"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, longpath), 0);
+    CU_ASSERT_EQUAL(exofs_sync(g_tv), 0);
 
-    exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    exofs_unmount(g_tv);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
 
     int found = 0;
     CU_ASSERT_EQUAL(readdir_contains("/", "keep", &found), 0);
@@ -2942,12 +3160,12 @@ static void test_directories_survive_remount(void)
     CU_ASSERT_EQUAL(readdir_contains("/keep", "deeper", &found), 0);
     CU_ASSERT_TRUE(found);
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     exofs_dirent_t e;
     CU_ASSERT_EQUAL(exofs_path_resolve(v, "/keep/deeper", NULL, &e), 0);
     CU_ASSERT_EQUAL(e.attributes, EXOFS_ATTR_DIRECTORY);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_opendir_errors(void)
@@ -2956,22 +3174,22 @@ static void test_opendir_errors(void)
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
     exofs_dir_t d;
-    CU_ASSERT_EQUAL(exofs_opendir("/nope", &d), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_opendir(g_tv, "/nope", &d), -EXO_ENOENT);
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     CU_ASSERT_EQUAL(exofs_dir_add(v, v->root_block, "plainfile",
                                   EXOFS_ATTR_FILE, EXOFS_NO_BLOCK, 0, NULL),
                     0);
-    CU_ASSERT_EQUAL(exofs_opendir("/plainfile", &d), -EXO_ENOTDIR);
+    CU_ASSERT_EQUAL(exofs_opendir(g_tv, "/plainfile", &d), -EXO_ENOTDIR);
 
     /* Reading a closed directory is a bad handle, not a crash. */
-    CU_ASSERT_EQUAL(exofs_opendir("/", &d), 0);
+    CU_ASSERT_EQUAL(exofs_opendir(g_tv, "/", &d), 0);
     CU_ASSERT_EQUAL(exofs_closedir(&d), 0);
 
     exofs_dirinfo_t info;
     CU_ASSERT_EQUAL(exofs_readdir(&d, &info), -EXO_EBADF);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* Formatting under a live mount would leave that mount describing a volume
@@ -2981,12 +3199,12 @@ static void test_format_under_a_mount_refused(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    CU_ASSERT_TRUE(exofs_is_mounted());
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS),
+    CU_ASSERT_TRUE(TV_MOUNTED());
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, VOL_SECTORS),
                     -EXO_EBUSY);
-    CU_ASSERT_TRUE(exofs_is_mounted());
+    CU_ASSERT_TRUE(TV_MOUNTED());
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* ---- File operations ---------------------------------------------------- */
@@ -3018,7 +3236,7 @@ static void test_file_create_write_read(void)
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
     exofs_file_t f;
-    CU_ASSERT_EQUAL(exofs_open("/hello.txt",
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/hello.txt",
                                EXOFS_O_WRITE | EXOFS_O_CREATE, &f), 0);
 
     const char *msg = "hello, exofs";
@@ -3026,18 +3244,18 @@ static void test_file_create_write_read(void)
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
 
     exofs_stat_t st;
-    CU_ASSERT_EQUAL(exofs_stat("/hello.txt", &st), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/hello.txt", &st), 0);
     CU_ASSERT_EQUAL(st.size, 12u);
     CU_ASSERT_EQUAL(st.attributes, EXOFS_ATTR_FILE);
 
     char back[32];
     memset(back, 0, sizeof(back));
-    CU_ASSERT_EQUAL(exofs_open("/hello.txt", EXOFS_O_READ, &f), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/hello.txt", EXOFS_O_READ, &f), 0);
     CU_ASSERT_EQUAL(exofs_read(&f, back, 32u), 12);
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
     CU_ASSERT_STRING_EQUAL(back, msg);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* An empty file costs no data blocks: first_block stays EXOFS_NO_BLOCK
@@ -3047,11 +3265,11 @@ static void test_empty_file_uses_no_blocks(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     uint32_t free_before = exofs_fat_free_count(v);
 
     exofs_file_t f;
-    CU_ASSERT_EQUAL(exofs_open("/empty", EXOFS_O_WRITE | EXOFS_O_CREATE, &f),
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/empty", EXOFS_O_WRITE | EXOFS_O_CREATE, &f),
                     0);
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
 
@@ -3066,11 +3284,11 @@ static void test_empty_file_uses_no_blocks(void)
 
     /* Reading it returns EOF rather than failing. */
     char buf[8];
-    CU_ASSERT_EQUAL(exofs_open("/empty", EXOFS_O_READ, &f), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/empty", EXOFS_O_READ, &f), 0);
     CU_ASSERT_EQUAL(exofs_read(&f, buf, 8u), 0);
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* A write spanning several blocks, read back byte-exact. The case that
@@ -3094,7 +3312,7 @@ static void test_multiblock_write_and_read(void)
     fill_pattern(w, N, 0, 5);
 
     exofs_file_t f;
-    CU_ASSERT_EQUAL(exofs_open("/big.bin", EXOFS_O_WRITE | EXOFS_O_CREATE, &f),
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/big.bin", EXOFS_O_WRITE | EXOFS_O_CREATE, &f),
                     0);
 
     /* Written in odd-sized pieces so no write starts block-aligned. */
@@ -3108,11 +3326,11 @@ static void test_multiblock_write_and_read(void)
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
 
     exofs_stat_t st;
-    CU_ASSERT_EQUAL(exofs_stat("/big.bin", &st), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/big.bin", &st), 0);
     CU_ASSERT_EQUAL(st.size, N);
 
     memset(r, 0, N);
-    CU_ASSERT_EQUAL(exofs_open("/big.bin", EXOFS_O_READ, &f), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/big.bin", EXOFS_O_READ, &f), 0);
 
     done = 0;
     while (done < N) {
@@ -3129,7 +3347,7 @@ static void test_multiblock_write_and_read(void)
 
     libos_heap_free(w);
     libos_heap_free(r);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_seek_and_overwrite(void)
@@ -3147,7 +3365,7 @@ static void test_seek_and_overwrite(void)
     fill_pattern(w, N, 0, 9);
 
     exofs_file_t f;
-    CU_ASSERT_EQUAL(exofs_open("/seek.bin",
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/seek.bin",
                                EXOFS_O_READ | EXOFS_O_WRITE | EXOFS_O_CREATE,
                                &f), 0);
     CU_ASSERT_EQUAL(exofs_write(&f, w, N), (int64_t)N);
@@ -3178,7 +3396,7 @@ static void test_seek_and_overwrite(void)
 
     libos_heap_free(w);
     libos_heap_free(r);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* Seeking past the end and writing leaves a hole that reads as zeros --
@@ -3189,7 +3407,7 @@ static void test_hole_reads_as_zeros(void)
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
     exofs_file_t f;
-    CU_ASSERT_EQUAL(exofs_open("/hole.bin",
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/hole.bin",
                                EXOFS_O_READ | EXOFS_O_WRITE | EXOFS_O_CREATE,
                                &f), 0);
 
@@ -3217,7 +3435,257 @@ static void test_hole_reads_as_zeros(void)
     CU_ASSERT_EQUAL(nonzero, 0u);
 
     libos_heap_free(r);
-    exofs_unmount();
+    exofs_unmount(g_tv);
+}
+
+/* ---- Whole-block appends (SCRUM-233) -------------------------------------
+ *
+ * exofs_write() batches a whole-block append into runs of consecutive free
+ * blocks, claimed without zeroing and written with one transfer each.
+ * These pin what that must not change: content across a run that has to
+ * stop at an occupied block, the fall-back for overwrites and holes, a full
+ * volume, and that a block is written once rather than zeroed then written.
+ */
+
+/* Write `n` bytes of the pattern to a new file `path` in one call. */
+static int write_pattern_file(const char *path, uint32_t n, uint32_t seed)
+{
+    uint8_t *w = libos_heap_alloc(n);
+    if (w == NULL) return -EXO_ENOMEM;
+    fill_pattern(w, n, 0, seed);
+    exofs_file_t f;
+    int rc = exofs_open(g_tv, path, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC,
+                        &f);
+    if (rc == 0) {
+        int64_t got = exofs_write(&f, w, n);
+        int crc = exofs_close(&f);
+        rc = got != (int64_t)n ? -EXO_EIO : crc;
+    }
+    libos_heap_free(w);
+    return rc;
+}
+
+/* 1 if `path` holds exactly `n` bytes of the pattern. */
+static int file_has_pattern(const char *path, uint32_t n, uint32_t seed)
+{
+    uint8_t *r = libos_heap_alloc(n + 1u);
+    if (r == NULL) return 0;
+    exofs_file_t f;
+    int ok = 0;
+    if (exofs_open(g_tv, path, EXOFS_O_READ, &f) == 0) {
+        ok = exofs_read(&f, r, n + 1u) == (int64_t)n &&
+             check_pattern(r, n, 0, seed);
+        exofs_close(&f);
+    }
+    libos_heap_free(r);
+    return ok;
+}
+
+/* Free space chopped into one-block gaps: the append's runs have to stop
+ * at every occupied block and carry on in the next gap, and the chain must
+ * still come out in file order. */
+static void test_append_across_fragmented_space(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_volume_t *v = g_tv;
+    char name[8] = "/f0";
+    for (uint32_t i = 0; i < 8u; i++) {
+        name[2] = (char)('0' + i);
+        CU_ASSERT_EQUAL(write_pattern_file(name, EXOFS_BLOCK_SIZE, i), 0);
+    }
+    for (uint32_t i = 0; i < 8u; i += 2u) {
+        name[2] = (char)('0' + i);
+        CU_ASSERT_EQUAL(exofs_unlink(g_tv, name), 0);
+    }
+    uint32_t free_before = exofs_fat_free_count(v);
+
+    const uint32_t N = 40u * EXOFS_BLOCK_SIZE + 100u;
+    CU_ASSERT_EQUAL(write_pattern_file("/big.bin", N, 9), 0);
+    CU_ASSERT_TRUE(file_has_pattern("/big.bin", N, 9));
+
+    exofs_dirent_t e;
+    uint32_t len = 0;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, v->root_block, "big.bin", NULL, &e), 0);
+    CU_ASSERT_EQUAL(exofs_chain_len(v, e.first_block, &len), 0);
+    CU_ASSERT_EQUAL(len, 41u);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before - 41u);
+
+    /* The surviving neighbours were not touched. */
+    for (uint32_t i = 1; i < 8u; i += 2u) {
+        name[2] = (char)('0' + i);
+        CU_ASSERT_TRUE(file_has_pattern(name, EXOFS_BLOCK_SIZE, i));
+    }
+
+    /* Survives a remount, i.e. the FAT that reached the disk is right. */
+    exofs_unmount(g_tv);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
+    CU_ASSERT_TRUE(file_has_pattern("/big.bin", N, 9));
+    CU_ASSERT_EQUAL(exofs_unlink(g_tv, "/big.bin"), 0);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(g_tv), free_before);
+    exofs_unmount(g_tv);
+}
+
+/* Two appends that each end on a block boundary continue one chain, and a
+ * whole-block overwrite in the middle goes through the per-block path
+ * without growing it. */
+static void test_append_then_overwrite_whole_blocks(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    const uint32_t B = EXOFS_BLOCK_SIZE;
+    uint8_t *w = libos_heap_alloc(4u * B);
+    CU_ASSERT_PTR_NOT_NULL(w);
+    if (w == NULL) return;
+    fill_pattern(w, 4u * B, 0, 3);
+
+    exofs_file_t f;
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/ow.bin", EXOFS_O_READ | EXOFS_O_WRITE |
+                               EXOFS_O_CREATE, &f), 0);
+    CU_ASSERT_EQUAL(exofs_write(&f, w, 2u * B), (int64_t)(2u * B));
+    CU_ASSERT_EQUAL(exofs_write(&f, w + 2u * B, 2u * B), (int64_t)(2u * B));
+
+    /* Overwrite blocks 1..2 with the pattern under a different seed. */
+    uint8_t *o = libos_heap_alloc(2u * B);
+    CU_ASSERT_PTR_NOT_NULL(o);
+    if (o != NULL) {
+        fill_pattern(o, 2u * B, B, 77);
+        CU_ASSERT_EQUAL(exofs_seek(&f, B, EXOFS_SEEK_SET), (int64_t)B);
+        CU_ASSERT_EQUAL(exofs_write(&f, o, 2u * B), (int64_t)(2u * B));
+    }
+    CU_ASSERT_EQUAL(f.size, 4u * B);
+    CU_ASSERT_EQUAL(exofs_close(&f), 0);
+
+    exofs_volume_t *v = g_tv;
+    exofs_dirent_t e;
+    uint32_t len = 0;
+    CU_ASSERT_EQUAL(exofs_dir_lookup(v, v->root_block, "ow.bin", NULL, &e), 0);
+    CU_ASSERT_EQUAL(exofs_chain_len(v, e.first_block, &len), 0);
+    CU_ASSERT_EQUAL(len, 4u);
+
+    uint8_t *r = libos_heap_alloc(4u * B);
+    CU_ASSERT_PTR_NOT_NULL(r);
+    if (r != NULL && o != NULL) {
+        CU_ASSERT_EQUAL(exofs_open(g_tv, "/ow.bin", EXOFS_O_READ, &f), 0);
+        CU_ASSERT_EQUAL(exofs_read(&f, r, 4u * B), (int64_t)(4u * B));
+        CU_ASSERT_EQUAL(exofs_close(&f), 0);
+        CU_ASSERT_TRUE(check_pattern(r, B, 0, 3));
+        CU_ASSERT_TRUE(check_pattern(r + B, 2u * B, B, 77));
+        CU_ASSERT_TRUE(check_pattern(r + 3u * B, B, 3u * B, 3));
+    }
+    libos_heap_free(r);
+    libos_heap_free(o);
+    libos_heap_free(w);
+    exofs_unmount(g_tv);
+}
+
+/* A block-aligned whole-block write past the end leaves a hole, which the
+ * append path must not take (its blocks are not zeroed): the gap still
+ * reads as zeros. */
+static void test_aligned_write_past_end_keeps_hole_zero(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    const uint32_t B = EXOFS_BLOCK_SIZE;
+    uint8_t *w = libos_heap_alloc(2u * B);
+    uint8_t *r = libos_heap_alloc(5u * B);
+    CU_ASSERT_PTR_NOT_NULL(w);
+    CU_ASSERT_PTR_NOT_NULL(r);
+    if (w == NULL || r == NULL) return;
+    fill_pattern(w, 2u * B, 0, 11);
+
+    /* Dirty the free space first, so an unzeroed block would show. */
+    CU_ASSERT_EQUAL(write_pattern_file("/junk", 8u * B, 0xAA), 0);
+    CU_ASSERT_EQUAL(exofs_unlink(g_tv, "/junk"), 0);
+
+    exofs_file_t f;
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/gap.bin", EXOFS_O_READ | EXOFS_O_WRITE |
+                               EXOFS_O_CREATE, &f), 0);
+    CU_ASSERT_EQUAL(exofs_seek(&f, 3u * B, EXOFS_SEEK_SET), (int64_t)(3u * B));
+    CU_ASSERT_EQUAL(exofs_write(&f, w, 2u * B), (int64_t)(2u * B));
+    CU_ASSERT_EQUAL(exofs_seek(&f, 0, EXOFS_SEEK_SET), 0);
+    CU_ASSERT_EQUAL(exofs_read(&f, r, 5u * B), (int64_t)(5u * B));
+    CU_ASSERT_EQUAL(exofs_close(&f), 0);
+
+    uint32_t nonzero = 0;
+    for (uint32_t i = 0; i < 3u * B; i++) if (r[i] != 0) nonzero++;
+    CU_ASSERT_EQUAL(nonzero, 0u);
+    CU_ASSERT_EQUAL(memcmp(r + 3u * B, w, 2u * B), 0);
+
+    libos_heap_free(w);
+    libos_heap_free(r);
+    exofs_unmount(g_tv);
+}
+
+/* Filling the volume: a short count, a size that matches what landed, and
+ * every block back after an unlink. */
+static void test_append_fills_volume(void)
+{
+    if (!drive_present()) return;
+    exofs_unmount(g_tv);
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, 64u), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
+    exofs_volume_t *v = g_tv;
+    if (v == NULL) return;
+
+    const uint32_t N = 64u * EXOFS_BLOCK_SIZE;
+    uint8_t *w = libos_heap_alloc(N);
+    CU_ASSERT_PTR_NOT_NULL(w);
+    if (w == NULL) { exofs_unmount(g_tv); return; }
+    fill_pattern(w, N, 0, 21);
+
+    uint32_t free_before = exofs_fat_free_count(v);
+    exofs_file_t f;
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/full.bin", EXOFS_O_WRITE | EXOFS_O_CREATE,
+                               &f), 0);
+    int64_t got = exofs_write(&f, w, N);
+    CU_ASSERT_TRUE(got > 0 && got < (int64_t)N);
+    CU_ASSERT_EQUAL(exofs_write(&f, w, EXOFS_BLOCK_SIZE), -EXO_ENOSPC);
+    CU_ASSERT_EQUAL(exofs_close(&f), 0);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), 0u);
+
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/full.bin", &st), 0);
+    CU_ASSERT_EQUAL((int64_t)st.size, got);
+    CU_ASSERT_TRUE(got > 0 && file_has_pattern("/full.bin", (uint32_t)got, 21));
+
+    CU_ASSERT_EQUAL(exofs_unlink(g_tv, "/full.bin"), 0);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
+
+    libos_heap_free(w);
+    exofs_unmount(g_tv);
+}
+
+/* Each appended block reaches the disk once. The per-block path wrote it
+ * twice (zeroed on allocation, then the data), which is what made writing
+ * the IWAD from `install` take minutes. */
+static void test_append_writes_each_block_once(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    exofs_volume_t *v = g_tv;
+    exofs_file_t f;
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/once.bin", EXOFS_O_WRITE | EXOFS_O_CREATE,
+                               &f), 0);
+    uint32_t before = v->stat_block_writes;
+
+    const uint32_t N = 200u * EXOFS_BLOCK_SIZE;
+    uint8_t *w = libos_heap_alloc(N);
+    CU_ASSERT_PTR_NOT_NULL(w);
+    if (w != NULL) {
+        fill_pattern(w, N, 0, 4);
+        CU_ASSERT_EQUAL(exofs_write(&f, w, N), (int64_t)N);
+        CU_ASSERT_EQUAL(v->stat_block_writes - before, 200u);
+    }
+    CU_ASSERT_EQUAL(exofs_close(&f), 0);
+    CU_ASSERT_TRUE(file_has_pattern("/once.bin", N, 4));
+
+    libos_heap_free(w);
+    exofs_unmount(g_tv);
 }
 
 static void test_append_and_truncate(void)
@@ -3226,13 +3694,13 @@ static void test_append_and_truncate(void)
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
     exofs_file_t f;
-    CU_ASSERT_EQUAL(exofs_open("/log.txt", EXOFS_O_WRITE | EXOFS_O_CREATE, &f),
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/log.txt", EXOFS_O_WRITE | EXOFS_O_CREATE, &f),
                     0);
     CU_ASSERT_EQUAL(exofs_write(&f, "one", 3u), 3);
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
 
     /* APPEND starts at the end and stays there. */
-    CU_ASSERT_EQUAL(exofs_open("/log.txt", EXOFS_O_WRITE | EXOFS_O_APPEND, &f),
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/log.txt", EXOFS_O_WRITE | EXOFS_O_APPEND, &f),
                     0);
     CU_ASSERT_EQUAL(exofs_seek(&f, 0, EXOFS_SEEK_SET), 0);
     CU_ASSERT_EQUAL(exofs_write(&f, "two", 3u), 3);
@@ -3240,16 +3708,16 @@ static void test_append_and_truncate(void)
 
     char back[16];
     memset(back, 0, sizeof(back));
-    CU_ASSERT_EQUAL(exofs_open("/log.txt", EXOFS_O_READ, &f), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/log.txt", EXOFS_O_READ, &f), 0);
     CU_ASSERT_EQUAL(exofs_read(&f, back, 16u), 6);
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
     CU_ASSERT_STRING_EQUAL(back, "onetwo");
 
     /* TRUNC discards the contents and gives the blocks back. */
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     uint32_t free_before = exofs_fat_free_count(v);
 
-    CU_ASSERT_EQUAL(exofs_open("/log.txt", EXOFS_O_WRITE | EXOFS_O_TRUNC, &f),
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/log.txt", EXOFS_O_WRITE | EXOFS_O_TRUNC, &f),
                     0);
     CU_ASSERT_EQUAL(f.size, 0u);
     CU_ASSERT_EQUAL(f.first_block, EXOFS_NO_BLOCK);
@@ -3258,10 +3726,10 @@ static void test_append_and_truncate(void)
     CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before + 1u);
 
     exofs_stat_t st;
-    CU_ASSERT_EQUAL(exofs_stat("/log.txt", &st), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/log.txt", &st), 0);
     CU_ASSERT_EQUAL(st.size, 0u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_open_errors(void)
@@ -3272,28 +3740,28 @@ static void test_open_errors(void)
     exofs_file_t f;
 
     /* Absent without O_CREATE. */
-    CU_ASSERT_EQUAL(exofs_open("/nope", EXOFS_O_READ, &f), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/nope", EXOFS_O_READ, &f), -EXO_ENOENT);
 
     /* Neither read nor write. */
-    CU_ASSERT_EQUAL(exofs_open("/nope", EXOFS_O_CREATE, &f), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/nope", EXOFS_O_CREATE, &f), -EXO_EINVAL);
 
     /* A directory is not a file, including the root. */
-    CU_ASSERT_EQUAL(exofs_mkdir("/adir"), 0);
-    CU_ASSERT_EQUAL(exofs_open("/adir", EXOFS_O_READ, &f), -EXO_EISDIR);
-    CU_ASSERT_EQUAL(exofs_open("/", EXOFS_O_READ, &f), -EXO_EISDIR);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/adir"), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/adir", EXOFS_O_READ, &f), -EXO_EISDIR);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/", EXOFS_O_READ, &f), -EXO_EISDIR);
 
     /* Missing parent, malformed path. */
-    CU_ASSERT_EQUAL(exofs_open("/missing/x",
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/missing/x",
                                EXOFS_O_WRITE | EXOFS_O_CREATE, &f),
                     -EXO_ENOENT);
-    CU_ASSERT_EQUAL(exofs_open("relative", EXOFS_O_READ, &f), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "relative", EXOFS_O_READ, &f), -EXO_EINVAL);
 
     /* Access is enforced per handle. */
-    CU_ASSERT_EQUAL(exofs_open("/ro", EXOFS_O_WRITE | EXOFS_O_CREATE, &f), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/ro", EXOFS_O_WRITE | EXOFS_O_CREATE, &f), 0);
     CU_ASSERT_EQUAL(exofs_read(&f, (void *)&f, 1u), -EXO_EACCES);
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
 
-    CU_ASSERT_EQUAL(exofs_open("/ro", EXOFS_O_READ, &f), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/ro", EXOFS_O_READ, &f), 0);
     CU_ASSERT_EQUAL(exofs_write(&f, "x", 1u), -EXO_EACCES);
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
 
@@ -3302,7 +3770,7 @@ static void test_open_errors(void)
     CU_ASSERT_EQUAL(exofs_write(&f, "x", 1u), -EXO_EBADF);
     CU_ASSERT_EQUAL(exofs_seek(&f, 0, EXOFS_SEEK_SET), -EXO_EBADF);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_truncate_and_unlink_refuse_while_open(void)
@@ -3314,11 +3782,11 @@ static void test_truncate_and_unlink_refuse_while_open(void)
 
     /* Give the file a real chain, so a wrongly-allowed truncate/unlink has
      * something to free out from under `a`. */
-    CU_ASSERT_EQUAL(exofs_open("/f", EXOFS_O_WRITE | EXOFS_O_CREATE, &a), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/f", EXOFS_O_WRITE | EXOFS_O_CREATE, &a), 0);
     CU_ASSERT_EQUAL(exofs_write(&a, "hello", 5u), 5);
     CU_ASSERT_EQUAL(exofs_close(&a), 0);
 
-    CU_ASSERT_EQUAL(exofs_open("/f", EXOFS_O_READ, &a), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/f", EXOFS_O_READ, &a), 0);
 
     /*
      * `a` is still open on "/f". A second open with O_TRUNC, or an unlink,
@@ -3327,9 +3795,9 @@ static void test_truncate_and_unlink_refuse_while_open(void)
      * into whatever block the allocator hands out next. Both must be
      * refused instead (exofs_volume_t::open_ent_block).
      */
-    CU_ASSERT_EQUAL(exofs_open("/f", EXOFS_O_WRITE | EXOFS_O_TRUNC, &b),
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/f", EXOFS_O_WRITE | EXOFS_O_TRUNC, &b),
                     -EXO_EBUSY);
-    CU_ASSERT_EQUAL(exofs_unlink("/f"), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exofs_unlink(g_tv, "/f"), -EXO_EBUSY);
 
     /* `a` still reads its real contents — nothing was freed. */
     char buf[5];
@@ -3339,11 +3807,11 @@ static void test_truncate_and_unlink_refuse_while_open(void)
     CU_ASSERT_EQUAL(exofs_close(&a), 0);
 
     /* Once closed, both are allowed again. */
-    CU_ASSERT_EQUAL(exofs_open("/f", EXOFS_O_WRITE | EXOFS_O_TRUNC, &b), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/f", EXOFS_O_WRITE | EXOFS_O_TRUNC, &b), 0);
     CU_ASSERT_EQUAL(exofs_close(&b), 0);
-    CU_ASSERT_EQUAL(exofs_unlink("/f"), 0);
+    CU_ASSERT_EQUAL(exofs_unlink(g_tv, "/f"), 0);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_unlink(void)
@@ -3351,13 +3819,13 @@ static void test_unlink(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
 
     /* One cycle first so the name area has reached its steady size. */
     exofs_file_t f;
-    CU_ASSERT_EQUAL(exofs_open("/gone", EXOFS_O_WRITE | EXOFS_O_CREATE, &f), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/gone", EXOFS_O_WRITE | EXOFS_O_CREATE, &f), 0);
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
-    CU_ASSERT_EQUAL(exofs_unlink("/gone"), 0);
+    CU_ASSERT_EQUAL(exofs_unlink(g_tv, "/gone"), 0);
 
     uint32_t free_before = exofs_fat_free_count(v);
 
@@ -3366,29 +3834,29 @@ static void test_unlink(void)
     if (w == NULL) return;
     fill_pattern(w, 4000u, 0, 3);
 
-    CU_ASSERT_EQUAL(exofs_open("/gone", EXOFS_O_WRITE | EXOFS_O_CREATE, &f), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/gone", EXOFS_O_WRITE | EXOFS_O_CREATE, &f), 0);
     CU_ASSERT_EQUAL(exofs_write(&f, w, 4000u), 4000);
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
 
     CU_ASSERT_TRUE(exofs_fat_free_count(v) < free_before);
 
-    CU_ASSERT_EQUAL(exofs_unlink("/gone"), 0);
-    CU_ASSERT_EQUAL(exofs_stat("/gone", NULL), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_unlink(g_tv, "/gone"), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/gone", NULL), -EXO_EINVAL);
 
     exofs_stat_t st;
-    CU_ASSERT_EQUAL(exofs_stat("/gone", &st), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/gone", &st), -EXO_ENOENT);
 
     /* Every block AND the name record came back. */
     CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
 
     /* A directory is rmdir's job, not unlink's. */
-    CU_ASSERT_EQUAL(exofs_mkdir("/adir"), 0);
-    CU_ASSERT_EQUAL(exofs_unlink("/adir"), -EXO_EISDIR);
-    CU_ASSERT_EQUAL(exofs_unlink("/"), -EXO_EISDIR);
-    CU_ASSERT_EQUAL(exofs_unlink("/nothing"), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/adir"), 0);
+    CU_ASSERT_EQUAL(exofs_unlink(g_tv, "/adir"), -EXO_EISDIR);
+    CU_ASSERT_EQUAL(exofs_unlink(g_tv, "/"), -EXO_EISDIR);
+    CU_ASSERT_EQUAL(exofs_unlink(g_tv, "/nothing"), -EXO_ENOENT);
 
     libos_heap_free(w);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_stat_rejects_dot_and_dotdot(void)
@@ -3396,7 +3864,7 @@ static void test_stat_rejects_dot_and_dotdot(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    CU_ASSERT_EQUAL(exofs_mkdir("/foo"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/foo"), 0);
 
     exofs_stat_t st;
 
@@ -3405,16 +3873,16 @@ static void test_stat_rejects_dot_and_dotdot(void)
      * independently timestamped copy of the target's record, not the real
      * one. There is nothing correct to hand back, so this is refused the
      * same way exofs_rmdir() refuses the identical path shape. */
-    CU_ASSERT_EQUAL(exofs_stat("/foo/.", &st), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(exofs_stat("/foo/..", &st), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(exofs_stat("/.", &st), -EXO_EINVAL);
-    CU_ASSERT_EQUAL(exofs_stat("/..", &st), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/foo/.", &st), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/foo/..", &st), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/.", &st), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/..", &st), -EXO_EINVAL);
 
     /* The directory itself still reports fine. */
-    CU_ASSERT_EQUAL(exofs_stat("/foo", &st), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/foo", &st), 0);
     CU_ASSERT_TRUE(st.attributes & EXOFS_ATTR_DIRECTORY);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* Create/write/unlink in a loop returns everything, every time -- the file
@@ -3424,28 +3892,28 @@ static void test_file_cycle_leaks_nothing(void)
     if (!drive_present()) return;
     if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
 
-    exofs_volume_t *v = exofs_vol();
+    exofs_volume_t *v = g_tv;
     uint8_t *w = libos_heap_alloc(1500u);
     CU_ASSERT_PTR_NOT_NULL(w);
     if (w == NULL) return;
     fill_pattern(w, 1500u, 0, 1);
 
     exofs_file_t f;
-    CU_ASSERT_EQUAL(exofs_open("/churn", EXOFS_O_WRITE | EXOFS_O_CREATE, &f), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/churn", EXOFS_O_WRITE | EXOFS_O_CREATE, &f), 0);
     CU_ASSERT_EQUAL(exofs_write(&f, w, 1500u), 1500);
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
-    CU_ASSERT_EQUAL(exofs_unlink("/churn"), 0);
+    CU_ASSERT_EQUAL(exofs_unlink(g_tv, "/churn"), 0);
 
     uint32_t free_before = exofs_fat_free_count(v);
     uint32_t names_before = 0;
     CU_ASSERT_EQUAL(exofs_name_chain_len(v, &names_before), 0);
 
     for (uint32_t i = 0; i < 20u; i++) {
-        CU_ASSERT_EQUAL(exofs_open("/churn", EXOFS_O_WRITE | EXOFS_O_CREATE,
+        CU_ASSERT_EQUAL(exofs_open(g_tv, "/churn", EXOFS_O_WRITE | EXOFS_O_CREATE,
                                    &f), 0);
         CU_ASSERT_EQUAL(exofs_write(&f, w, 1500u), 1500);
         CU_ASSERT_EQUAL(exofs_close(&f), 0);
-        CU_ASSERT_EQUAL(exofs_unlink("/churn"), 0);
+        CU_ASSERT_EQUAL(exofs_unlink(g_tv, "/churn"), 0);
     }
 
     CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
@@ -3455,7 +3923,7 @@ static void test_file_cycle_leaks_nothing(void)
     CU_ASSERT_EQUAL(names_after, names_before);
 
     libos_heap_free(w);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -3480,31 +3948,31 @@ static void test_acceptance_round_trip(void)
     fill_pattern(w, N, 0, 189);
 
     /* 1. Format and populate. */
-    exofs_unmount();
-    CU_ASSERT_EQUAL(exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS), 0);
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    exofs_unmount(g_tv);
+    CU_ASSERT_EQUAL(exofs_format(0, EXOFS_TEST_BASE_LBA, VOL_SECTORS), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
 
-    CU_ASSERT_EQUAL(exofs_mkdir("/subdir"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/subdir"), 0);
 
     char path[EXOFS_MAX_NAME + 8];
     path[0] = '/';
     memcpy(path + 1, fname, strlen(fname) + 1u);
 
     exofs_file_t f;
-    CU_ASSERT_EQUAL(exofs_open(path, EXOFS_O_WRITE | EXOFS_O_CREATE, &f), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, path, EXOFS_O_WRITE | EXOFS_O_CREATE, &f), 0);
     CU_ASSERT_EQUAL(exofs_write(&f, w, N), (int64_t)N);
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
 
     /* 2. Unmount -- everything now has to come off the disk. */
-    exofs_unmount();
-    CU_ASSERT_FALSE(exofs_is_mounted());
+    exofs_unmount(g_tv);
+    CU_ASSERT_FALSE(TV_MOUNTED());
 
     /* 3. Mount fresh and list the root. */
-    CU_ASSERT_EQUAL(exofs_mount(EXOFS_TEST_BASE_LBA), 0);
+    CU_ASSERT_EQUAL(exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv), 0);
 
     int saw_file = 0, saw_dir = 0;
     exofs_dir_t d;
-    CU_ASSERT_EQUAL(exofs_opendir("/", &d), 0);
+    CU_ASSERT_EQUAL(exofs_opendir(g_tv, "/", &d), 0);
     for (;;) {
         exofs_dirinfo_t info;
         int rc = exofs_readdir(&d, &info);
@@ -3527,14 +3995,312 @@ static void test_acceptance_round_trip(void)
 
     /* 4. Read the contents back and compare. */
     memset(r, 0, N);
-    CU_ASSERT_EQUAL(exofs_open(path, EXOFS_O_READ, &f), 0);
+    CU_ASSERT_EQUAL(exofs_open(g_tv, path, EXOFS_O_READ, &f), 0);
     CU_ASSERT_EQUAL(exofs_read(&f, r, N), (int64_t)N);
     CU_ASSERT_EQUAL(exofs_close(&f), 0);
     CU_ASSERT_TRUE(check_pattern(r, N, 0, 189));
 
     libos_heap_free(w);
     libos_heap_free(r);
-    exofs_unmount();
+    exofs_unmount(g_tv);
+}
+
+/* ---- Rename (SCRUM-240) -------------------------------------------------
+ *
+ * exofs_rename() re-links a directory entry; it never copies. So beyond
+ * "the bytes are still there", these check that the entry kept its data
+ * chain (first_block) and, within one directory, its slot -- which
+ * exofs_stat() does not report, hence the internal resolver.
+ */
+
+static int resolve_entry(const char *path, exofs_entry_ref_t *ref,
+                         exofs_dirent_t *out)
+{
+    return exofs_path_resolve(g_tv, path, ref, out);
+}
+
+static void test_rename_file_in_place(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+    exofs_volume_t *v = g_tv;
+
+    CU_ASSERT_EQUAL(write_pattern_file("/old.dat", 3000u, 240u), 0);
+    exofs_entry_ref_t rb, ra;
+    exofs_dirent_t eb, ea;
+    CU_ASSERT_EQUAL(resolve_entry("/old.dat", &rb, &eb), 0);
+    uint32_t free_before = exofs_fat_free_count(v);
+
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/old.dat", "/a-longer-new-name.dat"), 0);
+
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/old.dat", &st), -EXO_ENOENT);
+    CU_ASSERT_TRUE(file_has_pattern("/a-longer-new-name.dat", 3000u, 240u));
+
+    /* Same slot, same chain, nothing allocated: a rename, not a copy. */
+    CU_ASSERT_EQUAL(resolve_entry("/a-longer-new-name.dat", &ra, &ea), 0);
+    CU_ASSERT_EQUAL(ra.block, rb.block);
+    CU_ASSERT_EQUAL(ra.index, rb.index);
+    CU_ASSERT_EQUAL(ea.first_block, eb.first_block);
+    CU_ASSERT_EQUAL(ea.size, 3000u);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
+
+    exofs_unmount(g_tv);
+}
+
+static void test_rename_to_itself_and_onto_existing(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_EQUAL(write_pattern_file("/a", 700u, 1u), 0);
+    CU_ASSERT_EQUAL(write_pattern_file("/b", 900u, 2u), 0);
+
+    /* Onto itself, by its own name or an alias: nothing to do. */
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/a", "/a"), 0);
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/a", "/./a"), 0);
+    CU_ASSERT_TRUE(file_has_pattern("/a", 700u, 1u));
+
+    /* Onto a different entry: refused, and neither one touched. There is
+     * no replace-on-rename -- the caller removes the target if it means to. */
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/a", "/b"), -EXO_EEXIST);
+    CU_ASSERT_TRUE(file_has_pattern("/a", 700u, 1u));
+    CU_ASSERT_TRUE(file_has_pattern("/b", 900u, 2u));
+
+    exofs_unmount(g_tv);
+}
+
+static void test_rename_error_paths(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/missing", "/x"), -EXO_ENOENT);
+
+    CU_ASSERT_TRUE(write_small_file("/f"));
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/d"), 0);
+
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/f", "/nodir/x"), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/f", "/f/x"), -EXO_ENOTDIR);
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/", "/x"), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/f", "/"), -EXO_EINVAL);
+
+    /* A "." or ".." slot is not the entry naming the directory, on either
+     * side. */
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/d/.", "/e"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/d/..", "/e"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/f", "/d/.."), -EXO_EINVAL);
+
+    /* Still exactly as they were. */
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/f", &st), 0);
+    CU_ASSERT_EQUAL(st.size, 1u);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/d", &st), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/e", &st), -EXO_ENOENT);
+
+    exofs_unmount(g_tv);
+}
+
+static void test_rename_moves_file_between_directories(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+    exofs_volume_t *v = g_tv;
+
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/src"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/dst"), 0);
+    CU_ASSERT_EQUAL(write_pattern_file("/src/f", 5000u, 7u), 0);
+
+    exofs_dirent_t eb, ea;
+    CU_ASSERT_EQUAL(resolve_entry("/src/f", NULL, &eb), 0);
+    uint32_t free_before = exofs_fat_free_count(v);
+
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/src/f", "/dst/g"), 0);
+
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/src/f", &st), -EXO_ENOENT);
+    CU_ASSERT_TRUE(file_has_pattern("/dst/g", 5000u, 7u));
+
+    CU_ASSERT_EQUAL(resolve_entry("/dst/g", NULL, &ea), 0);
+    CU_ASSERT_EQUAL(ea.first_block, eb.first_block);
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
+
+    int found = 1;
+    CU_ASSERT_EQUAL(readdir_contains("/src", "f", &found), 0);
+    CU_ASSERT_FALSE(found);
+    CU_ASSERT_EQUAL(readdir_contains("/dst", "g", &found), 0);
+    CU_ASSERT_TRUE(found);
+
+    exofs_unmount(g_tv);
+}
+
+/* A non-empty directory moves whole, and its ".." follows it: otherwise
+ * "/b/moved/.." would still be "/a", and an rmdir of "/a" -- now empty --
+ * would leave that ".." naming freed blocks. */
+static void test_rename_moves_directory_and_fixes_dotdot(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/a"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/a/sub"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/b"), 0);
+    CU_ASSERT_EQUAL(write_pattern_file("/a/sub/file", 1200u, 9u), 0);
+
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/a/sub", "/b/moved"), 0);
+
+    CU_ASSERT_TRUE(file_has_pattern("/b/moved/file", 1200u, 9u));
+
+    exofs_dirent_t up, b, self, moved;
+    CU_ASSERT_EQUAL(resolve_entry("/b/moved/..", NULL, &up), 0);
+    CU_ASSERT_EQUAL(resolve_entry("/b", NULL, &b), 0);
+    CU_ASSERT_EQUAL(up.first_block, b.first_block);
+
+    /* "." is the directory's own chain and did not move. */
+    CU_ASSERT_EQUAL(resolve_entry("/b/moved/.", NULL, &self), 0);
+    CU_ASSERT_EQUAL(resolve_entry("/b/moved", NULL, &moved), 0);
+    CU_ASSERT_EQUAL(self.first_block, moved.first_block);
+
+    CU_ASSERT_TRUE(file_has_pattern("/b/moved/../moved/file", 1200u, 9u));
+    CU_ASSERT_EQUAL(exofs_rmdir(g_tv, "/a"), 0);
+
+    exofs_unmount(g_tv);
+}
+
+static void test_rename_refuses_directory_into_itself(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/a"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/a/b"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/a/b/c"), 0);
+
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/a", "/a/x"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/a", "/a/b/c/x"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/a/b", "/a/b/x"), -EXO_EINVAL);
+
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/a/b/c", &st), 0);
+
+    /* Up and out is fine. */
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/a/b/c", "/c"), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/c", &st), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/a/b/c", &st), -EXO_ENOENT);
+
+    exofs_unmount(g_tv);
+}
+
+/* Within a directory the slot does not move, so an open handle -- which
+ * remembers its slot, not its name -- keeps working and its close lands on
+ * the renamed entry. Between directories it would not, so that is refused. */
+static void test_rename_with_open_handle(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    CU_ASSERT_TRUE(write_small_file("/f"));
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/d"), 0);
+
+    exofs_file_t f;
+    CU_ASSERT_EQUAL(exofs_open(g_tv, "/f", EXOFS_O_WRITE | EXOFS_O_APPEND, &f), 0);
+    CU_ASSERT_EQUAL(exofs_write(&f, "abc", 3), 3);
+
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/f", "/g"), 0);
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/g", "/d/g"), -EXO_EBUSY);
+
+    CU_ASSERT_EQUAL(exofs_close(&f), 0);
+
+    exofs_stat_t st;
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/f", &st), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/g", &st), 0);
+    CU_ASSERT_EQUAL(st.size, 4u);
+
+    /* Closed now, so the move goes through. */
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/g", "/d/g"), 0);
+    CU_ASSERT_EQUAL(exofs_stat(g_tv, "/d/g", &st), 0);
+    CU_ASSERT_EQUAL(st.size, 4u);
+
+    exofs_unmount(g_tv);
+}
+
+/* Every rename releases the name record it replaced and every move frees
+ * the slot it left, so going back and forth costs nothing in the end. */
+static void test_rename_cycles_leak_nothing(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+    exofs_volume_t *v = g_tv;
+
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/x"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/y"), 0);
+    CU_ASSERT_EQUAL(write_pattern_file("/x/f", 2000u, 3u), 0);
+
+    /* One round first, so the destination directory's free slot and the
+     * name records the loop reuses already exist. */
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/x/f", "/y/f"), 0);
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/y/f", "/x/f"), 0);
+    uint32_t free_before = exofs_fat_free_count(v);
+
+    for (uint32_t i = 0; i < 40u; i++) {
+        CU_ASSERT_EQUAL(exofs_rename(g_tv, "/x/f", "/y/f"), 0);
+        CU_ASSERT_EQUAL(exofs_rename(g_tv, "/y/f", "/y/a-much-longer-name-for-f"),
+                        0);
+        CU_ASSERT_EQUAL(exofs_rename(g_tv, "/y/a-much-longer-name-for-f", "/x/f"),
+                        0);
+    }
+
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), free_before);
+    CU_ASSERT_TRUE(file_has_pattern("/x/f", 2000u, 3u));
+
+    exofs_unmount(g_tv);
+}
+
+/* exofs_dir_move()'s promise: a move that runs out of space changes nothing
+ * visible. The destination holds only "." and ".." plus a full set of empty
+ * files, so the move needs a chain extension, and the FAT has none to give. */
+static void test_rename_enospc_changes_nothing(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+    exofs_volume_t *v = g_tv;
+
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/src"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/dst"), 0);
+    CU_ASSERT_EQUAL(write_pattern_file("/src/f", 3000u, 5u), 0);
+
+    for (uint32_t i = 0; i < EXOFS_ENTS_PER_BLOCK - 2u; i++) {
+        char path[] = "/dst/e00";
+        path[6] = (char)('0' + i / 10u);
+        path[7] = (char)('0' + i % 10u);
+        exofs_file_t f;
+        CU_ASSERT_EQUAL(exofs_open(g_tv, path, EXOFS_O_WRITE | EXOFS_O_CREATE, &f),
+                        0);
+        CU_ASSERT_EQUAL(exofs_close(&f), 0);
+    }
+
+    exofs_dirent_t before;
+    CU_ASSERT_EQUAL(resolve_entry("/src/f", NULL, &before), 0);
+
+    /* Every free block taken, in the in-RAM FAT only, as in
+     * test_exhaustion_reports_enospc. */
+    for (uint32_t i = 1; i < v->total_blocks; i++) {
+        if (v->fat[i] == EXOFS_BLOCK_FREE) v->fat[i] = EXOFS_BLOCK_EOC;
+    }
+    CU_ASSERT_EQUAL(exofs_fat_free_count(v), 0u);
+
+    CU_ASSERT_EQUAL(exofs_rename(g_tv, "/src/f", "/dst/g"), -EXO_ENOSPC);
+
+    exofs_dirent_t after;
+    CU_ASSERT_EQUAL(resolve_entry("/src/f", NULL, &after), 0);
+    CU_ASSERT_EQUAL(after.first_block, before.first_block);
+    CU_ASSERT_TRUE(file_has_pattern("/src/f", 3000u, 5u));
+
+    int found = 1;
+    CU_ASSERT_EQUAL(readdir_contains("/dst", "g", &found), 0);
+    CU_ASSERT_FALSE(found);
+
+    exofs_unmount(g_tv);
 }
 
 void suite_exofs_tests(CU_pSuite s)
@@ -3563,6 +4329,8 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "double mount rejected", test_double_mount_rejected);
     CU_add_test(s, "format rejects a tiny volume",
                 test_format_rejects_tiny_volume);
+    CU_add_test(s, "format then mount agree at FAT-sector boundaries",
+                test_format_mounts_at_fat_boundaries);
     CU_add_test(s, "region_sectors: disk bigger than region",
                 test_region_sectors_disk_bigger_than_region);
     CU_add_test(s, "region_sectors: disk ends inside region",
@@ -3606,6 +4374,8 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "a name longer than cfat's 11-byte cap",
                 test_name_longer_than_cfat_limit);
     CU_add_test(s, "name length limits enforced", test_name_length_limits);
+    CU_add_test(s, "one name-length rule across layers",
+                test_name_length_rule_agrees_across_layers);
     CU_add_test(s, "long names with a common prefix stay distinct",
                 test_long_names_with_common_prefix_are_distinct);
     CU_add_test(s, "freed name records are reused",
@@ -3684,6 +4454,16 @@ void suite_exofs_tests(CU_pSuite s)
     CU_add_test(s, "seek and overwrite in place",
                 test_seek_and_overwrite);
     CU_add_test(s, "a hole reads as zeros", test_hole_reads_as_zeros);
+    CU_add_test(s, "append across fragmented free space",
+                test_append_across_fragmented_space);
+    CU_add_test(s, "append, then overwrite whole blocks",
+                test_append_then_overwrite_whole_blocks);
+    CU_add_test(s, "aligned write past the end keeps the hole zero",
+                test_aligned_write_past_end_keeps_hole_zero);
+    CU_add_test(s, "append fills the volume, then gives it all back",
+                test_append_fills_volume);
+    CU_add_test(s, "an appended block is written once",
+                test_append_writes_each_block_once);
     CU_add_test(s, "append and truncate", test_append_and_truncate);
     CU_add_test(s, "open error cases", test_open_errors);
     CU_add_test(s, "truncate/unlink refuse a still-open entry",
@@ -3693,6 +4473,30 @@ void suite_exofs_tests(CU_pSuite s)
                 test_stat_rejects_dot_and_dotdot);
     CU_add_test(s, "file cycles leak nothing",
                 test_file_cycle_leaks_nothing);
+    CU_add_test(s, "volumes in separate extents do not see each other",
+                test_volumes_in_separate_extents_do_not_see_each_other);
+    CU_add_test(s, "ExoFS cannot reach the other volume's sectors",
+                test_exofs_cannot_reach_the_other_volume);
+    CU_add_test(s, "another context cannot take an overlapping extent",
+                test_another_context_cannot_take_an_overlapping_extent);
     CU_add_test(s, "ACCEPTANCE: format, write, remount, list, read back",
                 test_acceptance_round_trip);
+    CU_add_test(s, "rename: a file in place keeps its slot and chain",
+                test_rename_file_in_place);
+    CU_add_test(s, "rename: onto itself is a no-op, onto another is EEXIST",
+                test_rename_to_itself_and_onto_existing);
+    CU_add_test(s, "rename: error paths leave everything as it was",
+                test_rename_error_paths);
+    CU_add_test(s, "rename: moves a file between directories",
+                test_rename_moves_file_between_directories);
+    CU_add_test(s, "rename: moves a directory and repoints its ..",
+                test_rename_moves_directory_and_fixes_dotdot);
+    CU_add_test(s, "rename: a directory cannot move into itself",
+                test_rename_refuses_directory_into_itself);
+    CU_add_test(s, "rename: open handles survive in place, block a move",
+                test_rename_with_open_handle);
+    CU_add_test(s, "rename: cycles leak nothing",
+                test_rename_cycles_leak_nothing);
+    CU_add_test(s, "rename: ENOSPC leaves both directories untouched",
+                test_rename_enospc_changes_nothing);
 }

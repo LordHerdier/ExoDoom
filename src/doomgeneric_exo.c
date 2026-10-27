@@ -41,6 +41,10 @@
 #include "exo_syscall.h"
 
 #include "doom_wad.h"
+#include "libos_fs/exo_file.h"
+#include "libos_fs/exo_file_stdio.h"
+#include "libos_fs/exofs.h"
+#include "libos_fs/exofs_attach.h"
 #include "libos_wad_params.h"
 #include "stdio.h"
 
@@ -51,44 +55,16 @@
 #include <stdint.h>
 
 /*
- * g_doom_params -- where the kernel tells this LibOS about the WAD.
- *
- * SCRUM-175's generalized params hand-off, the same one
- * src/libos_wad_viewer/libos_wad_viewer.c uses and reusing its struct
- * (src/libos_wad_params.h) rather than declaring a second type with the same
- * two fields: the kernel-side launcher for a Doom LibOS will patch this with
- * the identical libos_launch_patch_params() call.
- *
- * Non-zero-initialized on purpose. A zero initializer would put this in .bss,
- * where GCC stores no real bytes and libos_launch_patch_params() -- which
- * writes through img.data_paddrs[0], i.e. offset 0 of the .data blob -- would
- * have nothing to overwrite. The sentinel doubles as the "nobody patched
- * this" value DG_Init reports below, so an unpatched launch fails loudly at
- * DG_Init rather than dereferencing whatever address 0 happens to be.
- *
- * For the patch to land, this must stay (a) the first global declared in this
- * file and (b) this file first in build.sh's source list for the eventual
- * Doom link target -- the same two requirements .text.entry placement already
- * imposes. See libos_launch_patch_params()'s own comment in
- * src/libos_launch.h.
+ * The IWAD's name on the program volume (SCRUM-66, SCRUM-190). Must be a name
+ * src/doom/d_iwad.c actually searches for. It is LIBOS_WAD_FILE_NAME
+ * (src/libos_wad_params.h) rather than its own literal: that is also the name
+ * docker/scripts/build.sh writes the WAD under on ExoFS, and that header's own
+ * comment explains why one #define beats several strings.
  */
-#define DOOM_PARAMS_UNSET 0xFFFFFFFFFFFFFFFFULL
+#define DOOM_IWAD_NAME LIBOS_WAD_FILE_NAME
 
-/*
- * The filename DG_Init registers the mounted WAD under (SCRUM-66). Must be
- * a name src/doom/d_iwad.c actually searches for -- see the registration
- * call at the end of DG_Init(). Sourced from LIBOS_WAD_FILE_NAME
- * (src/libos_wad_params.h) rather than its own literal since SCRUM-190:
- * that is also the name docker/scripts/build.sh writes the WAD under on
- * ExoFS and the name src/syscall_launch.c opens at launch time, and that
- * header's own comment explains why one #define beats three strings.
- */
-#define DOOM_IWAD_BLOB_NAME LIBOS_WAD_FILE_NAME
-
-libos_wad_params_t g_doom_params = {
-    .wad_vaddr = DOOM_PARAMS_UNSET,
-    .wad_size  = DOOM_PARAMS_UNSET,
-};
+/* The system disk: the program volume is on device 0 (src/blkdev.h). */
+#define DG_SYSTEM_DEV 0u
 
 /*
  * DG_Init's outcome, since its signature has nowhere to return one.
@@ -103,6 +79,23 @@ int dg_init_result(void)
 {
     return g_dg_init_result;
 }
+
+/*
+ * The private volume's outcome (SCRUM-267): DG_INIT_NOT_RUN until DG_Init(),
+ * then 0 (mounted or formatted) or a negative -EXO_E*. Failure is not fatal
+ * -- Doom plays without saves -- so it is reported here rather than halting,
+ * the same split dg_init_result() makes for the IWAD.
+ */
+static int g_dg_save_result = DG_INIT_NOT_RUN;
+
+int dg_save_result(void)
+{
+    return g_dg_save_result;
+}
+
+/* The program volume, kept so the private volume can name it as the place
+ * reads fall through to (exo_file_stdio_set_fallback). */
+static exofs_vol_t *g_dg_program_vol;
 
 /*
  * The one place the tick value enters this file.
@@ -210,184 +203,223 @@ void DG_SleepMs(uint32_t ms)
 }
 
 /*
- * DG_Init — SCRUM-73.
- *
- * doomgeneric calls this once from doomgeneric_Create(), after allocating
- * DG_ScreenBuffer and immediately before D_DoomMain(). On an SDL port it is
- * where the window gets created. Here it is where the IWAD becomes usable,
- * which has to happen before D_DoomMain() because the first thing that runs
- * inside it is the IWAD search (d_iwad.c) and then W_AddFile.
- *
- * ── The ticket summary says "via exo_fb_map"; that is a mis-filing ─────
- *
- * There is no exo_fb_map syscall and there never was -- framebuffer mapping
- * is exo_fb_acquire (#4) plus exo_page_map (#2), composed LibOS-side by
- * libos_fb_map() (src/libos_fb.c, SCRUM-36), and none of it has anything to
- * do with an IWAD. The Jira description flags this on the ticket itself. The
- * mapping that matters here is libos_map_wad() (src/libos_wad_map.c), which
- * maps a physical range read-only into this LibOS's address space at
- * LIBOS_WAD_VADDR before it is ever entered. Through SCRUM-73 that range was
- * a GRUB multiboot module's, found by src/mmap.c's mmap_find_module(); as of
- * SCRUM-190 it is a buffer src/syscall_launch.c reads off the ExoFS-mounted
- * disk image instead (src/doom_wad_disk.c), with the GRUB module retired
- * entirely. Either way, this file does not know or care which: by the time
- * DG_Init runs, g_doom_params.wad_vaddr/wad_size already name a mapped,
- * readable range, and that is the entire interface this file depends on.
- *
- * So there is no loading to do in the read-a-file sense, and nowhere to load
- * 28 MB to if there were -- that already happened, one layer below, before
- * this LibOS was ever entered. DG_Init's job is to confirm that what is
- * mapped is really a WAD, record it, and say so on serial -- which is
- * exactly the acceptance criterion: "Doom init sequence runs; serial shows
- * WAD loaded without I_Error".
- *
- * ── Why a failure here reports rather than halts ───────────────────────
- *
- * Two reasons, and the second is the one that actually decides it.
- *
- * Mechanically, it cannot call I_Error: that lives in src/doom/i_system.c,
- * nothing under src/doom/ links into build/exodoom yet
- * (docs/libc_audit.md), and this file IS linked -- so the call would be an
- * undefined reference that breaks the kernel link outright.
- *
- * But it should not halt on its own either. A missing or malformed IWAD is
- * precisely what Doom's own startup is built to diagnose: D_DoomMain runs
- * d_iwad.c's search and then W_AddFile, and that path raises I_Error with
- * the engine's own context about which lump or which file it wanted.
- * Stopping the world inside DG_Init would pre-empt that for no gain --
- * the diagnosis below is already on serial by then, and it is strictly more
- * specific than I_Error's would be (which of the four distinct failures
- * happened, plus the address and length it was handed).
- *
- * So DG_Init records its outcome in dg_init_result() and returns, which is
- * also what makes it drivable from a ring-0 unit test: there is no #ifdef
- * here splitting "halt in ring 3, return under test", and therefore no
- * chance of the tested path and the shipped path diverging.
+ * #37 and #26 by whichever route this build has (the header comment): both
+ * volumes below are found and bound the same way, so the #ifdef lives here
+ * once instead of four times.
  */
-void DG_Init(void)
+static int64_t dg_disk_extent(uint64_t role, exo_diskextent_t *ext)
 {
-    const doom_wad_t *wad;
-    int               rc;
+#ifdef EXO_KERNEL
+    return exo_syscall_dispatch(EXO_SYS_DISK_EXTENT, (uint64_t)(uintptr_t)ext,
+                                role, 0, 0, 0, 0);
+#else
+    return exo_disk_extent_role(role, ext);
+#endif
+}
 
-    /*
-     * The unpatched case gets its own message, because it is a launcher bug
-     * rather than a WAD problem and the two send you to completely different
-     * files. If g_doom_params still holds its sentinel, nobody called
-     * libos_launch_patch_params() -- see the global's own comment above for
-     * the two ordering requirements that make that patch land.
-     */
-    if (g_doom_params.wad_vaddr == DOOM_PARAMS_UNSET ||
-        g_doom_params.wad_size == DOOM_PARAMS_UNSET) {
-        printf("DG_Init: WAD params were never patched in "
-               "(libos_launch_patch_params not called, or this TU is not "
-               "first in the link order).\n");
-        g_dg_init_result = DOOM_WAD_ENOENT;
-        return;
+static int64_t dg_disk_acquire(const exo_diskextent_t *ext)
+{
+#ifdef EXO_KERNEL
+    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, DG_SYSTEM_DEV, ext->base,
+                                ext->sectors, 0, 0, 0);
+#else
+    return exo_disk_acquire(DG_SYSTEM_DEV, ext->base, ext->sectors);
+#endif
+}
+
+/*
+ * Bind and mount the program volume (SCRUM-75).
+ *
+ * The IWAD is a file on the program volume, the one `install` copies it to,
+ * and Doom reads it with ordinary fopen/fread/fseek like any other program:
+ * no preloaded buffer, no mapping. The manifest's EXO_PKG_WANT_PROGRAM_RO
+ * makes the kernel assign that extent to this program (read-only, shared with
+ * the shell, which binds the same sectors read-write for its own commands),
+ * exo_disk_extent (#37) says where it is, and exo_disk_acquire (#26) binds
+ * it. ExoFS is then mounted over it and the FILE* backend installed.
+ *
+ * Mounted once and left mounted for the life of the program. Anything else
+ * the shell wants from that volume while Doom runs has to wait: the volume's
+ * read-only binding cannot coexist with the shell's read-write one.
+ *
+ * Returns 0 or a DOOM_WAD_* code: ENOENT for "no volume to read" (not
+ * granted, not mounted), which sends the reader to the manifest and to
+ * `install` rather than at the file.
+ */
+static int dg_mount_program_volume(void)
+{
+    exo_diskextent_t ext;
+    int64_t          rc;
+
+    rc = dg_disk_extent(EXO_DISK_EXTENT_PROGRAM, &ext);
+    if (rc != 0) {
+        printf("DG_Init: no program volume was granted to this program "
+               "(manifest lacks progvol?): %d\n", (int)rc);
+        return DOOM_WAD_ENOENT;
     }
 
-    /*
-     * Truncated to uint32_t deliberately: wad_t and the WAD format itself are
-     * 32-bit throughout (src/wad.h -- a WAD directory stores 32-bit file
-     * offsets, so a WAD over 4 GiB cannot address its own lumps). The guard
-     * is here rather than left to the cast so an absurd size is reported as
-     * an absurd size instead of silently wrapping into a plausible one.
-     */
-    if (g_doom_params.wad_size > DOOM_WAD_MAX_BYTES) {
-        /*
-         * Printed as two zero-padded 32-bit halves, not as a decimal.
-         * kvprintf (src/stdio.c) has no length modifiers, so there is no
-         * %llu -- and (unsigned)wad_size would truncate to the low 32 bits,
-         * which is exactly the wrap this branch exists to catch. A size of
-         * 0x1_0000_0100 would have reported itself as "256 bytes exceeds
-         * the 67108864 byte window", a sentence that sends the reader off
-         * after the wrong thing entirely.
-         */
-        printf("DG_Init: WAD size 0x%08x%08x bytes exceeds the %u byte "
-               "window.\n",
-               (unsigned)(g_doom_params.wad_size >> 32),
-               (unsigned)(g_doom_params.wad_size & 0xFFFFFFFFu),
-               (unsigned)DOOM_WAD_MAX_BYTES);
-        g_dg_init_result = DOOM_WAD_ETOOBIG;
-        return;
+    rc = dg_disk_acquire(&ext);
+    if (rc != 0) {
+        printf("DG_Init: could not bind the program volume (LBA %u +%u): %d "
+               "-- is the shell using it?\n",
+               (unsigned)ext.base, (unsigned)ext.sectors, (int)rc);
+        return DOOM_WAD_ENOENT;
     }
 
-    rc = doom_wad_mount((const void *)(uintptr_t)g_doom_params.wad_vaddr,
-                        (uint32_t)g_doom_params.wad_size);
-
-    if (rc != DOOM_WAD_OK) {
-        /* %u is safe here: wad_size already passed the check above, so it
-         * is at most DOOM_WAD_MAX_BYTES and cannot lose bits. */
-        printf("DG_Init: WAD mount failed at %p (%u bytes): %s\n",
-               (void *)(uintptr_t)g_doom_params.wad_vaddr,
-               (unsigned)g_doom_params.wad_size,
-               doom_wad_strerror(rc));
-        g_dg_init_result = rc;
-        return;
+    exofs_vol_t *vol = NULL;
+    rc = exofs_mount(DG_SYSTEM_DEV, ext.base, &vol);
+    if (rc != 0) {
+        printf("DG_Init: program volume will not mount: %d\n", (int)rc);
+        return DOOM_WAD_ENOENT;
     }
 
-    g_dg_init_result = DOOM_WAD_OK;
-    wad              = doom_wad_mounted();
+    g_dg_program_vol = vol;
+    exo_file_set_volume(vol);
+    exo_file_stdio_install();
+    return 0;
+}
 
-    /*
-     * The line the acceptance criterion asks for. It names the magic
-     * explicitly rather than just saying "WAD loaded": an IWAD is a complete
-     * game and a PWAD is a patch over one, and shipping the latter as the
-     * former is a mistake this project has already made once -- it surfaced
-     * deep inside W_Init/Z_Malloc/R_Init instead of at the four bytes that
-     * actually said so (docs/architecture.md sec7, SCRUM-164). Four bytes of
-     * output here is cheap next to that debugging session.
-     */
-    printf("DG_Init: WAD loaded -- %s, %u lumps, %u bytes at %p\n",
-           wad->is_iwad ? "IWAD" : "PWAD",
-           (unsigned)wad->numlumps,
-           (unsigned)wad->size,
-           (void *)(uintptr_t)g_doom_params.wad_vaddr);
+/*
+ * Bind and mount Doom's private volume (SCRUM-267), and make it the volume
+ * fopen writes to.
+ *
+ * Doom writes two kinds of file: savegames (G_DoSaveGame) and its config
+ * (M_SaveDefaults). The program volume is read-only to it, so both go to the
+ * slot its package asked for (--volume-slot, docker/scripts/build.sh), which
+ * the kernel assigned at launch and exo_disk_extent (#37) reports. The slot
+ * is formatted the first time, mounted every time after (exofs_attach: only a
+ * blank slot is ever formatted, so a volume that merely fails to mount is
+ * reported and left alone).
+ *
+ * After this the private volume is the default one, so every fopen and every
+ * write lands on it, and the program volume is the fallback for reads: the
+ * IWAD is not on the private volume, and Doom's startup opens the config
+ * (M_LoadDefaults) before it looks for the IWAD, so which volume is "current"
+ * cannot be what finds the WAD.
+ *
+ * Both extents stay bound for the life of the program. Nothing is unmounted:
+ * every save is closed (and so synced, docs/filesystem.md 6c) by the engine
+ * itself, and the kernel reclaims the bindings when the program ends.
+ *
+ * Returns 0, or a negative -EXO_E* code; on failure the program volume stays
+ * the default and Doom runs, read-only, without saves.
+ */
+static int dg_mount_save_volume(void)
+{
+    exo_diskextent_t ext;
+    int64_t          rc;
 
-    if (!wad->is_iwad) {
-        /* Not fatal -- Doom's own d_iwad.c decides whether it has a playable
-         * game. Worth saying out loud, though, since a PWAD here means the
-         * base game is missing and the failure will land much later and much
-         * less legibly. */
+    rc = dg_disk_extent(EXO_DISK_EXTENT_PRIVATE, &ext);
+    if (rc != 0) {
+        printf("DG_Init: no private volume was granted to this program "
+               "(manifest lacks a volume request?): %d -- savegames and "
+               "config will not persist\n", (int)rc);
+        return (int)rc;
+    }
+
+    rc = dg_disk_acquire(&ext);
+    if (rc != 0) {
+        printf("DG_Init: could not bind the private volume (LBA %u +%u): %d "
+               "-- savegames and config will not persist\n",
+               (unsigned)ext.base, (unsigned)ext.sectors, (int)rc);
+        return (int)rc;
+    }
+
+    exofs_vol_t *vol = NULL;
+    int arc = exofs_attach(DG_SYSTEM_DEV, ext.base, ext.sectors, &vol);
+    if (arc < 0) {
+        printf("DG_Init: private volume (LBA %u +%u) will not mount: %d "
+               "-- savegames and config will not persist\n",
+               (unsigned)ext.base, (unsigned)ext.sectors, arc);
+        return arc;
+    }
+    printf("DG_Init: private volume LBA %u +%u: %s\n", (unsigned)ext.base,
+           (unsigned)ext.sectors,
+           arc == EXOFS_ATTACH_FORMATTED ? "blank, formatted a new volume"
+                                         : "mounted existing volume");
+
+    exo_file_set_volume(vol);
+    exo_file_stdio_install();
+    exo_file_stdio_set_fallback(g_dg_program_vol);
+    return 0;
+}
+
+int dg_check_iwad(const char *name)
+{
+    uint8_t hdr[12];
+    FILE   *f;
+    size_t  got;
+    long    size;
+    int     is_iwad;
+
+    f = fopen(name, "rb");
+    if (f == NULL) {
+        printf("DG_Init: '%s' is not on the program volume (run `install %s`)"
+               "\n", name, name);
+        return DOOM_WAD_ENOENT;
+    }
+
+    got  = fread(hdr, 1, sizeof hdr, f);
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fclose(f);
+
+    /* Only the header: the directory is W_AddFile's to read and to diagnose,
+     * with engine context this layer lacks (see DG_Init). */
+    if (got != sizeof hdr || hdr[1] != 'W' || hdr[2] != 'A' || hdr[3] != 'D' ||
+        (hdr[0] != 'I' && hdr[0] != 'P')) {
+        printf("DG_Init: '%s' is not a WAD (bad magic or short file)\n", name);
+        return DOOM_WAD_EINVAL;
+    }
+    if (size < 0 || (unsigned long)size > DOOM_WAD_MAX_BYTES) {
+        printf("DG_Init: '%s' is too large to be a WAD Doom can use\n", name);
+        return DOOM_WAD_ETOOBIG;
+    }
+
+    is_iwad = hdr[0] == 'I';
+    printf("DG_Init: WAD found -- %s, %u bytes, %u lumps\n",
+           is_iwad ? "IWAD" : "PWAD", (unsigned)size,
+           (unsigned)(hdr[4] | (hdr[5] << 8) | (hdr[6] << 16) |
+                      ((unsigned)hdr[7] << 24)));
+    if (!is_iwad) {
         printf("DG_Init: warning -- this is a PWAD (a patch), not a base "
                "IWAD; expect W_Init to fail on a missing lump.\n");
     }
+    return DOOM_WAD_OK;
+}
 
-    /*
-     * Hand the mounted bytes to the libc shim's blob table, so the engine's
-     * own IWAD discovery can find them (SCRUM-66).
-     *
-     * Mounting the WAD (above, SCRUM-73) and being able to *open* it are two
-     * different things, and until this call they were two disconnected halves
-     * of the port. D_DoomMain() does not consult doom_wad_mounted(): it calls
-     * D_FindIWAD() -> M_FileExists() -> fopen() on each name in d_iwad.c's
-     * list, and with nothing registered every one of those misses and it dies
-     * with "Game mode indeterminate.  No IWAD file was found." -- which is
-     * exactly where the first end-to-end launch stopped.
-     *
-     * exo_file_register_blob() (src/stdio.c, SCRUM-65) is the shim built for
-     * this: fopen() matches on the BASENAME of whatever path Doom invents, so
-     * registering the bare filename is enough no matter which directory
-     * d_iwad.c joins onto it. The mechanism was already implemented and
-     * unit-tested -- tests/kernel/test_libc_gaps_k.c registers this very
-     * name -- but nothing in the shipping path had ever called it.
-     *
-     * DOOM_IWAD_BLOB_NAME is on d_iwad.c's search list, and is now
-     * LIBOS_WAD_FILE_NAME (src/libos_wad_params.h) rather than its own
-     * literal (SCRUM-190) -- the same name the ExoFS volume stores the file
-     * under and src/syscall_launch.c opens by, so all three agree by
-     * construction instead of by convention. It is still a name rather than
-     * something read off the volume, because libos_wad_params_t carries an
-     * address and a length and nothing else: ship a different IWAD and
-     * LIBOS_WAD_FILE_NAME's own definition is the line to change.
-     *
-     * Reported but not fatal: the mount itself succeeded, and D_FindIWAD's
-     * own error is clearer than anything this layer could say about a full
-     * blob table.
-     */
-    if (exo_file_register_blob(DOOM_IWAD_BLOB_NAME,
-                               wad->wad.data, wad->size) != 0) {
-        printf("DG_Init: warning -- could not register '%s' with the file "
-               "shim; D_FindIWAD will not find it.\n",
-               DOOM_IWAD_BLOB_NAME);
+/*
+ * DG_Init -- SCRUM-73, reworked by SCRUM-75.
+ *
+ * doomgeneric calls this once from doomgeneric_Create(), immediately before
+ * D_DoomMain(), whose first act is the IWAD search (d_iwad.c: M_FileExists ->
+ * fopen) and then W_AddFile (w_file_stdc.c: fopen/fseek/fread). This is where
+ * those fopen calls become able to find anything: DG_Init mounts the program
+ * volume and installs the FILE* backend over it, then confirms the IWAD
+ * really is there and really starts like a WAD, and says so on serial.
+ *
+ * Until SCRUM-75 there was nothing to read: the kernel preloaded the whole
+ * IWAD into a buffer, mapped it, and DG_Init registered those bytes as a
+ * fake file. That path (g_doom_params, exo_file_register_blob) is gone; this
+ * program reads what is on the volume.
+ *
+ * It reports rather than halts. A missing or malformed IWAD is what Doom's
+ * own startup is built to diagnose, with more engine context than this layer
+ * has, and a halt here would pre-empt it. It also means the real function is
+ * drivable from a ring-0 test: dg_init_result() carries the outcome, and
+ * there is no #ifdef splitting the tested path from the shipped one.
+ */
+void DG_Init(void)
+{
+    int rc = dg_mount_program_volume();
+
+    if (rc == 0) {
+        rc = dg_check_iwad(DOOM_IWAD_NAME);
     }
+    g_dg_init_result = rc;
+
+    /* SCRUM-267. After the IWAD check, which runs against the program volume
+     * while that is still the default. Independent of its outcome: a program
+     * with a private volume and no program volume still gets its saves. */
+    g_dg_save_result = dg_mount_save_volume();
 }

@@ -52,7 +52,7 @@ fi
 # -- The IWAD filename is spelled in two places; assert they agree --------
 #
 # LIBOS_WAD_FILE_NAME (src/libos_wad_params.h) is the one #define
-# src/doomgeneric_exo.c's DOOM_IWAD_BLOB_NAME and src/syscall_launch.c's
+# src/doomgeneric_exo.c's DOOM_IWAD_NAME and src/syscall_launch.c's
 # ExoFS open both now source their copy of this name from (SCRUM-190) --
 # see that header's own comment for the three places that have to agree.
 # Before SCRUM-190 a third spelling (src/grub.cfg's module2 line) had to
@@ -132,7 +132,9 @@ for f in exofs_volume exofs_fat exofs_dir exofs_dirent exofs_name exofs_path \
 done
 gcc -o build/mkexofsimg build/mkexofsimg_obj/*.o
 
-build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba"
+# The image itself is written by step [2e2/7], after the ring-3 targets exist:
+# it now carries program packages (SCRUM-230) alongside the IWAD, and a package
+# is built from a target's code/data blobs.
 
 if [[ "${DEBUG:-0}" == "1" ]]; then
   CFLAGS=(-std=gnu99 -ffreestanding -g -O0 -Wall -Wextra -mno-red-zone -mcmodel=small -mno-sse -mno-sse2 -mno-mmx)
@@ -142,6 +144,13 @@ fi
 
 if [[ "${TESTING:-0}" == "1" ]]; then
   CFLAGS+=(-DTESTING)
+fi
+
+# AUDIO_PROFILE=1: the MUSPROF/HDAPROF serial reports (docs/drivers/hda.md
+# §12.12).  In CFLAGS, so it reaches the kernel and the ring-3 libos_doom
+# target (probe_cflags below is derived from this array) alike.
+if [[ "${AUDIO_PROFILE:-0}" == "1" ]]; then
+  CFLAGS+=(-DAUDIO_PROFILE)
 fi
 
 LDFLAGS=(-T src/linker.ld -ffreestanding -O2 -nostdlib -z max-page-size=0x1000)
@@ -379,7 +388,12 @@ build_ring3_link_target() {
       "${name}_code.bin" "${name}_code_blob.o" )
   ( cd build && x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
       "${name}_data.bin" "${name}_data_blob.o" )
-  objs+=("build/${name}_code_blob.o" "build/${name}_data_blob.o")
+  # A target whose program ships as a package on the disk image (SCRUM-230)
+  # still gets its blobs and layout header built -- the packager reads them --
+  # but is not linked into the kernel.
+  if [[ "${ring3_embed:-1}" == "1" ]]; then
+    objs+=("build/${name}_code_blob.o" "build/${name}_data_blob.o")
+  fi
 }
 
 echo "[2c/7] Build shell LibOS (SCRUM-110)"
@@ -421,8 +435,21 @@ echo "[2c/7] Build shell LibOS (SCRUM-110)"
 # src/libos_heap.c/src/libos_page_alloc.c/src/libos_fb.c. Budget is not a
 # concern: LIBOS_LAUNCH_MAX_{CODE,DATA}_PAGES are 192/192 (raised for
 # Doom, which alone uses ~97/~99 of them).
+#
+# SCRUM-263 adds src/shell/shell_help.c (help matching/formatting). It is
+# also compiled into the TESTING kernel further down, for
+# tests/kernel/test_shell_help_k.c. SCRUM-233 adds src/shell/shell_install.c
+# (the `install` copy) the same way, for tests/kernel/test_shell_install_k.c.
+# SCRUM-266 adds src/shell/shell_mount.c (the mount table and path router),
+# likewise, for tests/kernel/test_shell_mount_k.c. SCRUM-271 adds
+# src/shell/shell_err.c (errno wording), likewise, for test_shell_err_k.c.
+# SCRUM-273 adds src/shell/shell_hist.c (command history), likewise, for
+# test_shell_hist_k.c. SCRUM-274 adds src/shell/shell_complete.c (Tab
+# completion matching), likewise, for test_shell_complete_k.c.
 build_ring3_link_target shell src/shell "" "" \
-  src/shell/shell_main.c src/fb.c src/fb_console.c src/libos_fb.c \
+  src/shell/shell_main.c src/shell/shell_help.c src/shell/shell_install.c \
+  src/shell/shell_mount.c src/shell/shell_err.c src/shell/shell_hist.c src/shell/shell_complete.c \
+  src/fb.c src/fb_console.c src/libos_fb.c \
   src/stdlib.c src/stdio.c src/string.c src/ctype.c \
   src/errno.c src/fpconv.c src/libos_heap.c src/libos_page_alloc.c \
   src/libos_fs/exofs_volume.c src/libos_fs/exofs_fat.c \
@@ -475,15 +502,46 @@ echo "[2e/7] Build clock demo LibOS (SCRUM-168)"
 # entry_vaddr (this target also carries the
 # __attribute__((section(".text.entry"))) belt-and-suspenders fix, for the
 # same reason the WAD-viewer target's own comment gives).
+#
+# Like Snake below, the clock ships as a package (SCRUM-231): its blobs and
+# layout header are built for the packager but not linked into the kernel, and
+# the shell's `clock` command is `run clock.exo`.
+ring3_embed=0
 build_ring3_link_target libos_clock src/libos_clock "" "" \
   src/libos_clock/libos_clock.c src/fb.c src/fb_console.c src/libos_fb.c
+ring3_embed=1
+
+echo "[2e/7] Build resource dashboard LibOS (SCRUM-236)"
+# Same mechanism as the clock above: a package (top.exo), blobs built
+# for the packager and not linked into the kernel.
+ring3_embed=0
+build_ring3_link_target libos_top src/libos_top "" "" \
+  src/libos_top/libos_top.c src/fb.c src/fb_console.c src/libos_fb.c
+ring3_embed=1
+
+echo "[2e/7] Build hello-world LibOS (SCRUM-238)"
+# The worked example docs/libos-authoring.md walks through, packaged as
+# hello.exo below so that walkthrough is built and run, not just written.
+# Same shape as the clock: a package, not linked into the kernel, and
+# libos_hello.c first in the list.
+ring3_embed=0
+build_ring3_link_target libos_hello src/libos_hello "" "" \
+  src/libos_hello/libos_hello.c src/fb.c src/fb_console.c src/libos_fb.c
+ring3_embed=1
+
+echo "[2e/7] Build crash-on-purpose LibOS (SCRUM-283)"
+# A program that reads address 0, packaged as crash.exo so fault containment
+# can be seen on a real boot (`run crash`). Same shape as hello above.
+ring3_embed=0
+build_ring3_link_target libos_crash src/libos_crash "" "" \
+  src/libos_crash/libos_crash.c src/fb.c src/fb_console.c src/libos_fb.c
+ring3_embed=1
 
 echo "[2f/7] Build Snake LibOS (SCRUM-182)"
 # Same reasoning and same mechanism as the WAD viewer step just above: built
-# UNCONDITIONALLY and ahead of step 3's C compile loop, because
-# src/syscall_launch.c (the kernel-side #22 handler that launches this LibOS
-# from the shell's "snake" command) #includes the generated
-# src/libos_snake/libos_snake_layout.h this call produces. src/libos_snake/
+# UNCONDITIONALLY, with its blobs built but NOT linked into the kernel
+# (SCRUM-230): the packager below reads them and the generated
+# src/libos_snake/libos_snake_layout.h. src/libos_snake/
 # is its own subdirectory for the same reason src/libos_wad_viewer/ is: step
 # 3's plain `src/*.c` glob below must never compile libos_snake.c with
 # -DEXO_KERNEL.
@@ -498,8 +556,30 @@ echo "[2f/7] Build Snake LibOS (SCRUM-182)"
 # src/fb.c/src/fb_console.c/src/libos_fb.c are the same framebuffer/text-
 # console/mapping code the shell and WAD viewer targets above already link
 # in unmodified.
+ring3_embed=0
 build_ring3_link_target libos_snake src/libos_snake "" "" \
   src/libos_snake/libos_snake.c src/fb.c src/fb_console.c src/libos_fb.c
+ring3_embed=1
+
+echo "[2f2/7] Build per-program volume demo LibOS (SCRUM-237)"
+# The live demonstration that each LibOS can own a filesystem: one program,
+# packaged twice below (step [2g/7]) with different volume slots, each copy
+# linking its own ExoFS (the same src/libos_fs/ set and libc-shim slice the
+# shell links -- see that step's comment for why it is that many files) and
+# mounting only the sectors the kernel assigned it. Blobs are built for the
+# packager and not linked into the kernel, like Snake and the clock above;
+# `run voldemoa.exo` / `run voldemob.exo` from the shell start the copies.
+# libos_voldemo.c MUST come first (entry point at .text offset 0).
+ring3_embed=0
+build_ring3_link_target libos_voldemo src/libos_voldemo "" "" \
+  src/libos_voldemo/libos_voldemo.c src/fb.c src/fb_console.c src/libos_fb.c \
+  src/stdlib.c src/stdio.c src/string.c src/ctype.c \
+  src/errno.c src/fpconv.c src/libos_heap.c src/libos_page_alloc.c \
+  src/libos_fs/exofs_volume.c src/libos_fs/exofs_fat.c \
+  src/libos_fs/exofs_name.c src/libos_fs/exofs_dirent.c \
+  src/libos_fs/exofs_path.c src/libos_fs/exofs_dir.c \
+  src/libos_fs/exofs_file.c src/libos_fs/exofs_blockdev.c
+ring3_embed=1
 
 echo "[2f/7] Build Doom LibOS (SCRUM-66)"
 # The convergence point: the vendored engine (src/doom/, SCRUM-63/-64), the
@@ -529,12 +609,9 @@ echo "[2f/7] Build Doom LibOS (SCRUM-66)"
 # point, per build_ring3_link_target()'s $5.. doc. This one leads with
 # src/doomgeneric_exo.c instead, and the difference is deliberate:
 #
-#   .data offset 0 -- libos_launch_patch_params() (src/libos_launch.c) writes
-#     the WAD address/length through img.data_paddrs[0], i.e. offset 0 of the
-#     .data blob, which is the first .data global of the first object on this
-#     command line. That global has to be g_doom_params (src/doomgeneric_exo.c),
-#     because DG_Init() is what reads it. Its own comment in that file states
-#     both halves of the requirement.
+#   .data offset 0 -- no longer load-bearing (SCRUM-75): g_doom_params, the
+#     WAD launch params this ordering used to protect, is gone; the order is
+#     kept only so the .text.entry arrangement below stays unchanged.
 #
 #   .text offset 0 -- libos_build_image() enters at the base of the code blob.
 #     libos_doom_main() gets there via __attribute__((section(".text.entry")))
@@ -560,8 +637,120 @@ build_ring3_link_target libos_doom src/libos_doom src/doom "-msse -msse2 -w" \
   src/doom_wad.c src/wad.c src/doom_panic.c src/doom_keymap.c \
   src/doom_sound.c src/doom_sfx_tone.c \
   src/doom_sound_pcm.c src/doom_dmx.c \
+  src/libos_doom/doom_midi.c src/libos_doom/doom_genmidi.c \
+  src/libos_doom/doom_opl.c src/nuked_opl3/opl3.c \
+  src/libos_doom/doom_sound_music.c \
   src/libos_heap.c src/libos_page_alloc.c src/libos_fb.c \
+  src/libos_fs/exofs_volume.c src/libos_fs/exofs_fat.c \
+  src/libos_fs/exofs_name.c src/libos_fs/exofs_dirent.c \
+  src/libos_fs/exofs_path.c src/libos_fs/exofs_dir.c \
+  src/libos_fs/exofs_file.c src/libos_fs/exofs_blockdev.c \
+  src/libos_fs/exo_file.c src/libos_fs/exo_file_stdio.c \
+  src/libos_fs/exofs_attach.c \
   src/doom/*.c
+
+echo "[2g/7] Package ring-3 targets and write the disk image (SCRUM-230, SCRUM-231)"
+# Ordering: this step must stay AFTER every target it packages (the disk image
+# is no longer produced early -- step [1b/7] only builds the tool), which is
+# why it sits below the Doom build rather than next to Snake's.
+#
+# Every package is built from what build_ring3_link_target() already left in
+# build/ (<name>_code.bin, <name>_data.bin, and <NAME>_BSS_LEN in the generated
+# layout header), so there is no second extraction path. Page counts in the
+# manifest are derived from those blobs by tools/exopkg (image pages + stack,
+# plus heap slack) -- measured, not guessed; SCRUM-232 owns real admission
+# policy. Same native-gcc, no "-I src" rule as tools/mkexofsimg above.
+gcc -std=c99 -O2 -Wall -Wextra -Werror \
+  tools/exopkg/main.c -o build/exopkg
+mkdir -p build/packages
+rm -f build/packages/*.exo
+
+# package_ring3_target <target> <layout dir> <package name> <want> [exopkg opts]
+#   <target> is the build_ring3_link_target name (libos_snake, ...).
+package_ring3_target() {
+  local name="$1" dir="$2" pkg="$3" want="$4"
+  shift 4
+  local macro bss_len
+  macro="$(echo "$name" | tr '[:lower:]' '[:upper:]')_BSS_LEN"
+  bss_len="$(sed -n "s/^#define $macro \([0-9]*\)$/\1/p" "$dir/${name}_layout.h")"
+  if [[ -z "$bss_len" ]]; then
+    echo "    ERROR: could not read $macro from $dir/${name}_layout.h"
+    exit 1
+  fi
+  build/exopkg "build/packages/$pkg" "build/${name}_code.bin" \
+    "build/${name}_data.bin" "$bss_len" "$want" "$@"
+  if [[ ! -s "build/packages/$pkg" ]]; then
+    echo "    ERROR: build/packages/$pkg is missing or empty"
+    exit 1
+  fi
+  build/exopkg --check "build/packages/$pkg"
+}
+
+# Launch params struct = libos_wad_params_t (src/libos_wad_params.h): two u64.
+# "wad" (SCRUM-232) is the manifest's request for the IWAD mapping and the
+# params patch, which is what lets Doom and the WAD viewer launch via `run`.
+# Add Tetris (SCRUM-183) / the calculator here when their targets exist.
+package_ring3_target libos_snake      src/libos_snake      snake.exo   fb,kbd
+package_ring3_target libos_clock      src/libos_clock      clock.exo   fb,kbd
+package_ring3_target libos_top        src/libos_top        top.exo     fb,kbd
+package_ring3_target libos_hello      src/libos_hello      hello.exo   fb,kbd
+package_ring3_target libos_crash      src/libos_crash      crash.exo   fb,kbd
+package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,kbd,wad \
+  --params-len 16
+# SCRUM-267: Doom reads the IWAD off the program volume (progvol) and keeps
+# its savegames and config in a private volume of its own. The slot is
+# EXO_VOLUME_SLOT_DOOM in src/exo_volume.h: change both together.
+package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd,progvol \
+  --sound-voices 8 --volume-slot 2 --volume-sectors 8192
+# SCRUM-237: one program, two packages, each requesting a private volume
+# (docs/architecture.md, src/exo_volume.h). Only the slot differs.
+package_ring3_target libos_voldemo    src/libos_voldemo    voldemoa.exo fb,disk,kbd \
+  --volume-slot 0 --volume-sectors 8192
+package_ring3_target libos_voldemo    src/libos_voldemo    voldemob.exo fb,disk,kbd \
+  --volume-slot 1 --volume-sectors 8192
+
+# Every package goes on the program volume under its own file name.
+pkg_args=()
+for f in build/packages/*.exo; do
+  pkg_args+=("$f" "$(basename "$f")")
+done
+build/mkexofsimg build/exodoom_disk.img "$WAD_PATH" "$wad_file" "$wad_base_lba" \
+  "${pkg_args[@]}"
+
+# SCRUM-237: the per-program volume slots (src/exo_volume.h) sit past the
+# program volume. mkexofsimg sizes the image to end with that volume, so grow
+# it (sparse -- the slots stay unformatted until a program that owns one first
+# runs and formats it) to cover every slot, or the kernel would hand a program
+# an extent the drive does not have. Read from the header like
+# LIBOS_WAD_DISK_BASE_LBA above, so there is one number.
+vol_h=src/exo_volume.h
+vol_base="$(sed -n 's/^#define EXO_VOLUME_REGION_BASE_LBA \([0-9]*\)u\?$/\1/p' "$vol_h")"
+vol_slot="$(sed -n 's/^#define EXO_VOLUME_SLOT_SECTORS *\([0-9]*\)u\?.*$/\1/p' "$vol_h")"
+vol_max="$(sed -n 's/^#define EXO_VOLUME_MAX_SLOTS *\([0-9]*\)u\?.*$/\1/p' "$vol_h")"
+if [[ -z "$vol_base" || -z "$vol_slot" || -z "$vol_max" ]]; then
+  echo "    ERROR: could not read the volume region layout from $vol_h"
+  exit 1
+fi
+vol_end_bytes=$(( (vol_base + vol_slot * vol_max) * 512 ))
+if [[ "$(stat -c %s build/exodoom_disk.img)" -lt "$vol_end_bytes" ]]; then
+  truncate -s "$vol_end_bytes" build/exodoom_disk.img
+fi
+
+# The disk behind every QEMU line's `-device usb-storage` (SCRUM-245,
+# docs/drivers/usb.md section 2). Blank for now -- QEMU only needs the file to
+# exist; SCRUM-247 has the packer write an ExoFS volume of .exo packages here.
+# Created only when missing, so whatever a developer put on it survives a
+# rebuild.
+[[ -f build/usb.img ]] || truncate -s 16M build/usb.img
+
+# The second IDE drive behind every QEMU line's $(QEMU_DISK2_ARGS) (SCRUM-244):
+# block device 1, the install-stick stand-in. SCRUM-233: an ExoFS volume at
+# LBA 0 holding the IWAD and every package, which the shell's `install` copies
+# onto the system volume. Rewritten on every build (mkexofsimg truncates its
+# output), because the multidisk and shell_install KUnit suites reformat the
+# whole drive on a test boot; the next build puts the packages back.
+build/mkexofsimg build/exodoom_disk2.img "$WAD_PATH" "$wad_file" 0 \
+  "${pkg_args[@]}"
 
 echo "[3/7] Compile C sources"
 
@@ -631,7 +820,7 @@ echo "[3a/7] Compile ExoFS into the kernel (SCRUM-189, SCRUM-190)"
 # never descends into.
 #
 # Unconditional as of SCRUM-190, not TESTING-only: src/syscall_launch.c's
-# LAUNCH_NEEDS_WAD path now mounts the ExoFS volume built by step [1b/7] and
+# LAUNCH_NEEDS_WAD path now mounts the ExoFS volume written by step [2e2/7] and
 # reads /freedoom2.wad off it at ring 0, on every normal boot, not just
 # under the KUnit harness. -DEXO_KERNEL picks the in-process
 # exo_syscall_dispatch() form of src/libos_fs/exofs_blockdev.c's disk I/O
@@ -642,9 +831,9 @@ echo "[3a/7] Compile ExoFS into the kernel (SCRUM-189, SCRUM-190)"
 # The shell target (step [2c/7], SCRUM-202) is now a second, independent
 # ring-3 compile of these same sources -- its own object files
 # (build/shell_exofs_*.o via build_ring3_link_target's naming), not these
-# kernel-view ones, so the two coexist with no symbol collision. SCRUM-44
-# (exo_file_*) and SCRUM-237 (per-program volumes) are future ring-3
-# consumers of the same library. Step [3b5/7] below, TESTING-only, keeps
+# kernel-view ones, so the two coexist with no symbol collision. The glob
+# also takes in exo_file.c, the descriptor layer (SCRUM-44), which the
+# exo_file KUnit suite drives through this kernel-view build. Step [3b5/7] below, TESTING-only, keeps
 # proving ExoFS stays portable to a ring-3 target with nothing more than a
 # build_ring3_link_target call -- which is exactly what step [2c/7] now is.
 _compile_exofs_one() {
@@ -664,7 +853,7 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   echo "[3b/7] Build LibOS C probe (SCRUM-173)"
   # tests/kernel/libos_c_probe/ is its own directory, not tests/kernel/*.c,
   # specifically so the shared test-compile loop below (step 3c) never needs
-  # to know this file exists -- CLAUDE.md's "no build-script change needed to
+  # to know this file exists -- docs/testing.md's "no build-script change needed to
   # add a test file" promise stays true for that loop; this probe simply
   # isn't a file the loop's glob ever sees, rather than an exception it has
   # to special-case.
@@ -757,6 +946,83 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL
   objs+=("build/doom_sounds.o")
 
+  # memio.c + mus2mid.c + the music reader are the third application of that
+  # exception (SCRUM-215).  The reader, src/libos_doom/doom_midi.c, calls
+  # mus2mid() directly, so it is ring-3 code that the src/ glob deliberately
+  # never sees; tests/kernel/test_doom_midi_k.c needs it here to prove a MUS
+  # lump converts to the same events as its hand-written MIDI twin, and the
+  # converter is the vendored mus2mid(), not something a test can stand in
+  # for.  A shipped kernel still links none of the three.
+  #
+  # memio.c allocates through Z_Malloc/Z_Free, which is the zone allocator the
+  # kernel cannot link; tests/kernel/z_zone_shim.c backs those two symbols
+  # with kmalloc/kfree for this build only.
+  #
+  # The GENMIDI instrument decoder (SCRUM-216) rides along: it is ring-3 code
+  # for the same reason (its only consumer is the OPL3 synth in libos_doom),
+  # and tests/kernel/test_doom_genmidi_k.c runs it from ring 0.  It needs no
+  # shim -- it allocates nothing.
+  #
+  # So does the synth that consumes both (SCRUM-217): the MIDI-to-OPL driver
+  # and the vendored Nuked-OPL3 core it drives, for
+  # tests/kernel/test_doom_opl_k.c.  Both are integer-only, which is why the
+  # ticket chose Nuked over DOSBox's double-based OPL, and both compile clean
+  # under these -mno-sse CFLAGS with -Wextra; neither allocates.
+  for f in src/doom/memio.c src/doom/mus2mid.c src/libos_doom/doom_midi.c \
+           src/libos_doom/doom_genmidi.c src/libos_doom/doom_opl.c \
+           src/libos_doom/doom_sound_music.c \
+           src/nuked_opl3/opl3.c; do
+    echo "    CC $(basename "$f") (music conversion)"
+    x86_64-elf-gcc -c "$f" -o "build/doom_mus_$(basename "${f%.c}").o" \
+      "${CFLAGS[@]}" -I src/ -I src/doom -DEXO_KERNEL
+    objs+=("build/doom_mus_$(basename "${f%.c}").o")
+  done
+
+  # The shell's help matcher/formatter (SCRUM-263) is ring-3 code the src/
+  # glob never sees either; tests/kernel/test_shell_help_k.c runs it from
+  # ring 0. It makes no syscalls and calls no libc, so it needs no shim.
+  echo "    CC shell_help.c (shell help)"
+  x86_64-elf-gcc -c src/shell/shell_help.c -o build/shell_help.o \
+    "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  objs+=("build/shell_help.o")
+
+  # The `install` copy (SCRUM-233), for tests/kernel/test_shell_install_k.c.
+  # Unlike shell_help.c it calls ExoFS, which the kernel already links
+  # (step [3a/7]).
+  echo "    CC shell_install.c (shell install)"
+  x86_64-elf-gcc -c src/shell/shell_install.c -o build/shell_install.o \
+    "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  objs+=("build/shell_install.o")
+
+  # The shell's mount table and path router (SCRUM-266), for
+  # tests/kernel/test_shell_mount_k.c. Pure logic: no syscalls, no libc.
+  echo "    CC shell_mount.c (shell mount)"
+  x86_64-elf-gcc -c src/shell/shell_mount.c -o build/shell_mount.o \
+    "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  objs+=("build/shell_mount.o")
+
+  # The shell's errno wording (SCRUM-271), for tests/kernel/test_shell_err_k.c.
+  # Pure logic: no syscalls, no libc.
+  echo "    CC shell_err.c (shell errors)"
+  x86_64-elf-gcc -c src/shell/shell_err.c -o build/shell_err.o \
+    "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  objs+=("build/shell_err.o")
+
+  # The shell's command history ring (SCRUM-273), for
+  # tests/kernel/test_shell_hist_k.c. Pure logic: no syscalls, no libc.
+  echo "    CC shell_hist.c (shell history)"
+  x86_64-elf-gcc -c src/shell/shell_hist.c -o build/shell_hist.o \
+    "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  objs+=("build/shell_hist.o")
+
+  # The shell's Tab-completion matching (SCRUM-274), for
+  # tests/kernel/test_shell_complete_k.c. Pure logic; uses shell_ci_prefix()
+  # from shell_help.c, which is linked above.
+  echo "    CC shell_complete.c (shell Tab completion)"
+  x86_64-elf-gcc -c src/shell/shell_complete.c -o build/shell_complete.o \
+    "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  objs+=("build/shell_complete.o")
+
   echo "[3b5/7] Gate: ExoFS still builds as a ring-3 target (SCRUM-189)"
   # Step [3a/7] above (now unconditional, SCRUM-190) compiles ExoFS one way
   # only -- WITH -DEXO_KERNEL, for both the kernel's own launch-time disk
@@ -765,8 +1031,9 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   # earns its keep: it catches a kernel-only dependency creeping into
   # src/libos_fs/ at the moment it is introduced, rather than at the next
   # full rebuild of the shell target, which may be a while after whatever
-  # broke it. SCRUM-44 (exo_file_*) and SCRUM-237 (per-program volumes) are
-  # future ring-3 consumers besides the shell.
+  # broke it. exo_file.c (SCRUM-44) is covered here too: no ring-3 target
+  # links it until the FILE* shim (SCRUM-42), so this gate is its only
+  # ring-3 build.
   #
   # So: compile every source a second time with probe_cflags (the ring-3
   # CFLAGS, -mcmodel=large) and WITHOUT -DEXO_KERNEL, which selects the
@@ -780,7 +1047,7 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   #
   # Objects go to a scratch dir and are never added to $objs: the kernel
   # image links the -DEXO_KERNEL build, not this one.
-  exofs_r3_allowed="libos_heap_alloc libos_heap_free memcmp memcpy memset strlen"
+  exofs_r3_allowed="exo_stdio_set_backend libos_heap_alloc libos_heap_free memcmp memcpy memset strlen"
   rm -rf build/exofs_ring3 && mkdir -p build/exofs_ring3
   _compile_exofs_ring3_one() {
     local c="$1" o="$2"
@@ -798,11 +1065,13 @@ if [[ "${TESTING:-0}" == "1" ]]; then
     exit 1
   }
 
-  # nm -u lists undefined symbols. exofs_* ones resolve within the library
-  # itself once all the objects are linked together, so drop them and judge
-  # what is left.
+  # nm -u lists undefined symbols. exofs_* and exo_file_* ones resolve within
+  # the library itself once all the objects are linked together, so drop them
+  # and judge what is left. exo_stdio_set_backend (src/stdio.c, the libc shim)
+  # is what src/libos_fs/exo_file_stdio.c plugs into (SCRUM-42/75).
   exofs_r3_undef=$(x86_64-elf-nm -u build/exofs_ring3/*.o \
-                   | awk '{ print $2 }' | sort -u | grep -v '^exofs_' || true)
+                   | awk '{ print $2 }' | sort -u \
+                   | grep -v -e '^exofs_' -e '^exo_file_' || true)
   exofs_r3_bad=""
   for sym in ${exofs_r3_undef}; do
     case " ${exofs_r3_allowed} " in
@@ -906,7 +1175,7 @@ fi
 
 echo "[6/7] Build ISO staging tree"
 # No more freedoom2.wad module here (SCRUM-190): the WAD now lives in
-# build/exodoom_disk.img, built by step [1b/7] and attached as a separate
+# build/exodoom_disk.img, written by step [2e2/7] (formatted tool built in [1b/7]) and attached as a separate
 # QEMU -drive (see Makefile), not staged into the ISO at all.
 mkdir -p build/isodir/boot
 cp build/exodoom build/isodir/boot/exodoom
@@ -916,4 +1185,4 @@ echo "[7/7] Create ISO -> build/exodoom.iso"
 grub-mkrescue -o build/exodoom.iso build/isodir >/dev/null
 
 echo "Done:"
-ls -lh build/exodoom build/exodoom.iso build/exodoom_disk.img
+ls -lh build/exodoom build/exodoom.iso build/exodoom_disk.img build/exodoom_disk2.img build/usb.img

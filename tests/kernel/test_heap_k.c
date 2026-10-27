@@ -4,7 +4,7 @@
  * Drives src/heap.c directly (heap_alloc/heap_free/heap_realloc), plus a
  * couple of sanity checks that kmalloc/kfree/krealloc (src/memory.c) route
  * to it once the PMM is live -- which it always is by the time tests run
- * (see kernel_main's boot order in CLAUDE.md).
+ * (see kernel_main's boot order in docs/architecture.md §4).
  */
 
 #include "kunit.h"

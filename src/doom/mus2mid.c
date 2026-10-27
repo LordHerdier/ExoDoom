@@ -468,6 +468,17 @@ boolean mus2mid(MEMFILE *musinput, MEMFILE *midioutput)
     // Used in building up time delays
     unsigned int timedelay;
 
+    /* ExoDoom (SCRUM-215).  Upstream converts once per song change and leans
+     * on these file-scope statics' initialisers, so a conversion that fails
+     * mid-stream leaves its pending delay in queuedtime and every conversion
+     * leaves its last volumes in channelvelocities -- both then leak into the
+     * next song.  Reset them here so each call starts from the same state. */
+    queuedtime = 0;
+    for (channel = 0; channel < NUM_CHANNELS; ++channel)
+    {
+        channelvelocities[channel] = 127;
+    }
+
     // Initialise channel map to mark all channels as unused.
 
     for (channel=0; channel<NUM_CHANNELS; ++channel)

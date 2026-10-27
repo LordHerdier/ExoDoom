@@ -85,13 +85,25 @@ void host_blockdev_close(void)
     g_sectors = 0;
 }
 
-int exofs_bdev_acquire(void)
+/* One image file is one device: `dev` (SCRUM-244) has nothing to select
+ * here, so it is accepted and ignored like the binding itself. */
+int exofs_bdev_acquire(uint32_t dev)
 {
+    (void)dev;
     return 0;
 }
 
-void exofs_bdev_release(void)
+int exofs_bdev_acquire_extent(uint32_t dev, uint32_t base, uint32_t count)
 {
+    (void)dev;
+    (void)base;
+    (void)count;
+    return 0;
+}
+
+void exofs_bdev_release(uint32_t dev)
+{
+    (void)dev;
 }
 
 uint32_t exofs_bdev_ticks(void)
@@ -99,8 +111,9 @@ uint32_t exofs_bdev_ticks(void)
     return 0;
 }
 
-int exofs_bdev_read(uint32_t lba, void *buf, uint32_t count)
+int exofs_bdev_read(uint32_t dev, uint32_t lba, void *buf, uint32_t count)
 {
+    (void)dev;
     if (count == 0) return 0;
     if (!g_img || buf == NULL) return -1;
 
@@ -114,8 +127,10 @@ int exofs_bdev_read(uint32_t lba, void *buf, uint32_t count)
     return 0;
 }
 
-int exofs_bdev_write(uint32_t lba, const void *buf, uint32_t count)
+int exofs_bdev_write(uint32_t dev, uint32_t lba, const void *buf,
+                     uint32_t count)
 {
+    (void)dev;
     if (count == 0) return 0;
     if (!g_img || buf == NULL || g_read_only) return -1;
 

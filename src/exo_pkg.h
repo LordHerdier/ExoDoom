@@ -44,6 +44,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "exo_volume.h"
+
 #define EXO_PKG_MAGIC   0x4B504F45u /* "EOPK" read as a little-endian u32 */
 #define EXO_PKG_VERSION 1u
 
@@ -54,6 +56,18 @@
 #define EXO_PKG_WANT_FRAMEBUFFER (1u << 0)
 #define EXO_PKG_WANT_DISK        (1u << 1)
 #define EXO_PKG_WANT_KEYBOARD    (1u << 2)
+#define EXO_PKG_WANT_WAD         (1u << 3) /* mount the IWAD and patch the program's
+                                            * first .data global (params_len must be
+                                            * sizeof(libos_wad_params_t), 16), SCRUM-232 */
+#define EXO_PKG_WANT_PROGRAM_RO  (1u << 4) /* may bind the program volume (the one
+                                            * `install` writes packages and the IWAD
+                                            * to) read-only: exo_disk_acquire of the
+                                            * extent exo_disk_extent (#37) reports,
+                                            * reads only (SCRUM-75). Needs
+                                            * EXO_PKG_WANT_DISK; may be combined with
+                                            * a private volume of its own (SCRUM-267),
+                                            * which exo_disk_extent_role() then tells
+                                            * apart. */
 
 /* Negative sentinel returns for exo_pkg_pack()/exo_pkg_parse(). Deliberately
  * NOT src/exo_errno.h's -EXO_E* space: that header is kernel/LibOS-only and
@@ -65,6 +79,12 @@
 #define EXO_PKG_ESHORT   (-4) /* buf_len is too small to hold even the
                                 * header, or less than header + the lengths
                                 * the header itself declares */
+#define EXO_PKG_EINVAL   (-5) /* a manifest field is malformed: non-zero
+                                * reserved[], min_pages > recommended_pages,
+                                * stack_pages == 0, sound_voices over
+                                * EXO_PKG_MAX_SOUND_VOICES, or an unknown
+                                * want_flags bit, or a volume request that
+                                * is inconsistent (see volume_slot) */
 
 /* Mirrors src/libos_launch.h's LIBOS_LAUNCH_MAX_CODE_PAGES/
  * LIBOS_LAUNCH_MAX_DATA_PAGES/LIBOS_LAUNCH_STACK_PAGES -- this format
@@ -72,14 +92,25 @@
  * than inventing its own. Restated here as plain integers (not by
  * #including libos_launch.h) because that header pulls in exo_syscall.h,
  * which is kernel/LibOS-only; keeping exo_pkg.h host-includable matters
- * more than deduplicating three constants, and a _Static_assert in
- * src/libos_launch.h itself (see its own comment) is what would catch the
- * two drifting apart.
+ * more than deduplicating three constants. src/libos_launch.h includes
+ * this header and _Static_asserts the two sets equal, which is what catches
+ * them drifting apart.
  */
 #define EXO_PKG_MAX_CODE_PAGES  192u
 #define EXO_PKG_MAX_DATA_PAGES  192u
 #define EXO_PKG_MAX_STACK_PAGES 16u
 #define EXO_PKG_PAGE_SIZE       0x1000u
+
+/* Restates src/pcm_mixer.h's PCM_MIXER_VOICES for the same reason as the
+ * page caps above; tests/kernel/test_exo_pkg_k.c, which sees both headers,
+ * asserts they agree. */
+#define EXO_PKG_MAX_SOUND_VOICES 8u
+
+/* Every want_flags bit this version defines; anything else is rejected so a
+ * v1 parser never silently accepts a request it does not understand. */
+#define EXO_PKG_WANT_ALL (EXO_PKG_WANT_FRAMEBUFFER | EXO_PKG_WANT_DISK | \
+                          EXO_PKG_WANT_KEYBOARD | \
+                          EXO_PKG_WANT_WAD | EXO_PKG_WANT_PROGRAM_RO)
 
 typedef struct {
     uint32_t magic;   /* EXO_PKG_MAGIC */
@@ -102,9 +133,122 @@ typedef struct {
     uint32_t sound_voices; /* voices wanted, 0 = none */
     uint32_t want_flags;   /* EXO_PKG_WANT_* bitmask */
 
-    uint32_t reserved[4]; /* must be zero; keeps the header growable without
-                            * bumping EXO_PKG_VERSION for every new field */
+    /* Filesystem volume request (SCRUM-237, src/exo_volume.h). A program that
+     * wants a private volume of its own sets volume_sectors != 0 and names
+     * the slot of the disk's volume region it owns; the kernel binds exactly
+     * that sector extent for it at launch. volume_sectors == 0 means no
+     * volume, and volume_slot must then be 0. A volume is a disk resource, so
+     * it requires EXO_PKG_WANT_DISK. These two fields were reserved[0..1]; a
+     * v1 parser that predates them rejects a package using them as EINVAL
+     * (non-zero reserved), which is the failure the reserved[] rule exists
+     * to produce, so there is no version bump. */
+    uint32_t volume_slot;    /* < EXO_VOLUME_MAX_SLOTS                      */
+    uint32_t volume_sectors; /* 0 = none, else <= EXO_VOLUME_SLOT_SECTORS   */
+
+    uint32_t reserved[2]; /* must be zero; keeps the header growable without
+                            * bumping EXO_PKG_VERSION for every new field --
+                            * which only holds because v1 pack/parse reject
+                            * a non-zero value (EXO_PKG_EINVAL), so a future
+                            * package that uses one cannot be mistaken for v1 */
 } exo_pkg_header_t;
+
+/* On-disk layout: 15 u32 fields (13 named + reserved[2]), no padding. Changing this is a format
+ * change and needs an EXO_PKG_VERSION bump. */
+_Static_assert(sizeof(exo_pkg_header_t) == 60,
+               "exo_pkg_header_t is an on-disk layout");
+
+/* Pages a launch takes from the PMM before the program runs a single
+ * instruction (SCRUM-232): the code, the data+bss, the fixed stack and the
+ * page-table pages libos_build_image() builds around them. This is what
+ * min_pages must at least be -- a manifest below it admits a program that
+ * then fails inside the loader, which is the failure the admission check
+ * exists to replace. Shared so the packer (tools/exopkg) and the kernel test
+ * that measures a real launch against it use one formula.
+ *
+ * The stack is EXO_PKG_MAX_STACK_PAGES, not the header's stack_pages: the
+ * builder always maps LIBOS_LAUNCH_STACK_PAGES (== the max), and stack_pages
+ * is advisory until it takes a count (docs/architecture.md SS7). */
+#define EXO_PKG_TABLE_PAGES 4u /* PML4 + PDPT + PD + PT; measured, see
+                                * tests/kernel/test_launch_pkg_k.c */
+/* EXO_PKG_WANT_WAD adds the IWAD mapping (src/libos_wad_map.h): the WAD's
+ * pages are shared, but the page tables over them are the program's own, one
+ * PT per 2 MiB. The manifest cannot know the WAD's size, so this is the
+ * worst case -- LIBOS_WAD_MAX_BYTES (64 MiB) / 2 MiB, plus one for an
+ * unaligned start. That makes min_pages a conservative bound, not an exact
+ * footprint: a real launch takes at most this many, and
+ * tests/kernel/test_launch_pkg_k.c asserts it. */
+#define EXO_PKG_WAD_TABLE_PAGES 33u
+
+static inline uint32_t exo_pkg_pages(uint64_t bytes)
+{
+    return (uint32_t)((bytes + EXO_PKG_PAGE_SIZE - 1) / EXO_PKG_PAGE_SIZE);
+}
+
+static inline uint32_t exo_pkg_footprint_pages(uint32_t code_len,
+                                               uint32_t data_len,
+                                               uint32_t bss_len,
+                                               uint32_t want_flags)
+{
+    return exo_pkg_pages(code_len) +
+           exo_pkg_pages((uint64_t)data_len + bss_len) +
+           EXO_PKG_MAX_STACK_PAGES + EXO_PKG_TABLE_PAGES +
+           ((want_flags & EXO_PKG_WANT_WAD) ? EXO_PKG_WAD_TABLE_PAGES : 0u);
+}
+
+/* Everything pack and parse both check about a header, in one place so the
+ * two cannot disagree on what a valid package is. Returns 0 or an
+ * EXO_PKG_E* code; says nothing about buffer lengths. */
+static inline int exo_pkg_check_header(const exo_pkg_header_t *hdr) {
+    if (hdr->magic != EXO_PKG_MAGIC)
+        return EXO_PKG_EMAGIC;
+    if (hdr->version != EXO_PKG_VERSION)
+        return EXO_PKG_EVERSION;
+
+    if (hdr->code_len > EXO_PKG_MAX_CODE_PAGES * EXO_PKG_PAGE_SIZE)
+        return EXO_PKG_ETOOBIG;
+    if ((uint64_t)hdr->data_len + (uint64_t)hdr->bss_len >
+        (uint64_t)EXO_PKG_MAX_DATA_PAGES * EXO_PKG_PAGE_SIZE)
+        return EXO_PKG_ETOOBIG;
+    if (hdr->stack_pages > EXO_PKG_MAX_STACK_PAGES)
+        return EXO_PKG_ETOOBIG;
+    if (hdr->params_len > hdr->data_len)
+        return EXO_PKG_ETOOBIG;
+
+    for (int i = 0; i < 2; i++)
+        if (hdr->reserved[i] != 0)
+            return EXO_PKG_EINVAL;
+    if (hdr->stack_pages < 1)
+        return EXO_PKG_EINVAL;
+    if (hdr->min_pages > hdr->recommended_pages)
+        return EXO_PKG_EINVAL;
+    if (hdr->sound_voices > EXO_PKG_MAX_SOUND_VOICES)
+        return EXO_PKG_EINVAL;
+    if (hdr->want_flags & ~EXO_PKG_WANT_ALL)
+        return EXO_PKG_EINVAL;
+
+    if (hdr->volume_sectors == 0) {
+        if (hdr->volume_slot != 0)
+            return EXO_PKG_EINVAL;
+    } else {
+        if (!(hdr->want_flags & EXO_PKG_WANT_DISK))
+            return EXO_PKG_EINVAL;
+        if (hdr->volume_slot >= EXO_VOLUME_MAX_SLOTS)
+            return EXO_PKG_EINVAL;
+        if (hdr->volume_sectors > EXO_VOLUME_SLOT_SECTORS)
+            return EXO_PKG_EINVAL;
+    }
+
+    /* The program volume is a disk resource too. It may accompany a private
+     * volume (SCRUM-267: Doom reads the IWAD from one and saves to the
+     * other); the two extents are disjoint by construction, the private slot
+     * lying past EXO_VOLUME_REGION_BASE_LBA. */
+    if (hdr->want_flags & EXO_PKG_WANT_PROGRAM_RO) {
+        if (!(hdr->want_flags & EXO_PKG_WANT_DISK))
+            return EXO_PKG_EINVAL;
+    }
+
+    return 0;
+}
 
 /*
  * Validate `*hdr` and write header + `code_len` bytes of `code` +
@@ -112,6 +256,7 @@ typedef struct {
  * between sections.
  *
  * Rejects (before writing anything):
+ *   - EXO_PKG_EINVAL for a malformed manifest (see exo_pkg_check_header()).
  *   - EXO_PKG_EMAGIC / EXO_PKG_EVERSION if hdr->magic/version aren't what
  *     this header defines -- callers fill those two fields in themselves
  *     (same struct, not an implicit side effect of calling pack), so this
@@ -132,28 +277,19 @@ static inline int exo_pkg_pack(void *buf, size_t buf_cap,
                                const exo_pkg_header_t *hdr,
                                const void *code, const void *data,
                                size_t *out_len) {
-    if (hdr->magic != EXO_PKG_MAGIC)
-        return EXO_PKG_EMAGIC;
-    if (hdr->version != EXO_PKG_VERSION)
-        return EXO_PKG_EVERSION;
-
-    if (hdr->code_len > EXO_PKG_MAX_CODE_PAGES * EXO_PKG_PAGE_SIZE)
-        return EXO_PKG_ETOOBIG;
-    if ((uint64_t)hdr->data_len + (uint64_t)hdr->bss_len >
-        (uint64_t)EXO_PKG_MAX_DATA_PAGES * EXO_PKG_PAGE_SIZE)
-        return EXO_PKG_ETOOBIG;
-    if (hdr->stack_pages > EXO_PKG_MAX_STACK_PAGES)
-        return EXO_PKG_ETOOBIG;
-    if (hdr->params_len > hdr->data_len)
-        return EXO_PKG_ETOOBIG;
+    int rc = exo_pkg_check_header(hdr);
+    if (rc != 0)
+        return rc;
 
     size_t total = sizeof(*hdr) + (size_t)hdr->code_len + (size_t)hdr->data_len;
     if (buf_cap < total)
         return EXO_PKG_ESHORT;
 
     unsigned char *out = (unsigned char *)buf;
-    exo_pkg_header_t *out_hdr = (exo_pkg_header_t *)out;
-    *out_hdr = *hdr;
+    /* Byte copy, not a cast: buf may be an unaligned view of a disk read. */
+    const unsigned char *hsrc = (const unsigned char *)hdr;
+    for (size_t i = 0; i < sizeof(*hdr); i++)
+        out[i] = hsrc[i];
     out += sizeof(*hdr);
 
     if (hdr->code_len > 0) {
@@ -200,20 +336,9 @@ static inline int exo_pkg_parse(const void *buf, size_t buf_len,
     for (size_t i = 0; i < sizeof(hdr); i++)
         ((unsigned char *)&hdr)[i] = in[i];
 
-    if (hdr.magic != EXO_PKG_MAGIC)
-        return EXO_PKG_EMAGIC;
-    if (hdr.version != EXO_PKG_VERSION)
-        return EXO_PKG_EVERSION;
-
-    if (hdr.code_len > EXO_PKG_MAX_CODE_PAGES * EXO_PKG_PAGE_SIZE)
-        return EXO_PKG_ETOOBIG;
-    if ((uint64_t)hdr.data_len + (uint64_t)hdr.bss_len >
-        (uint64_t)EXO_PKG_MAX_DATA_PAGES * EXO_PKG_PAGE_SIZE)
-        return EXO_PKG_ETOOBIG;
-    if (hdr.stack_pages > EXO_PKG_MAX_STACK_PAGES)
-        return EXO_PKG_ETOOBIG;
-    if (hdr.params_len > hdr.data_len)
-        return EXO_PKG_ETOOBIG;
+    int rc = exo_pkg_check_header(&hdr);
+    if (rc != 0)
+        return rc;
 
     size_t total = sizeof(hdr) + (size_t)hdr.code_len + (size_t)hdr.data_len;
     if (buf_len < total)

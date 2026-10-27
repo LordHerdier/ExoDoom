@@ -1,6 +1,7 @@
 #include "context.h"
 #include "libos_launch.h"  /* LIBOS_LAUNCH_RFLAGS */
 #include "exo_syscall.h"
+#include "fb_layout.h"
 
 #include <string.h>
 
@@ -122,6 +123,9 @@ int context_destroy(page_owner_t id) {
      * slot is still cleared either way: whatever vmm-side state exists (or
      * doesn't), this id is no longer a live context in this table. */
     int vmm_status = vmm_destroy_address_space(id);
+    /* Every teardown ends here, including launch-failure paths that never
+     * reach fb_shadow_release(): a reused id must not inherit a pane. */
+    fb_layout_clear(id);
     slot->state = CONTEXT_STATE_UNUSED;
     slot->id = PAGE_OWNER_FREE;
     return vmm_status == VMM_OK ? CONTEXT_OK : CONTEXT_ENOENT;
@@ -182,10 +186,23 @@ uint32_t context_list(context_info_t *out, uint32_t max) {
         if (contexts[i].state != CONTEXT_STATE_UNUSED) {
             out[count].id = contexts[i].id;
             out[count].state = contexts[i].state;
+            memcpy(out[count].name, contexts[i].name, CONTEXT_NAME_MAX);
             count++;
         }
     }
     return count;
+}
+
+int context_set_name(page_owner_t id, const char *name) {
+    context_t *slot = find_slot(id);
+    if (slot == NULL) {
+        return CONTEXT_ENOENT;
+    }
+    memset(slot->name, 0, CONTEXT_NAME_MAX);
+    for (int i = 0; name != NULL && i < CONTEXT_NAME_MAX - 1 && name[i] != '\0'; i++) {
+        slot->name[i] = name[i];
+    }
+    return CONTEXT_OK;
 }
 
 int context_set_state(page_owner_t id, context_state_t state) {

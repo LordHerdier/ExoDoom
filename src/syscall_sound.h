@@ -49,6 +49,15 @@
  */
 #define SOUND_PCM_MAX_SAMPLES 196608u
 
+/*
+ * The most stereo frames one exo_sound_stream_write may offer (SCRUM-219).
+ * The mixer's ring is PCM_MIXER_MUSIC_FRAMES (12288, 48 KiB), so a larger
+ * call could never be taken whole anyway; capping at the ring also bounds the
+ * copy under IF-clear to 48 KiB, well under a PIT tick, like
+ * SOUND_PCM_MAX_SAMPLES above.
+ */
+#define SOUND_STREAM_MAX_FRAMES 12288u
+
 void syscall_sound_init(void);
 
 /* Silence the speaker if `owner` started the tone now sounding, stop every
@@ -64,4 +73,15 @@ void syscall_sound_release(page_owner_t owner);
  * tests/kernel/test_syscall_sound_pcm_k.c, which has no other way to see that
  * a finished voice's pages really were reaped rather than leaked. */
 uint32_t syscall_sound_pcm_slots_used(void);
+
+/* How many of those staging rows `owner` holds -- the per-context read-out
+ * behind exo_grantstat (#39, SCRUM-235). */
+uint32_t syscall_sound_voices_of(page_owner_t owner);
 uint32_t syscall_sound_pcm_pages_used(void);
+
+/* The context holding the music stream, or PAGE_OWNER_FREE; and the kernel
+ * pages its ring occupies (0 when unbound).  For
+ * tests/kernel/test_syscall_sound_stream_k.c, which has no other way to see
+ * that stop/exit really returned the ring. */
+page_owner_t syscall_sound_stream_holder(void);
+uint32_t     syscall_sound_stream_pages_used(void);

@@ -40,8 +40,11 @@ int exofs_path_iter_next(exofs_path_iter_t *it, char *out)
     size_t len = (size_t)(it->cur - start);
 
     /* Reported, not truncated: a truncated component resolves to a
-     * different file, which is worse than failing. */
-    if (len > EXOFS_MAX_NAME) return -EXO_EINVAL;
+     * different file, which is worse than failing. len is never 0 here
+     * (the loops above stop on a non-separator), so this is only the upper
+     * bound in practice -- but it is the same rule exofs_dir_add() applies,
+     * not a second copy of it. */
+    if (!exofs_name_len_valid(len)) return -EXO_EINVAL;
 
     memcpy(out, start, len);
     out[len] = '\0';
