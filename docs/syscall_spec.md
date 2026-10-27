@@ -421,6 +421,7 @@ static inline int64_t exo_syscall1(uint64_t num, uint64_t arg1) {
 | 39 | `exo_grantstat(ctx, out)` | Introspection | ✅ | Write what context `ctx` holds to `out`, an `exo_grant_t` (`ctx_id`, `pages` = `page_count_owned`, `fb_owner` = the context holding the framebuffer binding or 0, `disk_base`/`disk_sectors` = its private volume or 0/0, `sound_voices` = mixer voices it started that still hold a staging buffer, `sound_stream` = 1 if it holds the music stream, `prog_base`/`prog_sectors` = the shared read-only program volume it was assigned or 0/0, `reserved` zeroed; 40 bytes). A context can have both volumes (§3.5a "Both at once"), so each is read out under its own name; before SCRUM-267 the struct was 32 bytes and `disk_*` held whichever single assignment the context had, so a program-volume-only context now reports `disk_sectors == 0` and fills `prog_*` instead. The size is ABI: a binary built against the 32-byte struct hands the kernel a buffer 8 bytes short. **A read-out, nothing is tracked for it:** every field comes from the table that already enforces it (page ownership, `fb_binding`, `disk_binding`, the `syscall_sound.c` rows). Unscoped introspection like #22/#38, and a snapshot. `fb_owner` is the current holder, not "did this context get it": the binding moves when a program is entered (#40), so a launcher compares it with the manifest. Sound is owned at play time, so `sound_voices` is 0 at launch; the launcher reports voices *available* from #38. **User-pointer validation:** pointer first (`exo_range_in_user_window` + `exo_user_range_mapped(…, writable)`), then the id; `*out` is written only on success. Returns `0`, `-EXO_EFAULT`, or `-EXO_ENOENT` (`ctx` names no live context). Implemented in SCRUM-235 (`src/syscall_stat.c`; `tests/kernel/test_launch_pkg_k.c`). |
 | 40 | `exo_launch_start(ctx)` | Lifecycle | ✅ | Enter the context #36 built under `EXO_LAUNCH_HOLD`: mark it `READY`, then the switch #21/#36 arm, then the manifest's framebuffer release, in that order so a refused start leaves the holder untouched. Like #21/#36, control does not return until something switches back. Only the context that built the hold may start it. Returns `0`, `-EXO_ENOENT` (`ctx` is not the outstanding hold: never held, already started, dropped by a later launch, or its row is gone), `-EXO_EPERM` (the hold belongs to a different context; it is left in place), or `-EXO_EINVAL` (the switch could not be armed; the held context is destroyed). Implemented in SCRUM-235 (`src/syscall_launch.c`). |
 | 41 | `exo_fault_info(after_seq, out)` | Introspection | ✅ | Write the oldest fault record with `seq > after_seq` to `out`, an `exo_fault_info_t` (56 bytes: `seq`, `ctx_id`, `rip`, `addr` = the faulting address for a page fault else 0, `vector`, `reason` = `EXO_FAULT_REASON_MEMORY`/`PRIVILEGED`/`ARITHMETIC`/`ILLEGAL`/`OTHER`, and the program's `name`). One record is added each time the kernel ends a ring-3 program for a CPU exception (§3.4a, SCRUM-283). The log is a ring of the last `EXO_FAULT_LOG_MAX` (8), kept apart from the context table so a record outlives the dead program's row. `seq` starts at 1 and never repeats, so a launcher remembers the last `seq` it handled and asks for "newer than that": it learns of every fault since it last looked, from whichever program, and if more than 8 happened in between it is handed the oldest still held. Pass `after_seq = 0` to read from the beginning, or `EXO_FAULT_NEWEST` (`~0`) for just the newest record: a shell the kernel has just (re)started uses that, since only the latest record explains why it exists and the older ones were reported by its predecessor. **A read-out, unscoped** like #22/#38/#39: it says that a program was ended, not what it held. `*out` is written only on success. **User-pointer validation:** `exo_range_in_user_window` + `exo_user_range_mapped(…, writable)`. Returns `0`, `-EXO_EFAULT`, or `-EXO_ENOENT` (nothing newer than `after_seq`). Implemented in SCRUM-283 (`src/syscall_fault.c`, `src/fault_record.c`; `tests/kernel/test_fault_record_k.c`, `tests/kernel/test_fault_contain_k.c`). The shell calls it after every command, at startup and while idle, and prints `program X stopped: <why>`. |
+| 42 | `exo_disk_acquire_ro(dev, base, count)` | Storage | ✅ | `exo_disk_acquire` (#26) for a caller that will only read: the extent is held **read-only** (§3.5a "Reading without an assignment"). Shares with other read-only holders, never with a read-write one; `exo_disk_write` through it returns `-EXO_EROFS`. Same arguments, return codes and precedence as #26 (`-EXO_ENODEV`, `-EXO_EINVAL`, `-EXO_EPERM`, `-EXO_EBUSY`, `-EXO_ENOMEM`); an assigned context keeps its assignment's mode. Implemented in SCRUM-281 (`src/syscall_disk.c`, `src/disk_binding.c`; `tests/kernel/test_disk_binding_k.c`). |
 
 **Introspection leaks a global view.** #22, #23, #38, #39 and #41 are deliberately
 unscoped: any caller can read every context's pages, bindings and sound voices.
@@ -428,7 +429,7 @@ That is fine for a demo and is what the `top` LibOS (SCRUM-236) is built
 on, but it means these calls are not what a normally unprivileged program would
 get; a real isolation boundary would scope or gate them.
 
-**Total: 42 syscalls.** This is the complete interface needed to run Doom with
+**Total: 43 syscalls.** This is the complete interface needed to run Doom with
 save/load, config, sound, and cooperative multitasking, plus the single
 argument-based LibOS-launch syscall (#21) that backs the shell's interactive
 demo commands and its package-based sibling (#36, SCRUM-230) that launches a
@@ -1055,8 +1056,24 @@ the assignment is **read-only** (`exo_disk_write` → `-EXO_EROFS`, checked befo
 the buffer), it grants **no exclusivity** (the shell still binds those sectors
 read-write), and **read-only holders may overlap each other** but never a
 read-write extent — either order is `-EXO_EBUSY`. `exo_disk_extent` (#37)
-reports it like any assignment. Consequence: while such a program holds the
-volume, the shell's `programs`/`run`/`install` find it busy.
+reports it like any assignment.
+
+**Reading without an assignment (SCRUM-281).** The shell holds no assignment but
+only *reads* the program volume to `run` or list programs, so it binds it with
+`exo_disk_acquire_ro` (#42). That is the same extent acquire with the extent
+held read-only: it shares with read-only holders (Doom's assignment included),
+conflicts with every read-write holder in either order, and `exo_disk_write`
+through it is `-EXO_EROFS`. A context that *has* an assignment gets the mode of
+its assignment whichever call it uses, so #42 reaches nothing #26 could not.
+Re-acquiring a held extent in the *other* mode is `-EXO_EBUSY` (release first),
+never an "ok" that keeps the old mode.
+`disk_binding_assign_ro` likewise tolerates a read-only holder when a program
+is launched onto the volume, but refuses a read-write one. Consequence: `run`
+and `programs` work while a program holds the volume; `install`, `mkfs` and
+every other command that writes still bind read-write and find it busy
+(`-EXO_EBUSY`) until the reader lets go. #42 is a separate number, not a flag
+on #26, because `exo_disk_acquire` passes three arguments and leaves the fourth
+register unset: a program already built against it would hand the kernel noise.
 
 **Both at once (SCRUM-267).** A manifest may carry `progvol` *and* a private
 volume, which is Doom's shape: the IWAD is read from the program volume for the
