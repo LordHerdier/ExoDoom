@@ -619,18 +619,31 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
  *   -EXO_ENOENT   `ctx` is not the held context
  *   -EXO_EPERM    the hold was built by another context
  *   -EXO_EINVAL   the switch could not be armed; the held context is gone */
+int64_t launch_hold_check(page_owner_t ctx, page_owner_t launcher)
+{
+    if (!launch_held_is_live() || ctx != held.id) {
+        return -EXO_ENOENT;
+    }
+    if (held.owner != launcher) {
+        return -EXO_EPERM;
+    }
+    return 0;
+}
+
 static int64_t sys_launch_start(uint64_t ctx, uint64_t a2, uint64_t a3,
                                 uint64_t a4, uint64_t a5, uint64_t a6)
 {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
 
-    if (!launch_held_is_live() || ctx != held.id) {
-        return -EXO_ENOENT;
-    }
     /* Only the launcher that built it may enter it: the entry displaces the
      * framebuffer holder when the manifest asks (the known gap above). */
-    if (held.owner != syscall_current_context()) {
-        return -EXO_EPERM;
+    if (ctx > (page_owner_t)~0u) {
+        return -EXO_ENOENT;
+    }
+    int64_t hrc = launch_hold_check((page_owner_t)ctx,
+                                    syscall_current_context());
+    if (hrc != 0) {
+        return hrc;
     }
 
     page_owner_t id = held.id;

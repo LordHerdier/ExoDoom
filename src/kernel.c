@@ -35,6 +35,7 @@
 #include "syscall_sound.h"
 #include "syscall_yield.h"
 #include "syscall_launch.h"
+#include "syscall_pane.h"
 #include "fb_binding.h"
 #include "fb_shadow.h"
 #include "revoke.h"
@@ -512,6 +513,12 @@ void kernel_main(void *mb2_info_ptr) {
     // Same placement rule as every other syscall *_init(): after
     // syscall_init(), ahead of the TESTING branch.
     syscall_launch_init();
+
+    // ── Pane placement syscall (SCRUM-296) ───────────────────────────────
+    // Binds exo_pane_set (#42): a launcher places the context it holds in
+    // the split screen before starting it. Authority is the hold's
+    // (syscall_launch.c), so it sits right after the launch syscalls.
+    syscall_pane_init();
 
 #ifdef TESTING
     // No blanket `sti` here: several suites (fault, tss, libos_launch,

@@ -1,5 +1,9 @@
 #pragma once
 
+#include <stdint.h>
+
+#include "page_alloc.h"   /* page_owner_t */
+
 /*
  * syscall_launch.h — the EXO_SYS_LAUNCH handler (SCRUM-178, SCRUM-184).
  *
@@ -26,3 +30,12 @@
  * every other syscall_*_init() follows) and ahead of the TESTING branch.
  */
 void syscall_launch_init(void);
+
+/*
+ * Whether `ctx` is the context #36 built under EXO_LAUNCH_HOLD and not yet
+ * started, built by `launcher` (SCRUM-296): 0 if so, -EXO_ENOENT if `ctx` is
+ * not a live hold, -EXO_EPERM if it is someone else's. The rule #40 enters a
+ * hold under, shared with anything else only a launcher may do to its hold
+ * before starting it (exo_pane_set, #42).
+ */
+int64_t launch_hold_check(page_owner_t ctx, page_owner_t launcher);
