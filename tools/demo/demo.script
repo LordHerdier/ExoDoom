@@ -31,7 +31,7 @@ type clear
 type programs
 shot 03-programs
 
-# Beats 4-5 -- specs and the resource grant (serial), then run it
+# Beats 4-5 -- specs and the resource grant (serial and shell screen), then run it
 type run snake.exo
 wait 3
 # Snake idles on its start banner until an arrow key; q quits from there

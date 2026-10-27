@@ -1486,11 +1486,13 @@ static int shell_admit_report(fb_console_t *con, const exo_pkg_header_t *parsed)
 
 /* Launch a package and log its resource grant first (SCRUM-235): build the
  * context without entering it, read what it holds (exo_grantstat, #39), write
- * that next to what the manifest asked for to COM1, then enter it (#40).
- * Returns what exo_launch_pkg()/exo_launch_start() would. Serial only: the
- * program takes the screen the moment it runs, so an on-screen copy would
- * either vanish unread or need the shell to hold the launch back. */
-static int64_t shell_launch_with_grant(const void *pkg, uint32_t len,
+ * that next to what the manifest asked for to COM1 and to the shell console
+ * (SCRUM-272), then enter it (#40). Returns what
+ * exo_launch_pkg()/exo_launch_start() would. The program takes the screen the
+ * moment it runs, so the on-screen copy is not seen until the shell is shown
+ * again; it stays in the shell's own shadow until then (SCRUM-292), so there
+ * is no pause. */
+static int64_t shell_launch_with_grant(fb_console_t *con, const void *pkg, uint32_t len,
                                        const exo_pkg_header_t *hdr,
                                        const char *prog_name) {
     if (hdr == NULL) {
@@ -1510,9 +1512,11 @@ static int64_t shell_launch_with_grant(const void *pkg, uint32_t len,
         size_t n = exo_grant_format(text, sizeof(text), hdr, &g, &res,
                                     g.fb_owner);
         exo_serial_write(text, n);
+        fbcon_write(con, text);
     } else {
         static const char unavailable[] = "run: grant read-out unavailable\n";
         exo_serial_write(unavailable, sizeof(unavailable) - 1);
+        fbcon_write(con, unavailable);
     }
     return exo_launch_start((uint64_t)ctx);
 }
@@ -1712,7 +1716,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         }
     }
 
-    int64_t lrc = shell_launch_with_grant(pkg, st.size, have_hdr ? &hdr : NULL,
+    int64_t lrc = shell_launch_with_grant(con, pkg, st.size, have_hdr ? &hdr : NULL,
                                           prog_name);
     libos_heap_free(pkg);
     if (lrc == 0) {
