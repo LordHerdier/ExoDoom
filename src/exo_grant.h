@@ -121,8 +121,15 @@ EXO_GRANT_INLINE size_t exo_grant_format(char *buf, size_t cap,
      * once (SCRUM-267, Doom), so each gets its own line and neither hides the
      * other. */
     if (g->disk_sectors != 0) {
+        /* The slot the kernel picked, not the manifest's first one: a package
+         * may name several (SCRUM-280), and the assigned extent says which. */
         exo_grant_puts(&o, "volume slot ");
-        exo_grant_putu(&o, hdr->volume_slot);
+        int in_region = g->disk_base >= EXO_VOLUME_REGION_BASE_LBA &&
+                        g->disk_base < EXO_VOLUME_REGION_END_LBA;
+        exo_grant_putu(&o, in_region
+                               ? (g->disk_base - EXO_VOLUME_REGION_BASE_LBA) /
+                                     EXO_VOLUME_SLOT_SECTORS
+                               : hdr->volume_slot);
         exo_grant_puts(&o, ", ");
         exo_grant_putu(&o, g->disk_sectors);
         exo_grant_puts(&o, " sectors from ");

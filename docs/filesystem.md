@@ -763,10 +763,22 @@ rebuild finds an empty install disk.
 
 Doom is the first real program with a private volume. Its package asks for
 both volumes (`docker/scripts/build.sh`): `progvol`, the read-only program
-volume holding the IWAD, and `--volume-slot 2 --volume-sectors 8192`, a 4 MiB
-slot of its own (`EXO_VOLUME_SLOT_DOOM`, `src/exo_volume.h`). The kernel assigns
-both at launch (`docs/syscall_spec.md` §3.5a "Both at once"), so Doom holds
-both extents for its whole run and can reach nothing else on the disk.
+volume holding the IWAD, and `--volume-slot 2 --volume-slots 2
+--volume-sectors 8192`, a 4 MiB slot of its own out of slots 2 and 3
+(`EXO_VOLUME_SLOT_DOOM`/`EXO_VOLUME_SLOTS_DOOM`, `src/exo_volume.h`). The
+kernel assigns both at launch (`docs/syscall_spec.md` §3.5a "Both at once"),
+so Doom holds both extents for its whole run and can reach nothing else on the
+disk.
+
+**Two Dooms, two save volumes (SCRUM-280).** The private volume is the first
+of slots 2 and 3 no running program holds (`docs/syscall_spec.md` §3.5a "One
+slot per instance"). A single Doom always gets slot 2, so its saves are where
+they always were; a second Doom started while the first runs gets slot 3, with
+its own saves and
+its own config, and the two never write the same volume. A third is refused
+with `-EXO_EBUSY` while both run. Nothing about the slot is remembered between
+launches: if the first Doom quits and is started again while the second still
+runs, it gets slot 2 back.
 
 `DG_Init` (`src/doomgeneric_exo.c`) mounts them in this order:
 
@@ -795,8 +807,8 @@ running still has to unmount first (§8 "Unmount before releasing the binding").
 What ends up on the slot: savegames are `/.savegame/doomsav0.dsg` to
 `doomsav5.dsg` (about 50 KB each for a Freedoom level; the engine's config
 directory is `.`, which Doom joins into `./.savegame/`). `mount disk0:vol5 <dir>`
-from the shell browses them while Doom is not running; while it is, the slot
-reads as in use.
+(slot 2; slot 3 is `vol6`) from the shell browses them while Doom is not
+running; while it is, the slot reads as in use.
 
 **Saves outlive a boot, not a build.** The slot is on the disk image, so it
 persists exactly as long as that image does, and most of the make targets

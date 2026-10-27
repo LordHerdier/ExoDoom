@@ -698,10 +698,12 @@ package_ring3_target libos_crash      src/libos_crash      crash.exo   fb,kbd
 package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,kbd,wad \
   --params-len 16
 # SCRUM-267: Doom reads the IWAD off the program volume (progvol) and keeps
-# its savegames and config in a private volume of its own. The slot is
-# EXO_VOLUME_SLOT_DOOM in src/exo_volume.h: change both together.
+# its savegames and config in a private volume of its own. SCRUM-280: two
+# slots, so a second Doom running alongside the first gets saves of its own
+# rather than -EBUSY. EXO_VOLUME_SLOT_DOOM/EXO_VOLUME_SLOTS_DOOM in
+# src/exo_volume.h: change both together.
 package_ring3_target libos_doom       src/libos_doom       doom.exo    fb,disk,kbd,progvol \
-  --sound-voices 8 --volume-slot 2 --volume-sectors 8192
+  --sound-voices 8 --volume-slot 2 --volume-slots 2 --volume-sectors 8192
 # SCRUM-237: one program, two packages, each requesting a private volume
 # (docs/architecture.md, src/exo_volume.h). Only the slot differs.
 package_ring3_target libos_voldemo    src/libos_voldemo    voldemoa.exo fb,disk,kbd \

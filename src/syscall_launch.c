@@ -460,13 +460,13 @@ _Static_assert(EXO_LAUNCH_PKG_MAX_LEN ==
  * buffer again, and libos_build_image() copies them exactly once.
  */
 static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
-                              uint64_t name_ptr, uint64_t a5, uint64_t a6)
+                              uint64_t name_ptr, uint64_t slot, uint64_t a6)
 {
-    (void)a5; (void)a6;
+    (void)a6;
 
     /* Shape first, like the length: a flag this kernel does not know is a
      * caller that expects behavior it will not get. */
-    if ((flags & ~(uint64_t)EXO_LAUNCH_HOLD) != 0) {
+    if ((flags & ~(uint64_t)(EXO_LAUNCH_HOLD | EXO_LAUNCH_SLOT)) != 0) {
         return -EXO_EINVAL;
     }
     if (len < sizeof(exo_pkg_header_t) || len > EXO_LAUNCH_PKG_MAX_LEN) {
@@ -510,6 +510,20 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
      * row exists rather than after. */
     if (hdr.code_len == 0) {
         return -EXO_EINVAL;
+    }
+
+    /* The slots this launch may assign (SCRUM-280): the package's range, or
+     * the one slot the launcher named, which must be in that range -- so a
+     * launcher can pick among a program's own slots but never hand it
+     * another program's. */
+    uint32_t slot_first = hdr.volume_slot;
+    uint32_t slot_count = exo_pkg_volume_slot_count(&hdr);
+    if (flags & EXO_LAUNCH_SLOT) {
+        if (slot < slot_first || slot - slot_first >= slot_count) {
+            return -EXO_EINVAL;
+        }
+        slot_first = (uint32_t)slot;
+        slot_count = 1;
     }
 
     launch_reclaim_exited();
@@ -559,11 +573,17 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
     /* The manifest's volume request becomes a sector extent the program alone
      * may bind (SCRUM-237). Done after the image exists but before the
      * program runs, and undone with the context if it cannot be granted --
-     * another running program already holds that slot, say. */
+     * every slot it may have is held by another running program, say. The
+     * first free slot of its range wins (SCRUM-280), so a second instance of
+     * a program gets a volume of its own instead of -EXO_EBUSY; only "held"
+     * moves on to the next slot, any other refusal is final. */
     int arc = DISK_BIND_OK;
-    if (hdr.volume_sectors != 0) {
-        arc = disk_binding_assign(id, exo_volume_slot_base(hdr.volume_slot),
+    for (uint32_t s = 0; s < slot_count; s++) {
+        arc = disk_binding_assign(id, exo_volume_slot_base(slot_first + s),
                                   hdr.volume_sectors);
+        if (arc != DISK_BIND_EBUSY) {
+            break;
+        }
     }
     /* Not an else-branch since SCRUM-267: Doom has a private volume for its
      * saves and reads the IWAD off the program volume, both for its whole
