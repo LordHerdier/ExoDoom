@@ -4,7 +4,7 @@
 #include "page_alloc.h"   /* page_owner_t */
 #include "ps2.h"          /* kbd_event_t */
 #include "usb_kbd.h"      /* USB_KBD_MAX */
-#include "exo_syscall.h"  /* EXO_KBD_SRC_* */
+#include "exo_kbd_src.h"  /* EXO_KBD_SRC_* */
 
 /*
  * kbd_source.h -- which keyboard feeds which context (SCRUM-199, epic
@@ -25,7 +25,7 @@
  * who is on screen.
  */
 
-/* The numbers are the public ones (EXO_KBD_SRC_*, src/exo_syscall.h). */
+/* The numbers are the public ones (EXO_KBD_SRC_*, src/exo_kbd_src.h). */
 #define KBD_SRC_NONE      (-1)
 #define KBD_SRC_PS2       ((int)EXO_KBD_SRC_PS2)
 #define KBD_SRC_USB(n)    ((int)EXO_KBD_SRC_USB(n))

@@ -5,6 +5,7 @@
 #endif
 
 #include "exo_errno.h"
+#include "exo_kbd_src.h"
 
 /*
  * exo_syscall.h — ExoDoom exokernel syscall ABI (SCRUM-24).
@@ -371,14 +372,6 @@ typedef struct {
 /* Flag for exo_pane_set's last argument (SCRUM-296): drop the pane instead of
  * setting one; the rect is ignored.  exo_pane_clear() passes it. */
 #define EXO_PANE_CLEAR    1u
-
-/* Keyboard sources for exo_kbd_bind's second argument (SCRUM-297).  One
- * namespace for the PS/2 keyboard and every USB keyboard; `usb:N` is the
- * keyboard's enumeration index, which can change between boots or ports.
- * EXO_KBD_SRC_NONE unbinds. */
-#define EXO_KBD_SRC_NONE      ((uint64_t)-1)
-#define EXO_KBD_SRC_PS2       0u
-#define EXO_KBD_SRC_USB(n)    (1u + (uint32_t)(n))
 
 /* Flag for exo_launch_pkg's third argument (SCRUM-280): give the program
  * exactly the volume slot in the fifth argument, which must be one of the

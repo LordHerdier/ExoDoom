@@ -78,8 +78,7 @@ static void test_numbers_match_spec(void)
 
 /* The dispatcher will range-check against EXO_SYS_COUNT, so it has to stay one
  * past the last number — 45 as of exo_kbd_bind (SCRUM-297), after
- * exo_pane_set (SCRUM-296),
- * exo_disk_acquire_ro (SCRUM-281),
+ * exo_pane_set (SCRUM-296), exo_disk_acquire_ro (SCRUM-281),
  * exo_fault_info (SCRUM-283),
  * exo_grantstat/exo_launch_start (SCRUM-235), exo_resstat (SCRUM-232) and the
  * per-program volume extent (SCRUM-237). */

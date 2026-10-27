@@ -446,7 +446,7 @@ rather than popping that context's keys.
   `src/syscall_kbd_bind.c`): a launcher binds a source to the context it
   holds, with the same authority as `exo_pane_set`, so a running program
   cannot rebind. The public source numbers (`EXO_KBD_SRC_PS2`,
-  `EXO_KBD_SRC_USB(n)`, `EXO_KBD_SRC_NONE`) are in `src/exo_syscall.h`;
+  `EXO_KBD_SRC_USB(n)`, `EXO_KBD_SRC_NONE`) are in `src/exo_kbd_src.h`;
   `usb:N` is the enumeration index, and a vendor:product name is resolved to
   an index before the call. `docs/syscall_spec.md` row 44. Tests: `kbd_source`
   (`tests/kernel/test_kbd_source_k.c`) and `syscall_kbd_bind`

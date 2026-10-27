@@ -217,9 +217,9 @@ int launch_multi_suite_init(void);
 int launch_multi_suite_cleanup(void);
 int launch_pkg_suite_cleanup(void);
 int syscall_pane_suite_init(void);
+int syscall_pane_suite_cleanup(void);
 int syscall_kbd_bind_suite_init(void);
 int syscall_kbd_bind_suite_cleanup(void);
-int syscall_pane_suite_cleanup(void);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
