@@ -48,7 +48,9 @@
  * context's pane keeps its slot, and with it its depth.)
  *
  * Like fb_shadow.h this module is ABI-agnostic: it speaks FB_LAYOUT_*
- * status codes, and nothing exposes it to ring 3 yet.
+ * status codes. Ring 3 reaches fb_layout_set()/fb_layout_clear() only through
+ * exo_pane_set (#43, src/syscall_pane.c, SCRUM-296), for a context it holds
+ * and has not started.
  */
 
 typedef struct {

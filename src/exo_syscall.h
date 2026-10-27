@@ -166,6 +166,8 @@
  * exo_disk_acquire passes three arguments and leaves the fourth register
  * unset, so a program already built against it would hand the kernel noise. */
 #define EXO_SYS_DISK_ACQUIRE_RO     42
+/* A launcher places a held context's pane on screen (SCRUM-296). */
+#define EXO_SYS_PANE_SET            43
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -175,7 +177,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        43
+#define EXO_SYS_COUNT        44
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -363,6 +365,10 @@ typedef struct {
  * its id instead of switching to it.  The caller reads the grant with
  * exo_grantstat and then calls exo_launch_start(id). */
 #define EXO_LAUNCH_HOLD   1u
+
+/* Flag for exo_pane_set's last argument (SCRUM-296): drop the pane instead of
+ * setting one; the rect is ignored.  exo_pane_clear() passes it. */
+#define EXO_PANE_CLEAR    1u
 
 /* Flag for exo_launch_pkg's third argument (SCRUM-280): give the program
  * exactly the volume slot in the fifth argument, which must be one of the
@@ -1047,6 +1053,39 @@ static inline int64_t exo_launch_pkg_slot(const void *pkg, uint64_t len,
 static inline int64_t exo_launch_start(uint64_t ctx)
 {
     return exo_syscall1(EXO_SYS_LAUNCH_START, ctx);
+}
+
+/*
+ * #43 — give the context the caller holds (#36 with EXO_LAUNCH_HOLD, not yet
+ * started) the screen rect (x, y, w, h), in real-framebuffer pixels, as its
+ * pane in the split screen (SCRUM-296).  Call it before exo_launch_start: the
+ * program's exo_fb_acquire then hands it a buffer exactly the pane's size, and
+ * the compositor draws it there.  Setting it again moves or resizes it, until
+ * the program has acquired its framebuffer (then only a move).
+ *
+ *   0            the pane is set
+ *   -EXO_ENOENT  `ctx` is not a held, unstarted context
+ *   -EXO_EPERM   another context holds it: only its launcher may place it
+ *   -EXO_EINVAL  empty rect, not wholly on screen, no framebuffer, or an
+ *                unknown flag
+ *   -EXO_ENOSPC  every pane is taken (FB_LAYOUT_MAX_PANES)
+ *   -EXO_EBUSY   the context already has a framebuffer of another size
+ *
+ * The pane goes away with the context: an unstarted hold that is dropped, a
+ * program that exits or is revoked.
+ */
+static inline int64_t exo_pane_set(uint64_t ctx, uint32_t x, uint32_t y,
+                                   uint32_t w, uint32_t h)
+{
+    return exo_syscall6(EXO_SYS_PANE_SET, ctx, x, y, w, h, 0);
+}
+
+/* #43 with EXO_PANE_CLEAR: take the held context's pane away again, e.g. when a
+ * later step of a multi-pane launch fails.  0 also if it had none; the same
+ * -EXO_ENOENT / -EXO_EPERM as exo_pane_set. */
+static inline int64_t exo_pane_clear(uint64_t ctx)
+{
+    return exo_syscall6(EXO_SYS_PANE_SET, ctx, 0, 0, 0, 0, EXO_PANE_CLEAR);
 }
 
 /* #39 — fill *out with what `ctx` was granted (SCRUM-235).

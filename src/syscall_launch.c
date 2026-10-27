@@ -632,6 +632,18 @@ static int64_t sys_launch_pkg(uint64_t pkg, uint64_t len, uint64_t flags,
     return launch_enter(id, &launch_img, release_fb);
 }
 
+/* The rule #40 and #43 share: see syscall_launch.h. */
+int64_t launch_hold_check(page_owner_t ctx, page_owner_t launcher)
+{
+    if (!launch_held_is_live() || ctx != held.id) {
+        return -EXO_ENOENT;
+    }
+    if (held.owner != launcher) {
+        return -EXO_EPERM;
+    }
+    return 0;
+}
+
 /* #40 -- enter the context #36 built under EXO_LAUNCH_HOLD (SCRUM-235).
  * The other half of launch_enter(): same switch, same framebuffer release
  * after it, but the image already exists. Like #21/#36, control does not
@@ -644,13 +656,15 @@ static int64_t sys_launch_start(uint64_t ctx, uint64_t a2, uint64_t a3,
 {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
 
-    if (!launch_held_is_live() || ctx != held.id) {
-        return -EXO_ENOENT;
-    }
     /* Only the launcher that built it may enter it: the entry displaces the
      * framebuffer holder when the manifest asks (the known gap above). */
-    if (held.owner != syscall_current_context()) {
-        return -EXO_EPERM;
+    if (ctx > (page_owner_t)~0u) {
+        return -EXO_ENOENT;
+    }
+    int64_t hrc = launch_hold_check((page_owner_t)ctx,
+                                    syscall_current_context());
+    if (hrc != 0) {
+        return hrc;
     }
 
     page_owner_t id = held.id;
