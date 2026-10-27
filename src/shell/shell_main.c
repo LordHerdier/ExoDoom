@@ -325,8 +325,8 @@ static void shell_run_top(fb_console_t *con, const char *arg);
 static void shell_run_snake(fb_console_t *con, const char *arg);
 static void shell_run_doom(fb_console_t *con, const char *arg);
 static void shell_print_usage(fb_console_t *con, const char *name);
-static void shell_tab(fb_console_t *con, char *cmd_buf, int *cmd_len,
-                      shell_comp_set_t *set, int again);
+static int shell_tab(fb_console_t *con, char *cmd_buf, int *cmd_len,
+                     shell_comp_set_t *set, int again);
 static void shell_print_prompt(fb_console_t *con);
 
 void shell_main(void) {
@@ -360,7 +360,7 @@ void shell_main(void) {
     static shell_hist_t hist;
     shell_hist_init(&hist);
     static shell_comp_set_t tab_set;
-    int tab_again = 0;      /* the previous key was a Tab that left tab_set */
+    int tab_again = 0;      /* tab_set is still the answer for this line */
 
     for (;;) {
         exo_kbd_event_t ev;
@@ -376,8 +376,10 @@ void shell_main(void) {
             if (ev.key == KEY_TAB) {
                 if (!(ev.modifiers & EXO_MOD_CTRL)) {
                     cmd_buf[cmd_len] = '\0';
-                    shell_tab(&con, cmd_buf, &cmd_len, &tab_set, tab_again);
-                    tab_again = 1;
+                    tab_again = shell_tab(&con, cmd_buf, &cmd_len, &tab_set,
+                                          tab_again);
+                } else {
+                    tab_again = 0;
                 }
                 continue;
             }
@@ -1924,12 +1926,14 @@ static void shell_tab_gather(fb_console_t *con, const char *line,
     }
 }
 
-/* Tab (SCRUM-274). First press: gather the candidates for the word at the end
- * of the line and append what is unambiguous. A second press in a row (`again`)
- * keeps the set from the first and, if several candidates remain, lists them
- * and redraws the prompt and the line. */
-static void shell_tab(fb_console_t *con, char *cmd_buf, int *cmd_len,
-                      shell_comp_set_t *set, int again) {
+/* Tab (SCRUM-274). Gathers the candidates for the word at the end of the line
+ * and appends what is unambiguous. If that added nothing and several
+ * candidates remain, the set is still the answer for this line: the next Tab
+ * (`again`) lists it instead of reading the disk again. Returns whether the
+ * set can be reused that way; after a Tab that did change the line, the next
+ * one gathers afresh against the new text. */
+static int shell_tab(fb_console_t *con, char *cmd_buf, int *cmd_len,
+                     shell_comp_set_t *set, int again) {
     if (again) {
         if (set->count > 1) {
             fbcon_write(con, "\n");
@@ -1944,12 +1948,25 @@ static void shell_tab(fb_console_t *con, char *cmd_buf, int *cmd_len,
             shell_print_prompt(con);
             fbcon_write(con, cmd_buf);
         }
-        return;
+        return set->count > 1;
     }
 
     shell_comp_ctx_t ctx;
     shell_comp_classify(cmd_buf, (size_t)*cmd_len, &ctx);
+
+    /* Gathering can print a diagnostic (a path that does not resolve, a disk
+     * that will not mount). It lands after the half-typed line, so start a
+     * fresh row and redraw the prompt and line below it. */
+    unsigned row = con->cursor_y, col = con->cursor_x;
     shell_tab_gather(con, cmd_buf, &ctx, set);
+    if (con->cursor_y != row || con->cursor_x != col) {
+        if (con->cursor_x != 0) {
+            fbcon_write(con, "\n");
+        }
+        shell_print_prompt(con);
+        fbcon_write(con, cmd_buf);
+        return 0;
+    }
 
     char add[SHELL_COMP_NAME_LEN + 1];
     size_t n = shell_comp_apply(set, ctx.leaf_len, add, sizeof(add));
@@ -1958,6 +1975,7 @@ static void shell_tab(fb_console_t *con, char *cmd_buf, int *cmd_len,
         fbcon_putc(con, add[i]);
     }
     cmd_buf[*cmd_len] = '\0';
+    return n == 0 && set->count > 1;
 }
 
 /* `install` with no argument: every file on the install disk's root, not

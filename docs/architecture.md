@@ -1325,9 +1325,11 @@ focus and the active framebuffer.
 > (pure logic, also compiled into the TESTING kernel for
 > `tests/kernel/test_shell_complete_k.c`); `shell_tab()` in `shell_main.c`
 > does the directory reads, one acquire/mount/read/release per first Tab. The
-> candidate set is fixed (24 names of up to 31 bytes; longer names are skipped,
-> extra matches dropped and shown as `...`). Mount or disk errors are reported
-> as for `ls`. No mid-line completion, no flags or sub-verbs.
+> candidate set is fixed (24 names of up to 31 bytes). A match that does not fit
+> (a longer name, or a 25th) is left out and flagged; the set is then not the
+> whole answer, so Tab appends nothing and a second Tab lists what is held
+> followed by `...`. Mount or disk errors are reported as for `ls`, then the
+> prompt and line are redrawn below the message. No mid-line completion, no flags or sub-verbs.
 
 ---
 

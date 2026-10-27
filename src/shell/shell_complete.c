@@ -106,7 +106,11 @@ int shell_comp_add(shell_comp_set_t *set, const char *name, int is_dir,
 {
     size_t n = str_len(name);
 
-    if (n == 0 || n >= SHELL_COMP_NAME_LEN || !shell_ci_prefix(name, prefix, plen)) {
+    if (n == 0 || !shell_ci_prefix(name, prefix, plen)) {
+        return 0;
+    }
+    if (n >= SHELL_COMP_NAME_LEN) {
+        set->overflow = 1;
         return 0;
     }
     for (unsigned i = 0; i < set->count; i++) {
@@ -147,7 +151,7 @@ size_t shell_comp_apply(const shell_comp_set_t *set, size_t plen, char *out,
         return 0;
     }
     out[0] = '\0';
-    if (set->count == 0) {
+    if (set->count == 0 || set->overflow) {
         return 0;
     }
 

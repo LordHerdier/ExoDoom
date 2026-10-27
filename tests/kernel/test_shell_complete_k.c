@@ -210,12 +210,33 @@ static void test_duplicates_and_long_names_skipped(void)
     big[sizeof(big) - 1] = '\0';
     CU_ASSERT_EQUAL(shell_comp_add(&s, big, 0, "", 0), 0);
     CU_ASSERT_EQUAL(s.count, 1);
+    CU_ASSERT_TRUE(s.overflow);        /* a matching name was left out */
+
+    /* A long name that does not match the prefix is no loss. */
+    shell_comp_init(&s);
+    CU_ASSERT_EQUAL(shell_comp_add(&s, big, 0, "y", 1), 0);
+    CU_ASSERT_FALSE(s.overflow);
+}
+
+static void test_left_out_match_blocks_completion(void)
+{
+    shell_comp_set_t s;
+    char out[SHELL_COMP_NAME_LEN];
+    char big[SHELL_COMP_NAME_LEN + 4] = "notes_for_the_quarterly_review_2026";
+
+    /* `notes.txt` looks like the only match, but a longer one exists. */
+    shell_comp_init(&s);
+    shell_comp_add(&s, "notes.txt", 0, "notes", 5);
+    shell_comp_add(&s, big, 0, "notes", 5);
+    CU_ASSERT_EQUAL(s.count, 1);
+    CU_ASSERT_EQUAL(shell_comp_apply(&s, 5, out, sizeof(out)), 0);
+    CU_ASSERT_TRUE(streq(out, ""));
 }
 
 static void test_overflow(void)
 {
     shell_comp_set_t s;
-    char name[3] = { 'a', 'a', '\0' };
+    char name[4] = { 'a', 'a', '\0', '\0' };
 
     shell_comp_init(&s);
     for (unsigned i = 0; i < SHELL_COMP_MAX + 3; i++) {
@@ -224,6 +245,19 @@ static void test_overflow(void)
     }
     CU_ASSERT_EQUAL(s.count, SHELL_COMP_MAX);
     CU_ASSERT_TRUE(s.overflow);
+
+    /* The held names share "a" + a letter, but a dropped one need not:
+     * nothing may be appended on the strength of a partial set. */
+    char out[SHELL_COMP_NAME_LEN];
+    shell_comp_init(&s);
+    for (unsigned i = 0; i < SHELL_COMP_MAX; i++) {
+        name[1] = 'b';
+        name[2] = (char)('a' + i);
+        shell_comp_add(&s, name, 0, "a", 1);
+    }
+    shell_comp_add(&s, "ac1", 0, "a", 1);
+    CU_ASSERT_TRUE(s.overflow);
+    CU_ASSERT_EQUAL(shell_comp_apply(&s, 1, out, sizeof(out)), 0);
 }
 
 static void test_apply_bounded(void)
@@ -258,6 +292,7 @@ void suite_shell_complete_tests(CU_pSuite s)
     CU_add_test(s, "no match / empty prefix", test_no_match_and_empty_prefix);
     CU_add_test(s, "duplicates and long names skipped", test_duplicates_and_long_names_skipped);
     CU_add_test(s, "candidate set overflow is flagged", test_overflow);
+    CU_add_test(s, "a left-out match blocks completion", test_left_out_match_blocks_completion);
     CU_add_test(s, "apply respects the output size", test_apply_bounded);
     CU_add_test(s, "program name rule", test_is_program);
 }

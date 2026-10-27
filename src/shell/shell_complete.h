@@ -24,12 +24,13 @@
 #include <stddef.h>
 
 /* Candidates held. More matches than this set the overflow flag and the
- * extras are dropped; what is held is still correct. */
+ * extras are dropped. */
 #define SHELL_COMP_MAX 24u
 
 /* Bytes per candidate name, NUL included. A longer name (ExoFS allows 255)
- * is skipped rather than truncated: a truncated name would complete to a
- * file that does not exist. */
+ * is skipped rather than truncated -- a truncated name would complete to a
+ * file that does not exist -- and sets the overflow flag, like a dropped
+ * match: the set is then not the whole answer. */
 #define SHELL_COMP_NAME_LEN 32u
 
 typedef enum {
@@ -54,7 +55,8 @@ typedef struct {
     char     name[SHELL_COMP_MAX][SHELL_COMP_NAME_LEN];
     unsigned char is_dir[SHELL_COMP_MAX];
     unsigned count;
-    int      overflow;   /* non-zero once a match was dropped              */
+    int      overflow;   /* non-zero once a matching name was left out
+                          * (set full, or name too long to hold)          */
 } shell_comp_set_t;
 
 /* Classify the NUL-terminated `line` of `len` bytes. Always fills `ctx`. */
@@ -64,7 +66,7 @@ void shell_comp_init(shell_comp_set_t *set);
 
 /* Offer `name`. Kept if it starts with the first `plen` bytes of `prefix`
  * (case-insensitively), is not already held and fits SHELL_COMP_NAME_LEN.
- * Returns 1 if kept. */
+ * A match that cannot be held sets set->overflow. Returns 1 if kept. */
 int shell_comp_add(shell_comp_set_t *set, const char *name, int is_dir,
                    const char *prefix, size_t plen);
 
@@ -76,7 +78,9 @@ int shell_comp_is_program(const char *name);
  * to a line whose prefix is `plen` bytes long, and return its length:
  *   - no candidates: nothing (0);
  *   - one: the rest of the name, then '/' for a directory or ' ' otherwise;
- *   - several: their longest common prefix beyond `plen` (possibly 0).
+ *   - several: their longest common prefix beyond `plen` (possibly 0);
+ *   - overflow set: nothing (0). The held names are not all the matches, so
+ *     neither their common prefix nor a "unique" match can be trusted.
  * The set must have been filled against that same `plen`-byte prefix. */
 size_t shell_comp_apply(const shell_comp_set_t *set, size_t plen, char *out,
                         size_t out_len);
