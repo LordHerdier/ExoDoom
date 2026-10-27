@@ -24,8 +24,8 @@ client's list) is `docs/demo-narration.md`.
    on `main` at `23380ef`.
 3. **Present with `make run-blank`.** This gives a QEMU window plus the serial
    console in the terminal. Arrange the window and the terminal **side by
-   side**: beat 4's resource grant is printed on the serial console, not on
-   screen (§"Rules"). Every run starts from a freshly zeroed disk. To start
+   side if you want the serial log too; beat 4's resource grant is also
+   written to the shell's screen (§"Rules"). Every run starts from a freshly zeroed disk. To start
    over, close QEMU and run it again: it rebuilds, then boots to the format
    prompt in about 8 s.
 
@@ -68,10 +68,11 @@ in front of the client.
    *anything* while Doom is up answers `another program is using the disk -- Ctrl+Tab to it, or quit it first`. Launch the
    dashboard first, then use Ctrl+Tab to reach it. (Extents of different
    owners may not overlap, read-only or not; see `docs/syscall_spec.md` §3.5a.)
-2. **The grant is on serial only.** `run` builds the program, prints what it
-   was granted next to what its package asked for (on COM1), then starts it.
-   The program takes the screen immediately, so an on-screen copy would
-   vanish unread. Keep the terminal visible for beat 4.
+2. **The grant is on the shell's screen and on serial.** `run` builds the program, prints what it
+   was granted next to what its package asked for (on COM1 and in the shell), then starts it.
+   The program takes the screen immediately, so the shell's copy is read when
+   the shell is next shown (quit the program, or Ctrl+Tab back); it stays in the
+   shell's scrollback. There is no pause.
 3. **`pages` in the grant can be below `asked min`, and that is expected.**
    `pages` is what the program holds the moment it is built. `asked min` and
    `rec` are what its package says it needs to run, which the shell checked
