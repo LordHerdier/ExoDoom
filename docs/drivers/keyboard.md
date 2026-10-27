@@ -203,6 +203,9 @@ The translation table maps scan code → internal key enum. Selected entries:
 | `0xE0 0x4B`   | Left arrow            |
 | `0xE0 0x4D`   | Right arrow           |
 
+The shell consumes `KEY_UP`/`KEY_DOWN` press events for command history
+(SCRUM-273, `src/shell/shell_hist.c`); Left/Right are not used by it.
+
 Translation is a `switch` over the raw make code byte (with the `0xE0` prefix
 and the break bit stripped), plus a small state machine for prefixes:
 

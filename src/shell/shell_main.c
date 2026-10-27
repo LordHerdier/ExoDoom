@@ -110,11 +110,15 @@
 #include "shell/shell_err.h"
 #include "shell/shell_firstboot.h"
 #include "shell/shell_help.h"
+#include "shell/shell_hist.h"
 #include "shell/shell_install.h"
 #include "shell/shell_mount.h"
 #include "stdlib.h"
 
 #define SHELL_CMD_BUF_LEN 64
+
+_Static_assert(SHELL_CMD_BUF_LEN == SHELL_HIST_LEN,
+               "history entries must hold a whole command line");
 
 /*
  * The shell's own scratch ExoFS volume -- deliberately NOT
@@ -349,6 +353,8 @@ void shell_main(void) {
 
     static char cmd_buf[SHELL_CMD_BUF_LEN];
     int cmd_len = 0;
+    static shell_hist_t hist;
+    shell_hist_init(&hist);
 
     for (;;) {
         exo_kbd_event_t ev;
@@ -360,6 +366,7 @@ void shell_main(void) {
 
             if (ev.key == KEY_ENTER) {
                 cmd_buf[cmd_len] = '\0';
+                shell_hist_push(&hist, cmd_buf);
                 fbcon_write(&con, "\n");
                 shell_run_command(&con, cmd_buf);
                 shell_print_prompt(&con);
@@ -371,6 +378,28 @@ void shell_main(void) {
                 if (cmd_len > 0) {
                     cmd_len--;
                     shell_backspace(&con);
+                }
+                continue;
+            }
+
+            if (ev.key == KEY_UP || ev.key == KEY_DOWN) {
+                cmd_buf[cmd_len] = '\0';
+                const char *line = (ev.key == KEY_UP)
+                                       ? shell_hist_prev(&hist, cmd_buf)
+                                       : shell_hist_next(&hist);
+                if (line != NULL) {
+                    /* Erase the row, then type the recalled line in its
+                     * place; it is a plain edit buffer from here (SCRUM-273). */
+                    while (cmd_len > 0) {
+                        cmd_len--;
+                        shell_backspace(&con);
+                    }
+                    while (line[cmd_len] != '\0' &&
+                           cmd_len < SHELL_CMD_BUF_LEN - 1) {
+                        cmd_buf[cmd_len] = line[cmd_len];
+                        fbcon_putc(&con, line[cmd_len]);
+                        cmd_len++;
+                    }
                 }
                 continue;
             }
