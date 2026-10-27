@@ -408,6 +408,12 @@ extern context_regs_t *context_switch_in_regs;
 extern uint64_t context_switch_in_pml4;
 extern uint64_t context_switch_in_id;
 
+/* SCRUM-283: switch to the context context_switch_request() last armed,
+ * without capturing the caller (which must be dead) and without waiting for a
+ * syscall return. For the ring-3 fault path only; never returns. Clears
+ * context_switch_pending. See src/context_switch.s. */
+void context_resume_noreturn(void) __attribute__((noreturn));
+
 #define CONTEXT_OK      0
 #define CONTEXT_ENOMEM  (-1)
 #define CONTEXT_ENOENT  (-2)
