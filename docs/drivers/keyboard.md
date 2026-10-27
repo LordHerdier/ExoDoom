@@ -16,6 +16,7 @@ SCRUM-14) / ✅ Ring buffer complete (SCRUM-18) **Last updated:** 3 Sep 2026
 5. [Modifier key state](#5-modifier-key-state)
 6. [Event ring buffer](#6-event-ring-buffer)
 7. [exo_kbd_poll syscall](#7-exo_kbd_poll-syscall)
+   - [7a. Per-context routing](#7a-per-context-routing)
 8. [Doom keycode mapping](#8-doom-keycode-mapping)
 9. [API reference](#9-api-reference)
 10. [Design decisions and gotchas](#10-design-decisions-and-gotchas)
@@ -418,6 +419,32 @@ int DG_GetKey(int *pressed, unsigned char *key) {
 
 `DG_GetKey` is called in a loop by the Doom game loop until it returns 0 (queue
 empty), so all pending events are drained each frame.
+
+### 7a. Per-context routing
+
+SCRUM-199, `src/kbd_source.c/h`. Every keyboard is a *source*: `KBD_SRC_PS2`
+(the ring above) or `KBD_SRC_USB(n)` (the n-th USB keyboard's own ring,
+usb.md §11). The rings are single-consumer (§6), so a source is bound to at
+most one context and a context holds at most one source.
+
+`exo_kbd_poll` pops the ring of the caller's source (`kbd_source_poll()`),
+whether or not the caller is `context_current()`. A context with no binding
+reads the PS/2 ring exactly as before, so the shell, Snake and a lone Doom
+are unchanged. If another context has bound PS/2, an unbound caller gets `0`
+rather than popping that context's keys.
+
+- `kbd_source_claim(src, ctx)`: `-EXO_ENOENT` for a source that does not
+  exist, `-EXO_EBUSY` if another context holds it (nothing changes).
+  Claiming a second source gives up the first.
+- The binding is dropped by `context_destroy()` (which also covers a hold
+  destroyed before it started), `revoke_all()` and `context_teardown()`
+  (`exo_exit` and the fault path); the source returns to unbound.
+- **Ctrl+Tab** is decoded only in `ps2_process_scancode()`. It keeps its
+  global switch from the PS/2 keyboard whichever context PS/2 is bound to; a
+  USB keyboard's Ctrl+Tab is delivered as a normal key.
+- Nothing user-visible assigns a source yet: the claim is kernel-internal
+  until SCRUM-297's `exo_kbd_bind`. Tests: `kbd_source` suite
+  (`tests/kernel/test_kbd_source_k.c`).
 
 ---
 

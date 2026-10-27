@@ -2,6 +2,7 @@
 #include "libos_launch.h"  /* LIBOS_LAUNCH_RFLAGS */
 #include "exo_syscall.h"
 #include "fb_layout.h"
+#include "kbd_source.h"
 
 #include <string.h>
 
@@ -126,6 +127,7 @@ int context_destroy(page_owner_t id) {
     /* Every teardown ends here, including launch-failure paths that never
      * reach fb_shadow_release(): a reused id must not inherit a pane. */
     fb_layout_clear(id);
+    kbd_source_release_ctx(id);
     slot->state = CONTEXT_STATE_UNUSED;
     slot->id = PAGE_OWNER_FREE;
     return vmm_status == VMM_OK ? CONTEXT_OK : CONTEXT_ENOENT;

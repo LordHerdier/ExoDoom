@@ -3,6 +3,7 @@
 #include "disk_binding.h"
 #include "fb_binding.h"
 #include "fb_shadow.h"
+#include "kbd_source.h"
 #include "page_alloc.h"
 #include "serial.h"
 #include "vmm.h"
@@ -218,6 +219,7 @@ uint32_t revoke_all(page_owner_t who)
      * `who` like any other page. This only prevents a stale slot from
      * outliving the context or being handed to whoever reuses its id. */
     fb_shadow_release(who);
+    kbd_source_release_ctx(who);
 
     if (fb_binding_reclaim(who) == FB_REVOKE_OK) {
         record.fb_reclaimed++;
