@@ -36,6 +36,6 @@ void syscall_launch_init(void);
  * started, built by `launcher` (SCRUM-296): 0 if so, -EXO_ENOENT if `ctx` is
  * not a live hold, -EXO_EPERM if it is someone else's. The rule #40 enters a
  * hold under, shared with anything else only a launcher may do to its hold
- * before starting it (exo_pane_set, #42).
+ * before starting it (exo_pane_set, #43).
  */
 int64_t launch_hold_check(page_owner_t ctx, page_owner_t launcher);

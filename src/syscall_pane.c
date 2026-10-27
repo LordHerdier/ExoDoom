@@ -6,7 +6,7 @@
 
 #include <stdint.h>
 
-/* #42 -- set or clear the pane of the context the caller holds (SCRUM-296).
+/* #43 -- set or clear the pane of the context the caller holds (SCRUM-296).
  * Checked in the order the answers are useful in: a flag this kernel does not
  * know first (the caller expects behavior it will not get), then whether the
  * caller may touch `ctx` at all, then the rect, which fb_layout_set() judges

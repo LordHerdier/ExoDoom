@@ -515,7 +515,7 @@ void kernel_main(void *mb2_info_ptr) {
     syscall_launch_init();
 
     // ── Pane placement syscall (SCRUM-296) ───────────────────────────────
-    // Binds exo_pane_set (#42): a launcher places the context it holds in
+    // Binds exo_pane_set (#43): a launcher places the context it holds in
     // the split screen before starting it. Authority is the hold's
     // (syscall_launch.c), so it sits right after the launch syscalls.
     syscall_pane_init();

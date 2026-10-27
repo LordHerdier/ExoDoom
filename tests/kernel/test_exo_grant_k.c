@@ -95,6 +95,27 @@ static void test_disk_line_reports_the_extent_or_its_absence(void)
     CU_ASSERT_PTR_NOT_NULL(strstr(buf, "disk   asked for, none assigned\n"));
 }
 
+/* SCRUM-280: a package may name several slots, and the grant names the one
+ * the kernel assigned (from its extent), not the package's first. */
+static void test_disk_line_names_the_assigned_slot(void)
+{
+    exo_pkg_header_t h = mk_hdr(EXO_PKG_WANT_DISK, 0);
+    h.volume_slot = 2;
+    h.volume_slots = 2;
+    h.volume_sectors = 64;
+    exo_grant_t g = mk_grant(9, 100);
+    exo_resstat_t r = mk_res(8);
+    char buf[EXO_GRANT_TEXT_MAX];
+
+    g.disk_base = exo_volume_slot_base(3);
+    g.disk_sectors = 64;
+    exo_grant_format(buf, sizeof(buf), &h, &g, &r, 0);
+    CU_ASSERT_PTR_NOT_NULL(strstr(buf, "disk   volume slot 3, 64 sectors"));
+    g.disk_base = exo_volume_slot_base(2);
+    exo_grant_format(buf, sizeof(buf), &h, &g, &r, 0);
+    CU_ASSERT_PTR_NOT_NULL(strstr(buf, "disk   volume slot 2, 64 sectors"));
+}
+
 /* SCRUM-267: a context can hold a private volume and the read-only program
  * volume at once (Doom). Neither may hide the other, and a context with only
  * the program volume must not be described as having a "volume slot". */
@@ -196,6 +217,8 @@ void suite_exo_grant_tests(CU_pSuite s)
                 test_disk_line_reports_the_extent_or_its_absence);
     CU_add_test(s, "the disk line names a private and a program volume",
                 test_disk_line_names_both_volumes);
+    CU_add_test(s, "disk line names the assigned slot",
+                test_disk_line_names_the_assigned_slot);
     CU_add_test(s, "the sound line caps at what is free",
                 test_sound_line_caps_at_what_is_free);
     CU_add_test(s, "the largest numbers fit EXO_GRANT_TEXT_MAX",

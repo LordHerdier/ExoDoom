@@ -23,11 +23,13 @@
  * persistent and private across launches: a program cannot name another
  * program's sectors by asking for them, only by being packaged with its slot.
  *
- * Slots in use (a package picks its slot by hand, so this is the register of
- * who has which; two packages naming one slot cannot run at once):
+ * Slots in use (a package picks its slots by hand, so this is the register of
+ * who has which; two live programs never share a slot):
  *
  *   0, 1   the two voldemo packages (SCRUM-237)
- *   2      Doom: savegames and config (SCRUM-267)
+ *   2, 3   Doom: savegames and config (SCRUM-267), one slot per instance that
+ *          can run at once (SCRUM-280) -- the first Doom launched gets 2, a
+ *          second one running alongside it gets 3
  *
  * Header-only and <stdint.h>-only, like src/exo_pkg.h, because the host-side
  * packer (tools/exopkg) includes it.
@@ -44,6 +46,7 @@
 
 #define EXO_VOLUME_SLOT_DOOM       2u      /* docker/scripts/build.sh's
                                             * doom.exo --volume-slot */
+#define EXO_VOLUME_SLOTS_DOOM      2u      /* ...and its --volume-slots */
 
 /* First sector past the last slot: the disk must be at least this big for
  * every slot to exist. */

@@ -1,5 +1,5 @@
 /*
- * test_syscall_pane_k.c — exo_pane_set (#42, SCRUM-296): a launcher places
+ * test_syscall_pane_k.c — exo_pane_set (#43, SCRUM-296): a launcher places
  * the context it holds in the split screen before starting it.
  *
  * Every case drives the real handler through exo_syscall_dispatch(), on a

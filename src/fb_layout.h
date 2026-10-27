@@ -49,7 +49,7 @@
  *
  * Like fb_shadow.h this module is ABI-agnostic: it speaks FB_LAYOUT_*
  * status codes. Ring 3 reaches fb_layout_set()/fb_layout_clear() only through
- * exo_pane_set (#42, src/syscall_pane.c, SCRUM-296), for a context it holds
+ * exo_pane_set (#43, src/syscall_pane.c, SCRUM-296), for a context it holds
  * and has not started.
  */
 

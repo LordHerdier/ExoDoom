@@ -162,7 +162,12 @@
 /* Read-only: what the kernel ended a program for (SCRUM-283). */
 #define EXO_SYS_FAULT_INFO          41
 /* A launcher places a held context's pane on screen (SCRUM-296). */
-#define EXO_SYS_PANE_SET            42
+#define EXO_SYS_PANE_SET            43
+/* Bind a disk extent read-only, so a reader can share it with a program that
+ * holds it read-only (SCRUM-281).  A new number rather than a flag on #26:
+ * exo_disk_acquire passes three arguments and leaves the fourth register
+ * unset, so a program already built against it would hand the kernel noise. */
+#define EXO_SYS_DISK_ACQUIRE_RO     42
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -172,7 +177,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        43
+#define EXO_SYS_COUNT        44
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -364,6 +369,11 @@ typedef struct {
 /* Flag for exo_pane_set's last argument (SCRUM-296): drop the pane instead of
  * setting one; the rect is ignored.  exo_pane_clear() passes it. */
 #define EXO_PANE_CLEAR    1u
+/* Flag for exo_launch_pkg's third argument (SCRUM-280): give the program
+ * exactly the volume slot in the fifth argument, which must be one of the
+ * slots its package names (volume_slot, volume_slots), instead of the first
+ * free one.  exo_launch_pkg_slot() passes it. */
+#define EXO_LAUNCH_SLOT   2u
 
 /* exo_rtc_read(out) — #35.  Calendar date and time from the CMOS RTC, which
  * the kernel treats as UTC (no time zones).  unix_secs is seconds since
@@ -793,6 +803,17 @@ static inline int64_t exo_disk_acquire(uint32_t dev, uint32_t base,
                         (uint64_t)count);
 }
 
+/* #42 — #26 for a caller that will only read (SCRUM-281).  The extent is held
+ * read-only: it may be shared with other read-only holders (a program given
+ * the read-only program volume, SCRUM-75) but never with a read-write one, and
+ * exo_disk_write through it returns -EXO_EROFS.  Same return codes as #26. */
+static inline int64_t exo_disk_acquire_ro(uint32_t dev, uint32_t base,
+                                          uint32_t count)
+{
+    return exo_syscall3(EXO_SYS_DISK_ACQUIRE_RO, (uint64_t)dev,
+                        (uint64_t)base, (uint64_t)count);
+}
+
 /* #27 — give the binding of device `dev` back (SCRUM-189, device SCRUM-244);
  * any other device the caller holds stays held. The voluntary counterpart to
  * exo_disk_acquire, and the only way a LibOS can perform phase 2 of the
@@ -988,16 +1009,36 @@ static inline int64_t exo_rtc_read(exo_rtc_time_t *out)
  *
  * With EXO_LAUNCH_HOLD in `flags` the context is built but not entered: the
  * call returns its id (> 0) at once, and the program does not run until
- * exo_launch_start(id).  Any other flag bit is -EXO_EINVAL.  One hold is
- * outstanding at a time: a hold from a context other than the one that owns
- * it is -EXO_EBUSY, and a context's own unstarted hold is dropped by its next
- * launch.
+ * exo_launch_start(id).  One hold is outstanding at a time: a hold from a
+ * context other than the one that owns it is -EXO_EBUSY, and a context's own
+ * unstarted hold is dropped by its next launch.
+ *
+ * A package that asks for a private volume may name several slots, one per
+ * instance that can run at once (SCRUM-280); the program gets the first of
+ * them no live context holds, and -EXO_EBUSY when every one is held.
+ * EXO_LAUNCH_SLOT (exo_launch_pkg_slot() below) names the slot instead.  Any
+ * other flag bit is -EXO_EINVAL.
  */
 static inline int64_t exo_launch_pkg(const void *pkg, uint64_t len,
                                      uint64_t flags, const char *name)
 {
-    return exo_syscall4(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len, flags,
+    return exo_syscall4(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len,
+                        flags & ~(uint64_t)EXO_LAUNCH_SLOT,
                         (uint64_t)(uintptr_t)name);
+}
+
+/* #36 with the volume slot chosen by the launcher (SCRUM-280), e.g. from a
+ * layout manifest's volume= (src/shell/shell_layout_cfg.h).  `slot` must lie
+ * in the package's [volume_slot, volume_slot + volume_slots), else
+ * -EXO_EINVAL (also for a package with no volume); a slot another live
+ * context holds is -EXO_EBUSY, with no other slot tried. */
+static inline int64_t exo_launch_pkg_slot(const void *pkg, uint64_t len,
+                                          uint64_t flags, const char *name,
+                                          uint32_t slot)
+{
+    return exo_syscall5(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len,
+                        flags | EXO_LAUNCH_SLOT, (uint64_t)(uintptr_t)name,
+                        (uint64_t)slot);
 }
 
 /* #40 — enter a context #36 built with EXO_LAUNCH_HOLD.  Like exo_launch, on
@@ -1014,7 +1055,7 @@ static inline int64_t exo_launch_start(uint64_t ctx)
 }
 
 /*
- * #42 — give the context the caller holds (#36 with EXO_LAUNCH_HOLD, not yet
+ * #43 — give the context the caller holds (#36 with EXO_LAUNCH_HOLD, not yet
  * started) the screen rect (x, y, w, h), in real-framebuffer pixels, as its
  * pane in the split screen (SCRUM-296).  Call it before exo_launch_start: the
  * program's exo_fb_acquire then hands it a buffer exactly the pane's size, and
@@ -1038,7 +1079,7 @@ static inline int64_t exo_pane_set(uint64_t ctx, uint32_t x, uint32_t y,
     return exo_syscall6(EXO_SYS_PANE_SET, ctx, x, y, w, h, 0);
 }
 
-/* #42 with EXO_PANE_CLEAR: take the held context's pane away again, e.g. when a
+/* #43 with EXO_PANE_CLEAR: take the held context's pane away again, e.g. when a
  * later step of a multi-pane launch fails.  0 also if it had none; the same
  * -EXO_ENOENT / -EXO_EPERM as exo_pane_set. */
 static inline int64_t exo_pane_clear(uint64_t ctx)

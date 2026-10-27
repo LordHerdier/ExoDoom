@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * syscall_pane.h — exo_pane_set (#42, SCRUM-296): a launcher places a context
+ * syscall_pane.h — exo_pane_set (#43, SCRUM-296): a launcher places a context
  * it holds in the split screen.
  *
  * The pane table (src/fb_layout.h, SCRUM-197) has to know a context's rect
