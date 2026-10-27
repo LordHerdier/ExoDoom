@@ -80,10 +80,12 @@ void gp_fault_handler(exception_frame_t *f);
  * the shell is relaunched instead (and the dead row reaped on the spot).
  * Ring 0, a ring-3 fault with no context row, or a failed relaunch: halts with
  * a diagnostic.
- * Never returns.  `why` is a short plain-language reason for the log.
+ * Never returns.  `vector` is the CPU exception number and `addr` the
+ * faulting address (CR2 for #PF, else 0); both go into the fault log
+ * (src/fault_record.h) that exo_fault_info reads.
  */
-void fault_terminate_current(const exception_frame_t *f, const char *why)
-    __attribute__((noreturn));
+void fault_terminate_current(const exception_frame_t *f, uint64_t vector,
+                             uint64_t addr) __attribute__((noreturn));
 
 /* Every other CPU exception vector (SCRUM-283), from isr.s's exc_stub_N with
  * the vector number.  Ring 3 ends the program via fault_terminate_current();

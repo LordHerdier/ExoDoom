@@ -24,6 +24,7 @@
 #include "exo_syscall.h"
 #include "syscall.h"
 #include "fault.h"
+#include "fault_record.h"
 #include "string.h"
 
 #include <stdint.h>
@@ -84,6 +85,20 @@ static uint64_t make_context(const void *code, size_t len, page_owner_t *id,
     return data;
 }
 
+/* What each selector in fault_contain_probe.s must be recorded as. */
+static const struct {
+    uint32_t vector;
+    uint32_t reason;
+} expected[FAULT_KINDS] = {
+    { 14, EXO_FAULT_REASON_MEMORY },     /* 0 NULL read          */
+    { 14, EXO_FAULT_REASON_MEMORY },     /* 1 kernel write       */
+    { 13, EXO_FAULT_REASON_PRIVILEGED }, /* 2 cli                */
+    { 13, EXO_FAULT_REASON_PRIVILEGED }, /* 3 hlt                */
+    { 13, EXO_FAULT_REASON_PRIVILEGED }, /* 4 in                 */
+    {  0, EXO_FAULT_REASON_ARITHMETIC }, /* 5 divide by zero     */
+    {  6, EXO_FAULT_REASON_ILLEGAL },    /* 6 ud2                */
+};
+
 /* Relaunch stand-in: builds the survivor blob as a new READY context, the way
  * shell_launch_context() builds the shell. */
 static page_owner_t relaunched_id;
@@ -133,6 +148,8 @@ static void run_round_ex(int kind, int relaunch, page_owner_t *victim_out,
     }
 
     *(uint64_t *)(uintptr_t)data_v = (uint64_t)kind;
+    context_set_name(victim, "victim");
+    uint64_t seq_before = fault_record_last_seq();
     CU_ASSERT_TRUE(page_count_owned(victim) > 0);
 
     context_set_current(victim);
@@ -160,6 +177,21 @@ static void run_round_ex(int kind, int relaunch, page_owner_t *victim_out,
 
     CU_ASSERT_EQUAL(page_count_owned(victim), 0);
     CU_ASSERT_EQUAL(context_next_ready(survivor), PAGE_OWNER_FREE);
+
+    /* Exactly one record, and it says what happened -- kept even when the
+     * victim's row is reaped on the spot (relaunch). */
+    CU_ASSERT_EQUAL(fault_record_last_seq(), seq_before + 1);
+    exo_fault_info_t rec;
+    CU_ASSERT_EQUAL(fault_record_next(seq_before, &rec), 0);
+    CU_ASSERT_EQUAL(rec.seq, seq_before + 1);
+    CU_ASSERT_EQUAL(rec.ctx_id, victim);
+    CU_ASSERT_EQUAL(rec.vector, expected[kind].vector);
+    CU_ASSERT_EQUAL(rec.reason, expected[kind].reason);
+    CU_ASSERT_STRING_EQUAL(rec.name, "victim");
+    CU_ASSERT_TRUE(rec.rip >= LIBOS_LAUNCH_CODE_VADDR);
+    if (kind == 0)
+        CU_ASSERT_EQUAL(rec.addr, 0);
+
     if (relaunch) {
         /* Nothing launches over the row of the last program, so the fault
          * path reaped it itself. */

@@ -159,6 +159,8 @@
  * launch (#36 with EXO_LAUNCH_HOLD).  Appended for the reason #28-30 were. */
 #define EXO_SYS_GRANTSTAT           39
 #define EXO_SYS_LAUNCH_START        40
+/* Read-only: what the kernel ended a program for (SCRUM-283). */
+#define EXO_SYS_FAULT_INFO          41
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -168,7 +170,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        41
+#define EXO_SYS_COUNT        42
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -371,6 +373,31 @@ typedef struct {
     uint64_t unix_secs;
 } exo_rtc_time_t;
 
+/* exo_fault_info(after_seq, out) — #41 (SCRUM-283).  One record per program
+ * the kernel ended for a CPU fault.  `seq` counts from 1 and never repeats, so
+ * a caller that remembers the last seq it saw asks for "anything newer" and
+ * learns of every fault since, however many programs died meanwhile (the
+ * kernel keeps the last EXO_FAULT_LOG_MAX; older ones are dropped and the
+ * caller sees the next oldest).  Faults are ordinary events a launcher
+ * reports, not errors the faulting program can handle: it is already gone. */
+#define EXO_FAULT_LOG_MAX   8
+
+#define EXO_FAULT_REASON_MEMORY      1  /* bad address, stack or alignment    */
+#define EXO_FAULT_REASON_PRIVILEGED  2  /* an instruction ring 3 may not run  */
+#define EXO_FAULT_REASON_ARITHMETIC  3  /* divide by zero, floating-point     */
+#define EXO_FAULT_REASON_ILLEGAL     4  /* not an instruction                 */
+#define EXO_FAULT_REASON_OTHER       5
+
+typedef struct {
+    uint64_t seq;           /* 1, 2, 3 ... in the order faults happened       */
+    uint64_t ctx_id;        /* the dead program's context id                  */
+    uint64_t rip;           /* where it was executing                         */
+    uint64_t addr;          /* faulting address for a page fault, else 0      */
+    uint32_t vector;        /* CPU exception number                           */
+    uint32_t reason;        /* EXO_FAULT_REASON_*                             */
+    char     name[16];      /* program name the launcher gave it (CONTEXT_NAME_MAX) */
+} exo_fault_info_t;
+
 /* CONTEXT_NAME_MAX (name field below) and CONTEXT_MAX (EXO_PSLIST_MAX, further
  * down) come from here; see the note at EXO_PSLIST_MAX for why it is safe to
  * include from a LibOS. */
@@ -447,6 +474,7 @@ _Static_assert(sizeof(exo_diskextent_t)  ==  8, "exo_diskextent_t layout is ABI"
 _Static_assert(sizeof(exo_rtc_time_t)    == 16, "exo_rtc_time_t layout is ABI");
 _Static_assert(sizeof(exo_resstat_t)     == 32, "exo_resstat_t layout is ABI");
 _Static_assert(sizeof(exo_grant_t)       == 40, "exo_grant_t layout is ABI");
+_Static_assert(sizeof(exo_fault_info_t)  == 56, "exo_fault_info_t layout is ABI");
 #endif /* __ASSEMBLER__ */
 
 #ifndef EXO_KERNEL
@@ -997,6 +1025,20 @@ static inline int64_t exo_grantstat(uint64_t ctx, exo_grant_t *out)
 static inline int64_t exo_resstat(exo_resstat_t *out)
 {
     return exo_syscall1(EXO_SYS_RESSTAT, (uint64_t)(uintptr_t)out);
+}
+
+/* #41 -- the oldest fault record with seq > after_seq, written to *out.
+ * Pass 0 to start from the beginning, then the seq of the last record you
+ * handled.  Read-only and unscoped, like #22/#38: a launcher learns that some
+ * program was ended, not anything the dead program held.
+ *
+ *   0            *out filled
+ *   -EXO_EFAULT  [out, out + sizeof(exo_fault_info_t)) is not entirely inside
+ *                the LibOS window and mapped writable
+ *   -EXO_ENOENT  no record newer than after_seq */
+static inline int64_t exo_fault_info(uint64_t after_seq, exo_fault_info_t *out)
+{
+    return exo_syscall2(EXO_SYS_FAULT_INFO, after_seq, (uint64_t)(uintptr_t)out);
 }
 
 #endif /* !EXO_KERNEL */

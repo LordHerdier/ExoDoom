@@ -9,6 +9,7 @@
 
 #include "fault.h"
 #include "context.h"
+#include "fault_record.h"
 #include "serial.h"
 #include "shell_launch.h"
 #include "syscall_exit.h"
@@ -77,6 +78,37 @@ void fault_set_hook(fault_hook_t h)
 }
 #endif
 
+/* What the log and the shell call each CPU exception (SCRUM-283): `why` is
+ * the plain-language reason a ring-3 program was stopped, `reason` the
+ * exo_fault_info reason code the shell turns into wording of its own. */
+static const char *exception_name(uint64_t vector, const char **why,
+                                  uint32_t *reason)
+{
+    *reason = EXO_FAULT_REASON_OTHER;
+    switch (vector) {
+    case 0:  *why = "divided by zero";                *reason = EXO_FAULT_REASON_ARITHMETIC; return "DIVIDE ERROR (#DE)";
+    case 1:  *why = "unexpected debug trap";          return "DEBUG (#DB)";
+    case 3:  *why = "unexpected breakpoint";          return "BREAKPOINT (#BP)";
+    case 4:  *why = "arithmetic overflow trap";       *reason = EXO_FAULT_REASON_ARITHMETIC; return "OVERFLOW (#OF)";
+    case 5:  *why = "bound range exceeded";           *reason = EXO_FAULT_REASON_MEMORY;     return "BOUND RANGE (#BR)";
+    case 6:  *why = "illegal instruction";            *reason = EXO_FAULT_REASON_ILLEGAL;    return "INVALID OPCODE (#UD)";
+    case 7:  *why = "floating-point unit unavailable"; *reason = EXO_FAULT_REASON_ILLEGAL;   return "DEVICE NOT AVAILABLE (#NM)";
+    case 8:  *why = "double fault";                   return "DOUBLE FAULT (#DF)";
+    case 10: *why = "invalid task state";             return "INVALID TSS (#TS)";
+    case 11: *why = "segment not present";            *reason = EXO_FAULT_REASON_MEMORY;     return "SEGMENT NOT PRESENT (#NP)";
+    case 12: *why = "stack fault";                    *reason = EXO_FAULT_REASON_MEMORY;     return "STACK FAULT (#SS)";
+    case 13: *why = "privileged or illegal operation"; *reason = EXO_FAULT_REASON_PRIVILEGED; return "GENERAL PROTECTION FAULT (#GP)";
+    case 14: *why = "illegal memory access";          *reason = EXO_FAULT_REASON_MEMORY;     return "PAGE FAULT (#PF)";
+    case 16: *why = "floating-point error";           *reason = EXO_FAULT_REASON_ARITHMETIC; return "x87 FLOATING POINT (#MF)";
+    case 17: *why = "misaligned memory access";       *reason = EXO_FAULT_REASON_MEMORY;     return "ALIGNMENT CHECK (#AC)";
+    case 18: *why = "machine check";                  return "MACHINE CHECK (#MC)";
+    case 19: *why = "floating-point error";           *reason = EXO_FAULT_REASON_ARITHMETIC; return "SIMD FLOATING POINT (#XM)";
+    case 20: *why = "virtualization exception";       return "VIRTUALIZATION (#VE)";
+    case 21: *why = "control-flow protection fault";  return "CONTROL PROTECTION (#CP)";
+    default: *why = "unexpected processor exception"; return "EXCEPTION";
+    }
+}
+
 /* Nothing left to hand the machine to, and no way to make something. */
 static void no_survivor(const char *msg)
 {
@@ -105,7 +137,8 @@ void fault_set_relaunch(fault_relaunch_fn fn)
 }
 #endif
 
-void fault_terminate_current(const exception_frame_t *f, const char *why)
+void fault_terminate_current(const exception_frame_t *f, uint64_t vector,
+                             uint64_t addr)
 {
     serial_print("  context:   ");
 
@@ -129,6 +162,10 @@ void fault_terminate_current(const exception_frame_t *f, const char *why)
         halt_forever();
     }
 
+    const char *why;
+    uint32_t reason;
+    (void)exception_name(vector, &why, &reason);
+
     serial_print("ring 3 (LibOS) id ");
     serial_print_hex64(owner);
     serial_print(" \"");
@@ -136,6 +173,10 @@ void fault_terminate_current(const exception_frame_t *f, const char *why)
     serial_print("\" -- terminating: ");
     serial_print(why);
     serial_print("\n");
+
+    /* Recorded before the teardown: the name lives in the row, and the shell
+     * reads this after the row may be gone (exo_fault_info, #41). */
+    fault_record_add(owner, ctx->name, (uint32_t)vector, reason, f->rip, addr);
 
     /* The same reclaim exo_exit runs (SCRUM-155), so the two cannot drift. */
     if (context_teardown(owner) != 0) {
@@ -267,7 +308,7 @@ void page_fault_handler(exception_frame_t *f)
     /* A ring-3 fault ends that program and carries on (SCRUM-283); a CPL 0
      * fault is a kernel bug and halts. Either way the diagnostic above has
      * already been printed. */
-    fault_terminate_current(f, "illegal memory access");
+    fault_terminate_current(f, 14, cr2);
 
     /* Not reached: fault_terminate_current() halts or switches away. */
     halt_forever();
@@ -312,36 +353,10 @@ void gp_fault_handler(exception_frame_t *f)
     serial_print("\n");
 
     /* See page_fault_handler: ring 3 is terminated, ring 0 halts. */
-    fault_terminate_current(f, "privileged or illegal operation");
+    fault_terminate_current(f, 13, 0);
 
     /* Not reached: fault_terminate_current() halts or switches away. */
     halt_forever();
-}
-
-/* What the log and the shell call each remaining vector (SCRUM-283). `why`
- * is the plain-language reason a ring-3 program was stopped. */
-static const char *exception_name(uint64_t vector, const char **why)
-{
-    switch (vector) {
-    case 0:  *why = "divided by zero";                return "DIVIDE ERROR (#DE)";
-    case 1:  *why = "unexpected debug trap";          return "DEBUG (#DB)";
-    case 3:  *why = "unexpected breakpoint";          return "BREAKPOINT (#BP)";
-    case 4:  *why = "arithmetic overflow trap";       return "OVERFLOW (#OF)";
-    case 5:  *why = "bound range exceeded";           return "BOUND RANGE (#BR)";
-    case 6:  *why = "illegal instruction";            return "INVALID OPCODE (#UD)";
-    case 7:  *why = "floating-point unit unavailable"; return "DEVICE NOT AVAILABLE (#NM)";
-    case 8:  *why = "double fault";                   return "DOUBLE FAULT (#DF)";
-    case 10: *why = "invalid task state";             return "INVALID TSS (#TS)";
-    case 11: *why = "segment not present";            return "SEGMENT NOT PRESENT (#NP)";
-    case 12: *why = "stack fault";                    return "STACK FAULT (#SS)";
-    case 16: *why = "floating-point error";           return "x87 FLOATING POINT (#MF)";
-    case 17: *why = "misaligned memory access";       return "ALIGNMENT CHECK (#AC)";
-    case 18: *why = "machine check";                  return "MACHINE CHECK (#MC)";
-    case 19: *why = "floating-point error";           return "SIMD FLOATING POINT (#XM)";
-    case 20: *why = "virtualization exception";       return "VIRTUALIZATION (#VE)";
-    case 21: *why = "control-flow protection fault";  return "CONTROL PROTECTION (#CP)";
-    default: *why = "unexpected processor exception"; return "EXCEPTION";
-    }
 }
 
 void exception_handler(exception_frame_t *f, uint64_t vector)
@@ -353,7 +368,8 @@ void exception_handler(exception_frame_t *f, uint64_t vector)
     in_fault = 1;
 
     const char *why;
-    const char *name = exception_name(vector, &why);
+    uint32_t reason;
+    const char *name = exception_name(vector, &why, &reason);
 
     serial_print("\n=== ");
     serial_print(name);
@@ -381,5 +397,5 @@ void exception_handler(exception_frame_t *f, uint64_t vector)
         halt_forever();
     }
 
-    fault_terminate_current(f, why);
+    fault_terminate_current(f, vector, 0);
 }
