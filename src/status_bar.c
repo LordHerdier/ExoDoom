@@ -12,7 +12,7 @@
 #define BAR_FG_G 0xd8
 #define BAR_FG_B 0xd8
 
-static int      enabled;
+static int      enabled = 1;   /* on by default; statusbar off / #45 blanks it */
 static int      drawn_valid;
 static int      drawn_enabled;
 static uint64_t drawn_base;
@@ -130,7 +130,7 @@ int status_bar_enabled(void) {
 }
 
 void status_bar_reset(void) {
-    enabled = 0;
+    enabled = 1;
     drawn_valid = 0;
     seen_valid = 0;
     tooltip_until_ms = 0;

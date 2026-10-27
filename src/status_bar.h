@@ -12,7 +12,7 @@
  * ever maps or sees it. It lists the live contexts in context-table order,
  * brackets the focused one, and shows a right-aligned Ctrl+Tab hint.
  *
- * Off by default. The rows stay reserved either way: programs size their
+ * On by default. The rows stay reserved either way: programs size their
  * buffers once, so turning the bar off blanks the strip instead of giving
  * the rows back.
  *
@@ -43,7 +43,7 @@ void status_bar_format(const context_info_t *ctx, uint32_t n,
                        uint32_t cols, char *line,
                        uint32_t *hl_start, uint32_t *hl_end);
 
-/* 0 = off (the default), nonzero = on. */
+/* 0 = off, nonzero = on (the default). */
 void status_bar_set_enabled(int on);
 int  status_bar_enabled(void);
 
@@ -56,6 +56,6 @@ int  status_bar_enabled(void);
  */
 void status_bar_update(const fb_geometry_t *geom, uint32_t now_ms);
 
-/* Forget what was last drawn and restore the defaults (off); for tests and
+/* Forget what was last drawn and restore the defaults (on); for tests and
  * for a republished framebuffer geometry. */
 void status_bar_reset(void);

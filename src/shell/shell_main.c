@@ -682,7 +682,7 @@ static const shell_cmd_t shell_cmds[] = {
     { { "statusbar", SHELL_GRP_SYSTEM, "Show or hide the program strip along the bottom",
         "usage: statusbar [on|off]\n"
         "     The strip lists the running programs and the Ctrl+Tab hint.\n"
-        "     It is off by default; off leaves the bottom rows blank.\n"
+        "     It is on by default; off leaves the bottom rows blank.\n"
         "     With no argument, says whether it is on\n" },
       shell_run_statusbar, 1 },
     { { "top", SHELL_GRP_APPS, "Live resource monitor (Q/Esc exits, Ctrl+Tab returns to the shell)",

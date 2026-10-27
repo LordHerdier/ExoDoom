@@ -89,10 +89,10 @@ in front of the client.
    Ctrl+Tab or Q shows an empty prompt, so earlier output is gone.
 7. **Ctrl+Tab cycles through every live program**, shell included, in launch
    order. With `top` and Doom running, two presses get from Doom to `top`.
-   `statusbar on` shows a strip along the bottom that lists them, brackets the
-   one on screen and says `Ctrl+Tab: next`, so the audience can see what is
-   running (SCRUM-278). It is off by default; its 16 rows are reserved either
-   way, so `statusbar off` leaves a black strip rather than a taller picture.
+   The strip along the bottom lists them, brackets the one on screen and says
+   `Ctrl+Tab: next`, so the audience can see what is running (SCRUM-278). It is
+   on by default; its 16 rows are reserved either way, so `statusbar off` (for
+   a clean capture) leaves a black strip rather than a taller picture.
 8. **Snake waits for the first arrow key.** It draws the board and idles
    (`Press any arrow key to start`) as long as you like, so it is safe to talk
    over the grant output first. `q` or Esc quits from that screen.

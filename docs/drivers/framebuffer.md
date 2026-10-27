@@ -537,7 +537,7 @@ which case applies.
   `STATUS_BAR_TOOLTIP_MS` after the entries or the focus change the hint is the
   longer `Ctrl+Tab cycles programs -- Esc/Q quits most apps`. It repaints only
   when what it would show changed.
-* The bar is **off by default** (`statusbar on` / `exo_statusbar` #45). The
+* The bar is **on by default** (`statusbar off` / `exo_statusbar` #45 turns it off). The
   rows stay reserved either way, because programs size their buffers once; off
   blanks the strip to black rather than giving the rows back.
 

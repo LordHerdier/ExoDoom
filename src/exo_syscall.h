@@ -1165,7 +1165,7 @@ static inline int64_t exo_kbd_unbind(uint64_t ctx)
  *   EXO_STATUSBAR_QUERY  2   change nothing
  *
  * Returns 1 if the bar is now on, 0 if off, or -EXO_EINVAL for another mode.
- * Unscoped, like #22/#38: any program may toggle it. Off at boot. */
+ * Unscoped, like #22/#38: any program may toggle it. On at boot. */
 static inline int64_t exo_statusbar(uint64_t mode)
 {
     return exo_syscall1(EXO_SYS_STATUSBAR, mode);

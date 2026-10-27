@@ -234,6 +234,7 @@ static void test_shadow_and_pane_exclude_the_strip(void)
 static void test_program_copy_never_touches_the_strip(void)
 {
     install_screen(SCR_H, 0xAA);
+    status_bar_set_enabled(0);
 
     exo_fb_info_t info;
     CU_ASSERT_EQUAL(fb_shadow_acquire(BAR_PROG, &info), FB_SHADOW_OK);
@@ -254,8 +255,9 @@ static void test_program_copy_never_touches_the_strip(void)
 static void test_off_leaves_strip_black_on_paints_it(void)
 {
     install_screen(SCR_H, 0xAA);
-    CU_ASSERT_EQUAL(status_bar_enabled(), 0);
+    CU_ASSERT_EQUAL(status_bar_enabled(), 1);       /* the default */
 
+    status_bar_set_enabled(0);
     status_bar_update(fb_binding_geometry(), 1000);
     CU_ASSERT_TRUE(strip_all(0));
     CU_ASSERT_EQUAL(screen[STRIP_OFF - 1], 0xAA);   /* program rows untouched */
@@ -326,6 +328,8 @@ static void test_statusbar_syscall(void)
 {
     status_bar_reset();
     CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_STATUSBAR, EXO_STATUSBAR_QUERY,
+                                         0, 0, 0, 0, 0), 1);   /* default on */
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_STATUSBAR, EXO_STATUSBAR_OFF,
                                          0, 0, 0, 0, 0), 0);
     CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_STATUSBAR, EXO_STATUSBAR_ON,
                                          0, 0, 0, 0, 0), 1);
