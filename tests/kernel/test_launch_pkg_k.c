@@ -248,7 +248,7 @@ static int64_t launch_corrupted(corrupt_fn corrupt, size_t *len_out)
 
 static void corrupt_magic(exo_pkg_header_t *h)    { h->magic ^= 1u; }
 static void corrupt_version(exo_pkg_header_t *h)  { h->version += 1u; }
-static void corrupt_reserved(exo_pkg_header_t *h) { h->reserved[1] = 1u; }
+static void corrupt_reserved(exo_pkg_header_t *h) { h->reserved[0] = 1u; }
 static void corrupt_no_code(exo_pkg_header_t *h)  { h->code_len = 0; }
 static void corrupt_oversize(exo_pkg_header_t *h)
 {
@@ -656,6 +656,152 @@ static void test_volume_request_assigns_a_fenced_extent(void)
                     DISK_BIND_OK);
     disk_binding_release(fg, 0);
 
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+/* The context a launch just made: the one live now that was not in
+ * `before[0 .. n)`. */
+static page_owner_t new_context(const context_info_t *before, uint32_t n)
+{
+    context_info_t live[CONTEXT_MAX];
+    uint32_t m = context_list(live, CONTEXT_MAX);
+    for (uint32_t i = 0; i < m; i++) {
+        int seen = 0;
+        for (uint32_t j = 0; j < n; j++)
+            if (before[j].id == live[i].id)
+                seen = 1;
+        if (!seen)
+            return live[i].id;
+    }
+    return PAGE_OWNER_FREE;
+}
+
+/* Launch the package at PKG_SCRATCH with `flags` (and `slot` for
+ * EXO_LAUNCH_SLOT), as the foreground `fg` would, and return the new
+ * context's private slot: -1 if it has none, -2 if the launch failed (its
+ * error in *rc). */
+static int launch_and_slot(page_owner_t fg, size_t total, uint64_t flags,
+                           uint64_t slot, int64_t *rc, page_owner_t *child)
+{
+    context_info_t before[CONTEXT_MAX];
+    uint32_t n = context_list(before, CONTEXT_MAX);
+    *rc = exo_syscall_dispatch(EXO_SYS_LAUNCH_PKG, PKG_SCRATCH, total, flags,
+                               0, slot, 0);
+    context_switch_pending = 0;
+    context_set_current(fg);
+    *child = PAGE_OWNER_FREE;
+    if (*rc < 0)
+        return -2;
+    *child = new_context(before, n);
+
+    uint32_t base, count;
+    if (disk_binding_assignment_role(*child, 0, &base, &count) != DISK_BIND_OK)
+        return -1;
+    return (int)((base - EXO_VOLUME_REGION_BASE_LBA) / EXO_VOLUME_SLOT_SECTORS);
+}
+
+/* SCRUM-280: a package naming two slots runs twice at once, each instance
+ * on its own volume; a third finds both held; one exiting frees its slot
+ * for the next launch. */
+static void test_volume_slots_give_each_instance_its_own_volume(void)
+{
+    if (!disk_binding_present(0))
+        return;
+
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    h.want_flags     = EXO_PKG_WANT_DISK | EXO_PKG_WANT_PROGRAM_RO;
+    h.volume_slot    = 2;
+    h.volume_slots   = 2;
+    h.volume_sectors = 64;
+    size_t total = write_probe_package(&h);
+
+    int64_t rc;
+    page_owner_t a, b, c;
+    CU_ASSERT_EQUAL(launch_and_slot(fg, total, 0, 0, &rc, &a), 2);
+    CU_ASSERT_EQUAL(launch_and_slot(fg, total, 0, 0, &rc, &b), 3);
+    CU_ASSERT_NOT_EQUAL(a, b);
+
+    /* Both read the program volume, each writes only its own slot. */
+    uint32_t base, count;
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(b, 1, &base, &count),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(a, 0, exo_volume_slot_base(3),
+                                                64),
+                    DISK_BIND_EPERM);
+
+    /* Every slot held: refused, with no context row left behind. */
+    context_info_t before[CONTEXT_MAX];
+    uint32_t n_before = context_list(before, CONTEXT_MAX);
+    CU_ASSERT_EQUAL(launch_and_slot(fg, total, 0, 0, &rc, &c), -2);
+    CU_ASSERT_EQUAL(rc, -EXO_EBUSY);
+    context_info_t after[CONTEXT_MAX];
+    CU_ASSERT_EQUAL(context_list(after, CONTEXT_MAX), n_before);
+
+    /* The first instance ends: its slot is the next launch's, and the
+     * second instance keeps its own. */
+    revoke_all(a);
+    context_destroy(a);
+    CU_ASSERT_EQUAL(launch_and_slot(fg, total, 0, 0, &rc, &c), 2);
+    CU_ASSERT_EQUAL(disk_binding_assignment_role(b, 0, &base, &count),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(base, exo_volume_slot_base(3));
+
+    revoke_all_but(fg);
+    context_switch_pending = 0;
+    drop_foreground(fg);
+    unmap_scratch(paddr);
+}
+
+/* SCRUM-280: EXO_LAUNCH_SLOT names one of the package's own slots, never
+ * another's, and does not fall back to a different one when it is held. */
+static void test_launch_slot_flag_pins_one_of_the_packages_slots(void)
+{
+    if (!disk_binding_present(0))
+        return;
+
+    uint64_t paddr = map_scratch();
+    page_owner_t fg = make_foreground();
+    exo_pkg_header_t h = good_header(probe_len());
+    h.want_flags     = EXO_PKG_WANT_DISK;
+    h.volume_slot    = 2;
+    h.volume_slots   = 2;
+    h.volume_sectors = 64;
+    size_t total = write_probe_package(&h);
+
+    int64_t rc;
+    page_owner_t a, b;
+    CU_ASSERT_EQUAL(launch_and_slot(fg, total, EXO_LAUNCH_SLOT, 3, &rc, &a), 3);
+
+    /* Outside the package's range, either side: refused before anything is
+     * built, whatever the slot holds. */
+    uint32_t n0 = context_count();
+    CU_ASSERT_EQUAL(launch_and_slot(fg, total, EXO_LAUNCH_SLOT, 1, &rc, &b), -2);
+    CU_ASSERT_EQUAL(rc, -EXO_EINVAL);
+    CU_ASSERT_EQUAL(launch_and_slot(fg, total, EXO_LAUNCH_SLOT, 4, &rc, &b), -2);
+    CU_ASSERT_EQUAL(rc, -EXO_EINVAL);
+    CU_ASSERT_EQUAL(launch_and_slot(fg, total, EXO_LAUNCH_SLOT, 1ull << 32,
+                                    &rc, &b), -2);
+    CU_ASSERT_EQUAL(rc, -EXO_EINVAL);
+    /* Held: busy, not quietly moved to slot 2. */
+    CU_ASSERT_EQUAL(launch_and_slot(fg, total, EXO_LAUNCH_SLOT, 3, &rc, &b), -2);
+    CU_ASSERT_EQUAL(rc, -EXO_EBUSY);
+    CU_ASSERT_EQUAL(context_count(), n0);
+    /* Without the flag the free one is found as usual. */
+    CU_ASSERT_EQUAL(launch_and_slot(fg, total, 0, 0, &rc, &b), 2);
+
+    /* A package with no volume has no slot to name. */
+    revoke_all_but(fg);
+    h.want_flags = 0;
+    h.volume_slot = h.volume_slots = h.volume_sectors = 0;
+    total = write_probe_package(&h);
+    CU_ASSERT_EQUAL(launch_and_slot(fg, total, EXO_LAUNCH_SLOT, 0, &rc, &b), -2);
+    CU_ASSERT_EQUAL(rc, -EXO_EINVAL);
+
+    revoke_all_but(fg);
     context_switch_pending = 0;
     drop_foreground(fg);
     unmap_scratch(paddr);
@@ -1128,7 +1274,7 @@ static void test_unknown_launch_flags_are_refused(void)
     uint32_t n_before = context_count();
 
     CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_LAUNCH_PKG, PKG_SCRATCH, total,
-                                         2, 0, 0, 0), -EXO_EINVAL);
+                                         4, 0, 0, 0), -EXO_EINVAL);
     CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_LAUNCH_PKG, PKG_SCRATCH, total,
                                          EXO_LAUNCH_HOLD | 0x100, 0, 0, 0),
                     -EXO_EINVAL);
@@ -1169,6 +1315,10 @@ void suite_launch_pkg_tests(CU_pSuite s)
                 test_volume_request_assigns_a_fenced_extent);
     CU_add_test(s, "a progvol-and-volume request assigns both",
                 test_progvol_and_volume_request_assigns_both);
+    CU_add_test(s, "volume slots give each instance its own volume",
+                test_volume_slots_give_each_instance_its_own_volume);
+    CU_add_test(s, "EXO_LAUNCH_SLOT pins one of the package's slots",
+                test_launch_slot_flag_pins_one_of_the_packages_slots);
     CU_add_test(s, "a package with no volume request gets none",
                 test_no_volume_request_assigns_nothing);
     CU_add_test(s, "launching past the context table fails cleanly",

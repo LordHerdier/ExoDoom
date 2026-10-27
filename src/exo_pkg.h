@@ -145,14 +145,23 @@ typedef struct {
     uint32_t volume_slot;    /* < EXO_VOLUME_MAX_SLOTS                      */
     uint32_t volume_sectors; /* 0 = none, else <= EXO_VOLUME_SLOT_SECTORS   */
 
-    uint32_t reserved[2]; /* must be zero; keeps the header growable without
+    /* How many slots, from volume_slot up, the program may be given: one per
+     * instance that can run at once (SCRUM-280). The kernel assigns the first
+     * one no live context holds, so two Dooms each get saves of their own
+     * instead of the second being refused. 0 means 1, which is every package
+     * built before the field existed: it was reserved[0], and a v1 parser that
+     * predates it rejects a package using it, as with volume_slot above.
+     * Must be 0 when there is no volume. */
+    uint32_t volume_slots;
+
+    uint32_t reserved[1]; /* must be zero; keeps the header growable without
                             * bumping EXO_PKG_VERSION for every new field --
                             * which only holds because v1 pack/parse reject
                             * a non-zero value (EXO_PKG_EINVAL), so a future
                             * package that uses one cannot be mistaken for v1 */
 } exo_pkg_header_t;
 
-/* On-disk layout: 15 u32 fields (13 named + reserved[2]), no padding. Changing this is a format
+/* On-disk layout: 15 u32 fields (14 named + reserved[1]), no padding. Changing this is a format
  * change and needs an EXO_PKG_VERSION bump. */
 _Static_assert(sizeof(exo_pkg_header_t) == 60,
                "exo_pkg_header_t is an on-disk layout");
@@ -195,6 +204,15 @@ static inline uint32_t exo_pkg_footprint_pages(uint32_t code_len,
            ((want_flags & EXO_PKG_WANT_WAD) ? EXO_PKG_WAD_TABLE_PAGES : 0u);
 }
 
+/* The slots a package's volume may be given, [volume_slot, volume_slot +
+ * this): 0 for no volume, else volume_slots with 0 read as 1 (SCRUM-280). */
+static inline uint32_t exo_pkg_volume_slot_count(const exo_pkg_header_t *hdr)
+{
+    if (hdr->volume_sectors == 0)
+        return 0;
+    return hdr->volume_slots != 0 ? hdr->volume_slots : 1u;
+}
+
 /* Everything pack and parse both check about a header, in one place so the
  * two cannot disagree on what a valid package is. Returns 0 or an
  * EXO_PKG_E* code; says nothing about buffer lengths. */
@@ -214,9 +232,8 @@ static inline int exo_pkg_check_header(const exo_pkg_header_t *hdr) {
     if (hdr->params_len > hdr->data_len)
         return EXO_PKG_ETOOBIG;
 
-    for (int i = 0; i < 2; i++)
-        if (hdr->reserved[i] != 0)
-            return EXO_PKG_EINVAL;
+    if (hdr->reserved[0] != 0)
+        return EXO_PKG_EINVAL;
     if (hdr->stack_pages < 1)
         return EXO_PKG_EINVAL;
     if (hdr->min_pages > hdr->recommended_pages)
@@ -227,12 +244,14 @@ static inline int exo_pkg_check_header(const exo_pkg_header_t *hdr) {
         return EXO_PKG_EINVAL;
 
     if (hdr->volume_sectors == 0) {
-        if (hdr->volume_slot != 0)
+        if (hdr->volume_slot != 0 || hdr->volume_slots != 0)
             return EXO_PKG_EINVAL;
     } else {
         if (!(hdr->want_flags & EXO_PKG_WANT_DISK))
             return EXO_PKG_EINVAL;
         if (hdr->volume_slot >= EXO_VOLUME_MAX_SLOTS)
+            return EXO_PKG_EINVAL;
+        if (hdr->volume_slots > EXO_VOLUME_MAX_SLOTS - hdr->volume_slot)
             return EXO_PKG_EINVAL;
         if (hdr->volume_sectors > EXO_VOLUME_SLOT_SECTORS)
             return EXO_PKG_EINVAL;

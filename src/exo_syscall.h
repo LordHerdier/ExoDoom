@@ -364,6 +364,12 @@ typedef struct {
  * exo_grantstat and then calls exo_launch_start(id). */
 #define EXO_LAUNCH_HOLD   1u
 
+/* Flag for exo_launch_pkg's third argument (SCRUM-280): give the program
+ * exactly the volume slot in the fifth argument, which must be one of the
+ * slots its package names (volume_slot, volume_slots), instead of the first
+ * free one.  exo_launch_pkg_slot() passes it. */
+#define EXO_LAUNCH_SLOT   2u
+
 /* exo_rtc_read(out) — #35.  Calendar date and time from the CMOS RTC, which
  * the kernel treats as UTC (no time zones).  unix_secs is seconds since
  * 1970-01-01 00:00:00 and is derived from the other fields. */
@@ -998,16 +1004,36 @@ static inline int64_t exo_rtc_read(exo_rtc_time_t *out)
  *
  * With EXO_LAUNCH_HOLD in `flags` the context is built but not entered: the
  * call returns its id (> 0) at once, and the program does not run until
- * exo_launch_start(id).  Any other flag bit is -EXO_EINVAL.  One hold is
- * outstanding at a time: a hold from a context other than the one that owns
- * it is -EXO_EBUSY, and a context's own unstarted hold is dropped by its next
- * launch.
+ * exo_launch_start(id).  One hold is outstanding at a time: a hold from a
+ * context other than the one that owns it is -EXO_EBUSY, and a context's own
+ * unstarted hold is dropped by its next launch.
+ *
+ * A package that asks for a private volume may name several slots, one per
+ * instance that can run at once (SCRUM-280); the program gets the first of
+ * them no live context holds, and -EXO_EBUSY when every one is held.
+ * EXO_LAUNCH_SLOT (exo_launch_pkg_slot() below) names the slot instead.  Any
+ * other flag bit is -EXO_EINVAL.
  */
 static inline int64_t exo_launch_pkg(const void *pkg, uint64_t len,
                                      uint64_t flags, const char *name)
 {
-    return exo_syscall4(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len, flags,
+    return exo_syscall4(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len,
+                        flags & ~(uint64_t)EXO_LAUNCH_SLOT,
                         (uint64_t)(uintptr_t)name);
+}
+
+/* #36 with the volume slot chosen by the launcher (SCRUM-280), e.g. from a
+ * layout manifest's volume= (src/shell/shell_layout_cfg.h).  `slot` must lie
+ * in the package's [volume_slot, volume_slot + volume_slots), else
+ * -EXO_EINVAL (also for a package with no volume); a slot another live
+ * context holds is -EXO_EBUSY, with no other slot tried. */
+static inline int64_t exo_launch_pkg_slot(const void *pkg, uint64_t len,
+                                          uint64_t flags, const char *name,
+                                          uint32_t slot)
+{
+    return exo_syscall5(EXO_SYS_LAUNCH_PKG, (uint64_t)(uintptr_t)pkg, len,
+                        flags | EXO_LAUNCH_SLOT, (uint64_t)(uintptr_t)name,
+                        (uint64_t)slot);
 }
 
 /* #40 — enter a context #36 built with EXO_LAUNCH_HOLD.  Like exo_launch, on
