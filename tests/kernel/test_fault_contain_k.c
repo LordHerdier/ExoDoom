@@ -20,6 +20,7 @@
 #include "context.h"
 #include "vmm.h"
 #include "page_alloc.h"
+#include "disk_binding.h"
 #include "libos_launch.h"
 #include "exo_syscall.h"
 #include "syscall.h"
@@ -45,6 +46,8 @@ int fault_contain_suite_cleanup(void)
     for (uint32_t offset = 0; offset < CLEANUP_SCAN_IDS; offset++) {
         page_owner_t id = (page_owner_t)(PAGE_OWNER_LIBOS + offset);
         if (context_lookup(id) != NULL) {
+            (void)disk_binding_reclaim(id);
+            disk_binding_forget(id);
             page_reclaim_all(id);
             context_destroy(id);
         }
@@ -248,6 +251,83 @@ static void test_fault_loop_does_not_leak(void)
     CU_ASSERT_EQUAL(context_count(), rows_before);
 }
 
+/* Three programs; one faults. The other two are untouched: still live rows,
+ * with their pages and their own disk volume intact, one of them now running
+ * and the other still ready to be. The victim's volume, by contrast, is gone.
+ * (Background vs foreground is a display matter only -- a context is switched
+ * to by readiness, not by who is on screen -- so "the others" is the claim.) */
+static void test_fault_leaves_the_other_programs_alone(void)
+{
+    page_owner_t victim, peer[2];
+    uint64_t pml4_v, pml4_p[2];
+    int have_disk = disk_binding_present(0);
+
+    uint64_t data_v = make_context(
+        (const void *)&fault_contain_victim,
+        (uintptr_t)&fault_contain_victim_end - (uintptr_t)&fault_contain_victim,
+        &victim, &pml4_v);
+    *(uint64_t *)(uintptr_t)data_v = 0;     /* NULL read */
+    for (int i = 0; i < 2; i++)
+        build_survivor(&pml4_p[i], &peer[i]);
+
+    /* Each program holds its own extent. */
+    uint32_t base_v = 6000, base_p[2] = { 5000, 7000 }, count = 64;
+    if (have_disk) {
+        disk_binding_init();
+        CU_ASSERT_EQUAL(disk_binding_assign(victim, base_v, count), DISK_BIND_OK);
+        for (int i = 0; i < 2; i++)
+            CU_ASSERT_EQUAL(disk_binding_assign(peer[i], base_p[i], count),
+                            DISK_BIND_OK);
+    }
+
+    uint32_t pages_p[2] = { page_count_owned(peer[0]), page_count_owned(peer[1]) };
+    CU_ASSERT_TRUE(pages_p[0] > 0 && pages_p[1] > 0);
+
+    context_set_current(victim);
+    CU_ASSERT_EQUAL(context_set_state(victim, CONTEXT_STATE_RUNNING), CONTEXT_OK);
+    exo_syscall_register(LIBOS_RETURN_SYSCALL_NUM, libos_return);
+    CU_ASSERT_EQUAL(vmm_switch_address_space(pml4_v), VMM_OK);
+    uint64_t result = libos_enter(LIBOS_LAUNCH_CODE_VADDR,
+                                  LIBOS_LAUNCH_STACK_VADDR + VMM_PAGE_SIZE);
+    CU_ASSERT_EQUAL(vmm_switch_address_space(vmm_kernel_pml4()), VMM_OK);
+    exo_syscall_register(LIBOS_RETURN_SYSCALL_NUM, 0);
+
+    /* One of the two ran to its marker; the other is still waiting its turn. */
+    CU_ASSERT_EQUAL(result, SURVIVOR_MARKER);
+    int ran = context_current() == peer[0] ? 0 : 1;
+    CU_ASSERT_EQUAL(context_current(), peer[ran]);
+    CU_ASSERT_EQUAL(context_lookup(peer[ran])->state, CONTEXT_STATE_RUNNING);
+    CU_ASSERT_EQUAL(context_lookup(peer[1 - ran])->state, CONTEXT_STATE_READY);
+    CU_ASSERT_EQUAL(context_next_ready(peer[ran]), peer[1 - ran]);
+
+    /* Nothing either held was taken. */
+    for (int i = 0; i < 2; i++) {
+        CU_ASSERT_EQUAL(page_count_owned(peer[i]), pages_p[i]);
+        if (have_disk) {
+            uint32_t base = 0, cnt = 0;
+            CU_ASSERT_EQUAL(disk_binding_assignment_of(peer[i], &base, &cnt), 0);
+            CU_ASSERT_EQUAL(base, base_p[i]);
+            CU_ASSERT_EQUAL(cnt, count);
+        }
+    }
+
+    /* The victim's pages and volume are gone, its row inert. */
+    CU_ASSERT_EQUAL(page_count_owned(victim), 0);
+    CU_ASSERT_EQUAL(context_lookup(victim)->state, CONTEXT_STATE_BLOCKED);
+    if (have_disk) {
+        uint32_t base = 0, cnt = 0;
+        CU_ASSERT_NOT_EQUAL(disk_binding_assignment_of(victim, &base, &cnt), 0);
+    }
+
+    for (int i = 0; i < 2; i++) {
+        (void)disk_binding_reclaim(peer[i]);
+        disk_binding_forget(peer[i]);
+    }
+    reap(victim, peer[0]);
+    page_reclaim_all(peer[1]);
+    CU_ASSERT_EQUAL(context_destroy(peer[1]), CONTEXT_OK);
+}
+
 /* The crashed program is the only context: the fault path relaunches (here
  * the survivor blob, in production the shell). Repeated, so the self-reaped
  * victim rows and pages are shown not to leak either. */
@@ -274,6 +354,8 @@ void suite_fault_contain_tests(CU_pSuite s)
                 test_each_fault_kind_is_contained);
     CU_add_test(s, "launch-fault loop leaks no pages or context rows",
                 test_fault_loop_does_not_leak);
+    CU_add_test(s, "a fault in one of several programs leaves the others alone",
+                test_fault_leaves_the_other_programs_alone);
     CU_add_test(s, "fault in the last ready program relaunches instead of halting",
                 test_last_program_fault_relaunches);
 }
