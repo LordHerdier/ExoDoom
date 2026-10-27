@@ -36,6 +36,7 @@
 #include "syscall.h"
 #include "exo_pkg.h"
 #include "string.h"
+#include "syscall_exit.h"
 
 #include <stdint.h>
 
@@ -238,6 +239,54 @@ static void test_blocked_context_reclaimed_but_live_one_survives(void)
     settle_switch(fg);
 }
 
+/* SCRUM-283: a program the kernel ended for a fault is left exactly as
+ * exo_exit() leaves one -- context_teardown() has freed what it held and the
+ * row is BLOCKED (src/fault.c). Launch, "fault", launch again, many times: the
+ * sweep at the start of each launch must reap the previous row, and nothing
+ * (pages, rows) may accumulate. The fault itself is stood in for by the same
+ * two calls fault_terminate_current() makes, since a launched-but-never-run
+ * context has no ring-3 code to execute here; test_fault_contain_k.c runs the
+ * real fault path and checks its leak loop the same way. */
+static void test_faulted_programs_are_reaped_by_the_next_launch(void)
+{
+    page_owner_t fg = make_foreground();
+
+    uint32_t total, free_before = 0, free_after = 0, ignore;
+    page_alloc_totals(&total, &free_before, &ignore, &ignore);
+    uint32_t rows_before = context_count();
+
+    page_owner_t prev = PAGE_OWNER_FREE;
+    for (int i = 0; i < 24; i++) {
+        CU_ASSERT_EQUAL(launch_probe_pkg(), 0);
+
+        /* The previous iteration's dead row went in this launch's sweep. */
+        if (prev != PAGE_OWNER_FREE)
+            CU_ASSERT_PTR_NULL(context_lookup(prev));
+
+        context_info_t live[CONTEXT_MAX];
+        uint32_t n = context_list(live, CONTEXT_MAX);
+        page_owner_t id = find_new_id(live, n, fg, PAGE_OWNER_FREE,
+                                      PAGE_OWNER_FREE);
+        CU_ASSERT_NOT_EQUAL(id, PAGE_OWNER_FREE);
+        settle_switch(fg);
+
+        CU_ASSERT_EQUAL(context_teardown(id), 0);
+        CU_ASSERT_EQUAL(context_set_state(id, CONTEXT_STATE_BLOCKED),
+                        CONTEXT_OK);
+        CU_ASSERT_EQUAL(page_count_owned(id), 0);
+        CU_ASSERT_EQUAL(context_count(), rows_before + 1);
+        prev = id;
+    }
+
+    /* Nothing launches over the last dead row: reap it as the sweep would. */
+    CU_ASSERT_EQUAL(context_destroy(prev), CONTEXT_OK);
+
+    page_alloc_totals(&total, &free_after, &ignore, &ignore);
+    CU_ASSERT_EQUAL(free_after, free_before);
+    CU_ASSERT_EQUAL(context_count(), rows_before);
+    settle_switch(fg);
+}
+
 /* CONTEXT_MAX (14) live rows total. Launching past that must fail cleanly --
  * context_create()'s existing CONTEXT_ENOMEM, surfaced as -EXO_ENOMEM -- not
  * corrupt state, per this ticket's acceptance criteria. */
@@ -330,6 +379,8 @@ void suite_launch_multi_tests(CU_pSuite s)
                 test_two_launches_of_same_app_yield_two_live_contexts);
     CU_add_test(s, "a blocked context is reclaimed but a live one survives",
                 test_blocked_context_reclaimed_but_live_one_survives);
+    CU_add_test(s, "faulted programs are reaped by the next launch, no leaks",
+                test_faulted_programs_are_reaped_by_the_next_launch);
     CU_add_test(s, "launching past context table capacity fails gracefully",
                 test_launch_past_capacity_fails_gracefully);
     CU_add_test(s, "a full table with an exited row still admits a launch",
