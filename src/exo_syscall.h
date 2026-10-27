@@ -5,6 +5,7 @@
 #endif
 
 #include "exo_errno.h"
+#include "exo_kbd_src.h"
 
 /*
  * exo_syscall.h — ExoDoom exokernel syscall ABI (SCRUM-24).
@@ -168,6 +169,8 @@
 #define EXO_SYS_DISK_ACQUIRE_RO     42
 /* A launcher places a held context's pane on screen (SCRUM-296). */
 #define EXO_SYS_PANE_SET            43
+/* A launcher binds a keyboard to a context it holds (SCRUM-297). */
+#define EXO_SYS_KBD_BIND            44
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -177,7 +180,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        44
+#define EXO_SYS_COUNT        45
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -1117,6 +1120,33 @@ static inline int64_t exo_pane_set(uint64_t ctx, uint32_t x, uint32_t y,
 static inline int64_t exo_pane_clear(uint64_t ctx)
 {
     return exo_syscall6(EXO_SYS_PANE_SET, ctx, 0, 0, 0, 0, EXO_PANE_CLEAR);
+}
+
+/* #44 -- make the keyboard `source` the one `ctx` reads with exo_kbd_poll
+ * (SCRUM-297).  `ctx` must be a context the caller holds: built by #36 with
+ * EXO_LAUNCH_HOLD and not yet started by #40, the same authority as
+ * exo_pane_set.  A source feeds one context at a time; the binding ends when
+ * the context exits, is revoked, or its hold is dropped.  A context with no
+ * binding reads the PS/2 keyboard, unless another context has bound it.
+ * Binding a second source replaces the first.
+ *
+ *   0            bound (EXO_KBD_SRC_NONE: unbound, also if it had none)
+ *   -EXO_EINVAL  `source` is neither EXO_KBD_SRC_NONE nor a source number
+ *   -EXO_ENOENT  `ctx` is not a live, unstarted hold; or no such keyboard is
+ *                plugged in
+ *   -EXO_EPERM   the hold was built by another context
+ *   -EXO_EBUSY   another context holds that keyboard; nothing changes
+ *
+ * Ctrl+Tab still switches contexts from the PS/2 keyboard only; from a USB
+ * keyboard it is an ordinary key. */
+static inline int64_t exo_kbd_bind(uint64_t ctx, uint64_t source)
+{
+    return exo_syscall2(EXO_SYS_KBD_BIND, ctx, source);
+}
+
+static inline int64_t exo_kbd_unbind(uint64_t ctx)
+{
+    return exo_syscall2(EXO_SYS_KBD_BIND, ctx, EXO_KBD_SRC_NONE);
 }
 
 /* #39 — fill *out with what `ctx` was granted (SCRUM-235).

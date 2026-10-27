@@ -442,9 +442,15 @@ rather than popping that context's keys.
 - **Ctrl+Tab** is decoded only in `ps2_process_scancode()`. It keeps its
   global switch from the PS/2 keyboard whichever context PS/2 is bound to; a
   USB keyboard's Ctrl+Tab is delivered as a normal key.
-- Nothing user-visible assigns a source yet: the claim is kernel-internal
-  until SCRUM-297's `exo_kbd_bind`. Tests: `kbd_source` suite
-  (`tests/kernel/test_kbd_source_k.c`).
+- **Assignment** is `exo_kbd_bind(ctx, source)` (#44, SCRUM-297,
+  `src/syscall_kbd_bind.c`): a launcher binds a source to the context it
+  holds, with the same authority as `exo_pane_set`, so a running program
+  cannot rebind. The public source numbers (`EXO_KBD_SRC_PS2`,
+  `EXO_KBD_SRC_USB(n)`, `EXO_KBD_SRC_NONE`) are in `src/exo_kbd_src.h`;
+  `usb:N` is the enumeration index, and a vendor:product name is resolved to
+  an index before the call. `docs/syscall_spec.md` row 44. Tests: `kbd_source`
+  (`tests/kernel/test_kbd_source_k.c`) and `syscall_kbd_bind`
+  (`tests/kernel/test_syscall_kbd_bind_k.c`).
 
 ---
 

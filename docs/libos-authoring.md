@@ -461,5 +461,8 @@ input= or volume=)`.
 `src/shell/shell_layout_cfg.c/h` (SCRUM-294), pure logic linked into the shell
 and, under `TESTING=1`, into the kernel for `tests/kernel/test_shell_layout_cfg_k.c`.
 Reading the file and launching what it says is `layout apply` (SCRUM-298),
-which needs pane assignment (`exo_pane_set`, SCRUM-296) and keyboard binding
-(`exo_kbd_bind`, SCRUM-297) from the kernel first.
+which uses pane assignment (`exo_pane_set`, SCRUM-296) and keyboard binding
+(`exo_kbd_bind`, SCRUM-297), both now in the kernel. The kernel takes a USB
+keyboard as its enumeration index only (`EXO_KBD_SRC_USB(n)`); a
+`usb:<vvvv>:<pppp>` name is resolved to an index by the caller, from the
+device list `lsusb` prints (SCRUM-293), before it calls `exo_kbd_bind`.
