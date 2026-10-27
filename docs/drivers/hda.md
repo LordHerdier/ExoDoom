@@ -225,13 +225,10 @@ SDnCTL  |= RUN                     ; go
 reads, which is the cheapest available proof that DMA is really happening
 rather than merely configured.
 
-`hda_init()` programs all of this but starts nothing. `kernel_main` plays the
-boot test tone from the normal-boot tail, *after* `sti` — not next to
-`hda_init()` — because the duration is enforced by `hda_tick()` from
-`irq0_handler`, so a tone started with interrupts still masked would sound
-until whenever they were enabled. That placement also keeps the tone out of
-`TESTING` builds, which exit through `run_tests()` and drive
-`hda_play_tone()` themselves.
+`hda_init()` programs all of this but starts nothing, and `kernel_main` starts
+nothing either: a normal boot is silent until a LibOS asks for sound. (A
+440 Hz boot test tone used to play from the normal-boot tail; SCRUM-287
+removed it. The KUnit suites drive `hda_play_tone()` themselves.)
 
 ---
 
@@ -347,9 +344,8 @@ asserts is the chain up to the point samples leave RAM.
 
 Two ways to go further, both worth knowing:
 
-- **Listen to it.** `kernel_main` plays a 440 Hz / 600 ms tone on a normal
-  boot once `hda_init()` has succeeded and interrupts are on
-  (`HDA_BOOT_TONE_HZ`/`_MS`). Use `make run` (host QEMU) with a real backend
+- **Listen to it.** A normal boot is silent, so run Doom (sfx and music play
+  through the mixer, §12). Use `make run` (host QEMU) with a real backend
   in place of `-audiodev none,id=snd0` — `pipewire`, `pa` or `alsa`,
   whichever the host runs; `qemu-system-x86_64 -audiodev help` lists what the
   binary supports. **Avoid `sdl` for anything timing-sensitive:** measured
@@ -459,7 +455,7 @@ are decoded by a separate module, `src/doom_dmx.c/h` (SCRUM-211). The two are
 joined by `src/pcm_mixer.c/h` and the streaming mode described in §12
 (SCRUM-212), and reached from ring 3 through `exo_sound_pcm` (§12.5,
 SCRUM-213) — which is now the only thing on a normal boot that starts a
-stream, the boot tone aside.
+stream.
 
 The gap that mixer has to close, which is the reason it exists at all:
 
