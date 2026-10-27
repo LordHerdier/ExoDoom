@@ -107,6 +107,7 @@
 #include "libos_fs/exofs.h"
 #include "exo_volume.h"
 #include "ps2.h"
+#include "shell/shell_complete.h"
 #include "shell/shell_err.h"
 #include "shell/shell_firstboot.h"
 #include "shell/shell_help.h"
@@ -324,6 +325,9 @@ static void shell_run_top(fb_console_t *con, const char *arg);
 static void shell_run_snake(fb_console_t *con, const char *arg);
 static void shell_run_doom(fb_console_t *con, const char *arg);
 static void shell_print_usage(fb_console_t *con, const char *name);
+static int shell_tab(fb_console_t *con, char *cmd_buf, int *cmd_len,
+                     shell_comp_set_t *set, int again);
+static void shell_print_prompt(fb_console_t *con);
 
 void shell_main(void) {
     libos_fb_t fb;
@@ -355,6 +359,8 @@ void shell_main(void) {
     int cmd_len = 0;
     static shell_hist_t hist;
     shell_hist_init(&hist);
+    static shell_comp_set_t tab_set;
+    int tab_again = 0;      /* tab_set is still the answer for this line */
 
     for (;;) {
         exo_kbd_event_t ev;
@@ -363,6 +369,21 @@ void shell_main(void) {
             if (!ev.pressed) {
                 continue;
             }
+
+            /* Plain Tab completes (SCRUM-274). Ctrl+Tab is the context hotkey
+             * and is consumed in src/ps2.c before it reaches the ring; the
+             * modifier test is for a keyboard path that does not do that. */
+            if (ev.key == KEY_TAB) {
+                if (!(ev.modifiers & EXO_MOD_CTRL)) {
+                    cmd_buf[cmd_len] = '\0';
+                    tab_again = shell_tab(&con, cmd_buf, &cmd_len, &tab_set,
+                                          tab_again);
+                } else {
+                    tab_again = 0;
+                }
+                continue;
+            }
+            tab_again = 0;
 
             if (ev.key == KEY_ENTER) {
                 cmd_buf[cmd_len] = '\0';
@@ -1807,6 +1828,154 @@ static int shell_install_mount_src(fb_console_t *con) {
         return 0;
     }
     return 1;
+}
+
+/* Fill `set` with the names that could complete the word `ctx` describes in
+ * `line`. Opens, reads and closes whatever it needs; a failure to reach the
+ * disk is reported by the shared mount helpers and leaves the set empty. */
+static void shell_tab_gather(fb_console_t *con, const char *line,
+                             const shell_comp_ctx_t *ctx,
+                             shell_comp_set_t *set) {
+    const char *prefix = line + ctx->leaf_off;
+    size_t plen = ctx->leaf_len;
+    exofs_dirinfo_t info;
+    exofs_dir_t dir;
+
+    shell_comp_init(set);
+
+    switch (ctx->kind) {
+    case SHELL_COMP_COMMAND:
+        for (size_t i = 0; i < sizeof(shell_cmds) / sizeof(shell_cmds[0]); i++) {
+            shell_comp_add(set, shell_cmds[i].help.name, 0, prefix, plen);
+        }
+        return;
+
+    case SHELL_COMP_PROGRAM:
+        if (shell_firstboot_classify(shell_probe_system_volume()) ==
+                SHELL_FIRSTBOOT_UNFORMATTED ||
+            !shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
+            return;
+        }
+        if (exofs_opendir(shell_cur_vol, "/", &dir) == 0) {
+            while (exofs_readdir(&dir, &info) > 0) {
+                if (!(info.attributes & EXOFS_ATTR_DIRECTORY) &&
+                    shell_comp_is_program(info.name)) {
+                    shell_comp_add(set, info.name, 0, prefix, plen);
+                }
+            }
+            exofs_closedir(&dir);
+        }
+        shell_fs_release();
+        return;
+
+    case SHELL_COMP_INSTALL:
+        if (exo_disk_acquire(SHELL_SRC_DEV, 0, 0) != 0) {
+            return;     /* no install disk, or it is busy: nothing to offer */
+        }
+        if (shell_install_mount_src(con)) {
+            if (exofs_opendir(shell_cur_vol, "/", &dir) == 0) {
+                while (exofs_readdir(&dir, &info) > 0) {
+                    if (!(info.attributes & EXOFS_ATTR_DIRECTORY)) {
+                        shell_comp_add(set, info.name, 0, prefix, plen);
+                    }
+                }
+                exofs_closedir(&dir);
+            }
+            exofs_unmount(shell_cur_vol);
+        }
+        exo_disk_release(SHELL_SRC_DEV);
+        return;
+
+    case SHELL_COMP_PATH:
+    case SHELL_COMP_DIR: {
+        char dir_path[SHELL_FS_PATH_BUF_LEN];
+        if (ctx->dir_len >= sizeof(dir_path)) {
+            return;
+        }
+        size_t n = 0;
+        for (; n < ctx->dir_len; n++) {
+            dir_path[n] = line[ctx->dir_off + n];
+        }
+        if (n == 0) {
+            dir_path[n++] = '.';
+        }
+        dir_path[n] = '\0';
+
+        shell_route_t rt;
+        if (!shell_route_arg(con, dir_path, &rt) ||
+            !shell_fs_acquire_and_mount_vol(con, &rt.vol)) {
+            return;
+        }
+        if (exofs_opendir(shell_cur_vol, rt.inner, &dir) == 0) {
+            while (exofs_readdir(&dir, &info) > 0) {
+                int is_dir = (info.attributes & EXOFS_ATTR_DIRECTORY) != 0;
+                if (ctx->kind == SHELL_COMP_DIR && !is_dir) {
+                    continue;
+                }
+                shell_comp_add(set, info.name, is_dir, prefix, plen);
+            }
+            exofs_closedir(&dir);
+        }
+        shell_fs_release();
+        return;
+    }
+
+    case SHELL_COMP_NONE:
+    default:
+        return;
+    }
+}
+
+/* Tab (SCRUM-274). Gathers the candidates for the word at the end of the line
+ * and appends what is unambiguous. If that added nothing and several
+ * candidates remain, the set is still the answer for this line: the next Tab
+ * (`again`) lists it instead of reading the disk again. Returns whether the
+ * set can be reused that way; after a Tab that did change the line, the next
+ * one gathers afresh against the new text. */
+static int shell_tab(fb_console_t *con, char *cmd_buf, int *cmd_len,
+                     shell_comp_set_t *set, int again) {
+    if (again) {
+        if (set->count > 1) {
+            fbcon_write(con, "\n");
+            for (unsigned i = 0; i < set->count; i++) {
+                fbcon_write(con, set->name[i]);
+                fbcon_write(con, set->is_dir[i] ? "/  " : "  ");
+            }
+            if (set->overflow) {
+                fbcon_write(con, "...");
+            }
+            fbcon_write(con, "\n");
+            shell_print_prompt(con);
+            fbcon_write(con, cmd_buf);
+        }
+        return set->count > 1;
+    }
+
+    shell_comp_ctx_t ctx;
+    shell_comp_classify(cmd_buf, (size_t)*cmd_len, &ctx);
+
+    /* Gathering can print a diagnostic (a path that does not resolve, a disk
+     * that will not mount). It lands after the half-typed line, so start a
+     * fresh row and redraw the prompt and line below it. */
+    unsigned row = con->cursor_y, col = con->cursor_x;
+    shell_tab_gather(con, cmd_buf, &ctx, set);
+    if (con->cursor_y != row || con->cursor_x != col) {
+        if (con->cursor_x != 0) {
+            fbcon_write(con, "\n");
+        }
+        shell_print_prompt(con);
+        fbcon_write(con, cmd_buf);
+        return 0;
+    }
+
+    char add[SHELL_COMP_NAME_LEN + 1];
+    size_t n = shell_comp_apply(set, ctx.leaf_len, add, sizeof(add));
+    for (size_t i = 0; i < n && *cmd_len < SHELL_CMD_BUF_LEN - 1; i++) {
+        cmd_buf[(*cmd_len)++] = add[i];
+        fbcon_putc(con, add[i]);
+    }
+    cmd_buf[*cmd_len] = '\0';
+    return n == 0 && set->count > 1;
 }
 
 /* `install` with no argument: every file on the install disk's root, not
