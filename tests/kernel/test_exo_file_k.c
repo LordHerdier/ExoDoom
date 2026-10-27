@@ -35,8 +35,23 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* See test_exofs_k.c's LBA RANGE note before moving either. */
 #define EXOFS_TEST_BASE_LBA 8192u
+
+/* The volume the tests in this file are working on (SCRUM-265): set by
+ * whichever helper mounts, read by everything after. A slot is zeroed on
+ * unmount, so a stale pointer reads as "not mounted". */
+static exofs_vol_t *g_tv;
+#define TV_MOUNTED() (g_tv != NULL && g_tv->mounted)
+
+/* Mount the test volume and make it the descriptor API's default. */
+static int tv_mount(void)
+{
+    int rc = exofs_mount(0, EXOFS_TEST_BASE_LBA, &g_tv);
+    if (rc == 0) exo_file_set_volume(g_tv);
+    return rc;
+}
+
+/* See test_exofs_k.c's LBA RANGE note before moving either. */
 #define VOL_SECTORS         8192u
 
 static int drive_present(void)
@@ -46,7 +61,7 @@ static int drive_present(void)
 
 int exo_file_suite_init(void)
 {
-    exofs_bdev_acquire();
+    exofs_bdev_acquire(0);
     return 0;
 }
 
@@ -55,8 +70,8 @@ int exo_file_suite_cleanup(void)
     /* Descriptors before the volume: unmounting under an open descriptor
      * is the silent-size-loss case exo_file.h warns about. */
     exo_file_close_all();
-    exofs_unmount();
-    exofs_bdev_release();
+    exofs_unmount(g_tv);
+    exofs_bdev_release(0);
     return 0;
 }
 
@@ -66,16 +81,16 @@ int exo_file_suite_cleanup(void)
 static int fresh_volume(void)
 {
     exo_file_close_all();
-    exofs_unmount();
-    if (exofs_format(EXOFS_TEST_BASE_LBA, VOL_SECTORS) != 0) return 0;
-    if (exofs_mount(EXOFS_TEST_BASE_LBA) != 0) return 0;
+    exofs_unmount(g_tv);
+    if (exofs_format(0, EXOFS_TEST_BASE_LBA, VOL_SECTORS) != 0) return 0;
+    if (tv_mount() != 0) return 0;
     return 1;
 }
 
 static int remount(void)
 {
-    exofs_unmount();
-    return exofs_mount(EXOFS_TEST_BASE_LBA) == 0;
+    exofs_unmount(g_tv);
+    return tv_mount() == 0;
 }
 
 /* ---- Constants ---------------------------------------------------------- */
@@ -123,7 +138,7 @@ static void test_bad_descriptors(void)
     CU_ASSERT_EQUAL(exo_file_write(fd, &c, 1u), -EXO_EBADF);
     CU_ASSERT_EQUAL(exo_file_seek(fd, 0, EXO_FILE_SEEK_SET), -EXO_EBADF);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_table_full_and_slot_reuse(void)
@@ -149,7 +164,7 @@ static void test_table_full_and_slot_reuse(void)
     CU_ASSERT_EQUAL(exo_file_open("/f3", EXO_FILE_O_READ), 3);
 
     CU_ASSERT_EQUAL(exo_file_close_all(), 0);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_failed_open_consumes_no_descriptor(void)
@@ -164,17 +179,150 @@ static void test_failed_open_consumes_no_descriptor(void)
     CU_ASSERT_EQUAL(exo_file_open("/x", EXO_FILE_O_WRITE | EXO_FILE_O_CREATE),
                     0);
     CU_ASSERT_EQUAL(exo_file_close(0), 0);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_nothing_mounted(void)
 {
     exo_file_close_all();
-    exofs_unmount();
+    exofs_unmount(g_tv);
 
     uint32_t size;
     CU_ASSERT_EQUAL(exo_file_open("/a", EXO_FILE_O_READ), -EXO_EINVAL);
     CU_ASSERT_EQUAL(exo_file_stat("/a", &size), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exo_file_remove("/a"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exo_file_rename("/a", "/b"), -EXO_EINVAL);
+}
+
+/* ---- remove / rename (SCRUM-106) ---------------------------------------- */
+
+/* Create `path` holding `n` bytes of `fill`. Returns 1 on success. */
+static int make_file(const char *path, char fill, unsigned n)
+{
+    char buf[64];
+    memset(buf, fill, sizeof(buf));
+    int fd = exo_file_open(path, EXO_FILE_O_WRITE | EXO_FILE_O_CREATE);
+    if (fd < 0) return 0;
+    int ok = exo_file_write(fd, buf, n) == (int64_t)n;
+    return exo_file_close(fd) == 0 && ok;
+}
+
+static void test_remove(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    uint32_t size;
+    CU_ASSERT_TRUE(make_file("/gone", 'x', 10u));
+    CU_ASSERT_EQUAL(exo_file_stat("/gone", &size), 0);
+    CU_ASSERT_EQUAL(exo_file_remove("/gone"), 0);
+    CU_ASSERT_EQUAL(exo_file_stat("/gone", &size), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exo_file_remove("/gone"), -EXO_ENOENT);
+
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/dir"), 0);
+    CU_ASSERT_EQUAL(exo_file_remove("/dir"), -EXO_EISDIR);
+
+    /* Open files are protected by ExoFS; closing releases them. */
+    CU_ASSERT_TRUE(make_file("/busy", 'y', 4u));
+    int fd = exo_file_open("/busy", EXO_FILE_O_READ);
+    CU_ASSERT_TRUE(fd >= 0);
+    CU_ASSERT_EQUAL(exo_file_remove("/busy"), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exo_file_close(fd), 0);
+    CU_ASSERT_EQUAL(exo_file_remove("/busy"), 0);
+
+    /* A NULL path is rejected, not dereferenced. */
+    CU_ASSERT_EQUAL(exo_file_remove(NULL), -EXO_EINVAL);
+
+    exofs_unmount(g_tv);
+}
+
+static void test_rename(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    uint32_t size;
+    char back[16];
+    CU_ASSERT_TRUE(make_file("/old", 'r', 9u));
+    CU_ASSERT_EQUAL(exo_file_rename("/old", "/new"), 0);
+    CU_ASSERT_EQUAL(exo_file_stat("/old", &size), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exo_file_stat("/new", &size), 0);
+    CU_ASSERT_EQUAL(size, 9u);
+
+    /* The contents moved with the name, and it is on disk. */
+    if (!remount()) { CU_ASSERT_TRUE(0); return; }
+    memset(back, 0, sizeof(back));
+    int fd = exo_file_open("/new", EXO_FILE_O_READ);
+    CU_ASSERT_TRUE(fd >= 0);
+    CU_ASSERT_EQUAL(exo_file_read(fd, back, 9u), 9);
+    CU_ASSERT_EQUAL(memcmp(back, "rrrrrrrrr", 9u), 0);
+    CU_ASSERT_EQUAL(exo_file_close(fd), 0);
+
+    /* Across directories. */
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/d"), 0);
+    CU_ASSERT_EQUAL(exo_file_rename("/new", "/d/moved"), 0);
+    CU_ASSERT_EQUAL(exo_file_stat("/d/moved", &size), 0);
+    CU_ASSERT_EQUAL(exo_file_stat("/new", &size), -EXO_ENOENT);
+
+    /* No replace-on-rename; a missing source is ENOENT. */
+    CU_ASSERT_TRUE(make_file("/other", 'o', 1u));
+    CU_ASSERT_EQUAL(exo_file_rename("/other", "/d/moved"), -EXO_EEXIST);
+    CU_ASSERT_EQUAL(exo_file_rename("/missing", "/z"), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exo_file_rename(NULL, "/z"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exo_file_rename("/other", NULL), -EXO_EINVAL);
+
+    exofs_unmount(g_tv);
+}
+
+/* The behaviours exo_file.h promises around open descriptors, directories
+ * and degenerate names. */
+static void test_rename_open_dirs_and_edge_cases(void)
+{
+    if (!drive_present()) return;
+    if (!fresh_volume()) { CU_ASSERT_TRUE(0); return; }
+
+    uint32_t size;
+    char back[16];
+
+    /* Same-directory rename: an open descriptor stays valid and its size
+     * lands under the new name when it is closed. */
+    int fd = exo_file_open("/a", EXO_FILE_O_READ | EXO_FILE_O_WRITE
+                                 | EXO_FILE_O_CREATE);
+    CU_ASSERT_TRUE(fd >= 0);
+    CU_ASSERT_EQUAL(exo_file_rename("/a", "/b"), 0);
+    CU_ASSERT_EQUAL(exo_file_write(fd, "hello", 5u), 5);
+    CU_ASSERT_EQUAL(exo_file_close(fd), 0);
+    CU_ASSERT_EQUAL(exo_file_stat("/a", &size), -EXO_ENOENT);
+    CU_ASSERT_EQUAL(exo_file_stat("/b", &size), 0);
+    CU_ASSERT_EQUAL(size, 5u);
+    fd = exo_file_open("/b", EXO_FILE_O_READ);
+    memset(back, 0, sizeof(back));
+    CU_ASSERT_EQUAL(exo_file_read(fd, back, 5u), 5);
+    CU_ASSERT_EQUAL(memcmp(back, "hello", 5u), 0);
+    CU_ASSERT_EQUAL(exo_file_close(fd), 0);
+
+    /* Moving an open file between directories is refused. */
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/d"), 0);
+    fd = exo_file_open("/b", EXO_FILE_O_READ);
+    CU_ASSERT_EQUAL(exo_file_rename("/b", "/d/b"), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exo_file_close(fd), 0);
+    CU_ASSERT_EQUAL(exo_file_rename("/b", "/d/b"), 0);
+
+    /* A directory moves with its contents. */
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/e"), 0);
+    CU_ASSERT_EQUAL(exo_file_rename("/d", "/e/d"), 0);
+    CU_ASSERT_EQUAL(exo_file_stat("/e/d/b", &size), 0);
+    CU_ASSERT_EQUAL(size, 5u);
+    CU_ASSERT_EQUAL(exo_file_stat("/d", &size), -EXO_ENOENT);
+
+    /* Into its own subtree, onto itself, and "." / ".." names. */
+    CU_ASSERT_EQUAL(exo_file_rename("/e", "/e/d/x"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exo_file_rename("/e/d/b", "/e/d/b"), 0);
+    CU_ASSERT_EQUAL(exo_file_stat("/e/d/b", &size), 0);
+    CU_ASSERT_EQUAL(exo_file_rename("/e/d/.", "/e/d/y"), -EXO_EINVAL);
+    CU_ASSERT_EQUAL(exo_file_rename("/e/d/b", "/e/d/.."), -EXO_EINVAL);
+
+    exofs_unmount(g_tv);
 }
 
 /* ---- I/O ---------------------------------------------------------------- */
@@ -194,7 +342,7 @@ static void test_access_mode_is_enforced(void)
     CU_ASSERT_EQUAL(exo_file_write(fd, &c, 1u), -EXO_EACCES);
     CU_ASSERT_EQUAL(exo_file_close(fd), 0);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_seek(void)
@@ -221,7 +369,7 @@ static void test_seek(void)
     CU_ASSERT_EQUAL(exo_file_seek(fd, 0, EXO_FILE_SEEK_CUR), 10);
 
     CU_ASSERT_EQUAL(exo_file_close(fd), 0);
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 static void test_truncate_and_append(void)
@@ -255,7 +403,7 @@ static void test_truncate_and_append(void)
     CU_ASSERT_EQUAL(exo_file_close(fd), 0);
     CU_ASSERT_STRING_EQUAL(back, "abcde");
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* ---- stat --------------------------------------------------------------- */
@@ -270,7 +418,7 @@ static void test_stat(void)
     CU_ASSERT_EQUAL(size, 123u);   /* untouched on failure */
     CU_ASSERT_EQUAL(exo_file_stat("/nope", NULL), -EXO_EINVAL);
 
-    CU_ASSERT_EQUAL(exofs_mkdir("/dir"), 0);
+    CU_ASSERT_EQUAL(exofs_mkdir(g_tv, "/dir"), 0);
     CU_ASSERT_EQUAL(exo_file_stat("/dir", &size), 0);
     CU_ASSERT_EQUAL(size, 0u);
 
@@ -280,7 +428,7 @@ static void test_stat(void)
     CU_ASSERT_EQUAL(exo_file_stat("/dir/f", &size), 0);
     CU_ASSERT_EQUAL(size, 5u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /* ---- Durability --------------------------------------------------------- */
@@ -313,7 +461,7 @@ static void test_close_all_makes_sizes_durable(void)
     CU_ASSERT_EQUAL(exo_file_stat("/c", &size), 0);
     CU_ASSERT_EQUAL(size, 3u);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 /*
@@ -360,7 +508,7 @@ static void test_acceptance(void)
     CU_ASSERT_EQUAL(exo_file_close(fd), 0);
     CU_ASSERT_EQUAL(memcmp(back, out, sizeof(out)), 0);
 
-    exofs_unmount();
+    exofs_unmount(g_tv);
 }
 
 void suite_exo_file_tests(CU_pSuite s)
@@ -372,6 +520,10 @@ void suite_exo_file_tests(CU_pSuite s)
     CU_add_test(s, "a failed open consumes no descriptor",
                 test_failed_open_consumes_no_descriptor);
     CU_add_test(s, "nothing mounted", test_nothing_mounted);
+    CU_add_test(s, "remove", test_remove);
+    CU_add_test(s, "rename", test_rename);
+    CU_add_test(s, "rename: open files, directories, edge cases",
+                test_rename_open_dirs_and_edge_cases);
     CU_add_test(s, "access mode is enforced", test_access_mode_is_enforced);
     CU_add_test(s, "seek", test_seek);
     CU_add_test(s, "truncate and append", test_truncate_and_append);

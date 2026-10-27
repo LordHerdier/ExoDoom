@@ -3,6 +3,9 @@
 **Last updated:** 18 Sep 2026 — sprint roadmap and epic breakdown reconciled
 against the Jira board
 
+Diagrams of the architecture, memory layout, syscall flow, interrupt path and more
+live in [`docs/diagrams/`](diagrams/README.md).
+
 ---
 
 ## Table of Contents
@@ -207,7 +210,9 @@ kernel_main  (src/kernel.c)
     ├─ syscall_init()         — EFER.SCE / STAR / LSTAR / FMASK
     ├─ syscall_mem_init()     — bind exo_page_alloc / exo_page_free
     ├─ syscall_fb_init(fb)    — publish FB geometry, bind exo_fb_acquire
+    ├─ ata_init() + ata_register_blkdevs() — probe all four IDE positions (CD-ROM skipped), register each disk as a block device; the primary master takes the reserved system slot, device 0 (SCRUM-244)
     ├─ usb_init()             — take every UHCI from the BIOS, enumerate root ports, claim HID boot keyboards; after pci_init/ata_init, interrupts still off (SCRUM-198)
+    ├─ syscall_disk_init()    — bind exo_disk_* (#24–#27, #31, #37) over the registry; after every driver that registers disks
     ├─ rtc_init() + syscall_rtc_init() — cache the FADT century register, bind exo_rtc_read (#35); after pit_init (SCRUM-249)
     │
     │  [if compiled with -DTESTING]
@@ -477,6 +482,53 @@ kernel's own boot-time console draws directly to the real hardware buffer
 before any LibOS launches and is never composited over, since nothing has
 acquired a virtual framebuffer yet at that point.
 
+**The boot hand-off (SCRUM-192).** The boot shell is the one exception to
+"a new context's buffer starts black". `kernel_main` creates the shell's
+virtual framebuffer itself with `fb_shadow_seed_from_screen()`, a copy of the
+boot console as it stands, ending in "Launching shell LibOS...". The
+compositor shows the shell's buffer from its first syscall, and the shell
+spends its first stretch mapping that buffer page by page and then clearing
+it. With a zeroed buffer the screen sat black for all of that, which
+under QEMU emulation was seconds. Measured with `-icount shift=8`, that
+stretch was ~950 ms of guest time and ~850 ms of it was `fb_clear()`'s
+per-pixel loop. That loop is now a `rep stosl` per row (`src/fb.c`), and the
+compositor copy and shadow zeroing are `rep movsq`/`rep stosq`
+(`src/fb_copy.h`) instead of `src/string.c`'s byte loops. Launch to banner
+drops from ~1350 ms to ~960 ms of guest time with no black frame. Seeding is
+only safe because nothing but the kernel has drawn yet; every other launch
+keeps a zeroed buffer, or it would see another context's pixels.
+
+**Split-screen panes (SCRUM-197, epic SCRUM-195).** The compositor can now show
+several contexts at once. `src/fb_layout.c` is a small kernel-owned table of
+panes, each a context id plus a rect in real-screen pixels
+(`fb_layout_set/get/clear`, up to `FB_LAYOUT_MAX_PANES`; panes may overlap and
+draw in slot order, so depth follows slot index, not assignment time). It is a kernel table rather than a launch parameter
+because a split has to be changeable at runtime, and because a launch-time
+parameter would have to fit #36, which only accepts the WAD params struct.
+A context with a pane gets a shadow buffer exactly the pane's size, tightly
+pitched (`fb_shadow_acquire()` reads the table), so `exo_fb_acquire` reports
+the pane's width/height/pitch and Doom's nearest-neighbour scaler fills it
+unchanged. `fb_compositor_tick()` then has two modes: if the layout is empty,
+or `context_current()` has no pane, it does the full-screen copy it always did
+(the shell and wadview are unaffected, and the shell is the way back out of a
+split); otherwise it copies every pane's rows to its rect on a change to the table
+(after clearing the background) and only the running context's pane on
+every other tick, clipped to the current screen geometry. The copy is per-row
+`fb_copy_bytes`, so it moves the same bytes as one full-screen copy and the
+kernel does no per-pixel scaling. `fb_shadow_release()` drops the pane, so
+`exo_exit` and revocation take a context out of the split. Not done: a pane
+must be assigned *before* the context's `exo_fb_acquire` (a pane may then move
+but `fb_layout_set` refuses a size change with `FB_LAYOUT_EBUSY` -- live
+resize needs Doom to rebuild its scale tables), and `context_destroy()` also
+drops the pane so a reused id cannot inherit one,
+and nothing user-facing assigns panes yet, so the split is exercised from tests
+(`test_fb_layout_k.c`, `test_fb_compositor_k.c`). Only the running context
+draws, so a pane that is not current shows its last frame until it is switched
+to; concurrent updates need SCRUM-201 / SCRUM-200. A second Doom
+cannot be launched yet either: its private save volume is exclusive
+(SCRUM-280), and the shell cannot `run` while a Doom holds the program volume
+read-only.
+
 **✅ SCRUM-111:** the Ctrl+Tab hotkey this note originally left undone.
 "Foreground == running" turned out not to need a scheduler to interrupt —
 `context_switch_request()` (`src/context.c`) already lets *anything*
@@ -731,7 +783,7 @@ the single argument-based launch syscall SCRUM-184 collapsed four per-app ones
 into), and the shell's `doom` command calls it. Doom then completes its whole
 startup — `W_Init` over the mounted WAD, `R_Init`, `P_Init`, `S_Init`,
 `HU_Init`, `ST_Init`, `I_InitGraphics` — and runs its tick loop. Page and
-stack sizing for the launch are in "LibOS launch conventions" above.
+stack sizing for the launch are in `docs/libos-authoring.md` §4.7–§4.8.
 
 Things the audit turned up that are worth knowing before touching this area:
 
@@ -744,14 +796,30 @@ Things the audit turned up that are worth knowing before touching this area:
   are all implemented now. `vprintf` was added for the fatal path (below), and
   `printf` is implemented in terms of it — one formatting engine and one sink
   per build.
-- **`fopen` is a memory-mapped reader, not a filesystem.** It resolves a name
-  against blobs registered via `exo_file_register_blob()` and returns a
-  read-only stream over memory the kernel already mapped — 28 MB of IWAD that
-  is never copied. Matching is on the **basename**, case-insensitively,
-  because Doom joins a discovered directory onto a filename before calling.
-  **`fopen` for writing fails**, as do `remove`/`rename`/`mkdir` (`EROFS`): a
+- **`fopen` reads through a pluggable backend** (`exo_stdio_set_backend()`,
+  `src/stdio.h`; SCRUM-42/75). With none installed it resolves a name against
+  blobs registered via `exo_file_register_blob()` — the original shim, still
+  what the kernel-side tests and every program without a filesystem get, with
+  matching on the **basename**, case-insensitively. A program that has mounted
+  ExoFS calls `exo_file_stdio_install()` (`src/libos_fs/exo_file_stdio.c`) and
+  `fopen`/`fread`/`fseek`/`ftell`/`fscanf` then run over `exo_file_*`; a
+  relative or `./` path is resolved against the volume root. The backend is a
+  function table so `src/stdio.c` does not pull ExoFS into every target.
+  **Writing works only through a backend that has a write op** (SCRUM-42):
+  `fopen` accepts `r`/`w`/`a` and their `+` forms, `fwrite`/`fprintf`/`fflush`
+  write through `exo_file_write`, and `mkdir` calls `exofs_mkdir`. With no
+  backend, or one without a write op, `fopen` for writing fails `EROFS`: a
   write that silently went nowhere would surface much later as a config that
-  never persists or a savegame that reloads as garbage. `mkdir`, `strdup`,
+  never persists or a savegame that reloads as garbage. libc `remove`/`rename`
+  go through the same backend (SCRUM-267): the ExoFS one calls
+  `exo_file_remove`/`exo_file_rename` (SCRUM-106), and a backend without those
+  ops still fails them `EROFS`. A read-only `fopen` can also fall through to a
+  second, read-only volume (`exo_file_stdio_set_fallback`, `docs/filesystem.md`
+  §6d), which is how Doom reads the IWAD while writing only to its own volume.
+  Each stream buffers one 512-byte block
+  of writes, flushed on full, `fflush`, `fclose`, `fseek` and `fread`; nothing
+  is durable, and the file's size is not on disk, until `fclose`
+  (`docs/filesystem.md` §6c, §6d). `mkdir`, `strdup`,
   `atof` and the `FILE*` block in `src/stdio.h` are real;
   `docs/libc_audit.md` remains the per-function, per-call-site list.
 - **`src/fpconv.c` exists because `-mno-sse` forbids `double` in kernel
@@ -815,23 +883,40 @@ Things the audit turned up that are worth knowing before touching this area:
 > subtraction is done in `uint32_t` so it stays correct across the counter's
 > ~49.7-day wrap, matching `kernel_sleep_ms` and Doom's own `I_GetTime`.
 
-### `DG_Init` mounts the IWAD; it does not load one (SCRUM-73)
+### `DG_Init` mounts the program volume and checks the IWAD (SCRUM-73, SCRUM-75)
 
-There is no file for Doom to read and nowhere to put 28 MB if there were
-(the LibOS stack and heap windows are far smaller). The kernel reads the IWAD
-off its ExoFS volume once (`src/doom_wad_disk.c`, SCRUM-190, which retired the
-earlier GRUB multiboot module) into a contiguous physical buffer, and
-`libos_map_wad()` (`src/libos_wad_map.c`) maps *those* pages read-only at
-`LIBOS_WAD_VADDR` before the LibOS is ever entered. `DG_Init`'s job is to prove
-what is mapped really is a WAD, record it (`src/doom_wad.c`), and say so on
-serial. It then calls `exo_file_register_blob(LIBOS_WAD_FILE_NAME, ...)`,
-because `D_DoomMain` finds its IWAD through `D_FindIWAD` → `fopen`, not
-through `doom_wad_mounted()`; the blob shim (SCRUM-65) and the mount existed,
-and nothing had connected them until SCRUM-66.
+Doom reads its IWAD like any program reads a file. `freedoom2.wad` is on the
+**program volume** — the ExoFS volume `install` copies packages and the IWAD
+to (`docs/filesystem.md` "Install"). The `doom.exo` manifest asks for
+`progvol` (`EXO_PKG_WANT_PROGRAM_RO`, `tools/exopkg`), so `exo_launch_pkg`
+assigns that extent to Doom **read-only** (`docs/syscall_spec.md` §3.5a);
+`DG_Init` learns it from `exo_disk_extent` (#37), binds it with
+`exo_disk_acquire`, `exofs_mount`s it, installs the FILE* backend, then
+`dg_check_iwad()` opens the file and checks the 12-byte header and reports on
+serial. `D_FindIWAD` → `fopen` and `W_AddFile` (`src/doom/w_file_stdc.c`,
+the stock upstream reader, unmodified) then read lumps with
+`fseek`/`fread`; nothing is preloaded or mapped.
 
-The ticket title says "via `exo_fb_map`" and that is a mis-filing: there is no
-such syscall (framebuffer mapping is `exo_fb_acquire` + `exo_page_map`,
-composed by `libos_fb_map()`), and it has nothing to do with an IWAD.
+Until SCRUM-75 the kernel read the whole 28 MB IWAD into a contiguous buffer
+(`src/doom_wad_disk.c`), `libos_map_wad()` mapped it at `LIBOS_WAD_VADDR`,
+`g_doom_params` carried its address, and `DG_Init` registered it as a blob.
+All of that is gone from Doom. `doom_wad_disk_get()`/`libos_map_wad()` remain
+for the WAD viewer (`EXO_PKG_WANT_WAD`) and the kernel tests.
+
+Two consequences worth knowing:
+
+- **While Doom runs, the shell cannot bind the program volume.** Doom holds
+  its read-only binding for its lifetime (the mounted volume's FAT is resident,
+  and `exofs_unmount` before release is the rule). Readers share, but a writer
+  overlapping a reader is `-EXO_EBUSY`, and the shell binds read-write, so
+  `programs`/`run`/`install` report the volume busy until Doom exits. `exo_exit` releases the disk binding and any assigned volume (`src/syscall_exit.c`), so the volume is free the moment Doom quits, not at the next launch's reap.
+- **Sound and music no longer walk a flat WAD.** `doom_sound_pcm.c` and
+  `src/libos_doom/doom_sound_music.c` get lumps from `doom_wad_lump()`
+  (`src/doom_wad.h`): the installed source if there is one, else the mounted
+  WAD. Ring-3 Doom installs `engine_lump()` (`src/libos_doom/libos_doom.c`),
+  which answers from the engine's own `W_CacheLumpNum(..., PU_STATIC)`, so
+  an effect or GENMIDI is cached once and the pointer stays valid after the
+  call. Kernel tests still mount a real buffer and use the fallback.
 
 - **`DG_Init` reports rather than halts.** It records a `DOOM_WAD_*` code in
   `dg_init_result()` and returns. A missing or malformed IWAD is exactly what
@@ -839,121 +924,9 @@ composed by `libos_fb_map()`), and it has nothing to do with an IWAD.
   context this layer lacks; halting first would pre-empt that for no gain. It
   also means no `#ifdef` splits the tested path from the shipped one —
   `tests/kernel/test_dg_init_k.c` drives the real function from ring 0.
-- **`g_doom_params` in `src/doomgeneric_exo.c`** is the SCRUM-175 params
-  hand-off (see "LibOS launch conventions"), reusing `libos_wad_params_t`
-  rather than declaring a second identical struct. It must stay the **first
-  global in that file**, and that file first in the Doom target's source list,
-  or `libos_launch_patch_params()` writes to the wrong offset. Its non-zero
-  sentinel initialiser (`DOOM_PARAMS_UNSET`) is load-bearing twice over: it
-  keeps the struct out of `.bss`, where there would be no bytes to patch, and
-  it lets `DG_Init` report "nobody patched this" instead of dereferencing
-  address 0.
-
-### Fatal errors: `I_Error` / `I_Quit` (SCRUM-83)
-
-Doom's fatal path used to write to `stderr`, open a zenity dialog through
-`system()`, and `exit(-1)` — none of which exists here. `src/doom/i_system.c`
-now calls `src/doom_panic.c`, which is **outside** the vendored tree on
-purpose: it keeps the `i_system.c` patch small for the next re-vendor and
-makes the logic reachable by a unit test.
-
-The API is deliberately **two** calls, not one: `doom_panic_begin()` prints
-and returns, `doom_panic_halt()` never returns. `I_Error` runs Doom's atexit
-list *between* them, so the message is already out before shutdown handlers
-run on a machine that has just declared itself broken — if one of them
-faults, it no longer takes the explanation with it. There is a re-entry guard,
-because Doom's own `already_quitting` does not actually stop anything (the
-`exit(-1)` it guards is inside `#if ORIGCODE`), and a recursive panic would
-otherwise recurse through the formatter on a small ring-3 stack.
-
-### Networking: stubbed, single player only
-
-ExoDoom has no network stack, but Doom's game loop does not know that. There
-is no separate single-player loop in the engine: every
-tic of every game runs through the same code that drives a netgame.
-`src/doom/d_loop.c` samples input into a `ticcmd_t`, files it in a ring of
-`BACKUPTICS` (128) slots, works out from the clock how many tics are due and
-hands each to the game along with a mask of who is playing; `src/doom/d_net.c`
-is the Doom-specific glue on top (settings in and out of the game's globals,
-`RunTic` → `G_Ticker`). "Single player" is that machinery with nobody else
-connected.
-
-What was left out of the vendor (SCRUM-63) is everything *beneath* those two
-files — `net_client.c`, `net_server.c`, `net_io.c`, the SDL transport. Three
-things stand in for it:
-
-| Mechanism | Where | Effect |
-| --- | --- | --- |
-| `#undef FEATURE_MULTIPLAYER` | `src/doom/doomfeatures.h` | Compiles out every call into the missing layer (`NET_CL_Run`, `NET_SV_Run`, `NET_CL_SendTiccmd`, the `-server`/`-connect`/`-autojoin` handling — twelve `NET_*` functions in `d_loop.c` alone). `D_InitNetGame()` reduces to: register `D_QuitNetGame` as an exit hook, remember the player class, return false. |
-| `#undef ORIGCODE` | `src/doom/config.h` | Replaces `D_StartNetGame()`'s server handshake with an invented reply: one player, console 0, `ticdup` 1, vanilla (old) sync. |
-| `net_client_connected = false`, `drone = false` | `src/doom_net_stub.c` | The two globals the loop still reads from `net_client.h`. They keep it on its local-only side: commands get built (a drone builds none), `PlayersInGame()` answers yes, and `TryRunTics()` clears every `ingame[]` slot but the local player's. |
-
-`libos_doom.c` passes Doom `argv = { "exodoom" }`, so `M_CheckParm()` returns
-0 for every net-related switch (`-solo-net`, `-left`, `-right`, `-timer`,
-`-avg`, …) and `netgame` stays false for the life of the process. The one
-exception is playback of a multiplayer *demo*, where `G_DoPlayDemo` sets it
-from the demo header and `G_CheckDemoStatus` clears it again when the demo
-ends.
-
-> ✅ **SCRUM-97:** verified, and one real defect fixed. The acceptance is "no
-> crashes from uninitialized net state", so the audit was of what the loop
-> reads on its way past where the network would have been:
->
-> - **`D_ConnectNetGame()` read an uninitialised stack field on every boot.**
->   It keeps a `net_connect_data_t` on its stack, and `InitConnectData()`
->   never writes two of its fields — `player_class` (Hexen's; no Doom code
->   assigns it) and `deh_sha1sum` (its writer is under `#if ORIGCODE`) — yet
->   `D_InitNetGame()` reads `player_class` unconditionally and stores it.
->   Nothing in Doom consumes a player class, so it never showed; it was still
->   undefined behaviour, and the struct is exactly what a network layer would
->   serialise to a server. Fixed with `= {0}` in `src/doom/d_net.c`, marked
->   `ExoDoom (SCRUM-97)` like the tree's other patches.
-> - **`ticdup` is a divisor that starts at zero.** `d_loop.c` divides by it in
->   ten places and it only becomes 1 inside `D_StartNetGame()`. `D_DoomMain`
->   reaches that (via `D_CheckNetGame()`) before `D_DoomLoop()`, and nothing
->   earlier calls `NetUpdate`/`TryRunTics`, so the order is safe — but a call
->   into the tic loop from earlier in startup would be a ring-3 `#DE`.
-> - **The loop relies on a zeroed `.bss`.** With `ORIGCODE` off,
->   `D_StartNetGame()` no longer assigns `localplayer`,
->   `local_playeringame[]`, `recvtic` or `offsetms`. `libos_build_image()`
->   zeroes `.bss` on every launch, including a second Doom (SCRUM-196), so it
->   holds.
-> - **A stall costs time, not correctness.** The loop may only run tics it
->   has built and builds at most five ahead, so a ten-second hitch runs five
->   tics and drops the rest instead of tripping `I_Error("gametic>lowtic")`.
->   The same cap is what bounds the very first frame: `D_DoomLoop()` calls
->   `TryRunTics()` *before* `D_StartGameLoop()` has set the loop's start
->   time, so that call believes every tic since boot is owed at once.
->
-> `tests/kernel/test_doom_net_k.c` is the regression test. It links the
-> **real** `d_loop.c` and `d_net.c` into the test kernel — the second
-> exception, after `tables.c` (SCRUM-41), to "nothing in `src/doom/` links
-> into `build/exodoom`", and likewise `TESTING=1` only — and drives one
-> continuous single-player session through them from ring 0 in the order
-> `D_DoomMain`/`D_DoomLoop` do: connect, check, the pre-clock first frame,
-> ten seconds at one tic per tic, a stall, a phantom `playeringame[]` entry
-> (retired through `PlayerQuitGame`, not simulated on input nobody built), a
-> multiplayer demo, then 20,000 frames at an uneven frame rate. The engine
-> below is faked in that TU — it *defines* the 22 engine globals and 16
-> functions the two objects import (`players`, `netgame`, `G_Ticker`,
-> `I_GetTime`, …), so nothing else in the kernel image may define those
-> names and a second test wanting the same fakes must share that file's. Its
-> cases are **one continuous session, order-dependent on purpose**, because
-> `d_loop.c` keeps its state in file statics with no reset. Each built command is stamped with its tic
-> number and `G_Ticker` checks the stamp, which is what turns "it did not
-> crash" into "it ran the right input" across well over a hundred laps of the
-> ring. The uninitialised read is caught by poisoning the stack first —
-> before the fix the test read back `0xA5A5A5A5`.
-
-### LibOS launch conventions
-
-How a ring-3 LibOS gets onto its own address space and what it can assume
-once there. The mechanism is `libos_build_image()` + `libos_enter()`
-(`src/libos_launch.c/h`, `src/libos_enter.s`; SCRUM-47/48/49/50), reached from
-the shell through `exo_launch(app_id)` (#21, `src/syscall_launch.c`). The
-address-space primitives underneath are in `docs/memory.md` §7; the syscall
-side is `docs/syscall_spec.md` §3.7.
-
+- **`g_doom_params` is gone** (SCRUM-75): Doom no longer takes a launch params
+  struct, so `doom.exo` has `params_len` 0 and `src/doomgeneric_exo.c` need not
+  lead its `.data`. The entry-point rule (`.text.entry`) is unchanged.
 - **Three fixed addresses inside the LibOS window.**
   `LIBOS_LAUNCH_CODE_VADDR`, `_DATA_VADDR` and `_STACK_VADDR`
   (`src/libos_launch.h`). Code and data+bss each span up to
@@ -1005,8 +978,8 @@ side is `docs/syscall_spec.md` §3.7.
   rule depend on the entry-and-params TU being **linked first** in
   `build_ring3_link_target()`'s source list: GCC emits a TU's globals into
   `.data` in source order and `ld`'s `*(.data)` collects input sections in
-  link order. `g_doom_params` in `src/doomgeneric_exo.c` follows the same
-  rule — see "doomgeneric platform functions" above.
+  link order. (`g_doom_params` in `src/doomgeneric_exo.c` used to follow the same
+  rule; SCRUM-75 removed it — see "`DG_Init` mounts the program volume".)
 
 ### Launching from a package on disk (SCRUM-230)
 
@@ -1037,21 +1010,38 @@ Details and error codes: `docs/syscall_spec.md` §3.2 #36.
   its own on request: the manifest's `volume_slot`/`volume_sectors`
   (`src/exo_pkg.h`, layout in `src/exo_volume.h`) become a kernel-side extent
   assignment at launch, which the program reads with `exo_disk_extent` (#37)
-  and binds with `exo_disk_acquire(base, count)` (#26). `--volume-slot N
+  and binds with `exo_disk_acquire(0, base, count)` (#26; slots are always on
+  device 0, the system disk, SCRUM-244). `--volume-slot N
   --volume-sectors M` on `tools/exopkg` sets them; `docker/scripts/build.sh`
   step [2f2/7] builds the `libos_voldemo` demo, packaged as `voldemoa.exo`
   and `voldemob.exo` (slots 0 and 1), and grows the disk image to cover the
-  slots. `docs/syscall_spec.md` §3.5a has the rules; SCRUM-233 (install) and SCRUM-234 (first boot, below) are the
+  slots. SCRUM-267 gives Doom the first real one (slot 2, with `progvol` as
+  well, so it holds the IWAD's volume and its own at once): `docs/filesystem.md`
+  §8 "Doom's volumes". `docs/syscall_spec.md` §3.5a has the rules; SCRUM-233 (install) and SCRUM-234 (first boot, below) are the
   two halves.
 - **First boot (SCRUM-234).** The shell probes this volume at startup and offers
   to format it when blank; `programs` lists the packages on it. See
   `docs/filesystem.md` "First boot".
+- **Install (SCRUM-233).** `install <name>` copies a file from the install
+  disk (block device 1, an ExoFS volume of every package plus the IWAD that
+  `build.sh` writes each build) onto this volume, after which `programs` lists
+  it and `run` launches it. `install doom` means `/doom.exo`; the IWAD is a
+  separate `install freedoom2.wad`. The copy mounts the install disk and the
+  system volume together and moves a chunk at a time (SCRUM-265). See `docs/filesystem.md`
+  "Install".
 - **Snake and the clock are no longer in the kernel image.** Their
   `launch_apps[]` rows and `EXO_LAUNCH_APP_SNAKE`/`_CLOCK` are gone (WAD viewer
   is app id 0, Doom 1); `build.sh` builds their blobs but does not link them
   (`ring3_embed=0`), and the shell's `snake`/`clock` commands are `run
   snake.exo`/`run clock.exo`. The kernel half is asserted by the
   `launch_pkg` suite; the boot half is a manual `make docker-run-kernel` check.
+- **Resource dashboard (SCRUM-236).** `src/libos_top/libos_top.c`,
+  shipped as `top.exo` (`ring3_embed=0`, like the clock) and started by the
+  shell's `top` command. Redraws ~4 Hz from #22/#23/#31/#38/#39 and #5; no syscall
+  was added. It is a full-screen app you Ctrl+Tab to: the kernel runs one context
+  at a time and the compositor shows only `context_current()`, so showing it
+  beside a running program needs the preemptive scheduling of SCRUM-127/176.
+  Contexts are listed by id and program name: the launcher passes the name to #36 (the shell uses the file name without `.exo`), the kernel names the shell and the #21 apps itself, and #23 reports it. The name is display-only and caller-asserted. The page redraws in place (one clear at start, every line padded to the row width) because clearing each frame let the compositor copy a black frame.
 - **Admission (SCRUM-232).** The manifest's `min_pages`/`recommended_pages`/
   `sound_voices`/`want_flags` are read at launch. The kernel *reports* what is
   free (`exo_resstat`, #38: free pages, free context slots, voices, whether the
@@ -1069,7 +1059,24 @@ Details and error codes: `docs/syscall_spec.md` §3.2 #36.
   (code + data/bss + the fixed 16-page stack + 4 page-table pages, + 33 more for
   `EXO_PKG_WANT_WAD` since the WAD's tables are the program's own), and
   `test_launch_pkg_k.c` measures a real launch against it.
-- **Doom and the WAD viewer launch this way too.** `EXO_PKG_WANT_WAD` (with
+- **The grant read-out (SCRUM-235).** Admission says what was *asked* against
+  what is *free*; the read-out says what the program *holds*, at the moment it
+  starts. `run` launches with `EXO_LAUNCH_HOLD` (#36), so the context exists but
+  has not run; reads it with `exo_grantstat` (#39: pages, framebuffer holder,
+  disk extent, sound voices); writes it next to the manifest through
+  `exo_grant_format()` (`src/exo_grant.h`, header-only and pure like
+  `exo_admit.h`); then enters it with `exo_launch_start` (#40). The split is
+  needed because #36 otherwise switches away immediately and the shell never
+  runs again until the program yields. The read-out goes to COM1 only: the
+  program draws over the console as soon as it runs, so an on-screen copy
+  would vanish unread or need the shell to delay the launch. Nothing new is
+  tracked: every field is read from the table that already enforces it. The framebuffer line states what
+  *will* happen (the binding moves in #40), and "sound" reports voices
+  *available*, since voices are owned at play time. Same data, continuously, is
+  SCRUM-236.
+- **Doom and the WAD viewer launch this way too.** Doom asks for
+  `EXO_PKG_WANT_PROGRAM_RO` (SCRUM-75) and reads its own IWAD; the WAD viewer
+  still uses `EXO_PKG_WANT_WAD` (with
   `params_len` = 16) makes #36 map the IWAD and patch `libos_wad_params_t`
   exactly as #21's `LAUNCH_NEEDS_WAD` rows do (shared `launch_attach_wad`), so
   the shell's `doom` and `wadview` are `run doom.exo` / `run wadview.exo` and go
@@ -1332,6 +1339,44 @@ focus and the active framebuffer.
 > kernel for `tests/kernel/test_shell_help_k.c`. `shell_key_to_ascii()`
 > now maps Shift+`/`, `8`, `-` to `?`, `*`, `_`, the only shifted symbols
 > the command syntax uses.
+>
+> ✅ **SCRUM-271:** failures print a sentence, not a bare `err=-16`. Every
+> handler calls `shell_err_report(con, op, err)`, which asks
+> `shell_err_text()` in `src/shell/shell_err.c` (pure logic, also compiled
+> into the TESTING kernel for `tests/kernel/test_shell_err_k.c`). The `op`
+> picks the lead word and the few codes whose advice depends on the command
+> (`ENOENT` on `run` vs `install`). A code with no sentence of its own prints
+> the op's generic one followed by `(err=N)`, so it stays greppable. The
+> sentence does not name which program holds the disk.
+>
+> ✅ **SCRUM-273:** the shell keeps the last 16 submitted commands. Up recalls
+> older ones, Down newer ones, and Down past the newest restores the line
+> being typed. The ring lives in `src/shell/shell_hist.c` (pure logic, also
+> compiled into the TESTING kernel for `tests/kernel/test_shell_hist_k.c`);
+> the key loop in `shell_main()` handles `KEY_UP`/`KEY_DOWN` before
+> `shell_key_to_ascii()` and redraws the input row with `shell_backspace()`.
+> Empty lines and a repeat of the previous command are not stored. A recalled
+> line is an ordinary edit buffer (Backspace and typing work), but pressing
+> Up/Down again replaces it, edits included. Not persisted, no Left/Right.
+>
+> ✅ **SCRUM-274:** Tab completes the word at the end of the line. The first
+> word completes against the command table; after `run`, against the `*.exo`
+> files `programs` lists; after `install`, against the install disk's root;
+> after `cat`/`ls`/`rm`/`cp`/`mv`/`mkdir`/`touch` (any path word) and `cd`
+> (directories only), against the directory named by the path typed so far,
+> routed through `shell_route_arg()`. One match completes with a trailing
+> space (`/` for a directory); several complete their longest common prefix,
+> and a second Tab in a row prints the candidates and redraws the prompt.
+> Matching is case-insensitive (`shell_ci_prefix()`) and appends the
+> candidate's own case. The matching lives in `src/shell/shell_complete.c`
+> (pure logic, also compiled into the TESTING kernel for
+> `tests/kernel/test_shell_complete_k.c`); `shell_tab()` in `shell_main.c`
+> does the directory reads, one acquire/mount/read/release per first Tab. The
+> candidate set is fixed (24 names of up to 31 bytes). A match that does not fit
+> (a longer name, or a 25th) is left out and flagged; the set is then not the
+> whole answer, so Tab appends nothing and a second Tab lists what is held
+> followed by `...`. Mount or disk errors are reported as for `ls`, then the
+> prompt and line are redrawn below the message. No mid-line completion, no flags or sub-verbs.
 
 ---
 
@@ -1453,8 +1498,8 @@ The entire toolchain runs inside Docker. No host cross-compiler is required.
     function; `libos_doom` alone passes `-msse -msse2` via the `extra_cflags`
     parameter (§7).
 
-  Entry-point and params placement rules for all of them are in §7, "LibOS
-  launch conventions".
+  Entry-point and params placement rules for all of them are in
+  `docs/libos-authoring.md` §4.
 - **Toolchain fetches have more than one host.** Every `docker-*` target
   leads with the same `docker buildx build` of `docker/Dockerfile.build`, so a
   failure fetching the cross-toolchain sources fails all of them, with a
@@ -1500,10 +1545,10 @@ sprints — see the epic breakdown below the table for everything filed since.
 | **Sprint 1: Memory + Timer**                            | Foundations                              | Multiboot 2 mmap ✅ SCRUM-6, bump allocator ✅, bitmap page allocator ✅ SCRUM-7, PIT/timer ✅ SCRUM-9, sleep ✅ SCRUM-10, string.h ✅ SCRUM-11, ctype.h ✅ SCRUM-12, KUnit ✅ SCRUM-133/134, PS/2 keyboard ✅ SCRUM-13/14/18, x86_64 migration ✅, error_stub bug fix ✅ SCRUM-135                                                                                                                                                                    |
 | **Sprint 2: VMem + Input + libc**                       | Virtual memory + input                   | Paging on (kernel page tables from the PMM ✅ SCRUM-15), page fault handler ✅ SCRUM-17, framebuffer+WAD mapped ✅ SCRUM-16, keyboard ring buffer ✅ SCRUM-18, PS/2 mouse init ✅ SCRUM-19, `printf`→serial shim ✅ SCRUM-20                                                                                                                                                                                                                                                           |
 | **Sprint 3: Heap+Mouse+Syscalls** _(20 Apr – 4 May)_    | Kernel heap + syscall gate               | First-fit heap allocator (`kmalloc`/`kfree`/`krealloc`) backed by PMM ✅ SCRUM-25, on-demand heap growth from the PMM ✅ SCRUM-26, 10K-block allocate/free stress + leak audit ✅ SCRUM-27, mouse packet decoding + delta accumulator ✅ SCRUM-28/29, `stdlib.h` wrappers (`malloc`/`free`/`realloc`, `atoi`, `abs`, `rand`/`srand`, `qsort`) ✅ SCRUM-30, `errno`/`assert`/`abort` ✅ SCRUM-31, `syscall`/`sysret` entry path via MSRs ✅ SCRUM-32, `exo_get_ticks` as first end-to-end syscall ✅ SCRUM-33                                                                                                                                               |
-| **Sprint 4: LibOS mem+input+math** _(4 May – 18 May)_   | LibOS address space + remaining syscalls | `exo_page_alloc`/`exo_page_free`/`exo_page_map`/`exo_fb_acquire` in dispatcher ✅ SCRUM-34/35/36 (framebuffer mapping is `exo_fb_acquire` + `exo_page_map`, composed LibOS-side by `libos_fb_map()` — SCRUM-36; there is no separate `exo_fb_map` syscall despite that ticket's title), LibOS-side page allocator + heap ✅ SCRUM-37/38, `exo_get_key`/`exo_get_mouse_delta` syscalls ✅ SCRUM-39 (`exo_kbd_poll` (#6) was; `exo_mouse_poll` (#7) was declared in the ABI but had no bound handler, no PS/2 mouse controller init and no IRQ12 wiring at all despite this row and SCRUM-19/28/29 reading ✅ — the actual driver and syscall binding landed in SCRUM-52, `src/ps2_mouse.c`/`src/syscall_mouse.c`; see `docs/syscall_spec.md` §3.2 row 7), Doom keycode → PS/2 scancode translation ⬜ SCRUM-40 (still To Do), `math.h` (fixed-point sin/cos/tan/atan, `abs`, `floor`/`ceil`) ✅ SCRUM-41, `strcasecmp`/`strncasecmp` ✅ SCRUM-43, `FILE*` shim (`fopen`/`fclose`/`fread`/`fwrite`/`fseek`/`ftell`) backed by `exo_file_*` ⬜ SCRUM-42, `exo_file_*` ✅ SCRUM-44 — rescoped from a kernel dispatcher to a LibOS descriptor library over ExoFS (`src/libos_fs/exo_file.h`, `docs/filesystem.md` §6d; #9–16 stay reserved and unbound); SCRUM-42 is still To Do, and the read-only `fopen` that exists today (§7) is a memory-mapped-blob reader that doesn't close it                     |
+| **Sprint 4: LibOS mem+input+math** _(4 May – 18 May)_   | LibOS address space + remaining syscalls | `exo_page_alloc`/`exo_page_free`/`exo_page_map`/`exo_fb_acquire` in dispatcher ✅ SCRUM-34/35/36 (framebuffer mapping is `exo_fb_acquire` + `exo_page_map`, composed LibOS-side by `libos_fb_map()` — SCRUM-36; there is no separate `exo_fb_map` syscall despite that ticket's title), LibOS-side page allocator + heap ✅ SCRUM-37/38, `exo_get_key`/`exo_get_mouse_delta` syscalls ✅ SCRUM-39 (`exo_kbd_poll` (#6) was; `exo_mouse_poll` (#7) was declared in the ABI but had no bound handler, no PS/2 mouse controller init and no IRQ12 wiring at all despite this row and SCRUM-19/28/29 reading ✅ — the actual driver and syscall binding landed in SCRUM-52, `src/ps2_mouse.c`/`src/syscall_mouse.c`; see `docs/syscall_spec.md` §3.2 row 7), Doom keycode → PS/2 scancode translation ⬜ SCRUM-40 (still To Do), `math.h` (fixed-point sin/cos/tan/atan, `abs`, `floor`/`ceil`) ✅ SCRUM-41, `strcasecmp`/`strncasecmp` ✅ SCRUM-43, `FILE*` shim (`fopen`/`fclose`/`fread`/`fwrite`/`fseek`/`ftell`) backed by `exo_file_*` ✅ SCRUM-42 (read half landed with SCRUM-75, write half in its own change: `src/libos_fs/exo_file_stdio.c`, `src/stdio.c`), `exo_file_*` ✅ SCRUM-44 — rescoped from a kernel dispatcher to a LibOS descriptor library over ExoFS (`src/libos_fs/exo_file.h`, `docs/filesystem.md` §6d; #9–16 stay reserved and unbound)                     |
 | **Sprint 5: LibOS struct+ring 3** _(18 May – 1 Jun)_    | Ring 0 → ring 3 transition               | GDT with ring 0 + ring 3 segments ✅ SCRUM-45, TSS for kernel stack on ring-3 exceptions ✅ SCRUM-46, boot LibOS in ring 3 via `iret` to user-mode entry point ✅ SCRUM-47, separate page directory per LibOS ✅ SCRUM-48, LibOS binary loading at fixed user-space address ✅ SCRUM-49, `libos_main()` entry framework ✅ SCRUM-50, `exo_serial_write` syscall ✅ SCRUM-50, separate LibOS link target for compiled ring-3 code ✅ SCRUM-173, port libc shim (`malloc`/`printf`) to use syscall stubs ✅ SCRUM-51                                                                                                                    |
 | **Sprint 6: Syscall harden+Iso** _(1 Jun – 15 Jun)_     | Security + correctness                   | Syscall argument validation (bounds-check pointers, reject kernel addresses) ✅ SCRUM-54, test LibOS cannot read/write kernel memory (#PF, protection not not-present) ✅ SCRUM-55, test LibOS cannot execute IN/OUT instructions (#GP) ✅ SCRUM-56, consistent `exo_errno.h` error codes ✅ SCRUM-57, automated LibOS test suite via serial ✅ SCRUM-58, memory isolation stress test (allocate/free all pages, verify no kernel corruption) ⬜ SCRUM-59 (PR #110 open), syscall round-trip benchmarks ✅ SCRUM-60                                                        |
-| **Sprint 7: Vendor Doomgeneric** _(15 Jun – 29 Jun)_    | Doom source integration                  | Vendor doomgeneric into `src/doom/` (or git submodule) ✅ SCRUM-63, resolve all compile errors (missing types, headers, signatures) ✅ SCRUM-64, fill remaining libc gaps found during compilation ✅ SCRUM-65, link Doom + LibOS + libc shim into single exodoom ELF ✅ SCRUM-66, `DG_Init` loading IWAD from multiboot module via the mapped WAD module (`mmap_find_module()`, SCRUM-16) ✅ SCRUM-73, `DG_GetTicksMs`/`DG_SleepMs` via `exo_get_ticks` ✅ SCRUM-74, memory-mapped WAD reader replacing `w_file_stdc.c` ⬜ SCRUM-75, `sscanf` with `%d %f %x %s` support ⬜ SCRUM-76 |
+| **Sprint 7: Vendor Doomgeneric** _(15 Jun – 29 Jun)_    | Doom source integration                  | Vendor doomgeneric into `src/doom/` (or git submodule) ✅ SCRUM-63, resolve all compile errors (missing types, headers, signatures) ✅ SCRUM-64, fill remaining libc gaps found during compilation ✅ SCRUM-65, link Doom + LibOS + libc shim into single exodoom ELF ✅ SCRUM-66, `DG_Init` loading IWAD from multiboot module via the mapped WAD module (`mmap_find_module()`, SCRUM-16) ✅ SCRUM-73, `DG_GetTicksMs`/`DG_SleepMs` via `exo_get_ticks` ✅ SCRUM-74, `FILE*`-over-ExoFS IWAD reader replacing the memory-mapped one ✅ SCRUM-75 (`w_file_stdc.c` itself is the unmodified upstream reader; the change is the `fopen` backend and `DG_Init`, §7), `sscanf` with `%d %f %x %s` support ⬜ SCRUM-76 |
 | **Sprint 8: DG** callbacks+render_* _(29 Jun – 13 Jul)_ | First pixels on screen                   | `DG_DrawFrame`: blit 640×400 ARGB → 1024×768 FB (scaled), nearest-neighbour integer scale with 32-bit writes, `DG_GetKey` wired to `exo_get_key` with Doom keycode translation, `i_input.c` patched to post `ev_mouse` via `exo_mouse_poll`, debug Doom startup crash sequence (`Z_Malloc`, `W_Init`, `R_Init`), stub `I_StartSound`/`I_StopSound`/`I_UpdateSound` as no-ops ✅ SCRUM-82 (no-op by configuration -- `FEATURE_SOUND` undefined -- plus a build gate that keeps it that way; superseded by SCRUM-101, which turns sound on and inverts that gate), stub `I_Error`/`I_Quit` to serial + halt ✅ SCRUM-83                      |
 | **Sprint 9: Playability E1M1** _(13 Jul – 27 Jul)_      | Playable first level                     | Debug and fix E1M1 rendering (walls, floors, ceilings, sprites), verify combat (shooting, enemy AI, damage, pickups, status bar), menu navigation (new game, options, difficulty, quit), performance profiling (frame time per subsystem), fix top 3 bottlenecks, verify 35 tics/sec game loop timing, test with Freedoom2 IWAD and original DOOM2.WAD                                                                                      |
 | **Sprint 10: Gameplay + Save/Load**                     | Save games                               | Save/load over ExoFS (`exo_file_*`, LibOS), `exo_file_remove`/`exo_file_rename` (SCRUM-106), `sscanf` for config                                                                                                                                                                                                                                                                                                                                                  |
@@ -1524,12 +1569,13 @@ sprint number that was never assigned:
 | SCRUM-142 Ring 3 & LibOS Runtime | **In Progress** (epic) | LibOS launch mechanism, entry convention, link target, and app-loading convention (SCRUM-47/48/49/50/51/173/175) are all done; the WAD/flat/automap viewer (SCRUM-165/178) and the demo-app line (clock ✅ SCRUM-168, Snake — **In Review**, SCRUM-182, calculator ⬜ SCRUM-169, Tetris ⬜ SCRUM-183) are what's currently exercising it |
 | SCRUM-144/145 Doom Port & Gameplay Verification | In Progress (epic) | Doom is linked into `build/exodoom` as the `libos_doom` ring-3 target and playable from the shell's `doom` command (SCRUM-66/77/79) — this row used to say otherwise. Verified so far: the net layer, stubbed to single player with no uninitialised net state ✅ SCRUM-97 (§7 "Networking: stubbed, single player only", `tests/kernel/test_doom_net_k.c`). Still open: game-loop timing (SCRUM-89) and frame-time profiling (SCRUM-87) are in draft PRs, IWAD compatibility (SCRUM-90), and save/load + config persistence (SCRUM-92/93), which wait on the file layer (SCRUM-42/44) |
 | SCRUM-146 Audio | In Progress | PC speaker driver ✅ SCRUM-98 (`src/speaker.c/h`, PIT channel 2, non-blocking duration via IRQ0); SFX→tone table ✅ SCRUM-99 (`src/doom_sfx_tone.c/h`, 1–4 freq/duration steps per `sfxenum_t` id); `exo_sound_tone`/`exo_sound_stop` syscalls ✅ SCRUM-100 (#17/#18, `src/syscall_sound.c/h`; ring-3 port access to the speaker proven to #GP); Doom `sound_module_t` ✅ SCRUM-101 (`src/doom_sound.c/h`, `FEATURE_SOUND` on, one-voice sequencer driven from `I_UpdateSound`, Doom priority rule; music is a silent module). All four stories done — `docs/syscall_spec.md` §6 Option B. **Real PCM audio has since started on top of that:** PCI enumeration + config space ✅ SCRUM-209 (`src/pci.c/h`, mechanism #1 over 0xCF8/0xCFC, `docs/drivers/pci.md`) and the Intel HDA controller driver ✅ SCRUM-210 (`src/hda.c/h`, CORB/RIRB codec ring + BDL stream DMA + INTx completion interrupt, `docs/drivers/hda.md`) — a synthesized tone now plays by DMA out of system memory, with register/DMA/IRQ state asserted by the `hda` KUnit suite. The other end of that path is now real too: the WAD DMX sound lump decoder ✅ SCRUM-211 (`src/doom_dmx.c/h`, `DS*` → 8-bit unsigned PCM, zero-copy out of the mounted module, 16 padding samples stripped at each end), acceptance-tested against the vendored `freedoom2.wad` by the `doom_dmx` suite. **That decode disproved the ticket's premise and the mixer must not inherit it:** DMX lumps are not "almost universally 11025 Hz" — of freedoom2 v0.13.0's 109 `DS*` lumps, 67 are 22050 Hz, 38 are 11025, 2 are 17990, 1 is 16000 and 1 is 44100, so with HDA pinned at 48 kHz/16-bit/stereo, resampling is unavoidable rather than optional. **And the two ends are now joined:** the software PCM mixer ✅ SCRUM-212 (`src/pcm_mixer.c/h`, 8 voices matching Doom's `snd_channels`, per-voice 16.16 phase accumulator with linear interpolation so each lump plays at *its* rate, int32 summation saturating to int16, Doom's own squared-separation panning law) plus a streaming mode in the driver (`hda_pcm_start()`, the BDL rediced from 2 entries to `HDA_BDL_ENTRIES_PCM` = 16 so a slice is ~21 ms rather than ~171 ms, refilled from the stream-completion IRQ) — `docs/drivers/hda.md` §12. Overlap and the non-disturbance of frame timing are both asserted from hardware state by the `hda_pcm` suite, the latter as a ratio between the PIT clock and the audio DMA rate, since timing a wait against the clock that gates it proves nothing; the arithmetic itself is asserted sample-for-sample by the hardware-free `pcm_mixer` suite. **And ring 3 can now reach it:** the PCM sound syscalls ✅ SCRUM-213 (`exo_sound_pcm` #28 / `exo_sound_pcm_stop` #29, `src/syscall_sound.c`), which resolved the story's own open design question by making sound **shared rather than exclusively bound** — there is no `exo_sound_acquire` and no `src/sound_binding.c`, because `pcm_mixer_start()`'s eight voices, Doom priority rule and non-disturbing refusal already are the admission policy a binding table would answer worse; what is owned is a voice, not the device (`docs/syscall_spec.md` §3.5b). The samples are copied into kernel pages rather than played in place: the mixer renders from `hda_irq_handler()` under whatever CR3 is loaded, and the caller may free its buffer the moment the syscall returns. A ring-3 LibOS queueing its own samples and the controller then DMA'ing them is asserted end to end by the `syscall_sound_pcm` suite. The ring-0 boot demo SCRUM-212 added to `kernel_main` is gone with it — the boot tone stays. **And Doom itself now plays through it:** the sound module's PCM leg ✅ SCRUM-214 (`src/doom_sound_pcm.c/h`, plus `pcm_mixer_set_params()` and `exo_sound_pcm_params` #30 — Doom retunes live sounds once a tic via `I_UpdateSoundParams`, which the mixer had no way to honour), so firing the shotgun in-game plays `DSSHOTGN` itself, the epic's own definition of done. **The two wirings coexist by a runtime rule rather than a build-time switch**, which the ticket asked for explicitly since only one can own `I_StartSound`: PCM is tried first and SCRUM-101's tone sequencer is the per-effect fallback — no WAD or no such lump costs that one effect, a `-EXO_ENODEV` (no audio controller) latches the whole path off for the run, and a `-EXO_EBUSY` counts as handled rather than failed, since the mixer declined that sound on purpose and a tone would answer it a second time (`docs/syscall_spec.md` §6 Option C). Nothing is copied LibOS-side: `LIBOS_WAD_VADDR` is inside the user window and #28 checks its buffer readable, so a decoded DMX lump is already a valid argument. The `doom_sound_pcm` suite asserts the shotgun's own first sample on the voice — 3072, the unity-gain conversion of DMX 140 — and then that those bytes leave RAM. Still open on that line: `src/revoke.c` has no sound leg (an exiting LibOS loses its voices, a revoked one does not), and music is still silent (`DG_music_module` is MUS/MIDI, not PCM). **The music path (SCRUM-215–220) has started from the mixer end:** a streaming music voice ✅ SCRUM-218 (`pcm_mixer_music_*` in `src/pcm_mixer.c/h` — one ring of 16-bit stereo at 48 kHz outside the sfx voice table, so no effect can steal or stop it; its own 0..127 level; an empty ring renders silence and counts an underrun rather than stalling the IRQ; `PCM_MIXER_MUSIC_PAGES` = 12, 256 ms; `docs/drivers/hda.md` §12.7). The MUS/MIDI song reader and sequencer ✅ SCRUM-215 (`src/libos_doom/doom_midi.c/h`, ring 3: sniffs `MThd` vs `MUS\x1a`, converts MUS with the vendored `mus2mid.c`, validates every track at open, merges format-1 tracks and yields channel events in exact integer microseconds with loop support; all 35 freedoom2 `D_*` lumps open and play through in the `doom_midi` suite; `docs/drivers/hda.md` §12.8). The GENMIDI instrument table decoder ✅ SCRUM-216 (`src/libos_doom/doom_genmidi.c/h`, ring 3: the IWAD's 175 OPL patches decoded by value out of the mounted lump, exact-size and magic checked, a missing lump reported as `ENOENT` rather than a fault; the `doom_genmidi` suite asserts freedoom2's records field by field; `docs/drivers/hda.md` §12.9). The OPL3 synth ✅ SCRUM-217 (`src/libos_doom/doom_opl.c/h` over vendored, integer-only Nuked-OPL3 in `src/nuked_opl3/`, ring 3: DMX's voice/frequency/volume behaviour on 18 OPL3 channels, steals the oldest voice, an exact 49716→48000 Hz rational resampler, exact digital silence after release; 1 s of `D_OPENIN` costs 169 ms under QEMU TCG, 4.8 ms per tic; `docs/drivers/hda.md` §12.10). The stream syscalls ✅ SCRUM-219 (`exo_sound_stream_write`/`_stop`/`_volume` #32–#34, `src/syscall_sound.c`: the music stream is **bound** to its first writer — `-EXO_EBUSY` to others, released by `exo_exit` — over a 12-page kernel ring; `write` never blocks and packs frames-accepted/room-left into its result; `docs/syscall_spec.md` §3.5c; `syscall_sound_stream` suite incl. a ring-3 probe). **And the music is audible:** the Doom wiring ✅ SCRUM-220 (`src/libos_doom/doom_sound_music.c/h`, ring 3, behind `DG_music_module` in `src/doom_sound.c`: `Poll` is now the per-frame hook that advances the song, renders OPL3 and fills the stream only as far as the ring has room, with the song clock counted in rendered frames so it cannot drift; pause drops the queued audio as well as the notes; any stream error latches music off for the run; `libos_doom` is 106 code / 112 data pages of 192 so the caps stand; `docs/drivers/hda.md` §12.11; `doom_sound_music` suite) |
-| SCRUM-243 USB Support | In Progress (epic) | Controller topology + interrupt delivery spike ✅ SCRUM-245 (`docs/drivers/usb.md`): three UHCI controllers (`ich9-usb-uhci1..3`, 6 root ports, every device on an explicit `port=` so QEMU never adds a hub), **polled from IRQ0 with `USBINTR = 0`** because QEMU routes a UHCI function onto HDA's IRQ 11 and there is no shared-IRQ dispatch, no hub driver, and each `usb-kbd` bound to its own `secondary-vga` console with `display=` so it doesn't take keystrokes from PS/2. UHCI + enumeration + HID boot keyboard ✅ SCRUM-198 (under the dual-Doom epic SCRUM-195; `src/uhci.c`, `src/usb.c`, `src/usb_kbd.c`, usb.md §7–§12): a host-controller ops table the xHCI driver can reuse, one fixed schedule per controller, synchronous busy-waited control transfers on the controller's frame clock, and one event ring per keyboard. Two `usb-kbd`s typed into separately over QMP are told apart in CI (`usb` suite, `docker/scripts/qmp-keys.sh`). Still open: per-context routing of those rings ⬜ SCRUM-199, HID mouse ⬜ SCRUM-246, mass storage ⬜ SCRUM-247 (needs the multi-disk block layer SCRUM-244), xHCI (stretch) ⬜ SCRUM-248 |
+| SCRUM-243 USB Support | In Progress (epic) | Controller topology + interrupt delivery spike ✅ SCRUM-245 (`docs/drivers/usb.md`): three UHCI controllers (`ich9-usb-uhci1..3`, 6 root ports, every device on an explicit `port=` so QEMU never adds a hub), **polled from IRQ0 with `USBINTR = 0`** because QEMU routes a UHCI function onto HDA's IRQ 11 and there is no shared-IRQ dispatch, no hub driver, and each `usb-kbd` bound to its own `secondary-vga` console with `display=` so it doesn't take keystrokes from PS/2. UHCI + enumeration + HID boot keyboard ✅ SCRUM-198 (under the dual-Doom epic SCRUM-195; `src/uhci.c`, `src/usb.c`, `src/usb_kbd.c`, usb.md §7–§12): a host-controller ops table the xHCI driver can reuse, one fixed schedule per controller, synchronous busy-waited control transfers on the controller's frame clock, and one event ring per keyboard. Two `usb-kbd`s typed into separately over QMP are told apart in CI (`usb` suite, `docker/scripts/qmp-keys.sh`). Still open: per-context routing of those rings ⬜ SCRUM-199, HID mouse ⬜ SCRUM-246, mass storage ⬜ SCRUM-247 (registers into the multi-disk block layer, ✅ SCRUM-244), xHCI (stretch) ⬜ SCRUM-248 |
+| SCRUM-195 Dual Doom | To Do (epic), in progress | Doom launch singleton removed ✅ SCRUM-196, USB HID boot keyboard ✅ SCRUM-198 (see SCRUM-243), split-screen compositor ✅ SCRUM-197 (`src/fb_layout.c`; §5 "Split-screen panes" -- kernel pane table, pane-sized shadows, per-row blit; no user-facing way to assign panes yet); still open: per-context keyboard routing ⬜ SCRUM-199, status bar ⬜ SCRUM-278, `I_Sleep` yield ⬜ SCRUM-201, preemptive scheduling (stretch) ⬜ SCRUM-200; one save volume per Doom instance ⬜ SCRUM-280, dead #21 launch rows ⬜ SCRUM-279 |
 | SCRUM-250 ACPI table parser | In Progress | Read-only RSDP/RSDT/XSDT/FADT parser ✅ (`src/acpi.c/h`, `docs/drivers/acpi.md`): feeds SCRUM-249's RTC the CMOS century register and the "no CMOS RTC" flag. Runs before `vmm_init` because the kernel map does not map firmware tables. No AML interpreter (uACPI is a later ticket). |
 | SCRUM-249 Real-time clock | In Progress | CMOS RTC driver ✅ (`src/rtc.c/h`, polled, UIP wait + double-read, Status B honoured, century from the FADT via SCRUM-250 with a 20xx fallback, `-ENODEV` when ACPI reports no CMOS RTC) and `exo_rtc_read` ✅ (#35, `src/syscall_rtc.c/h`, unowned, user pointer validated like `exo_memstat`); the `clock` LibOS app now shows wall-clock UTC beside its uptime stopwatch. `docs/drivers/rtc.md`. Out of scope: setting the clock, alarms, IRQ8, time zones, libc `time()`. |
-| SCRUM-143 Storage & File I/O | To Do (epic), the whole bottom half of the stack now done | ATA PIO driver ✅ SCRUM-102 (`src/ata.c/h`, polled, primary bus/master); `exo_disk_read`/`exo_disk_write` syscalls ✅ SCRUM-103 (`src/syscall_disk.c/h`, #24/#25, sector-addressed, zero filesystem knowledge); disk ownership/binding ✅ SCRUM-188 (`src/disk_binding.c/h`, #26 `exo_disk_acquire`, one exclusive owner); ported FAT-like filesystem ✅ SCRUM-189 (`src/libos_fs/`, **LibOS-space, not kernel** — `docs/filesystem.md`; variable-length names, superblock, mkdir/rmdir/readdir, open/read/write/seek/unlink, 66 tests in `tests/kernel/test_exofs_k.c`). Note this **supersedes the in-kernel ramdisk** that `docs/syscall_spec.md` §4 used to recommend — see the note at the head of that section. Still open: FAT-formatted QEMU disk image ⬜ SCRUM-190 (which also retires the multiboot WAD module), `exo_file_*` descriptor API over ExoFS ✅ SCRUM-44 (LibOS library, not syscalls — `src/libos_fs/exo_file.c/h`, `tests/kernel/test_exo_file_k.c`), the `FILE*` shim over it ⬜ SCRUM-42/75, save/config persistence ⬜ SCRUM-92/93/104/106, shell filesystem commands ✅ SCRUM-202 (`mkfs`/`mkdir`/`ls`/`cat`/`rm` in `src/shell/shell_main.c`, the first ring-3 ExoFS consumer, over its own scratch volume distinct from the IWAD's), per-program volumes ✅ SCRUM-237 (the disk binding is a table of non-overlapping sector extents, `exo_disk_acquire(base, count)`; a package manifest can request a volume slot, `exo_disk_extent` #37 reports it, and two copies of `libos_voldemo` run at once each on its own ExoFS volume — `docs/syscall_spec.md` §3.5a) |
+| SCRUM-143 Storage & File I/O | To Do (epic), the whole bottom half of the stack now done | ATA PIO driver ✅ SCRUM-102 (`src/ata.c/h`, polled; all four IDE positions since SCRUM-244); `exo_disk_read`/`exo_disk_write` syscalls ✅ SCRUM-103 (`src/syscall_disk.c/h`, #24/#25, sector-addressed, zero filesystem knowledge); disk ownership/binding ✅ SCRUM-188 (`src/disk_binding.c/h`, #26 `exo_disk_acquire`, one exclusive owner); ported FAT-like filesystem ✅ SCRUM-189 (`src/libos_fs/`, **LibOS-space, not kernel** — `docs/filesystem.md`; variable-length names, superblock, mkdir/rmdir/readdir, open/read/write/seek/unlink, 66 tests in `tests/kernel/test_exofs_k.c`). Note this **supersedes the in-kernel ramdisk** that `docs/syscall_spec.md` §4 used to recommend — see the note at the head of that section. Still open: FAT-formatted QEMU disk image ⬜ SCRUM-190 (which also retires the multiboot WAD module), `exo_file_*` descriptor API over ExoFS ✅ SCRUM-44 (LibOS library, not syscalls — `src/libos_fs/exo_file.c/h`, `tests/kernel/test_exo_file_k.c`), the `FILE*` shim over it ✅ SCRUM-42/75 (`src/libos_fs/exo_file_stdio.c`; Doom reads its IWAD through it from the program volume, bound read-only via `EXO_PKG_WANT_PROGRAM_RO`), `exo_file_remove`/`exo_file_rename` ✅ SCRUM-106 (LibOS, over `exofs_unlink`/`exofs_rename`; libc `remove()`/`rename()` on the `FILE*` shim not wired up), save/config persistence ⬜ SCRUM-92/93/104, shell filesystem commands ✅ SCRUM-202 (`mkfs`/`mkdir`/`ls`/`cat`/`rm` in `src/shell/shell_main.c`, the first ring-3 ExoFS consumer, over its own scratch volume distinct from the IWAD's), per-program volumes ✅ SCRUM-237 (the disk binding is a table of non-overlapping sector extents, `exo_disk_acquire(base, count)`; a package manifest can request a volume slot, `exo_disk_extent` #37 reports it, and two copies of `libos_voldemo` run at once each on its own ExoFS volume — `docs/syscall_spec.md` §3.5a), multi-disk block layer ✅ SCRUM-244 (`src/blkdev.c/h` registry; `exo_disk_*`/`exo_diskstat` take a device index, device 0 = system disk; the binding is one extent per owner *per device*, so one context can hold two disks; `exofs_mount/format` take the device; the test boot attaches a second IDE drive, `build/exodoom_disk2.img`, and `tests/kernel/test_multidisk_k.c` copies an ExoFS file between the two — `docs/syscall_spec.md` §3.5a, `docs/drivers/ata.md`), the shell's `install` ✅ SCRUM-233 (`src/shell/shell_install.c`, device 1 → the system volume, `docs/filesystem.md` "Install"), shell `mount`/`umount` ✅ SCRUM-266 (`src/shell/shell_mount.c`: a table of directory → `diskN:volM` that the shell routes paths through, mounting the volumes a command needs together; `disk` lists volumes; `docs/filesystem.md` "Mounts"), handle-based ExoFS ✅ SCRUM-265 (`exofs_mount()` returns an `exofs_vol_t *` that every call takes; up to `EXOFS_MAX_VOLUMES` volumes at once; `tests/kernel/test_exofs_multivol_k.c`; `docs/filesystem.md` §8) |
 | SCRUM-148 Testing, CI & Isolation | Mostly done | CI pipeline ✅ SCRUM-120 (Docker build + QEMU boot + serial suite on push, now a required status check on `main`); test harness ✅ SCRUM-58, regression suite ✅ SCRUM-114, syscall fuzzing ✅ SCRUM-115, syscall benchmarks ✅ SCRUM-60; still open: memory isolation stress test — SCRUM-59 (PR #110 open), IWAD compat suite — SCRUM-116 |
-| SCRUM-149 Documentation & Delivery | Mostly to do, one piece done | README refresh ✅ SCRUM-167, CLAUDE.md split into onboarding + docs/ ✅ SCRUM-207; final architecture doc, contributor guide, release tag, demo video, client presentation, post-mortem (SCRUM-91, 119, 121–132) all still To Do |
+| SCRUM-149 Documentation & Delivery | In Progress, the written deliverables done | README ✅ SCRUM-167/124, CLAUDE.md split into onboarding + docs/ ✅ SCRUM-207, contributor guide ✅ SCRUM-125, client architecture document ✅ SCRUM-61, diagrams ✅ SCRUM-62, performance report ✅ SCRUM-117, the scripted client demo ✅ SCRUM-121 (`docs/demo.md`; `make demo-rehearse` runs it unattended over QMP and checks the serial log) and its narration ✅ SCRUM-239 (`docs/demo-narration.md`), final architecture document (architecture, implementation, evaluation and isolation proof, in `docs/exokernel-architecture.md`) ✅ SCRUM-123; still To Do: team review of that document SCRUM-129, demo video SCRUM-122, release tag SCRUM-130, client presentation SCRUM-131, post-mortem SCRUM-132 |
 | SCRUM-136/137/138/139/140/141 (Memory Mgmt / Interrupts & Timing / Kernel libc / Input / Graphics / Syscall ABI) | To Do (epics) | These are retroactive groupings over Sprints 1–5's already-✅ work above; their own epic tickets stay "To Do" because an epic isn't closed until every story under it is, and each still has open stories (e.g. SCRUM-40, SCRUM-158, SCRUM-161 above) |
 
 Two small standalone fixes landed off the sprint grid entirely:

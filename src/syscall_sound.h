@@ -73,6 +73,10 @@ void syscall_sound_release(page_owner_t owner);
  * tests/kernel/test_syscall_sound_pcm_k.c, which has no other way to see that
  * a finished voice's pages really were reaped rather than leaked. */
 uint32_t syscall_sound_pcm_slots_used(void);
+
+/* How many of those staging rows `owner` holds -- the per-context read-out
+ * behind exo_grantstat (#39, SCRUM-235). */
+uint32_t syscall_sound_voices_of(page_owner_t owner);
 uint32_t syscall_sound_pcm_pages_used(void);
 
 /* The context holding the music stream, or PAGE_OWNER_FREE; and the kernel

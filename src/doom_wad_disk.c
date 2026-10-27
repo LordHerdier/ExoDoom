@@ -32,24 +32,25 @@ int64_t doom_wad_disk_get(uint64_t *out_paddr, uint64_t *out_size)
 
     /* Only the program volume, not the whole disk: a program holding its own
      * volume extent (SCRUM-237) must not make the IWAD unreadable. */
-    int rc = exofs_bdev_acquire_extent(LIBOS_WAD_DISK_BASE_LBA,
+    int rc = exofs_bdev_acquire_extent(0, LIBOS_WAD_DISK_BASE_LBA,
                                        EXO_VOLUME_REGION_BASE_LBA -
                                            LIBOS_WAD_DISK_BASE_LBA);
     if (rc != 0) {
         return rc;
     }
 
-    rc = exofs_mount(LIBOS_WAD_DISK_BASE_LBA);
+    exofs_vol_t *vol = NULL;
+    rc = exofs_mount(0, LIBOS_WAD_DISK_BASE_LBA, &vol);
     if (rc != 0) {
-        exofs_bdev_release();
+        exofs_bdev_release(0);
         return rc;
     }
 
     exofs_file_t f;
-    rc = exofs_open("/" LIBOS_WAD_FILE_NAME, EXOFS_O_READ, &f);
+    rc = exofs_open(vol, "/" LIBOS_WAD_FILE_NAME, EXOFS_O_READ, &f);
     if (rc != 0) {
-        exofs_unmount();
-        exofs_bdev_release();
+        exofs_unmount(vol);
+        exofs_bdev_release(0);
         return rc;
     }
 
@@ -62,15 +63,15 @@ int64_t doom_wad_disk_get(uint64_t *out_paddr, uint64_t *out_size)
     void *buf = alloc_pages_contig_owned(PAGE_OWNER_KERNEL, pages);
     if (buf == NULL) {
         exofs_close(&f);
-        exofs_unmount();
-        exofs_bdev_release();
+        exofs_unmount(vol);
+        exofs_bdev_release(0);
         return -EXO_ENOMEM;
     }
 
     int64_t got = exofs_read(&f, buf, size);
     exofs_close(&f);
-    exofs_unmount();
-    exofs_bdev_release();
+    exofs_unmount(vol);
+    exofs_bdev_release(0);
 
     if (got < 0 || (uint64_t)got != (uint64_t)size) {
         /* Not cached, so this is the only reference -- free it. No bulk

@@ -425,14 +425,23 @@ void kernel_main(void *mb2_info_ptr) {
     // -drive. A missing drive (docker-run/docker-run-kernel, which attach
     // none) is not fatal: ata_init() returns ATA_ENODEV and boot continues,
     // same soft-fail pattern as vmm_init() above.
+    //
+    // SCRUM-244: every IDE position is probed and each disk that answered is
+    // registered as a block device (src/blkdev.h): the primary master in the
+    // slot reserved for the system disk, device 0, the others from 1 up. The
+    // CD-ROM GRUB booted from is skipped.
     int ata_rc = ata_init();
     if (ata_rc != ATA_OK) {
-        serial_print("ATA: no drive detected (rc=");
+        serial_print("ATA: no primary master drive (rc=");
         serial_print_hex64((uint64_t)(int64_t)ata_rc);
         serial_print(")\n");
     } else {
         serial_print("ATA: primary master drive detected\n");
     }
+    int ata_ndevs = ata_register_blkdevs();
+    serial_print("ATA: block devices registered: ");
+    serial_print_hex64((uint64_t)ata_ndevs);
+    serial_print("\n");
 
     // ── USB: UHCI + HID boot keyboards (SCRUM-198) ───────────────────────
     // After pci_init() (it walks the PCI table for class 0x0C03) and
@@ -453,13 +462,14 @@ void kernel_main(void *mb2_info_ptr) {
 
     // ── Disk syscalls (SCRUM-103/SCRUM-188) ─────────────────────────────
     // Binds exo_disk_read/_write/_acquire/_release (#24/#25/#26/#27) in
-    // front of the ATA driver above, passing along whether a drive actually
-    // answered so the handlers can return -EXO_ENODEV without re-probing the
-    // bus. Same placement rule as every other syscall *_init(): after
+    // front of the block-device registry, after every driver that registers
+    // disks into it (ATA above; USB mass storage, SCRUM-247, will register
+    // from usb_init()), so the handlers answer -EXO_ENODEV from the registry
+    // without re-probing the bus. Same placement rule as every other syscall *_init(): after
     // syscall_init(), ahead of the TESTING branch. syscall_disk_init() also
     // calls disk_binding_init() before registering any of the three, so the
     // ownership/binding gate (SCRUM-188) is live from the first syscall.
-    syscall_disk_init(ata_rc == ATA_OK);
+    syscall_disk_init();
 
     // ── Timer syscall (SCRUM-172) ────────────────────────────────────────
     // Binds exo_get_ticks (#5). After pit_init() -- the handler reports
@@ -675,6 +685,20 @@ void kernel_main(void *mb2_info_ptr) {
             __asm__ volatile ("cli; hlt");
         }
     }
+
+    context_set_name(shell_id, "shell");
+
+    // SCRUM-192: give the shell a shadow framebuffer that starts as a copy
+    // of this boot console instead of black. The compositor shows the
+    // current context's shadow from its first syscall on, and the shell's
+    // first stretch is mapping that buffer one page at a time before it can
+    // draw anything -- with a zeroed shadow the screen went black for all of
+    // it, seconds under emulation. Seeded, the boot log (ending in
+    // "Launching shell LibOS..." above) stays up until the shell's
+    // fbcon_init() clears it to draw the banner. Safe only because nothing
+    // but the kernel has drawn yet (fb_shadow.h). Best effort: on failure
+    // the shell's own exo_fb_acquire allocates a zeroed one, as before.
+    (void)fb_shadow_seed_from_screen(shell_id);
 
     size_t shell_code_len = (size_t)(_binary_shell_code_bin_end -
                                      _binary_shell_code_bin_start);

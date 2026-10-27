@@ -24,10 +24,14 @@
  * -EXO_ENFILE, by contrast, comes from ExoFS's own open-entry table
  * (EXOFS_MAX_OPEN_HANDLES) and is passed through as-is.
  *
- * NO MOUNT POLICY. These calls operate on whatever volume the program has
- * mounted with exofs_mount(). With nothing mounted, open and stat answer
- * ExoFS's -EXO_EINVAL. Choosing, formatting and mounting a volume is the
- * caller's decision, not this library's (docs/filesystem.md §8).
+ * NO MOUNT POLICY. The path-taking calls (open, stat, remove, rename) resolve against one
+ * *default volume*, which the caller names with exo_file_set_volume() after
+ * exofs_mount(). Descriptors remember the volume they were opened on, so
+ * changing the default later does not move an open file. With no default set
+ * (or a default that has been unmounted), open and stat answer ExoFS's
+ * -EXO_EINVAL. Choosing, formatting and mounting a volume is the caller's
+ * decision, not this library's (docs/filesystem.md §8). The default is not a
+ * mount table: paths are not routed between volumes here.
  *
  * DURABILITY. A file's size reaches the disk on close, not on every write
  * (exofs.h's note on exofs_file_t). **Close every descriptor — or call
@@ -35,9 +39,16 @@
  * survive and the size does not, and the file silently reads back short.
  *
  * ONE TABLE PER PROGRAM. The table is a static inside this program's copy of
- * src/libos_fs/, the same way ExoFS's mounted volume is. There is no
+ * src/libos_fs/, the same way ExoFS's volume pool is. There is no
  * threading and no locking, for the reasons exofs.h gives.
  */
+
+/* Set the volume exo_file_open() / exo_file_stat() resolve paths against.
+ * NULL clears it. Clear it (or replace it) when unmounting that volume. */
+void exo_file_set_volume(exofs_vol_t *v);
+
+/* The default volume, or NULL if none is set or it has been unmounted. */
+exofs_vol_t *exo_file_volume(void);
 
 /* Open flags. Aliases of ExoFS's, so they pass straight through; combine
  * them. One of EXO_FILE_O_READ / EXO_FILE_O_WRITE must be present. */
@@ -69,6 +80,16 @@
 int exo_file_open(const char *path, uint32_t flags);
 
 /*
+ * exo_file_open() on `v` instead of the default volume (SCRUM-267), without
+ * touching the default: for a caller that reads from a second volume and
+ * must not have its notion of "the" volume change underneath it, which a
+ * set-open-restore sequence would do. Same results as exo_file_open();
+ * -EXO_EINVAL if `v` is NULL or not mounted. The descriptor keeps `v`, as
+ * any descriptor keeps the volume it was opened on.
+ */
+int exo_file_open_on(exofs_vol_t *v, const char *path, uint32_t flags);
+
+/*
  * Flush and close `fd`. The descriptor is free afterwards even if the flush
  * failed — there is nothing more a caller could do with it — and that flush
  * error is what gets returned. -EXO_EBADF for a descriptor that is not open,
@@ -98,6 +119,26 @@ int64_t exo_file_seek(int fd, int64_t off, uint32_t whence);
  * reports — -EXO_ENOENT for a missing path. Sizes of files still open for
  * writing are as of their last close or flush, not their last write. */
 int exo_file_stat(const char *path, uint32_t *size_out);
+
+/*
+ * Delete the file `path` (SCRUM-106), freeing its data and its name. Returns
+ * 0, or what exofs_unlink() reports: -EXO_ENOENT for a missing path,
+ * -EXO_EISDIR for a directory (that is exofs_rmdir()'s job), -EXO_EBUSY if a
+ * descriptor has the file open, -EXO_EINVAL for a malformed path or no
+ * default volume, or a device error. Close the file first.
+ */
+int exo_file_remove(const char *path);
+
+/*
+ * Rename or move `old_path` to `new_path` (SCRUM-106) without copying data.
+ * Returns 0, or what exofs_rename() reports: -EXO_ENOENT, -EXO_EEXIST if
+ * `new_path` already names a different entry (there is no replace-on-rename;
+ * remove the target first), -EXO_EBUSY for moving an open file between
+ * directories, -EXO_EINVAL for a malformed path or no default volume,
+ * -EXO_ENOSPC, or a device error. Renaming within one directory keeps an
+ * open descriptor on the file valid.
+ */
+int exo_file_rename(const char *old_path, const char *new_path);
 
 /* Close every open descriptor. Returns 0, or the first close error seen;
  * every descriptor is closed either way. Call before exofs_unmount(). */

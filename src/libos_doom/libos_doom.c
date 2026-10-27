@@ -7,12 +7,12 @@
  * here into one ring-3 image that the kernel embeds and the shell launches,
  * the same way src/libos_snake/ and src/libos_wad_viewer/ are.
  *
- * Modeled on src/libos_wad_viewer/libos_wad_viewer.c, which is the other
- * target that needs a WAD staged before launch: sys_launch_doom()
- * (src/syscall_launch.c) maps the multiboot WAD module into this address
- * space and patches g_doom_params (src/doomgeneric_exo.c) with its address
- * and length via libos_launch_patch_params(), which is where DG_Init picks
- * it up.
+ * Unlike src/libos_wad_viewer/libos_wad_viewer.c, nothing stages the WAD for
+ * it (SCRUM-75): the launcher grants the program volume read-only and
+ * DG_Init (src/doomgeneric_exo.c) mounts it, so the IWAD is read with
+ * ordinary fopen/fread like any file. Since SCRUM-267 it also mounts Doom's
+ * own volume (the package's --volume-slot), which is where fopen writes:
+ * savegames, and the config file if the engine ever writes one.
  *
  * ── What this file owes the link ──────────────────────────────────────
  *
@@ -43,19 +43,22 @@
  * point rather than looking up a symbol.
  *
  * That attribute is doing real work here rather than belt-and-braces. This
- * is the one ring-3 target whose source list does NOT lead with the file
- * defining its entry point: src/doomgeneric_exo.c goes first instead,
- * because libos_launch_patch_params() writes the WAD params through offset 0
- * of the .data blob and g_doom_params has to be what lives there. Two
- * offsets, two files, two mechanisms -- see the source-order comment on this
- * target's build_ring3_link_target() call in docker/scripts/build.sh.
+ * is a ring-3 target whose source list does NOT lead with the file defining
+ * its entry point: src/doomgeneric_exo.c goes first instead. That ordering
+ * was needed for g_doom_params (the WAD launch params, removed by SCRUM-75);
+ * it is kept, harmlessly, and .text.entry is what guarantees the entry
+ * point -- see the source-order comment on this target's
+ * build_ring3_link_target() call in docker/scripts/build.sh.
  */
 
 #include "exo_syscall.h"
 #include "doomgeneric_exo.h"
 #include "libos_fb.h"
 #include "doom_keymap.h"
+#include "doom_wad.h"
 #include "doom/doomgeneric.h"
+#include "doom/w_wad.h"
+#include "doom/z_zone.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -394,8 +397,27 @@ void DG_SetWindowTitle(const char *title)
     }
 }
 
+/*
+ * The sound code's way to a lump (SCRUM-75): through the engine's own cache,
+ * since there is no flat WAD mapped to walk any more. PU_STATIC, so the
+ * pointer outlives the call -- sound effects and GENMIDI are handed on to the
+ * mixer and the OPL synth, which keep using them. W_CheckNumForName answers
+ * -1 before W_Init has run, which reads as "no such lump".
+ */
+static const uint8_t *engine_lump(const char *name, uint32_t *size)
+{
+    int num = W_CheckNumForName((char *)name);
+
+    if (num < 0)
+        return NULL;
+    *size = (uint32_t)W_LumpLength(num);
+    return W_CacheLumpNum(num, PU_STATIC);
+}
+
 void libos_doom_main(void)
 {
+    doom_wad_set_lump_source(engine_lump);
+
     printf("libos_doom: entering doomgeneric_Create\n");
 
     /*

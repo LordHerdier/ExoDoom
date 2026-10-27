@@ -84,7 +84,7 @@ static long host_file_size(const char *path)
     return n;
 }
 
-static int write_file_into_volume(const char *host_path,
+static int write_file_into_volume(exofs_vol_t *vol, const char *host_path,
                                    const char *volume_path)
 {
     FILE *in = fopen(host_path, "rb");
@@ -94,7 +94,7 @@ static int write_file_into_volume(const char *host_path,
     }
 
     exofs_file_t f;
-    int rc = exofs_open(volume_path,
+    int rc = exofs_open(vol, volume_path,
                         EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC, &f);
     if (rc != 0) {
         fprintf(stderr, "mkexofsimg: exofs_open(%s) failed: %d\n",
@@ -184,7 +184,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    int rc = exofs_format(base_lba, vol_sectors);
+    int rc = exofs_format(0, base_lba, vol_sectors);
     if (rc != 0) {
         fprintf(stderr, "mkexofsimg: exofs_format failed: %d\n", rc);
         host_blockdev_close();
@@ -192,7 +192,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    rc = exofs_mount(base_lba);
+    exofs_vol_t *vol = NULL;
+    rc = exofs_mount(0, base_lba, &vol);
     if (rc != 0) {
         fprintf(stderr, "mkexofsimg: exofs_mount failed: %d\n", rc);
         host_blockdev_close();
@@ -203,8 +204,8 @@ int main(int argc, char **argv)
     char volume_path[256];
     snprintf(volume_path, sizeof(volume_path), "/%s", name_on_volume);
 
-    if (write_file_into_volume(wad_path, volume_path) != 0) {
-        exofs_unmount();
+    if (write_file_into_volume(vol, wad_path, volume_path) != 0) {
+        exofs_unmount(vol);
         host_blockdev_close();
         remove(img_path);
         return 1;
@@ -215,13 +216,13 @@ int main(int argc, char **argv)
         int plen = snprintf(extra_path, sizeof(extra_path), "/%s", argv[i + 1]);
         if (plen < 0 || (size_t)plen >= sizeof(extra_path)) {
             fprintf(stderr, "mkexofsimg: name '%s' is too long\n", argv[i + 1]);
-            exofs_unmount();
+            exofs_unmount(vol);
             host_blockdev_close();
             remove(img_path);
             return 1;
         }
-        if (write_file_into_volume(argv[i], extra_path) != 0) {
-            exofs_unmount();
+        if (write_file_into_volume(vol, argv[i], extra_path) != 0) {
+            exofs_unmount(vol);
             host_blockdev_close();
             remove(img_path);
             return 1;
@@ -229,16 +230,16 @@ int main(int argc, char **argv)
         printf("mkexofsimg: wrote %s as %s\n", argv[i], extra_path);
     }
 
-    rc = exofs_sync();
+    rc = exofs_sync(vol);
     if (rc != 0) {
         fprintf(stderr, "mkexofsimg: exofs_sync failed: %d\n", rc);
-        exofs_unmount();
+        exofs_unmount(vol);
         host_blockdev_close();
         remove(img_path);
         return 1;
     }
 
-    exofs_unmount();
+    exofs_unmount(vol);
     host_blockdev_close();
 
     printf("mkexofsimg: wrote %ld bytes as %s into %s "

@@ -23,6 +23,10 @@
 
 #define OTHER_LIBOS ((page_owner_t)(PAGE_OWNER_LIBOS + 1))
 #define THIRD_LIBOS ((page_owner_t)(PAGE_OWNER_LIBOS + 2))
+/* SCRUM-192's seed test: one owner for the seeded shadow, one for the RAM
+ * standing in for the screen, both released by that test itself. */
+#define SEEDED_LIBOS ((page_owner_t)(PAGE_OWNER_LIBOS + 3))
+#define SCREEN_OWNER ((page_owner_t)(PAGE_OWNER_LIBOS + 4))
 
 /* Small on purpose (4 pages exactly): keeps each test's contiguous
  * allocation cheap against a bitmap PMM shared with every other suite. */
@@ -193,6 +197,59 @@ static void test_lookup_of_unacquired_context_fails(void)
     CU_ASSERT_NOT_EQUAL(fb_shadow_lookup(OTHER_LIBOS, &phys_base), 0);
 }
 
+/*
+ * SCRUM-192: fb_shadow_seed_from_screen() gives a context a shadow holding
+ * whatever the published framebuffer shows, and a later acquire by that same
+ * context hands back that buffer still seeded -- that is how kernel_main()'s
+ * boot console survives into the shell's first frames. The "screen" is
+ * ordinary RAM here, so its bytes are checkable.
+ */
+static void test_seed_from_screen_copies_the_screen(void)
+{
+    uint64_t fb_bytes = (uint64_t)TEST_FB_PITCH * TEST_FB_HEIGHT;
+    uint32_t pages = (uint32_t)(fb_bytes / 4096u);
+
+    uint8_t *screen = alloc_pages_contig_owned(SCREEN_OWNER, pages);
+    CU_ASSERT_PTR_NOT_NULL(screen);
+    if (screen == NULL) return;
+    for (uint64_t i = 0; i < fb_bytes; i++) screen[i] = (uint8_t)(i * 7u + 1u);
+
+    fb_geometry_t g = {
+        .phys_addr = (uint64_t)(uintptr_t)screen,
+        .width     = TEST_FB_WIDTH,
+        .height    = TEST_FB_HEIGHT,
+        .pitch     = TEST_FB_PITCH,
+        .bpp       = TEST_FB_BPP,
+    };
+    CU_ASSERT_EQUAL(fb_binding_init(&g), FB_BIND_OK);
+
+    CU_ASSERT_EQUAL(fb_shadow_seed_from_screen(SEEDED_LIBOS), FB_SHADOW_OK);
+
+    exo_fb_info_t info;
+    CU_ASSERT_EQUAL(fb_shadow_acquire(SEEDED_LIBOS, &info), FB_SHADOW_OK);
+    CU_ASSERT_NOT_EQUAL(info.phys_addr, (uint64_t)(uintptr_t)screen);
+    CU_ASSERT_EQUAL(page_owner((void *)(uintptr_t)info.phys_addr),
+                    SEEDED_LIBOS);
+
+    const uint8_t *shadow = (const uint8_t *)(uintptr_t)info.phys_addr;
+    int same = 1;
+    for (uint64_t i = 0; i < fb_bytes; i++) {
+        if (shadow[i] != screen[i]) { same = 0; break; }
+    }
+    CU_ASSERT_TRUE(same);
+
+    fb_shadow_release(SEEDED_LIBOS);
+    for (uint32_t p = 0; p < pages; p++) {
+        free_page_owned(screen + (uint64_t)p * 4096u, SCREEN_OWNER);
+    }
+
+    /* Headless: nothing to seed from, and nothing created. */
+    CU_ASSERT_EQUAL(fb_binding_init((const fb_geometry_t *)0), FB_BIND_ENODEV);
+    CU_ASSERT_EQUAL(fb_shadow_seed_from_screen(SEEDED_LIBOS), FB_SHADOW_ENODEV);
+    uint64_t phys_base;
+    CU_ASSERT_NOT_EQUAL(fb_shadow_lookup(SEEDED_LIBOS, &phys_base), 0);
+}
+
 void suite_fb_shadow_tests(CU_pSuite s)
 {
     CU_add_test(s, "acquire allocates and zeroes",
@@ -204,4 +261,6 @@ void suite_fb_shadow_tests(CU_pSuite s)
     CU_add_test(s, "headless reports ENODEV", test_headless_reports_enodev);
     CU_add_test(s, "lookup of unacquired context fails",
                 test_lookup_of_unacquired_context_fails);
+    CU_add_test(s, "seed from screen copies the screen",
+                test_seed_from_screen_copies_the_screen);
 }

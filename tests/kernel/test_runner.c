@@ -70,6 +70,8 @@ void suite_syscall_yield_tests(CU_pSuite s);
 void suite_shell_libos_tests(CU_pSuite s);
 void suite_context_launch_rebind_tests(CU_pSuite s);
 void suite_fb_shadow_tests(CU_pSuite s);
+void suite_fb_layout_tests(CU_pSuite s);
+void suite_fb_compositor_tests(CU_pSuite s);
 void suite_fixed_math_tests(CU_pSuite s);
 void suite_doom_panic_tests(CU_pSuite s);
 void suite_dg_init_tests(CU_pSuite s);
@@ -84,10 +86,15 @@ void suite_libos_doom_tests(CU_pSuite s);
 void suite_doom_net_tests(CU_pSuite s);
 void suite_syscall_stat_tests(CU_pSuite s);
 void suite_ata_tests(CU_pSuite s);
+void suite_blkdev_tests(CU_pSuite s);
 void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
 void suite_exofs_tests(CU_pSuite s);
 void suite_exo_file_tests(CU_pSuite s);
+void suite_stdio_exofs_tests(CU_pSuite s);
+void suite_multidisk_tests(CU_pSuite s);
+void suite_exofs_multivol_tests(CU_pSuite s);
+void suite_shell_install_tests(CU_pSuite s);
 void suite_doom_wad_disk_tests(CU_pSuite s);
 void suite_launch_multi_tests(CU_pSuite s);
 void suite_launch_pkg_tests(CU_pSuite s);
@@ -108,9 +115,14 @@ void suite_doom_sound_music_tests(CU_pSuite s);
 void suite_exo_pkg_tests(CU_pSuite s);
 void suite_exo_slides_tests(CU_pSuite s);
 void suite_exo_admit_tests(CU_pSuite s);
+void suite_exo_grant_tests(CU_pSuite s);
 void suite_shell_firstboot_tests(CU_pSuite s);
 void suite_acpi_tests(CU_pSuite s);
 void suite_shell_help_tests(CU_pSuite s);
+void suite_shell_err_tests(CU_pSuite s);
+void suite_shell_hist_tests(CU_pSuite s);
+void suite_shell_complete_tests(CU_pSuite s);
+void suite_shell_mount_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
  * pslist tests create their own scratch contexts and must not leak a PML4
@@ -181,6 +193,14 @@ int exofs_suite_cleanup(void);
 /* exo_file_* sits on ExoFS, so the same binding requirement (SCRUM-44). */
 int exo_file_suite_init(void);
 int exo_file_suite_cleanup(void);
+int multidisk_suite_init(void);
+int exofs_multivol_suite_init(void);
+int exofs_multivol_suite_cleanup(void);
+int multidisk_suite_cleanup(void);
+int shell_install_suite_init(void);
+int shell_mount_suite_init(void);
+int shell_mount_suite_cleanup(void);
+int shell_install_suite_cleanup(void);
 
 /* Same idea as context_launch_rebind_suite_cleanup (SCRUM-196): each test
  * here launches real contexts (with real code/data/stack pages) via the
@@ -200,6 +220,14 @@ int fb_binding_suite_cleanup(void);
  * (SCRUM-112). */
 int fb_shadow_suite_init(void);
 int fb_shadow_suite_cleanup(void);
+
+/* The split-screen suites (SCRUM-197) swap in synthetic geometries too, and
+ * the compositor one borrows a page for a RAM "screen" and sets
+ * context_current(); each restores all of it. */
+int fb_layout_suite_init(void);
+int fb_layout_suite_cleanup(void);
+int fb_compositor_suite_init(void);
+int fb_compositor_suite_cleanup(void);
 
 /* Same idea for the revocation suite: it borrows the framebuffer and allocates
  * pages under a second context id, and must leave neither behind (SCRUM-156). */
@@ -401,6 +429,14 @@ int run_tests(void)
                      fb_shadow_suite_cleanup);
     suite_fb_shadow_tests(s);
 
+    s = CU_add_suite("fb_layout", fb_layout_suite_init,
+                     fb_layout_suite_cleanup);
+    suite_fb_layout_tests(s);
+
+    s = CU_add_suite("fb_compositor", fb_compositor_suite_init,
+                     fb_compositor_suite_cleanup);
+    suite_fb_compositor_tests(s);
+
     s = CU_add_suite("vmm", NULL, NULL);
     suite_vmm_tests(s);
 
@@ -560,6 +596,13 @@ int run_tests(void)
     s = CU_add_suite("ata", NULL, NULL);
     suite_ata_tests(s);
 
+    /* After "ata": the registry's second half checks what
+     * ata_register_blkdevs() registered against what ata_init() probes, and
+     * ahead of every suite that reaches a disk through the registry
+     * (SCRUM-244). */
+    s = CU_add_suite("blkdev", NULL, NULL);
+    suite_blkdev_tests(s);
+
     s = CU_add_suite("syscall_disk", syscall_disk_suite_init,
                      syscall_disk_suite_cleanup);
     suite_syscall_disk_tests(s);
@@ -578,6 +621,31 @@ int run_tests(void)
      * failure should be reported there first (SCRUM-44). */
     s = CU_add_suite("exo_file", exo_file_suite_init, exo_file_suite_cleanup);
     suite_exo_file_tests(s);
+
+    /* fopen/fread over ExoFS (SCRUM-42/75): same volume fixture as exo_file. */
+    s = CU_add_suite("stdio_exofs", exo_file_suite_init, exo_file_suite_cleanup);
+    suite_stdio_exofs_tests(s);
+
+    /* After "exofs" and "disk_binding": the two-drive acceptance suite
+     * (SCRUM-244) builds an ExoFS volume on each device, so a failure in
+     * either layer should be reported by its own suite first. */
+    s = CU_add_suite("multidisk", multidisk_suite_init,
+                     multidisk_suite_cleanup);
+    suite_multidisk_tests(s);
+
+    /* After "multidisk": it shares that suite's two-drive fixture, and
+     * SCRUM-265's several-volumes-at-once checks build on the single-volume
+     * behaviour "exofs" has already covered. */
+    s = CU_add_suite("exofs_multivol", exofs_multivol_suite_init,
+                     exofs_multivol_suite_cleanup);
+    suite_exofs_multivol_tests(s);
+
+    /* After "multidisk": `install` (SCRUM-233) is that suite's cross-device
+     * copy run in chunks, so a binding or two-drive failure shows up there
+     * first. */
+    s = CU_add_suite("shell_install", shell_install_suite_init,
+                     shell_install_suite_cleanup);
+    suite_shell_install_tests(s);
 
     /* After "exofs": doom_wad_disk_get() (src/doom_wad_disk.c) is ExoFS
      * plus a contiguous allocation and a cache on top, mounting the real
@@ -715,6 +783,9 @@ int run_tests(void)
     s = CU_add_suite("exo_admit", NULL, NULL);
     suite_exo_admit_tests(s);
 
+    s = CU_add_suite("exo_grant", NULL, NULL);
+    suite_exo_grant_tests(s);
+
     s = CU_add_suite("shell_firstboot", NULL, NULL);
     suite_shell_firstboot_tests(s);
 
@@ -725,6 +796,20 @@ int run_tests(void)
      * syscall dependency. */
     s = CU_add_suite("shell_help", NULL, NULL);
     suite_shell_help_tests(s);
+
+    /* The shell's errno wording (SCRUM-271): pure string logic. */
+    s = CU_add_suite("shell_err", NULL, NULL);
+    suite_shell_err_tests(s);
+
+    s = CU_add_suite("shell_hist", NULL, NULL);
+    suite_shell_hist_tests(s);
+
+    s = CU_add_suite("shell_complete", NULL, NULL);
+    suite_shell_complete_tests(s);
+
+    s = CU_add_suite("shell_mount", shell_mount_suite_init,
+                     shell_mount_suite_cleanup);
+    suite_shell_mount_tests(s);
 
     /* Runs last: hammers exo_syscall_dispatch() with a million random
      * syscalls and checks the PMM is still sane afterward, so it should not

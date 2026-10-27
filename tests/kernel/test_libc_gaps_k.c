@@ -471,6 +471,28 @@ static void test_filesystem_absent_functions_say_so(void)
 
 /* ---- sscanf ------------------------------------------------------------ */
 
+static void test_sscanf_scanset(void)
+{
+    /* m_config.c's "%79s %99[^\n]": name, then the rest of the line. */
+    char name[80], val[100];
+
+    CU_ASSERT_EQUAL(sscanf("player_name   my name is x\nnext", "%79s %99[^\n]", name, val), 2);
+    CU_ASSERT_EQUAL(strcmp(name, "player_name"), 0);
+    CU_ASSERT_EQUAL(strcmp(val, "my name is x"), 0);
+
+    CU_ASSERT_EQUAL(sscanf("s \"quoted val\"\n", "%79s %99[^\n]", name, val), 2);
+    CU_ASSERT_EQUAL(strcmp(val, "\"quoted val\""), 0);
+
+    /* Width limit stops the set. */
+    CU_ASSERT_EQUAL(sscanf("abcdef", "%3[abcdef]", val), 1);
+    CU_ASSERT_EQUAL(strcmp(val, "abc"), 0);
+
+    /* ']' first is a member; a set that matches nothing assigns nothing. */
+    CU_ASSERT_EQUAL(sscanf("]]x", "%[]]", val), 1);
+    CU_ASSERT_EQUAL(strcmp(val, "]]"), 0);
+    CU_ASSERT_EQUAL(sscanf("xyz", "%[0123456789]", val), 0);
+}
+
 static void test_sscanf_m_strtoint_forms(void)
 {
     /*
@@ -660,6 +682,7 @@ void suite_libc_gaps_tests(CU_pSuite s)
                 test_stdout_stderr_exist_and_survive_fclose);
     CU_add_test(s, "absent filesystem says so",
                 test_filesystem_absent_functions_say_so);
+    CU_add_test(s, "sscanf scanset", test_sscanf_scanset);
     CU_add_test(s, "sscanf M_StrToInt forms", test_sscanf_m_strtoint_forms);
     CU_add_test(s, "sscanf reports what it assigned",
                 test_sscanf_reports_what_it_assigned);

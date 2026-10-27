@@ -88,7 +88,7 @@ int exofs_fat_alloc(exofs_volume_t *v, uint32_t *out)
     if (v->scratch == NULL) return -EXO_EINVAL;
     memset(v->scratch, 0, EXOFS_BLOCK_SIZE);
 
-    rc = exofs_write_block(blk, v->scratch);
+    rc = exofs_write_block(v, blk, v->scratch);
     if (rc < 0) return rc;
 
     v->fat[blk] = EXOFS_BLOCK_EOC;
@@ -99,6 +99,39 @@ int exofs_fat_alloc(exofs_volume_t *v, uint32_t *out)
     v->next_free_hint = blk + 1u;
 
     *out = blk;
+    return 0;
+}
+
+int exofs_fat_alloc_run(exofs_volume_t *v, uint32_t max, uint32_t *first,
+                        uint32_t *count)
+{
+    if (v == NULL || first == NULL || count == NULL || max == 0) {
+        return -EXO_EINVAL;
+    }
+
+    uint32_t blk;
+    int rc = find_free_block(v, &blk);
+    if (rc < 0) return rc;
+
+    uint32_t n = 1;
+    while (n < max && blk + n < v->total_blocks &&
+           v->fat[blk + n] == EXOFS_BLOCK_FREE) {
+        n++;
+    }
+
+    /* No disk write here, so nothing can fail part-way: see exofs_fat.h on
+     * why the blocks are not zeroed. */
+    for (uint32_t i = 0; i + 1 < n; i++) {
+        v->fat[blk + i] = blk + i + 1u;
+        exofs_fat_mark_dirty(v, blk + i);
+    }
+    v->fat[blk + n - 1] = EXOFS_BLOCK_EOC;
+    exofs_fat_mark_dirty(v, blk + n - 1);
+
+    v->next_free_hint = blk + n;
+
+    *first = blk;
+    *count = n;
     return 0;
 }
 

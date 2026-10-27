@@ -39,6 +39,19 @@ static void test_isspace(void)
     CU_ASSERT_FALSE(isspace('0'));
 }
 
+static void test_isprint(void)
+{
+    CU_ASSERT_TRUE(isprint(' '));
+    CU_ASSERT_TRUE(isprint('a'));
+    CU_ASSERT_TRUE(isprint('~'));
+    CU_ASSERT_FALSE(isprint('\n'));
+    CU_ASSERT_FALSE(isprint('\r'));
+    CU_ASSERT_FALSE(isprint('\0'));
+    CU_ASSERT_FALSE(isprint(0x7f));
+    CU_ASSERT_FALSE(isprint(0x80));
+    CU_ASSERT_FALSE(isprint(-1));
+}
+
 static void test_toupper(void)
 {
     CU_ASSERT_EQUAL(toupper('a'), 'A');
@@ -66,6 +79,7 @@ void suite_ctype_tests(CU_pSuite s)
     CU_add_test(s, "isalpha", test_isalpha);
     CU_add_test(s, "isdigit", test_isdigit);
     CU_add_test(s, "isspace", test_isspace);
+    CU_add_test(s, "isprint", test_isprint);
     CU_add_test(s, "toupper", test_toupper);
     CU_add_test(s, "tolower", test_tolower);
 }

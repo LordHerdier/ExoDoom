@@ -1,0 +1,70 @@
+# 02 Memory layout: physical RAM as the kernel sees it, and one LibOS's virtual
+# address space. Not to scale.
+# Sources: src/linker.ld, src/boot.s, src/vmm.c, src/page_alloc.c,
+#          src/libos_launch.h, src/libos_fb.c, src/libos_page_alloc.c,
+#          src/libos_wad_map.h, src/exo_syscall.h
+...@style
+grid-columns: 1
+grid-gap: 14
+
+title: "ExoDoom: memory layout\nThe kernel runs on one identity map (virtual == physical, supervisor-only).\nEvery LibOS gets its own page tables, confined to a window above 64 TiB. Not to scale." {
+  class: note
+  style.font-size: 18
+  style.italic: false
+  style.font-color: "#111827"
+}
+
+panels: "" {
+  style.fill: transparent
+  style.stroke: transparent
+  grid-columns: 2
+  grid-gap: 40
+
+  phys: "PHYSICAL  ·  QEMU, 256 MiB" {
+    class: zone
+    style.stroke: "#5B6B7F"
+    style.font-color: "#374151"
+    grid-columns: 1
+    grid-gap: 0
+
+    fb: "VESA framebuffer aperture\naddress from the Multiboot 2 tag\n(~0xFD000000 on QEMU)\nabove RAM, in the PCI MMIO hole\nkernel-mapped; unmappable by any LibOS" {class: hw; style.stroke-dash: 3}
+    topram: "0x1000_0000  top of RAM" {class: note; style.font-size: 13}
+    pool: "Usable RAM: the page-allocator pool\n4 KiB pages, each tagged with an owner\nkernel: page tables, heap, mixer rings\nper LibOS: PML4 + tables, code, data, stack,\nheap, virtual framebuffer" {class: k; style.fill: "#DCDFFB"}
+    bump: "Bump pool, from align_up(_bss_end, 4 KiB)\nholds the PMM bitmap and the owner table" {class: k}
+    kimg: "0x0020_0000  Kernel image (linked at 2 MiB)\n.multiboot2 · .text · .rodata · .data · .bss\n.bss holds the 24 KiB boot page tables,\nthe 16 KiB boot stack, the 16 KiB syscall stack" {class: k; style.fill: "#C9CDF7"}
+    gap: "0x0010_0000 – 0x001F_FFFF  reserved gap" {class: hw}
+    vga: "0x000A_0000 – 0x000F_FFFF\nVGA / BIOS ROM" {class: hw}
+    low: "0x0000_1000 – 0x0009_FFFF  low memory" {class: hw}
+    null: "0x0000_0000  page 0 UNMAPPED\n(NULL guard)" {class: warn}
+  }
+
+  virt: "VIRTUAL  ·  one LibOS (its own PML4)" {
+    class: zone
+    style.stroke: "#0F8B7A"
+    style.font-color: "#0F8B7A"
+    grid-columns: 1
+    grid-gap: 0
+
+    hi: "0x0000_8000_0000_0000  EXO_USER_VA_END" {class: note; style.font-size: 13}
+    wad: "+0x800_0000   IWAD window, read-only\nonly if the package asks\n(EXO_PKG_WANT_WAD)" {class: doom}
+    fbv: "+0x400_0000   framebuffer window\nthe context's private virtual framebuffer" {class: u}
+    heap: "+0x100_0000   LibOS heap\non-demand pages, up to 4096 (16 MiB)" {class: u}
+    unm: "+0x19_2000 … +0xFF_FFFF   unmapped" {class: warn; style.stroke-dash: 3}
+    stack: "+0x18_2000 … +0x19_2000   stack, 16 pages\ngrows down; entry RSP = top - 8" {class: u}
+    guard: "+0x18_1000   guard page, never mapped\nstack overflow faults, not corrupts" {class: warn}
+    data: "+0x0C_1000 … +0x18_1000   .data + .bss\nup to 192 pages" {class: u}
+    code: "+0x00_1000 … +0x0C_1000   .text\nup to 192 pages" {class: u}
+    base: "0x0000_4000_0000_0000  EXO_USER_VA_BASE" {class: note; style.font-size: 13}
+    below: "Below 64 TiB: PML4 slot 0, shared by every\naddress space, supervisor-only: the kernel's\nidentity map. Ring 3 reaches none of it." {class: k}
+  }
+}
+
+rules: "How the two halves connect" {
+  class: zone
+  style.stroke: "#374151"
+  style.font-color: "#111827"
+  grid-columns: 3
+  r1: "exo_page_alloc returns a\nphysical page tagged with\nthe caller's context id" {class: k}
+  r2: "exo_page_map(vaddr, paddr, flags)\ninstalls it inside the window,\nonly if the caller owns paddr" {class: k}
+  r3: "Why 64 TiB: the kernel map is identity,\nso a lower window would overlap\nreal kernel mappings" {class: k}
+}

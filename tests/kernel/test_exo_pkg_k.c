@@ -338,7 +338,7 @@ static void c_min_over_rec(exo_pkg_header_t *h)
 static void c_voices(exo_pkg_header_t *h)
 { h->sound_voices = EXO_PKG_MAX_SOUND_VOICES + 1; }
 static void c_flags(exo_pkg_header_t *h)
-{ h->want_flags |= 1u << 4; }
+{ h->want_flags |= 1u << 5; }
 static void c_noop(exo_pkg_header_t *h)
 { (void)h; }
 
@@ -358,6 +358,22 @@ static void c_vol_size_over(exo_pkg_header_t *h)
 { c_vol_ok(h); h->volume_sectors = EXO_VOLUME_SLOT_SECTORS + 1; }
 static void c_vol_slot_without_size(exo_pkg_header_t *h)
 { h->want_flags |= EXO_PKG_WANT_DISK; h->volume_slot = 1; }
+
+/* SCRUM-75 program-volume request: a disk resource. Since SCRUM-267 it may
+ * accompany a private volume of the program's own (Doom: IWAD + saves). */
+static void c_progvol_ok(exo_pkg_header_t *h)
+{ h->want_flags |= EXO_PKG_WANT_DISK | EXO_PKG_WANT_PROGRAM_RO; }
+static void c_progvol_no_disk(exo_pkg_header_t *h)
+{ c_progvol_ok(h); h->want_flags &= ~EXO_PKG_WANT_DISK; }
+static void c_progvol_and_volume(exo_pkg_header_t *h)
+{ c_progvol_ok(h); h->volume_slot = 1; h->volume_sectors = 64; }
+
+static void test_program_volume_request_is_validated(void)
+{
+    CU_ASSERT_EQUAL(parse_after(c_progvol_ok), 0);
+    CU_ASSERT_EQUAL(parse_after(c_progvol_no_disk), EXO_PKG_EINVAL);
+    CU_ASSERT_EQUAL(parse_after(c_progvol_and_volume), 0);
+}
 
 static void test_volume_request_is_validated(void)
 {
@@ -463,6 +479,8 @@ void suite_exo_pkg_tests(CU_pSuite s)
 {
     CU_add_test(s, "volume request is validated by pack and parse",
                 test_volume_request_is_validated);
+    CU_add_test(s, "program-volume request is validated",
+                test_program_volume_request_is_validated);
     CU_add_test(s, "volume request round-trips through pack -> parse",
                 test_volume_request_round_trips);
     CU_add_test(s, "pack -> parse round-trips header, code and data bytes",

@@ -1,0 +1,88 @@
+# 04 Interrupt path: from a device raising a line to iretq, plus CPU exceptions.
+# Sources: src/pic.c, src/idt.c, src/isr.s, src/pit.c, src/ps2.c, src/ps2_mouse.c,
+#          src/hda.c, src/fault.c, src/tss.c, src/kernel.c
+...@style
+grid-columns: 1
+grid-gap: 14
+
+title: "ExoDoom: interrupt path\nHow a device event reaches C code and returns, and what happens on a CPU exception." {
+  class: note
+  style.font-size: 18
+  style.italic: false
+  style.font-color: "#111827"
+}
+
+irqs: "Hardware interrupts  ·  8259 PIC remapped so IRQ0–7 → vectors 0x20–0x27 and IRQ8–15 → 0x28–0x2F" {
+  class: zone
+  style.stroke: "#4F46E5"
+  style.font-color: "#4F46E5"
+  grid-rows: 7
+  grid-columns: 5
+  grid-gap: 6
+
+  h1: "Source" {class: gate}
+  h2: "PIC line → vector" {class: gate}
+  h3: "IDT gate → asm stub" {class: gate}
+  h4: "C handler" {class: gate}
+  h5: "What it does" {class: gate}
+  a1: "PIT channel 0\n1 kHz" {class: hw}
+  a2: "IRQ0 → 0x20\nunmasked by pic_remap()" {class: k}
+  a3: "irq0_stub" {class: k}
+  a4: "irq0_handler\npit.c" {class: k}
+  a5: "ticks++ · speaker_tick · hda_tick · usb_poll\nsets composite_pending at ~60 Hz\nEOI(0). The framebuffer copy is NOT here:\nit runs later, from syscall dispatch" {class: k}
+  b1: "8042 keyboard\n(PS/2)" {class: hw}
+  b2: "IRQ1 → 0x21\nunmasked after kbd_init()" {class: k}
+  b3: "irq1_stub" {class: k}
+  b4: "irq1_handler →\nps2_irq1_handler\nps2.c" {class: k}
+  b5: "drain port 0x60 (bounded), drop AUX bytes\nscancode → key event → 256-entry ring\nCtrl+Tab: context_switch_request(), swallowed\nEOI(1)" {class: k}
+  c1: "8042 mouse\n(PS/2 aux)" {class: hw}
+  c2: "IRQ12 → 0x2C, via cascade IRQ2\nunmasked in the boot tail" {class: k}
+  c3: "irq12_stub" {class: k}
+  c4: "irq12_handler →\nps2_mouse_irq12_handler\nps2_mouse.c" {class: k}
+  c5: "3-byte packets → dx / dy accumulator\nread by exo_mouse_poll\nEOI(12)" {class: k}
+  d1: "Intel HDA\n(PCI INTx)" {class: hw}
+  d2: "IRQ = PCI Interrupt Line\nvector 32 + line\nunmasked by hda_init()" {class: k}
+  d3: "irq_hda_stub\ngate installed by hda_init()" {class: k}
+  d4: "hda_irq_handler\nhda.c" {class: k}
+  d5: "stream-completion: render the mixer into\nthe next buffer-descriptor entry\nsends its own EOI (line may be on the slave)" {class: k}
+  e1: "Spurious request\n(line dropped before ack)" {class: hw; style.stroke-dash: 3}
+  e2: "IRQ7 → 0x27\nIRQ15 → 0x2F" {class: k}
+  e3: "irq7_spurious_stub\nirq15_spurious_stub" {class: k}
+  e4: "pic_irq7_spurious\npic_irq15_spurious\npic.c" {class: k}
+  e5: "read the ISR: really in service → EOI;\nspurious → count only. IRQ15 spurious\nstill EOIs the master (SCRUM-227)" {class: k}
+  f1: "UHCI USB · CMOS RTC\nATA · COM1" {class: hw; style.stroke-dash: 3}
+  f2: "no interrupt used" {class: note}
+  f3: "—" {class: note}
+  f4: "polled" {class: note}
+  f5: "USB is polled from irq0_handler\n(USBINTR = 0): QEMU routes UHCI onto\nHDA's line. RTC, ATA PIO, serial: polled." {class: k; style.stroke-dash: 3}
+}
+
+exc: "CPU exceptions  ·  vectors 0–31, no PIC involved" {
+  class: zone
+  style.stroke: "#C62828"
+  style.font-color: "#C62828"
+  grid-rows: 2
+  grid-columns: 3
+  grid-gap: 6
+  x1: "Vector 14  #PF\npf_stub → page_fault_handler\nsaves all 15 GPRs, passes the frame" {class: warn}
+  x2: "Vector 13  #GP\ngpf_stub → gp_fault_handler\nring-3 in/out lands here: port I/O\nis walled off" {class: warn}
+  x3: "Vectors 8 10 11 12 17 21 29 30\nerror_stub: discard the CPU-pushed\nerror code, iretq" {class: k}
+  x5: "Both report on COM1, then halt:\nCR2, decoded error code, RIP, CS:RSP,\nlive page-table walk, ring 0 or 3" {class: warn; style.stroke-dash: 3}
+  x6: "Why a TSS exists: a fault taken at CPL 3\nloads RSP from TSS.RSP0 (all gates IST = 0).\nWithout it: #PF → #GP → #DF → triple fault." {class: k}
+  x4: "Every other vector\ndefault_stub: bare iretq\n(no handler registered)" {class: k}
+}
+
+anatomy: "Anatomy of an IRQ entry  ·  isr.s, identical for every IRQ stub" {
+  class: zone
+  style.stroke: "#374151"
+  style.font-color: "#111827"
+  direction: right
+  cpu: "CPU, before the stub\ninterrupt gate (type 0x8E) clears IF\nfrom ring 3: RSP ← TSS.RSP0\npush SS RSP RFLAGS CS RIP" {class: hw}
+  p1: "PUSH_REGS\nRAX RCX RDX RSI RDI\nR8 R9 R10 R11\n(caller-saved only)" {class: k}
+  p2: "ALIGN_CALL_STACK\nsave RSP in RBP, RSP &= -16\nSysV wants 16-byte alignment" {class: k}
+  p3: "call C handler\nRBX RBP R12–R15 are\npreserved by the C function" {class: k; style.stroke-width: 2}
+  p4: "RESTORE_CALL_STACK\nRSP ← RBP, pop RBP" {class: k}
+  p5: "POP_REGS" {class: k}
+  p6: "iretq\nback to the interrupted code\n(or the next context)" {class: hw}
+  cpu -> p1 -> p2 -> p3 -> p4 -> p5 -> p6: {class: flow}
+}

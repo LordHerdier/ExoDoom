@@ -33,6 +33,7 @@ make docker-build              # Build kernel + ISO -> build/exodoom, build/exod
 make docker-run                # Build, then boot the ISO in QEMU (GRUB menu)
 make docker-run-kernel         # Build, then boot the ISO with the GRUB menu skipped -- preferred for dev iteration
 make docker-run-blank         # Like docker-run-kernel but on a zeroed disk: exercises the first-boot format prompt
+make demo-rehearse             # Build, then run the client demo unattended over QMP (host QEMU; docs/demo.md)
 make docker-test               # Build with TESTING=1, boot, stream serial test output
 make docker-ci                 # Same as docker-test; what CI runs
 make docker-build-doom         # Compile-only gate over vendored src/doom/ (79/79; CI runs it)
@@ -85,7 +86,8 @@ Full guide: `docs/testing.md`. Debugging with GDB: `docs/debugging.md`.
 serial_init -> idt_init -> tss_init -> mmap_init/memory_init -> acpi_init -> page_alloc_init
   -> vmm_init -> syscall_init + every syscall_*_init
   -> pic_remap -> IRQ0 + spurious IRQ7/15 gates -> pit_init
-  -> pci_init -> hda_init -> ata_init -> usb_init -> rtc_init + syscall_rtc_init
+  -> pci_init -> hda_init -> ata_init + ata_register_blkdevs -> usb_init
+  -> syscall_disk_init -> rtc_init + syscall_rtc_init
   [-DTESTING]    serial_flush -> qemu_exit(run_tests())
   [normal boot]  fb + fbcon -> kbd_init -> sti -> launch the shell LibOS (ring 3)
 ```
@@ -127,14 +129,15 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | Syscall gate (entry, dispatch, handlers) | `src/syscall.c/h`, `src/syscall_entry.s`, `src/syscall_*.c/h` (one per area) |
 | Resource ownership (secure binding) | `src/page_alloc.c/h` (pages), `src/fb_binding.c/h`, `src/disk_binding.c/h` |
 | Resource revocation | `src/revoke.c/h` and the `*_revoke_*` primitives |
-| Disk (ATA PIO) | `src/ata.c/h`, `src/syscall_disk.c/h` |
+| Disk: ATA PIO (all four IDE positions), block-device registry (device 0 = system disk) | `src/ata.c/h`, `src/blkdev.c/h`, `src/syscall_disk.c/h` |
 | LibOS-space filesystem (ExoFS) + `exo_file_*` descriptor API | `src/libos_fs/` (`exo_file.c/h` for descriptors) — **not part of the kernel**; syscalls #9–16 are reserved, never bound |
 | Keyboard / mouse | `src/ps2.c/h`, `src/kbd_ring.c/h`, `src/ps2_mouse.c/h` |
 | Freestanding libc | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`, `src/fpconv.c/h`; header-only shims `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/*.h` |
 | Fixed-point trigonometry | `src/fixed_math.c/h` |
 | Vendored Doom engine (`libos_doom` ring-3 target) | `src/doom/`, `src/libos_doom/` |
 | doomgeneric platform layer | `src/doomgeneric_exo.c/h` |
-| Doom net stub / fatal-error path / mounted IWAD registry | `src/doom_net_stub.c`, `src/doom_panic.c/h`, `src/doom_wad.c/h`, `src/doom_wad_disk.c/h` |
+| Doom net stub / fatal-error path / mounted IWAD registry (kernel tests; ring-3 Doom reads the IWAD via FILE* over ExoFS) | `src/doom_net_stub.c`, `src/doom_panic.c/h`, `src/doom_wad.c/h`, `src/doom_wad_disk.c/h` |
+| Shell mount table + path router (`mount`/`umount`, pure logic, TESTING-kernel suite) | `src/shell/shell_mount.c/h` (used from `src/shell/shell_main.c`) |
 | LibOS apps | `src/shell/`, `src/libos_wad_viewer/`, `src/libos_clock/`, … |
 | Slide decks (`.exs` format, host packer, viewer LibOS) | `src/exo_slides.h`, `tools/mkslides/`, `src/libos_slides/`, decks in `slides/` → `docs/architecture.md` §7 "Slide decks" |
 | Test framework | `src/kunit.h`, `tests/kernel/*.c`, `tests/kernel/kunit.c`, `tests/kernel/ring3_probe.s` |
@@ -151,7 +154,7 @@ area.
   → `docs/architecture.md` §9, `docs/memory.md` §7.
 - Compiled ring-3 targets are linked at the real LibOS addresses and need
   `.text.entry`, a first-global params struct and the entry TU linked first.
-  → `docs/architecture.md` §7 "LibOS launch conventions".
+  → `docs/libos-authoring.md` §4.
 - Never mix `__SSE2__` and `EXO_KERNEL` as the same condition: "not the kernel"
   does not mean "has SSE". → `docs/architecture.md` §7 "Linking the engine".
 - Kernel code is `-mno-sse` and kernel entry saves no XMM state, by design.
@@ -191,7 +194,8 @@ area.
 - ExoFS is LibOS code over `exo_disk_*`; disk buffers come from
   `libos_heap_alloc()`, never `malloc()`; unmount before releasing the disk;
   write ordering is load-bearing. → `docs/filesystem.md` §1, §8, "Pitfalls".
-- `fopen` is a read-only blob reader; writes fail (`EROFS`) on purpose.
+- `fopen` is read-only; writes fail (`EROFS`) on purpose. Its source is a
+  pluggable backend: ExoFS in ring-3 Doom, the blob table elsewhere.
   → `docs/architecture.md` §7, `docs/libc_audit.md`.
 - Doom's net layer is two booleans; flipping `drone` silently freezes the
   game; `FEATURE_MULTIPLAYER` must stay undefined. → `docs/architecture.md` §7
@@ -203,15 +207,19 @@ area.
 
 | Topic | Doc |
 |---|---|
+| Client-facing overview: architecture, syscall table, isolation guarantees, design rationale | `docs/exokernel-architecture.md` |
 | System design, boot sequence, subsystems, LibOS/Doom path, build, sprint status | `docs/architecture.md` |
 | Syscall ABI, ownership/revocation, address-space mapping, libc audit, sound | `docs/syscall_spec.md` |
 | Paging, allocators, LibOS heap | `docs/memory.md` |
 | ExoFS | `docs/filesystem.md` |
+| Writing a new LibOS program: conventions, build, packaging, worked example | `docs/libos-authoring.md` |
 | KUnit, writing and registering tests | `docs/testing.md` |
 | GDB and bare-metal debugging | `docs/debugging.md` |
 | Branches, commits, style, CI checks | `docs/contributing.md` |
 | libc per-function audit | `docs/libc_audit.md` |
 | Drivers (IDT, PIC, PIT, serial, keyboard, framebuffer, ATA, PCI, ACPI, RTC, HDA, speaker, USB) | `docs/drivers/*.md` |
+| Measured frame times, syscall latency, launch latency, memory per context | `docs/performance.md` |
+| The client demo: the beat-by-beat script, its unattended rehearsal, and what to say at each beat | `docs/demo.md`, `docs/demo-narration.md` |
 
 **New architectural facts go into the doc that owns the subsystem, integrated
 into its existing section — not appended here.** If you find yourself writing

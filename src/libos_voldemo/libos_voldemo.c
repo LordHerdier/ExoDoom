@@ -100,31 +100,35 @@ static void voldemo_halt(fb_console_t *con, const char *what, int64_t rc)
 
 /* Read this copy's launch counter from its own volume, bump it, store it
  * back. A fresh volume has no such file, which reads as zero. */
-static uint32_t voldemo_bump_launches(void)
+static uint32_t voldemo_bump_launches(exofs_vol_t *vol)
 {
     uint32_t n = 0;
     exofs_file_t f;
 
-    if (exofs_open(voldemo_launches, EXOFS_O_READ, &f) == 0) {
+    if (exofs_open(vol, voldemo_launches, EXOFS_O_READ, &f) == 0) {
         if (exofs_read(&f, &n, sizeof(n)) != (int64_t)sizeof(n))
             n = 0;
         exofs_close(&f);
     }
     n++;
-    if (exofs_open(voldemo_launches, EXOFS_O_WRITE | EXOFS_O_CREATE |
-                                         EXOFS_O_TRUNC, &f) == 0) {
+    if (exofs_open(vol, voldemo_launches, EXOFS_O_WRITE |
+                                         EXOFS_O_CREATE | EXOFS_O_TRUNC, &f) == 0) {
         exofs_write(&f, &n, sizeof(n));
         exofs_close(&f);
     }
     return n;
 }
 
+/* The volume slots exo_disk_extent (#37) hands out are on the system disk,
+ * block device 0 (SCRUM-244). */
+#define VOLDEMO_DEV 0u
+
 /* Try to read sector `lba` and report what the kernel said. A refusal is the
  * expected answer for everything except our own extent. */
 static void voldemo_probe(fb_console_t *con, const char *vol, const char *what,
                           uint32_t lba, void *buf)
 {
-    int64_t rc = exo_disk_read(lba, buf, 1);
+    int64_t rc = exo_disk_read(VOLDEMO_DEV, lba, buf, 1);
 
     printf("voldemo[%s] probe %s lba=%u rc=%d %s\n", vol, what, (unsigned)lba,
            (int)rc, rc < 0 ? "refused" : "READ-OK");
@@ -188,19 +192,20 @@ void libos_voldemo_main(void)
     write_u32(&con, ext.sectors);
     label(&con, " sectors\n");
 
-    rc = exo_disk_acquire(ext.base, ext.sectors);
+    rc = exo_disk_acquire(VOLDEMO_DEV, ext.base, ext.sectors);
     if (rc != 0)
         voldemo_halt(&con, "exo_disk_acquire failed: ", rc);
 
     label(&con, "fs       ");
-    if (exofs_mount(ext.base) == 0) {
+    exofs_vol_t *vol = NULL;
+    if (exofs_mount(VOLDEMO_DEV, ext.base, &vol) == 0) {
         printf("voldemo[%s] mounted existing volume\n", name);
         value(&con, "mounted existing volume\n");
     } else {
-        int frc = exofs_format(ext.base, ext.sectors);
+        int frc = exofs_format(VOLDEMO_DEV, ext.base, ext.sectors);
         if (frc != 0)
             voldemo_halt(&con, "exofs_format failed: ", frc);
-        int mrc = exofs_mount(ext.base);
+        int mrc = exofs_mount(VOLDEMO_DEV, ext.base, &vol);
         if (mrc != 0)
             voldemo_halt(&con, "exofs_mount failed: ", mrc);
         printf("voldemo[%s] formatted new volume\n", name);
@@ -208,7 +213,7 @@ void libos_voldemo_main(void)
     }
 
     label(&con, "launches ");
-    uint32_t launches = voldemo_bump_launches();
+    uint32_t launches = voldemo_bump_launches(vol);
     printf("voldemo[%s] launches=%u\n", name, (unsigned)launches);
     write_u32(&con, launches);
     fbcon_write(&con, " (kept in this volume)\n");
@@ -216,17 +221,17 @@ void libos_voldemo_main(void)
     /* Each copy writes a differently-named file, so that if the volumes were
      * ever shared the other copy's file would show up in the listing below. */
     exofs_file_t f;
-    if (exofs_open(hello, EXOFS_O_WRITE | EXOFS_O_CREATE | EXOFS_O_TRUNC,
-                   &f) == 0) {
+    if (exofs_open(vol, hello, EXOFS_O_WRITE | EXOFS_O_CREATE |
+                                EXOFS_O_TRUNC, &f) == 0) {
         exofs_write(&f, voldemo_message, sizeof(voldemo_message) - 1);
         exofs_close(&f);
     }
-    exofs_sync();
+    exofs_sync(vol);
 
     label(&con, "root     ");
     fbcon_write(&con, "\n");
     exofs_dir_t dir;
-    if (exofs_opendir("/", &dir) == 0) {
+    if (exofs_opendir(vol, "/", &dir) == 0) {
         for (;;) {
             exofs_dirinfo_t info;
             if (exofs_readdir(&dir, &info) <= 0)
@@ -255,7 +260,7 @@ void libos_voldemo_main(void)
         voldemo_probe(&con, name, "shell-scratch", 8192, probe);
         voldemo_probe(&con, name, "program-volume", 16384, probe);
     }
-    rc = exo_disk_acquire(0, 0);
+    rc = exo_disk_acquire(VOLDEMO_DEV, 0, 0);
     printf("voldemo[%s] probe whole-disk rc=%d %s\n", name, (int)rc,
            rc < 0 ? "refused" : "GRANTED");
     fbcon_write(&con, "  ");
@@ -278,8 +283,8 @@ void libos_voldemo_main(void)
         exo_kbd_event_t ev;
         if (exo_kbd_poll(&ev) > 0 && ev.pressed &&
             (ev.key == KEY_Q || ev.key == KEY_ESC)) {
-            exofs_unmount();
-            exo_disk_release();
+            exofs_unmount(vol);
+            exo_disk_release(VOLDEMO_DEV);
             exo_syscall1(EXO_SYS_EXIT, 0);
             for (;;) { exo_yield(); }
         }

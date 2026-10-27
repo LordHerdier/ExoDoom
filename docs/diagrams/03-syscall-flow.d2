@@ -1,0 +1,133 @@
+# 03 Syscall flow: one exo_page_map call from ring 3 and back, as a swimlane.
+# Numbers are the order of events; the same path serves all 41 syscall numbers.
+# Sources: src/exo_syscall.h (stubs), src/syscall.c (MSRs, dispatch),
+#          src/syscall_entry.s, src/syscall_mem.c, src/context_switch.s
+...@style
+grid-columns: 1
+grid-gap: 14
+
+title: "ExoDoom: syscall flow\nOne exo_page_map(vaddr, paddr, flags) call, #2, from ring 3 and back. Read the numbers in order." {
+  class: note
+  style.font-size: 18
+  style.italic: false
+  style.font-color: "#111827"
+}
+
+flow: "" {
+  style.fill: transparent
+  style.stroke: transparent
+  grid-columns: 5
+  grid-gap: 12
+  lane0: "" {
+    style.fill: transparent
+    style.stroke: transparent
+    grid-columns: 1
+    grid-gap: 10
+    hd: "LibOS · ring 3" {class: u; style.bold: true; style.font-size: 17; height: 70}
+    s0: "1  exo_page_map(vaddr, paddr, flags)\nRAX = 2, args in RDI RSI RDX\ninline `syscall`; clobbers RCX, R11 only" {class: u; height: 120}
+    p1: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p2: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p3: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p4: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p5: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p6: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p7: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p8: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    s9: "10  caller resumes\nafter its `syscall`\nwith RAX = result" {class: u; height: 120}
+    p10: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+  }
+  lane1: "" {
+    style.fill: transparent
+    style.stroke: transparent
+    grid-columns: 1
+    grid-gap: 10
+    hd: "CPU" {class: hw; style.bold: true; style.font-size: 17; height: 70}
+    p0: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    s1: "2  hardware entry\nRCX ← RIP, R11 ← RFLAGS\nIF DF TF AC NT cleared (FMASK)\nCS/SS ← 0x08/0x10, RIP ← LSTAR\nRSP is NOT switched" {class: hw; height: 120}
+    p2: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p3: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p4: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p5: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p6: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p7: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p8: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p9: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p10: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+  }
+  lane2: "" {
+    style.fill: transparent
+    style.stroke: transparent
+    grid-columns: 1
+    grid-gap: 10
+    hd: "syscall_entry.s" {class: k; style.bold: true; style.font-size: 17; height: 70}
+    p0: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p1: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    s2: "3  save and switch stack\npark user RSP in saved_user_rsp\nload the 16 KiB kernel stack\npush 14 regs, args → SysV order" {class: k; height: 120}
+    p3: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p4: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p5: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p6: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p7: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    s8: "9  no switch pending (the usual case)\npop 14 regs, restore saved_user_rsp\nsysretq: every register but\nRAX, RCX, R11 is as it was" {class: k; height: 120}
+    p9: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    s10: "9′  switch pending\n(exo_yield · exo_exit · exo_launch*\nCtrl+Tab)\njmp context_switch_tail:\nsave regs, CR3 ← next PML4,\niretq into the other context" {class: k; style.stroke: "#D9822B"; style.stroke-width: 3; height: 120}
+  }
+  lane3: "" {
+    style.fill: transparent
+    style.stroke: transparent
+    grid-columns: 1
+    grid-gap: 10
+    hd: "exo_syscall_dispatch\nsyscall.c" {class: k; style.bold: true; style.font-size: 17; height: 70}
+    p0: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p1: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p2: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    s3: "4  dispatch\ncompositor service if a frame is due\nnum ≥ 41 or unbound → -ENOSYS\ncall handlers[num](a1 … a6)" {class: k; height: 120}
+    p4: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p5: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p6: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    s7: "8  result returns\nint64 in RAX: 0 or -EXO_E*" {class: k; height: 120}
+    p8: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p9: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p10: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+  }
+  lane4: "" {
+    style.fill: transparent
+    style.stroke: transparent
+    grid-columns: 1
+    grid-gap: 10
+    hd: "sys_page_map +\nownership checks\nsyscall_mem.c" {class: k; style.bold: true; style.font-size: 17; height: 70}
+    p0: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p1: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p2: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p3: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    s4: "5  shape checks\nunknown flag / unaligned → -EINVAL\nvaddr outside [64 TiB, 128 TiB)\n→ -EPERM" {class: warn; height: 120}
+    s5: "6  ownership check, may_map_phys()\nreal framebuffer range: refused\npage_owner(paddr) != caller\n→ -EPERM" {class: warn; height: 120}
+    s6: "7  vmm_map_page_in_owned()\ninstall PTE in the caller's PML4\nover the page-table quota\n→ -ENOMEM" {class: k; height: 120}
+    p7: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p8: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p9: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+    p10: "" {style.fill: transparent; style.stroke: transparent; height: 120}
+  }
+}
+
+flow.lane0.s0 -> flow.lane1.s1: {class: flow}
+flow.lane1.s1 -> flow.lane2.s2: {class: flow}
+flow.lane2.s2 -> flow.lane3.s3: {class: flow}
+flow.lane3.s3 -> flow.lane4.s4: {class: flow}
+flow.lane4.s4 -> flow.lane4.s5: {class: flow}
+flow.lane4.s5 -> flow.lane4.s6: {class: flow}
+flow.lane4.s6 -> flow.lane3.s7: {class: flow}
+flow.lane3.s7 -> flow.lane2.s8: {class: flow}
+flow.lane2.s8 -> flow.lane0.s9: {class: flow}
+flow.lane3.s7 -> flow.lane2.s10: "if a switch is pending" {class: flow; style.stroke: "#D9822B"; style.stroke-dash: 4; style.font-color: "#92400E"}
+
+facts: "What makes this a boundary" {
+  class: zone
+  style.stroke: "#374151"
+  style.font-color: "#111827"
+  grid-columns: 4
+  f1: "MSRs, set once by syscall_init()\nEFER.SCE · STAR 0x08 / 0x18|3\nLSTAR = syscall_entry\nFMASK = IF|DF|TF|AC|NT" {class: k}
+  f2: "GDT order is forced by sysret\n0x08 kernel code · 0x10 kernel data\n0x18 user code32 (placeholder)\n0x20 user data · 0x28 user code64" {class: k}
+  f3: "No TSS stack on this path\nsyscall never reads TSS.RSP0, so the\nstub swaps the stack itself.\nIF stays clear, one CPU." {class: k}
+  f4: "Strongest register contract\nonly RAX, RCX, R11 change; the\nargument registers survive, unlike\nthe SysV C ABI." {class: k}
+}

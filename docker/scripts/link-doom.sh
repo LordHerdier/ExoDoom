@@ -97,6 +97,21 @@ SHIM_SOURCES=(
   src/libos_heap.c
   src/libos_page_alloc.c
   src/libos_fb.c
+  # SCRUM-75: DG_Init mounts the program volume and installs the FILE*
+  # backend over it, so Doom links ExoFS and the stdio glue like the shell.
+  src/libos_fs/exofs_volume.c
+  src/libos_fs/exofs_fat.c
+  src/libos_fs/exofs_name.c
+  src/libos_fs/exofs_dirent.c
+  src/libos_fs/exofs_path.c
+  src/libos_fs/exofs_dir.c
+  src/libos_fs/exofs_file.c
+  src/libos_fs/exofs_blockdev.c
+  src/libos_fs/exo_file.c
+  src/libos_fs/exo_file_stdio.c
+  # SCRUM-267: DG_Init also mounts Doom's private volume, formatting it the
+  # first time (exofs_attach).
+  src/libos_fs/exofs_attach.c
 )
 
 # Symbols that are allowed to remain undefined, each with the ticket that
