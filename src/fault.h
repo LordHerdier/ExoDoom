@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "page_alloc.h"
+
 /*
  * fault — CPU exception diagnostics (SCRUM-17).
  *
@@ -74,8 +76,10 @@ void gp_fault_handler(exception_frame_t *f);
  * (SCRUM-283).  Ring 3: logs the context id and name, reclaims through
  * context_teardown() (the exo_exit path), marks the dead row BLOCKED and
  * resumes the next READY context via context_resume_noreturn(); the row is
- * left for the next launch to context_destroy().  Ring 0, or a ring-3 fault
- * with no context row or no other context to run: halts with a diagnostic.
+ * left for the next launch to context_destroy().  If no other context is ready
+ * the shell is relaunched instead (and the dead row reaped on the spot).
+ * Ring 0, a ring-3 fault with no context row, or a failed relaunch: halts with
+ * a diagnostic.
  * Never returns.  `why` is a short plain-language reason for the log.
  */
 void fault_terminate_current(const exception_frame_t *f, const char *why)
@@ -86,7 +90,17 @@ void fault_terminate_current(const exception_frame_t *f, const char *why)
  * ring 0, #DF and #MC halt with a diagnostic.  Never returns. */
 void exception_handler(exception_frame_t *f, uint64_t vector);
 
+/* What the fault path runs when the crashed program was the last ready
+ * context: returns the id of a new READY, primed context, or PAGE_OWNER_FREE
+ * for "could not" (production: shell_launch_context(), src/shell_launch.c). */
+typedef page_owner_t (*fault_relaunch_fn)(void);
+
 #ifdef TESTING
+/*
+ * Replace the relaunch function; NULL restores the shell relaunch.
+ */
+void fault_set_relaunch(fault_relaunch_fn fn);
+
 /*
  * Test hook.  Called before anything is printed; returning nonzero makes the
  * handler return instead of halting, which lets a test recover from a

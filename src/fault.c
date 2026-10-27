@@ -10,6 +10,7 @@
 #include "fault.h"
 #include "context.h"
 #include "serial.h"
+#include "shell_launch.h"
 #include "syscall_exit.h"
 #include "vmm.h"
 
@@ -76,14 +77,33 @@ void fault_set_hook(fault_hook_t h)
 }
 #endif
 
-/* Nothing left to hand the machine to.  Halts with an explicit message for
- * now; the shell relaunch (SCRUM-283 step 5) replaces this. */
-static void no_survivor(void)
+/* Nothing left to hand the machine to, and no way to make something. */
+static void no_survivor(const char *msg)
 {
-    serial_print("  no runnable context left -- halting\n");
+    serial_print("  ");
+    serial_print(msg);
+    serial_print(" -- halting\n");
     serial_print("=== halted ===\n");
     halt_forever();
 }
+
+/* What to run when the faulting program was the last ready context: build a
+ * fresh READY context and return its id, or PAGE_OWNER_FREE if that failed.
+ * Production relaunches the shell; tests substitute their own. */
+static page_owner_t relaunch_shell(void)
+{
+    page_owner_t id;
+    return shell_launch_context(&id) == 0 ? id : PAGE_OWNER_FREE;
+}
+
+static fault_relaunch_fn relaunch = relaunch_shell;
+
+#ifdef TESTING
+void fault_set_relaunch(fault_relaunch_fn fn)
+{
+    relaunch = fn ? fn : relaunch_shell;
+}
+#endif
 
 void fault_terminate_current(const exception_frame_t *f, const char *why)
 {
@@ -130,9 +150,28 @@ void fault_terminate_current(const exception_frame_t *f, const char *why)
      * context_switch_request() marks the outgoing row READY; override it as
      * sys_exit does (SCRUM-111) so round-robin never re-enters freed pages. */
     page_owner_t next = context_next_ready(owner);
-    if (next == PAGE_OWNER_FREE || context_switch_request(next) != CONTEXT_OK)
-        no_survivor();
+    int relaunched = 0;
+    if (next == PAGE_OWNER_FREE) {
+        /* The crashed program was the last one running: bring the shell back
+         * rather than leave a machine with nothing to show or type into. */
+        serial_print("  no other program is ready -- relaunching the shell\n");
+        next = relaunch();
+        if (next == PAGE_OWNER_FREE)
+            no_survivor("could not relaunch the shell");
+        relaunched = 1;
+    }
+    if (context_switch_request(next) != CONTEXT_OK)
+        no_survivor("could not switch to the next context");
     context_set_state(owner, CONTEXT_STATE_BLOCKED);
+
+    if (relaunched) {
+        /* Nothing will launch over this row, so reap it here: the switch
+         * request is armed and context_resume_noreturn() never reads the
+         * outgoing row. Leave the dead address space first -- destroying the
+         * page tables CR3 still points at would pull them out from under us. */
+        vmm_switch_address_space(vmm_kernel_pml4());
+        context_destroy(owner);
+    }
 
     serial_print("  resuming context id ");
     serial_print_hex64(next);
