@@ -1341,7 +1341,7 @@ The entire toolchain runs inside Docker. No host cross-compiler is required.
 
 | Image                     | Purpose                                                                   |
 | ------------------------- | ------------------------------------------------------------------------- |
-| `docker/Dockerfile.build` | Multi-stage build: compiles `x86_64-elf-binutils` 2.42 + `x86_64-elf-gcc` 13.2.0 from source, then creates a slim runtime image with GRUB ISO tools (`grub-mkrescue`, `grub-file`, `xorriso`) |
+| `docker/Dockerfile.build` | Multi-stage build: compiles `x86_64-elf-binutils` 2.42 + `x86_64-elf-gcc` 13.2.0 from source, then creates a slim runtime image with GRUB ISO tools (`grub-mkrescue`, `grub-file`, `xorriso`) and both GRUB platforms (`grub-pc-bin`, `grub-efi-amd64-bin` + `mtools`), so the ISO boots under BIOS and UEFI |
 | `docker/Dockerfile.qemu`  | `qemu-system-x86_64` for running the ISO                                 |
 
 **Build pipeline (`build.sh`):**
@@ -1353,7 +1353,7 @@ The entire toolchain runs inside Docker. No host cross-compiler is required.
 5. Link everything with `src/linker.ld`, `-nostdlib`, `-z max-page-size=0x1000`, `-lgcc` → `build/exodoom` (ELF64)
 6. Validate multiboot header with `grub-file --is-x86-multiboot2`
 7. Stage ISO tree under `build/isodir/boot/`
-8. `grub-mkrescue` → `build/exodoom.iso`
+8. `grub-mkrescue` → `build/exodoom.iso` (hybrid: a BIOS El Torito entry and a UEFI `/efi.img` carrying `bootx64.efi`)
 
 **Critical CFLAGS for x86_64 kernel code:**
 
@@ -1447,6 +1447,7 @@ The entire toolchain runs inside Docker. No host cross-compiler is required.
 | `make docker-build`             | Build kernel + ISO                                    |
 | `make docker-run`               | Boot ISO in QEMU (GRUB menu)                          |
 | `make docker-run-kernel`        | Boot the ISO with the GRUB menu skipped (`qemu -kernel` can't load Multiboot 2) |
+| `make run-uefi`                 | Boot the ISO on host QEMU under EDK2/OVMF (q35); `OVMF_CODE=`/`OVMF_VARS=` override the firmware paths |
 | `make docker-test`              | Build with `TESTING=1`, boot, stream serial output    |
 | `make docker-ci`                | As `docker-test`; used by GitHub Actions              |
 | `make docker-build DEBUG=1`     | Debug build (`-g -O0`) for GDB sessions               |
