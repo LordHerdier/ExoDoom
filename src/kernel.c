@@ -36,6 +36,7 @@
 #include "syscall_yield.h"
 #include "syscall_launch.h"
 #include "syscall_pane.h"
+#include "syscall_kbd_bind.h"
 #include "fb_binding.h"
 #include "fb_shadow.h"
 #include "revoke.h"
@@ -519,6 +520,12 @@ void kernel_main(void *mb2_info_ptr) {
     // the split screen before starting it. Authority is the hold's
     // (syscall_launch.c), so it sits right after the launch syscalls.
     syscall_pane_init();
+
+    // ── Keyboard binding syscall (SCRUM-297) ─────────────────────────────
+    // Binds exo_kbd_bind (#44): a launcher picks which keyboard the context
+    // it holds reads. Same hold authority as exo_pane_set, so it sits next
+    // to it.
+    syscall_kbd_bind_init();
 
 #ifdef TESTING
     // No blanket `sti` here: several suites (fault, tss, libos_launch,
