@@ -200,13 +200,17 @@ run-blank: docker-build
 OVMF_DIR  ?= $(shell d="$$(dirname "$$(readlink -f "$$(command -v qemu-system-x86_64)")")"; echo "$$d/../share/qemu")
 OVMF_CODE ?= $(OVMF_DIR)/edk2-x86_64-code.fd
 OVMF_VARS ?= $(OVMF_DIR)/edk2-i386-vars.fd
+# pc (i440FX) keeps the legacy IDE controller the ATA driver needs, so the
+# shell and Doom's WAD work under UEFI. q35 has SATA/AHCI only, like a current
+# laptop: the kernel finds no disk there until AHCI lands (SCRUM-242).
+UEFI_MACHINE ?= pc
 
 run-uefi: docker-build
 	@test -f "$(OVMF_CODE)" && test -f "$(OVMF_VARS)" || { \
 	  echo "run-uefi: OVMF firmware not found (OVMF_CODE=$(OVMF_CODE), OVMF_VARS=$(OVMF_VARS)) -- pass OVMF_CODE=... OVMF_VARS=..."; \
 	  exit 1; }
 	cp "$(OVMF_VARS)" build/ovmf_vars.fd && chmod u+w build/ovmf_vars.fd
-	qemu-system-x86_64 -m 256M -machine q35 \
+	qemu-system-x86_64 -m 256M -machine $(UEFI_MACHINE) \
 	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \
 	  -drive if=pflash,format=raw,file=build/ovmf_vars.fd \
 	  -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide,index=0 $(QEMU_DISK2_ARGS) -device intel-hda -device hda-output,audiodev=snd0 $(HOST_QEMU_AV_ARGS) $(QEMU_USB_ARGS) -no-reboot -serial stdio

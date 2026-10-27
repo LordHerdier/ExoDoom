@@ -1447,7 +1447,7 @@ The entire toolchain runs inside Docker. No host cross-compiler is required.
 | `make docker-build`             | Build kernel + ISO                                    |
 | `make docker-run`               | Boot ISO in QEMU (GRUB menu)                          |
 | `make docker-run-kernel`        | Boot the ISO with the GRUB menu skipped (`qemu -kernel` can't load Multiboot 2) |
-| `make run-uefi`                 | Boot the ISO on host QEMU under EDK2/OVMF (q35); `OVMF_CODE=`/`OVMF_VARS=` override the firmware paths |
+| `make run-uefi`                 | Boot the ISO on host QEMU under EDK2/OVMF (i440FX; `UEFI_MACHINE=q35` drops legacy IDE to mimic a laptop, so no disk until AHCI); `OVMF_CODE=`/`OVMF_VARS=` override the firmware paths |
 | `make docker-test`              | Build with `TESTING=1`, boot, stream serial output    |
 | `make docker-ci`                | As `docker-test`; used by GitHub Actions              |
 | `make docker-build DEBUG=1`     | Debug build (`-g -O0`) for GDB sessions               |
