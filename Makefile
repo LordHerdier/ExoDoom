@@ -1,4 +1,4 @@
-.PHONY: docker-build docker-run docker-run-kernel docker-run-blank run-blank run-keep docker-test docker-build-doom docker-link-doom demo-rehearse clean
+.PHONY: docker-build docker-run docker-run-kernel docker-run-blank run-blank run-uefi run-keep docker-test docker-build-doom docker-link-doom demo-rehearse clean
 
 DEBUG ?= 0
 # AUDIO_PROFILE=1 compiles in the MUSPROF/HDAPROF serial timing reports
@@ -189,6 +189,31 @@ run-blank: docker-build
 	rm -f build/exodoom_blank.img
 	truncate -s "$$(stat -c %s build/exodoom_disk.img)" build/exodoom_blank.img
 	qemu-system-x86_64 -m 256M -cdrom build/exodoom.iso -drive file=build/exodoom_blank.img,format=raw,if=ide,index=0 $(QEMU_DISK2_ARGS) -device intel-hda -device hda-output,audiodev=snd0 $(HOST_QEMU_AV_ARGS) $(QEMU_USB_ARGS) -no-reboot -serial stdio
+
+# Boot the ISO under UEFI firmware (EDK2/OVMF) on the host QEMU: the closest
+# we can get to a UEFI-only laptop (e.g. Framework 13) without the hardware.
+# It exercises GRUB's EFI image and a GOP framebuffer instead of VBE. The
+# firmware ships with QEMU; OVMF_CODE/OVMF_VARS override the lookup when it
+# lives elsewhere (distro `ovmf` package: /usr/share/OVMF/OVMF_CODE_4M.fd and
+# OVMF_VARS_4M.fd). The vars file is copied to build/ each run so NVRAM state
+# never leaks between boots. Docker is not used: its qemu image has no OVMF.
+OVMF_DIR  ?= $(shell d="$$(dirname "$$(readlink -f "$$(command -v qemu-system-x86_64)")")"; echo "$$d/../share/qemu")
+OVMF_CODE ?= $(OVMF_DIR)/edk2-x86_64-code.fd
+OVMF_VARS ?= $(OVMF_DIR)/edk2-i386-vars.fd
+# pc (i440FX) keeps the legacy IDE controller the ATA driver needs, so the
+# shell and Doom's WAD work under UEFI. q35 has SATA/AHCI only, like a current
+# laptop: the kernel finds no disk there until AHCI lands (SCRUM-242).
+UEFI_MACHINE ?= pc
+
+run-uefi: docker-build
+	@test -f "$(OVMF_CODE)" && test -f "$(OVMF_VARS)" || { \
+	  echo "run-uefi: OVMF firmware not found (OVMF_CODE=$(OVMF_CODE), OVMF_VARS=$(OVMF_VARS)) -- pass OVMF_CODE=... OVMF_VARS=..."; \
+	  exit 1; }
+	cp "$(OVMF_VARS)" build/ovmf_vars.fd && chmod u+w build/ovmf_vars.fd
+	qemu-system-x86_64 -m 256M -machine $(UEFI_MACHINE) \
+	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \
+	  -drive if=pflash,format=raw,file=build/ovmf_vars.fd \
+	  -cdrom build/exodoom.iso -drive file=build/exodoom_disk.img,format=raw,if=ide,index=0 $(QEMU_DISK2_ARGS) -device intel-hda -device hda-output,audiodev=snd0 $(HOST_QEMU_AV_ARGS) $(QEMU_USB_ARGS) -no-reboot -serial stdio
 
 # Rehearse the client demo unattended (SCRUM-121, docs/demo.md): run-blank's
 # machine, but headless and driven over QMP; screenshots and serial land in
