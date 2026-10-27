@@ -78,6 +78,19 @@ const fb_geometry_t *fb_binding_geometry(void)
     return fb_present ? &geometry : NULL;
 }
 
+int fb_binding_has_bar(void)
+{
+    return fb_present && geometry.height >= FB_BAR_MIN_HEIGHT;
+}
+
+uint32_t fb_binding_usable_height(void)
+{
+    if (!fb_present)
+        return 0;
+    return fb_binding_has_bar() ? geometry.height - FB_BAR_ROWS
+                                : geometry.height;
+}
+
 int fb_binding_acquire(page_owner_t who)
 {
     if (!fb_present)

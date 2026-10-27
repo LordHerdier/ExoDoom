@@ -32,7 +32,7 @@ int fb_layout_set(page_owner_t who, const fb_rect_t *rect) {
     }
     /* 64-bit sums: x + w can wrap a uint32_t. */
     if ((uint64_t)rect->x + rect->w > geom->width ||
-        (uint64_t)rect->y + rect->h > geom->height) {
+        (uint64_t)rect->y + rect->h > fb_binding_usable_height()) {
         return FB_LAYOUT_EINVAL;
     }
 

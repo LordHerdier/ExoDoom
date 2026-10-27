@@ -80,6 +80,23 @@ int fb_binding_init(const fb_geometry_t *geom);
  * fb_binding_init(). */
 const fb_geometry_t *fb_binding_geometry(void);
 
+/* SCRUM-278: rows at the bottom of the real framebuffer the compositor keeps
+ * for its status bar (src/status_bar.c); one 8x16 font cell. Programs are
+ * never given them: shadow buffers and panes are sized and validated against
+ * fb_binding_usable_height(). A screen shorter than FB_BAR_MIN_HEIGHT keeps
+ * its whole height (and shows no bar), so a small synthetic geometry or a
+ * degenerate mode is not eaten by the reserve. */
+#define FB_BAR_ROWS        16u
+#define FB_BAR_MIN_HEIGHT  480u
+
+/* Rows of the published framebuffer a program may use: the full height, minus
+ * FB_BAR_ROWS on a screen at least FB_BAR_MIN_HEIGHT tall. 0 when there is
+ * no framebuffer. */
+uint32_t fb_binding_usable_height(void);
+
+/* 1 if the published framebuffer has a reserved status-bar strip. */
+int fb_binding_has_bar(void);
+
 /*
  * Bind the framebuffer to `who`.
  *

@@ -37,6 +37,7 @@
 #include "syscall_launch.h"
 #include "syscall_pane.h"
 #include "syscall_kbd_bind.h"
+#include "syscall_statusbar.h"
 #include "fb_binding.h"
 #include "fb_shadow.h"
 #include "revoke.h"
@@ -526,6 +527,11 @@ void kernel_main(void *mb2_info_ptr) {
     // it holds reads. Same hold authority as exo_pane_set, so it sits next
     // to it.
     syscall_kbd_bind_init();
+
+    // ── Status bar toggle (SCRUM-278) ────────────────────────────────────
+    // Binds exo_statusbar (#45). No state to prepare: the bar is off until
+    // asked for, and the compositor paints it.
+    syscall_statusbar_init();
 
 #ifdef TESTING
     // No blanket `sti` here: several suites (fault, tss, libos_launch,

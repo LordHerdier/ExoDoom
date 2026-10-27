@@ -142,7 +142,8 @@ static void test_libc_shim_works_from_ring3(void) {
             (volatile uint32_t *)(uintptr_t)shadow_phys;
         volatile uint32_t *last =
             (volatile uint32_t *)(uintptr_t)(shadow_phys +
-                                  (uint64_t)geom->pitch * (geom->height - 1));
+                                  (uint64_t)geom->pitch *
+                                  (fb_binding_usable_height() - 1));
 
         CU_ASSERT_EQUAL(*first, 0xDEADBEEFu);
         CU_ASSERT_EQUAL(*last,  0xCAFEF00Du);

@@ -103,6 +103,7 @@ void suite_launch_multi_tests(CU_pSuite s);
 void suite_launch_pkg_tests(CU_pSuite s);
 void suite_syscall_pane_tests(CU_pSuite s);
 void suite_syscall_kbd_bind_tests(CU_pSuite s);
+void suite_status_bar_tests(CU_pSuite s);
 void suite_pci_tests(CU_pSuite s);
 void suite_hda_tests(CU_pSuite s);
 void suite_usb_topology_tests(CU_pSuite s);
@@ -220,6 +221,8 @@ int syscall_pane_suite_init(void);
 int syscall_pane_suite_cleanup(void);
 int syscall_kbd_bind_suite_init(void);
 int syscall_kbd_bind_suite_cleanup(void);
+int status_bar_suite_init(void);
+int status_bar_suite_cleanup(void);
 
 /* Suite init/cleanup for the framebuffer binding suite: it swaps in a
  * synthetic framebuffer geometry and must put the real one back (SCRUM-154). */
@@ -698,6 +701,10 @@ int run_tests(void)
     s = CU_add_suite("syscall_kbd_bind", syscall_kbd_bind_suite_init,
                      syscall_kbd_bind_suite_cleanup);
     suite_syscall_kbd_bind_tests(s);
+
+    s = CU_add_suite("status_bar", status_bar_suite_init,
+                     status_bar_suite_cleanup);
+    suite_status_bar_tests(s);
 
     /* Next to "ata" above: the other driver that talks to real emulated
      * hardware rather than to a model of it (SCRUM-209). */
