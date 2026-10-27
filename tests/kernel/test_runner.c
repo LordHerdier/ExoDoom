@@ -120,6 +120,7 @@ void suite_acpi_tests(CU_pSuite s);
 void suite_shell_help_tests(CU_pSuite s);
 void suite_shell_err_tests(CU_pSuite s);
 void suite_shell_hist_tests(CU_pSuite s);
+void suite_shell_complete_tests(CU_pSuite s);
 void suite_shell_mount_tests(CU_pSuite s);
 
 /* Same defensive shape as context_suite_cleanup (test_context_k.c): the
@@ -797,6 +798,9 @@ int run_tests(void)
 
     s = CU_add_suite("shell_hist", NULL, NULL);
     suite_shell_hist_tests(s);
+
+    s = CU_add_suite("shell_complete", NULL, NULL);
+    suite_shell_complete_tests(s);
 
     s = CU_add_suite("shell_mount", shell_mount_suite_init,
                      shell_mount_suite_cleanup);

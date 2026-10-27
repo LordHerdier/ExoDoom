@@ -444,10 +444,11 @@ echo "[2c/7] Build shell LibOS (SCRUM-110)"
 # likewise, for tests/kernel/test_shell_mount_k.c. SCRUM-271 adds
 # src/shell/shell_err.c (errno wording), likewise, for test_shell_err_k.c.
 # SCRUM-273 adds src/shell/shell_hist.c (command history), likewise, for
-# test_shell_hist_k.c.
+# test_shell_hist_k.c. SCRUM-274 adds src/shell/shell_complete.c (Tab
+# completion matching), likewise, for test_shell_complete_k.c.
 build_ring3_link_target shell src/shell "" "" \
   src/shell/shell_main.c src/shell/shell_help.c src/shell/shell_install.c \
-  src/shell/shell_mount.c src/shell/shell_err.c src/shell/shell_hist.c \
+  src/shell/shell_mount.c src/shell/shell_err.c src/shell/shell_hist.c src/shell/shell_complete.c \
   src/fb.c src/fb_console.c src/libos_fb.c \
   src/stdlib.c src/stdio.c src/string.c src/ctype.c \
   src/errno.c src/fpconv.c src/libos_heap.c src/libos_page_alloc.c \
@@ -1004,6 +1005,14 @@ if [[ "${TESTING:-0}" == "1" ]]; then
   x86_64-elf-gcc -c src/shell/shell_hist.c -o build/shell_hist.o \
     "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
   objs+=("build/shell_hist.o")
+
+  # The shell's Tab-completion matching (SCRUM-274), for
+  # tests/kernel/test_shell_complete_k.c. Pure logic; uses shell_ci_prefix()
+  # from shell_help.c, which is linked above.
+  echo "    CC shell_complete.c (shell Tab completion)"
+  x86_64-elf-gcc -c src/shell/shell_complete.c -o build/shell_complete.o \
+    "${CFLAGS[@]}" -I src/ -DEXO_KERNEL
+  objs+=("build/shell_complete.o")
 
   echo "[3b5/7] Gate: ExoFS still builds as a ring-3 target (SCRUM-189)"
   # Step [3a/7] above (now unconditional, SCRUM-190) compiles ExoFS one way

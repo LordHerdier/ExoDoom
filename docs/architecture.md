@@ -1311,6 +1311,23 @@ focus and the active framebuffer.
 > Empty lines and a repeat of the previous command are not stored. A recalled
 > line is an ordinary edit buffer (Backspace and typing work), but pressing
 > Up/Down again replaces it, edits included. Not persisted, no Left/Right.
+>
+> ✅ **SCRUM-274:** Tab completes the word at the end of the line. The first
+> word completes against the command table; after `run`, against the `*.exo`
+> files `programs` lists; after `install`, against the install disk's root;
+> after `cat`/`ls`/`rm`/`cp`/`mv`/`mkdir`/`touch` (any path word) and `cd`
+> (directories only), against the directory named by the path typed so far,
+> routed through `shell_route_arg()`. One match completes with a trailing
+> space (`/` for a directory); several complete their longest common prefix,
+> and a second Tab in a row prints the candidates and redraws the prompt.
+> Matching is case-insensitive (`shell_ci_prefix()`) and appends the
+> candidate's own case. The matching lives in `src/shell/shell_complete.c`
+> (pure logic, also compiled into the TESTING kernel for
+> `tests/kernel/test_shell_complete_k.c`); `shell_tab()` in `shell_main.c`
+> does the directory reads, one acquire/mount/read/release per first Tab. The
+> candidate set is fixed (24 names of up to 31 bytes; longer names are skipped,
+> extra matches dropped and shown as `...`). Mount or disk errors are reported
+> as for `ls`. No mid-line completion, no flags or sub-verbs.
 
 ---
 

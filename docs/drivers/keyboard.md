@@ -206,6 +206,13 @@ The translation table maps scan code → internal key enum. Selected entries:
 The shell consumes `KEY_UP`/`KEY_DOWN` press events for command history
 (SCRUM-273, `src/shell/shell_hist.c`); Left/Right are not used by it.
 
+Plain `KEY_TAB` reaches the shell for completion (SCRUM-274,
+`src/shell/shell_complete.c`). Ctrl+Tab is the context hotkey: `src/ps2.c`
+consumes it before the event ring, so the shell never sees it, and the shell
+also ignores a Tab that arrives with a Ctrl modifier. A USB keyboard has no
+context hotkey (`src/usb_kbd.c` only fills its own ring); its Ctrl+Tab reaches
+the shell as a Tab with the Ctrl bit set, which the shell ignores.
+
 Translation is a `switch` over the raw make code byte (with the `0xE0` prefix
 and the break bit stripped), plus a small state machine for prefixes:
 
