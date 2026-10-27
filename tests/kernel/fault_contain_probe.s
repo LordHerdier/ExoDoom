@@ -17,6 +17,8 @@
  *   4  in %dx, %al         (#GP, I/O bitmap denies)
  *   5  divide by zero      (#DE)
  *   6  ud2                 (#UD)
+ *   7  int3                (arrives as #GP: the gates are DPL 0, so ring 3
+ *                           cannot reach #BP's handler directly)
  * An unknown selector falls into a ud2 as well; a handled fault never falls
  * through, and the final ud2 only bounds the copy.
  */
@@ -48,6 +50,10 @@ fault_contain_victim:
     je  5f
     cmpq $5, %rax
     je  6f
+    cmpq $6, %rax
+    je  7f
+    cmpq $7, %rax
+    je  8f
     ud2
 1:  xorl %eax, %eax
     movq (%rax), %rax              /* NULL read */
@@ -67,6 +73,9 @@ fault_contain_victim:
     xorl %ecx, %ecx
     divl %ecx                      /* #DE */
     ud2
+7:  ud2                            /* #UD */
+8:  int3
+    ud2
 fault_contain_victim_end:
     ud2
 
@@ -78,3 +87,20 @@ fault_contain_survivor:
     syscall
 fault_contain_survivor_end:
     ud2
+
+/*
+ * A ring-0 divide by zero, for the exception_handler hook test: a plain
+ * function the kernel test calls. The hook resumes at the label below, which
+ * returns a marker, so the test sees the fault was taken in ring 0 (cs RPL 0)
+ * and survived. Not copied anywhere -- it runs where it is linked.
+ */
+.global fault_contain_ring0_div
+.global fault_contain_ring0_div_resume
+fault_contain_ring0_div:
+    xorl %edx, %edx
+    movl $1, %eax
+    xorl %ecx, %ecx
+    divl %ecx                      /* #DE in ring 0 */
+fault_contain_ring0_div_resume:
+    movl $0x1234, %eax
+    ret

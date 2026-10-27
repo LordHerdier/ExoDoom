@@ -174,9 +174,12 @@ void fault_terminate_current(const exception_frame_t *f, uint64_t vector,
     serial_print(why);
     serial_print("\n");
 
-    /* Recorded before the teardown: the name lives in the row, and the shell
-     * reads this after the row may be gone (exo_fault_info, #41). */
-    fault_record_add(owner, ctx->name, (uint32_t)vector, reason, f->rip, addr);
+    /* The row may be gone by the time the record is written (a relaunch
+     * reaps it), so keep the name now. The record itself is written only
+     * once the hand-off is certain, below, so a halt path leaves none. */
+    char name[CONTEXT_NAME_MAX];
+    for (unsigned i = 0; i < sizeof name; i++)
+        name[i] = ctx->name[i];
 
     /* The same reclaim exo_exit runs (SCRUM-155), so the two cannot drift. */
     if (context_teardown(owner) != 0) {
@@ -189,21 +192,39 @@ void fault_terminate_current(const exception_frame_t *f, uint64_t vector,
      * switch only to fill in context_switch_in_*, then resume without the
      * syscall-path capture (context_resume_noreturn, src/context_switch.s).
      * context_switch_request() marks the outgoing row READY; override it as
-     * sys_exit does (SCRUM-111) so round-robin never re-enters freed pages. */
-    page_owner_t next = context_next_ready(owner);
+     * sys_exit does (SCRUM-111) so round-robin never re-enters freed pages.
+     *
+     * A switch may already be armed: Ctrl+Tab (src/ps2.c) arms one from IRQ1,
+     * marking its target RUNNING, and only the next syscall return would have
+     * taken it. context_resume_noreturn() clears the pending flag, so the
+     * armed target is the one to resume -- dropping it would leave that
+     * context RUNNING and never scheduled again. */
+    page_owner_t next;
     int relaunched = 0;
-    if (next == PAGE_OWNER_FREE) {
-        /* The crashed program was the last one running: bring the shell back
-         * rather than leave a machine with nothing to show or type into. */
-        serial_print("  no other program is ready -- relaunching the shell\n");
-        next = relaunch();
-        if (next == PAGE_OWNER_FREE)
-            no_survivor("could not relaunch the shell");
-        relaunched = 1;
+    if (context_switch_pending != 0 &&
+        context_lookup((page_owner_t)context_switch_in_id) != NULL &&
+        (page_owner_t)context_switch_in_id != owner) {
+        next = (page_owner_t)context_switch_in_id;
+    } else {
+        next = context_next_ready(owner);
+        if (next == PAGE_OWNER_FREE) {
+            /* The crashed program was the last one running: bring the shell
+             * back rather than leave a machine with nothing to show or type
+             * into. */
+            serial_print("  no other program is ready -- relaunching the shell\n");
+            next = relaunch();
+            if (next == PAGE_OWNER_FREE)
+                no_survivor("could not relaunch the shell");
+            relaunched = 1;
+        }
+        if (context_switch_request(next) != CONTEXT_OK)
+            no_survivor("could not switch to the next context");
     }
-    if (context_switch_request(next) != CONTEXT_OK)
-        no_survivor("could not switch to the next context");
     context_set_state(owner, CONTEXT_STATE_BLOCKED);
+
+    /* Recorded for exo_fault_info (#41), after the point where this can still
+     * end in a halt. */
+    fault_record_add(owner, name, (uint32_t)vector, reason, f->rip, addr);
 
     if (relaunched) {
         /* Nothing will launch over this row, so reap it here: the switch
@@ -366,6 +387,16 @@ void exception_handler(exception_frame_t *f, uint64_t vector)
         halt_forever();
     }
     in_fault = 1;
+
+#ifdef TESTING
+    /* Same resume hook as #PF/#GP, so a test can take a deliberate ring-0
+     * exception (a divide by zero, say) and carry on past it. */
+    if (test_hook && f->rip != last_resume_rip && test_hook(f, 0)) {
+        last_resume_rip = f->rip;
+        in_fault = 0;
+        return;
+    }
+#endif
 
     const char *why;
     uint32_t reason;

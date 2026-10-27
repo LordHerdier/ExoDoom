@@ -25,6 +25,12 @@ void fault_record_add(uint64_t ctx_id, const char *name, uint32_t vector,
 
 int fault_record_next(uint64_t after_seq, exo_fault_info_t *out)
 {
+    if (after_seq == EXO_FAULT_NEWEST) {
+        if (last_seq == 0)
+            return -1;
+        *out = records[(last_seq - 1) % EXO_FAULT_LOG_MAX];
+        return 0;
+    }
     if (after_seq >= last_seq)
         return -1;
 

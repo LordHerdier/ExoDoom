@@ -20,8 +20,8 @@
 void fault_record_add(uint64_t ctx_id, const char *name, uint32_t vector,
                       uint32_t reason, uint64_t rip, uint64_t addr);
 
-/* Copy the oldest record with seq > after_seq into *out. Returns 0, or -1 if
- * there is none. */
+/* Copy the oldest record with seq > after_seq into *out; EXO_FAULT_NEWEST
+ * asks for the newest instead. Returns 0, or -1 if there is none. */
 int fault_record_next(uint64_t after_seq, exo_fault_info_t *out);
 
 /* Highest seq assigned so far (0 = nothing yet). */

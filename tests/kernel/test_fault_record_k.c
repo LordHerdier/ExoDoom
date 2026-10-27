@@ -68,6 +68,32 @@ static void test_full_ring_drops_the_oldest(void)
     CU_ASSERT_EQUAL(fault_record_last_seq(), EXO_FAULT_LOG_MAX + 3);
 }
 
+/* EXO_FAULT_NEWEST: what a restarted shell asks for, so it reports the crash
+ * that explains it and nothing older. */
+static void test_newest_returns_only_the_latest(void)
+{
+    exo_fault_info_t r;
+
+    fault_record_reset();
+    CU_ASSERT_EQUAL(fault_record_next(EXO_FAULT_NEWEST, &r), -1);
+
+    add(1); add(2); add(3);
+    CU_ASSERT_EQUAL(fault_record_next(EXO_FAULT_NEWEST, &r), 0);
+    CU_ASSERT_EQUAL(r.seq, 3);
+    CU_ASSERT_EQUAL(r.ctx_id, 3);
+
+    /* Still the newest after the ring has wrapped. */
+    for (uint64_t i = 4; i <= EXO_FAULT_LOG_MAX + 5; i++)
+        add(i);
+    CU_ASSERT_EQUAL(fault_record_next(EXO_FAULT_NEWEST, &r), 0);
+    CU_ASSERT_EQUAL(r.seq, EXO_FAULT_LOG_MAX + 5);
+    CU_ASSERT_EQUAL(r.ctx_id, EXO_FAULT_LOG_MAX + 5);
+
+    /* Reading "newer than the newest" afterwards finds nothing, so a shell
+     * that started from NEWEST is not told the same crash twice. */
+    CU_ASSERT_EQUAL(fault_record_next(r.seq, &r), -1);
+}
+
 static void test_name_is_copied_and_terminated(void)
 {
     fault_record_reset();
@@ -100,6 +126,7 @@ void suite_fault_record_tests(CU_pSuite s)
     CU_add_test(s, "empty log has nothing to read", test_empty_log_has_nothing);
     CU_add_test(s, "reads walk forward in seq order", test_reads_walk_forward_in_order);
     CU_add_test(s, "a full ring drops the oldest record", test_full_ring_drops_the_oldest);
+    CU_add_test(s, "EXO_FAULT_NEWEST returns only the latest record", test_newest_returns_only_the_latest);
     CU_add_test(s, "name is truncated and NUL-terminated", test_name_is_copied_and_terminated);
     CU_add_test(s, "exo_fault_info rejects a bad pointer", test_syscall_rejects_a_bad_pointer);
 }

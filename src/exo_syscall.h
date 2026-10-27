@@ -382,6 +382,11 @@ typedef struct {
  * reports, not errors the faulting program can handle: it is already gone. */
 #define EXO_FAULT_LOG_MAX   8
 
+/* Pass as exo_fault_info's after_seq to get the newest record only: what a
+ * freshly (re)started shell wants, since it has seen none of them and only
+ * the latest explains why it exists. */
+#define EXO_FAULT_NEWEST    (~(uint64_t)0)
+
 #define EXO_FAULT_REASON_MEMORY      1  /* bad address, stack or alignment    */
 #define EXO_FAULT_REASON_PRIVILEGED  2  /* an instruction ring 3 may not run  */
 #define EXO_FAULT_REASON_ARITHMETIC  3  /* divide by zero, floating-point     */
@@ -1029,7 +1034,7 @@ static inline int64_t exo_resstat(exo_resstat_t *out)
 
 /* #41 -- the oldest fault record with seq > after_seq, written to *out.
  * Pass 0 to start from the beginning, then the seq of the last record you
- * handled.  Read-only and unscoped, like #22/#38: a launcher learns that some
+ * handled; EXO_FAULT_NEWEST returns just the newest.  Read-only and unscoped, like #22/#38: a launcher learns that some
  * program was ended, not anything the dead program held.
  *
  *   0            *out filled

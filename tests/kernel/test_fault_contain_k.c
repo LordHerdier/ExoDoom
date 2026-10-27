@@ -13,7 +13,10 @@
  * Reuses context_switch_k's hand-built contexts (two context_create()'d
  * address spaces, one page each for code/data/stack) rather than
  * libos_build_image(), which binds the address space to its own owner.
- * Covers #PF, #GP, #DE and #UD; the other vectors share exception_handler().
+ * Covers #PF, #GP, #DE, #UD and int3; the other vectors share
+ * exception_handler(). Also: a Ctrl+Tab armed before the fault is honoured, a
+ * ring-0 exception can be resumed through the TESTING hook, and the others
+ * are left alone when one program faults.
  */
 
 #include "kunit.h"
@@ -34,10 +37,12 @@ extern void fault_contain_victim(void);
 extern void fault_contain_victim_end(void);
 extern void fault_contain_survivor(void);
 extern void fault_contain_survivor_end(void);
+extern int  fault_contain_ring0_div(void);
+extern void fault_contain_ring0_div_resume(void);
 
 #define SURVIVOR_MARKER 0x600DC0DEULL /* must match fault_contain_probe.s */
-#define FAULT_KINDS     7             /* selector values the victim handles */
-#define LOOP_ROUNDS     28            /* 4 rounds of every kind */
+#define FAULT_KINDS     8             /* selector values the victim handles */
+#define LOOP_ROUNDS     32            /* 4 rounds of every kind */
 
 #define CLEANUP_SCAN_IDS 4096
 
@@ -100,6 +105,7 @@ static const struct {
     { 13, EXO_FAULT_REASON_PRIVILEGED }, /* 4 in                 */
     {  0, EXO_FAULT_REASON_ARITHMETIC }, /* 5 divide by zero     */
     {  6, EXO_FAULT_REASON_ILLEGAL },    /* 6 ud2                */
+    { 13, EXO_FAULT_REASON_PRIVILEGED }, /* 7 int3: DPL 0 gate -> #GP */
 };
 
 /* Relaunch stand-in: builds the survivor blob as a new READY context, the way
@@ -328,6 +334,80 @@ static void test_fault_leaves_the_other_programs_alone(void)
     CU_ASSERT_EQUAL(context_destroy(peer[1]), CONTEXT_OK);
 }
 
+/* Ctrl+Tab (src/ps2.c) arms a switch from IRQ1 and marks its target RUNNING;
+ * the next syscall return would have taken it. If the program faults first,
+ * the fault path must resume that target rather than drop the request, or the
+ * target stays RUNNING and is never scheduled again. */
+static void test_pending_switch_target_is_resumed(void)
+{
+    page_owner_t victim, target;
+    uint64_t pml4_v, pml4_t;
+
+    uint64_t data_v = make_context(
+        (const void *)&fault_contain_victim,
+        (uintptr_t)&fault_contain_victim_end - (uintptr_t)&fault_contain_victim,
+        &victim, &pml4_v);
+    *(uint64_t *)(uintptr_t)data_v = 0;     /* NULL read */
+    build_survivor(&pml4_t, &target);
+
+    relaunch_calls = 0;
+    relaunched_id = PAGE_OWNER_FREE;
+    fault_set_relaunch(test_relaunch);      /* must NOT be needed */
+
+    context_set_current(victim);
+    CU_ASSERT_EQUAL(context_set_state(victim, CONTEXT_STATE_RUNNING), CONTEXT_OK);
+    CU_ASSERT_EQUAL(context_switch_request(target), CONTEXT_OK);   /* "Ctrl+Tab" */
+    CU_ASSERT_NOT_EQUAL(context_switch_pending, 0);
+
+    exo_syscall_register(LIBOS_RETURN_SYSCALL_NUM, libos_return);
+    CU_ASSERT_EQUAL(vmm_switch_address_space(pml4_v), VMM_OK);
+    uint64_t result = libos_enter(LIBOS_LAUNCH_CODE_VADDR,
+                                  LIBOS_LAUNCH_STACK_VADDR + VMM_PAGE_SIZE);
+    CU_ASSERT_EQUAL(vmm_switch_address_space(vmm_kernel_pml4()), VMM_OK);
+    exo_syscall_register(LIBOS_RETURN_SYSCALL_NUM, 0);
+    fault_set_relaunch(0);
+
+    CU_ASSERT_EQUAL(result, SURVIVOR_MARKER);
+    CU_ASSERT_EQUAL(relaunch_calls, 0);
+    CU_ASSERT_EQUAL(context_switch_pending, 0);
+    CU_ASSERT_EQUAL(context_current(), target);
+    CU_ASSERT_EQUAL(context_lookup(target)->state, CONTEXT_STATE_RUNNING);
+    CU_ASSERT_EQUAL(context_lookup(victim)->state, CONTEXT_STATE_BLOCKED);
+
+    if (relaunch_calls > 0 && relaunched_id != PAGE_OWNER_FREE) {
+        page_reclaim_all(relaunched_id);
+        context_destroy(relaunched_id);
+    }
+    reap(victim, target);
+}
+
+/* exception_handler() honours the TESTING hook like #PF/#GP do, so a
+ * deliberate ring-0 exception can be resumed past. Without a hook the same
+ * fault halts (not testable here); with one, execution carries on. */
+static volatile int ring0_hook_calls;
+static volatile uint64_t ring0_hook_cs;
+
+static int ring0_resume_hook(exception_frame_t *f, uint64_t cr2)
+{
+    (void)cr2;
+    ring0_hook_calls++;
+    ring0_hook_cs = f->cs;
+    f->rip = (uint64_t)(uintptr_t)&fault_contain_ring0_div_resume;
+    return 1;
+}
+
+static void test_ring0_exception_resumes_through_the_hook(void)
+{
+    ring0_hook_calls = 0;
+    fault_set_hook(ring0_resume_hook);
+    int r = fault_contain_ring0_div();
+    fault_set_hook(0);
+
+    CU_ASSERT_EQUAL(r, 0x1234);
+    CU_ASSERT_EQUAL(ring0_hook_calls, 1);
+    CU_ASSERT_EQUAL(ring0_hook_cs & 3, 0);
+}
+
 /* The crashed program is the only context: the fault path relaunches (here
  * the survivor blob, in production the shell). Repeated, so the self-reaped
  * victim rows and pages are shown not to leak either. */
@@ -356,6 +436,10 @@ void suite_fault_contain_tests(CU_pSuite s)
                 test_fault_loop_does_not_leak);
     CU_add_test(s, "a fault in one of several programs leaves the others alone",
                 test_fault_leaves_the_other_programs_alone);
+    CU_add_test(s, "a switch armed before the fault is resumed, not dropped",
+                test_pending_switch_target_is_resumed);
+    CU_add_test(s, "a ring-0 exception resumes through the test hook",
+                test_ring0_exception_resumes_through_the_hook);
     CU_add_test(s, "fault in the last ready program relaunches instead of halting",
                 test_last_program_fault_relaunches);
 }

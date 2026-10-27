@@ -284,7 +284,7 @@ up or handle it, so there is no signal to catch. The shell then prints
 `program <name> stopped: <why>`, and `exo_fault_info` (#41) gives the same
 record (vector, faulting `rip`, address) to any program that wants it. A
 program that crashes as the only one running is replaced by a fresh shell.
-`run crash` (`src/libos_crash/`) does it on purpose.
+`run crash` (`src/libos_crash/`) does it on purpose, three seconds after it starts, so you can Ctrl+Tab back to the shell and watch the report arrive.
 
 ### 4.10 You share the CPU
 
