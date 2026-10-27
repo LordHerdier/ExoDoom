@@ -425,11 +425,13 @@ ring's SPSC contract, and keeps USB input off the PS/2 ring entirely.
 - `usb_kbd_ident(idx, &id)`: controller index, root port and USB address.
   The root port is what stays stable across boots on a fixed topology
   (QEMU's `port=`). Addresses are handed out in enumeration order.
-- **Nothing in normal boot consumes these rings yet.** With no consumer they
-  fill to 255 events and then count drops. No syscall exposes them yet, and
-  the shell's Ctrl+Tab hotkey stays PS/2-only. Routing a keyboard to a
-  context, and deciding whether a USB Ctrl+Tab switches contexts, is
-  SCRUM-199.
+- **A ring is consumed only once a context is bound to it** (SCRUM-199,
+  `src/kbd_source.c`, keyboard.md §7a): that context's `exo_kbd_poll` pops
+  it via `usb_kbd_pop()`. Until something binds a keyboard (SCRUM-297's
+  `exo_kbd_bind`), nothing does, and an unbound ring fills to 255 events and
+  then counts drops. A USB Ctrl+Tab is an ordinary key: the context-switch
+  hotkey is decoded in the PS/2 path only. The source id is `usb:N`, N the
+  enumeration index above (`KBD_SRC_USB(n)`).
 
 ## 12. Tests and QMP key injection
 

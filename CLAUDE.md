@@ -132,7 +132,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | Resource revocation | `src/revoke.c/h` and the `*_revoke_*` primitives |
 | Disk: ATA PIO (all four IDE positions), block-device registry (device 0 = system disk) | `src/ata.c/h`, `src/blkdev.c/h`, `src/syscall_disk.c/h` |
 | LibOS-space filesystem (ExoFS) + `exo_file_*` descriptor API | `src/libos_fs/` (`exo_file.c/h` for descriptors) — **not part of the kernel**; syscalls #9–16 are reserved, never bound |
-| Keyboard / mouse | `src/ps2.c/h`, `src/kbd_ring.c/h`, `src/ps2_mouse.c/h` |
+| Keyboard / mouse (`kbd_source`: which keyboard feeds which context) | `src/ps2.c/h`, `src/kbd_ring.c/h`, `src/kbd_source.c/h`, `src/ps2_mouse.c/h` |
 | Freestanding libc | `src/string.c/h`, `src/ctype.c/h`, `src/stdio.c/h`, `src/stdlib.c/h`, `src/errno.c/h`, `src/fpconv.c/h`; header-only shims `src/strings.h`, `src/inttypes.h`, `src/math.h`, `src/unistd.h`, `src/assert.h`, `src/fcntl.h`, `src/sys/*.h` |
 | Fixed-point trigonometry | `src/fixed_math.c/h` |
 | Vendored Doom engine (`libos_doom` ring-3 target) | `src/doom/`, `src/libos_doom/` |

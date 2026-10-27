@@ -39,6 +39,7 @@ void suite_tss_tests(CU_pSuite s);
 void suite_libos_launch_tests(CU_pSuite s);
 void suite_syscall_serial_tests(CU_pSuite s);
 void suite_syscall_kbd_tests(CU_pSuite s);
+void suite_kbd_source_tests(CU_pSuite s);
 void suite_syscall_mouse_tests(CU_pSuite s);
 void suite_pit_tests(CU_pSuite s);
 void suite_speaker_tests(CU_pSuite s);
@@ -483,6 +484,9 @@ int run_tests(void)
 
     s = CU_add_suite("syscall_kbd", NULL, NULL);
     suite_syscall_kbd_tests(s);
+
+    s = CU_add_suite("kbd_source", NULL, NULL);
+    suite_kbd_source_tests(s);
 
     s = CU_add_suite("syscall_mouse", NULL, NULL);
     suite_syscall_mouse_tests(s);

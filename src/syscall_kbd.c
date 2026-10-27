@@ -2,6 +2,7 @@
 #include "syscall.h"
 #include "exo_syscall.h"
 #include "ps2.h"
+#include "kbd_source.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -22,7 +23,9 @@
  *   1              an event was dequeued and *event_out filled
  *   0              the ring was empty; *event_out untouched
  *   -EXO_EFAULT    event_out is not entirely inside the LibOS window
- * Backs DG_GetKey and any ring-3 LibOS that needs interactive input. */
+ * Backs DG_GetKey and any ring-3 LibOS that needs interactive input.
+ * Which ring is popped is the caller's keyboard binding (src/kbd_source.h,
+ * SCRUM-199), keyed on the calling context rather than the foreground one; an unbound caller reads the PS/2 ring as always. */
 static int64_t sys_kbd_poll(uint64_t event_out, uint64_t a2, uint64_t a3,
                             uint64_t a4, uint64_t a5, uint64_t a6)
 {
@@ -37,7 +40,7 @@ static int64_t sys_kbd_poll(uint64_t event_out, uint64_t a2, uint64_t a3,
         return -EXO_EFAULT;
 
     kbd_event_t ev;
-    if (!exo_kbd_poll(&ev))
+    if (!kbd_source_poll(syscall_current_context(), &ev))
         return 0;
 
     exo_kbd_event_t *out = (exo_kbd_event_t *)(uintptr_t)event_out;

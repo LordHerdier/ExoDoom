@@ -7,6 +7,7 @@
 #include "exo_syscall.h"
 #include "fb_binding.h"
 #include "fb_shadow.h"
+#include "kbd_source.h"
 #include "page_alloc.h"
 #include "syscall.h"
 #include "syscall_sound.h"
@@ -97,6 +98,8 @@ int context_teardown(page_owner_t owner)
      * whoever runs next. Tones are bounded (SOUND_TONE_MAX_MS) regardless,
      * but that bound is seconds, not "now". */
     syscall_sound_release(owner);
+    /* SCRUM-199: the keyboard it was bound to goes back to unbound. */
+    kbd_source_release_ctx(owner);
     /* SCRUM-75: the disk too. A program that exits holding an extent (Doom
      * holds the program volume for its whole run) must not leave it bound,
      * or the shell finds the volume busy until the row is reaped by the next
