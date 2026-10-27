@@ -31,10 +31,13 @@ int64_t doom_wad_disk_get(uint64_t *out_paddr, uint64_t *out_size)
     }
 
     /* Only the program volume, not the whole disk: a program holding its own
-     * volume extent (SCRUM-237) must not make the IWAD unreadable. */
-    int rc = exofs_bdev_acquire_extent(0, LIBOS_WAD_DISK_BASE_LBA,
-                                       EXO_VOLUME_REGION_BASE_LBA -
-                                           LIBOS_WAD_DISK_BASE_LBA);
+     * volume extent (SCRUM-237) must not make the IWAD unreadable. Read-only
+     * (SCRUM-281): this only reads, and a running Doom holds the same extent
+     * read-only, so a read-write bind would fail the first WAD launch (the
+     * WAD viewer's) while Doom is up. */
+    int rc = exofs_bdev_acquire_extent_ro(0, LIBOS_WAD_DISK_BASE_LBA,
+                                          EXO_VOLUME_REGION_BASE_LBA -
+                                              LIBOS_WAD_DISK_BASE_LBA);
     if (rc != 0) {
         return rc;
     }

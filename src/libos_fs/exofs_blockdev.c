@@ -31,6 +31,12 @@ static int64_t bdev_acquire_raw(uint32_t dev, uint32_t base, uint32_t count)
                                 (uint64_t)base, (uint64_t)count, 0, 0, 0);
 }
 
+static int64_t bdev_acquire_ro_raw(uint32_t dev, uint32_t base, uint32_t count)
+{
+    return exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE_RO, (uint64_t)dev,
+                                (uint64_t)base, (uint64_t)count, 0, 0, 0);
+}
+
 static int64_t bdev_release_raw(uint32_t dev)
 {
     return exo_syscall_dispatch(EXO_SYS_DISK_RELEASE, (uint64_t)dev,
@@ -63,6 +69,11 @@ static int64_t bdev_ticks_raw(void)
 static int64_t bdev_acquire_raw(uint32_t dev, uint32_t base, uint32_t count)
 {
     return exo_disk_acquire(dev, base, count);
+}
+
+static int64_t bdev_acquire_ro_raw(uint32_t dev, uint32_t base, uint32_t count)
+{
+    return exo_disk_acquire_ro(dev, base, count);
 }
 
 static int64_t bdev_release_raw(uint32_t dev)
@@ -162,6 +173,12 @@ int exofs_bdev_write(uint32_t dev, uint32_t lba, const void *buf,
 int exofs_bdev_acquire_extent(uint32_t dev, uint32_t base, uint32_t count)
 {
     int64_t r = bdev_acquire_raw(dev, base, count);
+    return (r < 0) ? (int)r : 0;
+}
+
+int exofs_bdev_acquire_extent_ro(uint32_t dev, uint32_t base, uint32_t count)
+{
+    int64_t r = bdev_acquire_ro_raw(dev, base, count);
     return (r < 0) ? (int)r : 0;
 }
 

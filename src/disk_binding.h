@@ -115,6 +115,17 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
                                 uint32_t count);
 
 /*
+ * Same, for a bind the caller will only read (SCRUM-281). The extent is held
+ * read-only: it shares with other read-only holders -- Doom's assigned
+ * program volume included -- conflicts with every read-write holder in either
+ * order, and exo_disk_write through it is DISK_BIND_EROFS. A context with an
+ * assigned volume gets the mode of its assignment regardless, so this cannot
+ * be used to reach anything the plain acquire could not.
+ */
+int disk_binding_acquire_extent_ro(page_owner_t who, uint32_t dev,
+                                   uint32_t base, uint32_t count);
+
+/*
  * Assign `who` the extent [base, base + count) of device 0 as its volume
  * (SCRUM-237; always device 0 -- the slot region is a system-disk layout).
  * Set by the launcher from the package manifest before the program runs.

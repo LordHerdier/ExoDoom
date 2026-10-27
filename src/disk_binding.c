@@ -165,8 +165,12 @@ int disk_binding_acquire(page_owner_t who, uint32_t dev)
     return disk_binding_acquire_extent(who, dev, 0, 0);
 }
 
-int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
-                                uint32_t count)
+/* `want_ro` is a request by a context with no assignment for a bind it will
+ * only read (SCRUM-281); an assigned context's mode is always its
+ * assignment's, so the request cannot loosen or tighten what the launcher
+ * granted. */
+static int acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
+                          uint32_t count, int want_ro)
 {
     if (!disk_binding_present(dev))
         return DISK_BIND_ENODEV;
@@ -196,7 +200,7 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
     if (assigned_any && !own)
         return DISK_BIND_EPERM;
     /* A read-only assignment grants no exclusivity, so it keeps nobody out. */
-    int ro = own != NULL && own->read_only;
+    int ro = own != NULL ? own->read_only : want_ro;
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
         if (assigned[i].owner != PAGE_OWNER_FREE && assigned[i].owner != who &&
             !assigned[i].read_only && assigned[i].dev == dev &&
@@ -213,8 +217,15 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
         disk_extent_t *e = &extents[i];
         if (e->owner != who || e->dev != dev)
             continue;
-        if (e->base == base && e->count == count)
-            return DISK_BIND_OK;
+        if (e->base == base && e->count == count) {
+            /* The same extent in the other mode is not silently kept as it
+             * was (SCRUM-281): a read-only bind answered "ok" to a read-write
+             * request would fail the caller's first write with -EROFS, and
+             * the reverse would hand a reader a writer's exclusivity. Release
+             * first, as for any other change. An assigned context's mode is
+             * its assignment's, so it can never mismatch. */
+            return (!!e->read_only == !!ro) ? DISK_BIND_OK : DISK_BIND_EBUSY;
+        }
         if (!assigned_any)
             return DISK_BIND_EBUSY;
     }
@@ -250,6 +261,18 @@ int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
     free_slot->read_only     = ro;
 
     return DISK_BIND_OK;
+}
+
+int disk_binding_acquire_extent(page_owner_t who, uint32_t dev, uint32_t base,
+                                uint32_t count)
+{
+    return acquire_extent(who, dev, base, count, 0);
+}
+
+int disk_binding_acquire_extent_ro(page_owner_t who, uint32_t dev,
+                                   uint32_t base, uint32_t count)
+{
+    return acquire_extent(who, dev, base, count, 1);
 }
 
 int disk_binding_assign(page_owner_t who, uint32_t base, uint32_t count)
@@ -308,6 +331,15 @@ int disk_binding_assign_ro(page_owner_t who, uint32_t base, uint32_t count)
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
         if (assigned[i].owner != PAGE_OWNER_FREE && !assigned[i].read_only &&
             overlap(base, count, assigned[i].base, assigned[i].count))
+            return DISK_BIND_EBUSY;
+
+    /* Another context already holding the sectors read-write would make the
+     * reader's acquire fail after the launch reported success. A read-only
+     * holder (the shell reading a package, SCRUM-281) is no obstacle. */
+    for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++)
+        if (extents[i].owner != PAGE_OWNER_FREE && extents[i].owner != who &&
+            !extents[i].read_only && extents[i].dev == 0 &&
+            overlap(base, count, extents[i].base, extents[i].count))
             return DISK_BIND_EBUSY;
 
     for (int i = 0; i < DISK_BIND_MAX_EXTENTS; i++) {

@@ -287,6 +287,8 @@ static void shell_run_pslist(fb_console_t *con, const char *arg);
 static int shell_cmd_match(const char *line, const char *cmd, const char **rest);
 static int shell_fs_acquire_and_mount(fb_console_t *con);
 static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba);
+static int shell_fs_acquire_and_mount_at_ro(fb_console_t *con,
+                                            uint32_t base_lba);
 static void shell_run_run(fb_console_t *con, const char *arg);
 static int shell_list_programs(fb_console_t *con, exofs_dir_t *dir);
 static void shell_run_programs(fb_console_t *con, const char *arg);
@@ -1237,10 +1239,18 @@ static uint32_t shell_fs_held_dev;
 static exofs_vol_t *shell_cur_vol;
 
 /* Acquire the extent `v` lives in and mount it. Prints its own diagnostic
- * and returns 0 on failure so each caller can just return. */
-static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
-                                          const shell_volref_t *v) {
-    int64_t rc = exo_disk_acquire(v->dev, v->extent_base, v->extent_count);
+ * and returns 0 on failure so each caller can just return.
+ *
+ * `read_only` binds the extent with exo_disk_acquire_ro() (SCRUM-281), which
+ * is what lets a command that only reads run while a program holds the same
+ * extent read-only -- Doom holds the program volume that way for its whole
+ * run. Anything that writes must pass 0 and so still gets -EBUSY then. */
+static int shell_fs_acquire_and_mount_vol_mode(fb_console_t *con,
+                                               const shell_volref_t *v,
+                                               int read_only) {
+    int64_t rc = read_only
+        ? exo_disk_acquire_ro(v->dev, v->extent_base, v->extent_count)
+        : exo_disk_acquire(v->dev, v->extent_base, v->extent_count);
     if (rc != 0) {
         shell_err_report(con, SHELL_OP_DISK, rc);
         return 0;
@@ -1257,6 +1267,11 @@ static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
     return 1;
 }
 
+static int shell_fs_acquire_and_mount_vol(fb_console_t *con,
+                                          const shell_volref_t *v) {
+    return shell_fs_acquire_and_mount_vol_mode(con, v, 0);
+}
+
 static int shell_fs_acquire_and_mount(fb_console_t *con) {
     return shell_fs_acquire_and_mount_at(con, SHELL_FS_BASE_LBA);
 }
@@ -1266,6 +1281,14 @@ static int shell_fs_acquire_and_mount(fb_console_t *con) {
 static int shell_fs_acquire_and_mount_at(fb_console_t *con, uint32_t base_lba) {
     shell_volref_t v = shell_sys_volref(base_lba);
     return shell_fs_acquire_and_mount_vol(con, &v);
+}
+
+/* Read-only counterpart of the above, for `run` and `programs`: they only
+ * read the program volume, and must work while a program holds it. */
+static int shell_fs_acquire_and_mount_at_ro(fb_console_t *con,
+                                            uint32_t base_lba) {
+    shell_volref_t v = shell_sys_volref(base_lba);
+    return shell_fs_acquire_and_mount_vol_mode(con, &v, 1);
 }
 
 static void shell_fs_release(void) {
@@ -1568,7 +1591,7 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
         fbcon_write(con, " (reboot to be offered a format)\n");
         return;
     }
-    if (!shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
+    if (!shell_fs_acquire_and_mount_at_ro(con, LIBOS_WAD_DISK_BASE_LBA)) {
         return;
     }
 
@@ -1790,7 +1813,11 @@ static void shell_run_mkfs(fb_console_t *con, const char *arg) {
  * from "could not look". Acquires and releases the disk itself; on a failed
  * acquire the code is the acquire's. */
 static int shell_probe_system_volume(void) {
-    int64_t arc = shell_disk_acquire_for(LIBOS_WAD_DISK_BASE_LBA);
+    /* Read-only: `run` probes first, and must not be refused because a
+     * program holds the volume read-only (SCRUM-281). */
+    shell_volref_t pv_ref = shell_sys_volref(LIBOS_WAD_DISK_BASE_LBA);
+    int64_t arc = exo_disk_acquire_ro(pv_ref.dev, pv_ref.extent_base,
+                                      pv_ref.extent_count);
     if (arc != 0) {
         return (int)arc;
     }
@@ -1884,7 +1911,7 @@ static void shell_run_programs(fb_console_t *con, const char *arg) {
         fbcon_write(con, " (reboot to be offered a format)\n");
         return;
     }
-    if (!shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
+    if (!shell_fs_acquire_and_mount_at_ro(con, LIBOS_WAD_DISK_BASE_LBA)) {
         return;
     }
 
@@ -1943,7 +1970,7 @@ static void shell_tab_gather(fb_console_t *con, const char *line,
     case SHELL_COMP_PROGRAM:
         if (shell_firstboot_classify(shell_probe_system_volume()) ==
                 SHELL_FIRSTBOOT_UNFORMATTED ||
-            !shell_fs_acquire_and_mount_at(con, LIBOS_WAD_DISK_BASE_LBA)) {
+            !shell_fs_acquire_and_mount_at_ro(con, LIBOS_WAD_DISK_BASE_LBA)) {
             return;
         }
         if (exofs_opendir(shell_cur_vol, "/", &dir) == 0) {

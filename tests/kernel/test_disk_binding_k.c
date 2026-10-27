@@ -22,6 +22,7 @@
 #include "exo_syscall.h"
 #include "ata.h"
 #include "blkdev.h"
+#include "libos_fs/exofs_blockdev.h"
 
 #include <stdint.h>
 
@@ -784,6 +785,147 @@ static void test_second_extent_needs_an_assignment(void)
     disk_binding_forget(PAGE_OWNER_LIBOS);
 }
 
+/* ── Read-only bind by an unassigned reader (SCRUM-281) ─────────────────── */
+
+/* The shell's `run`: it holds no assignment, binds the program volume only to
+ * read a package, and must be able to while a program holds it read-only. */
+static void test_ro_acquire_shares_with_a_ro_holder(void)
+{
+    page_owner_t shell = (page_owner_t)(PAGE_OWNER_LIBOS + 2);
+
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(PAGE_OWNER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+
+    /* The plain acquire stays refused; the read-only one is not. */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(shell, 0, 5000, 64),
+                    DISK_BIND_EBUSY);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(shell, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(shell, 0, 5000, 64),
+                    DISK_BIND_OK);   /* re-acquire of the same extent */
+
+    /* Reads are in range; a write through it is read-only. */
+    CU_ASSERT_EQUAL(disk_binding_check_range(shell, 0, 5000, 64), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_check_write(shell, 0, 5000, 1),
+                    DISK_BIND_EROFS);
+
+    disk_binding_release(shell, 0);
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+}
+
+static void test_ro_acquire_never_shares_with_a_writer(void)
+{
+    page_owner_t shell = (page_owner_t)(PAGE_OWNER_LIBOS + 2);
+
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+
+    /* A read-write holder keeps a reader out... */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(shell, 0, 5000, 64),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(OTHER_LIBOS, 0);
+
+    /* ...a reader keeps a writer out (what `install` still gets)... */
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(shell, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(shell, 0);
+
+    /* ...and a private assigned volume is not reachable by a reader. */
+    CU_ASSERT_EQUAL(disk_binding_assign(PAGE_OWNER_LIBOS, 6000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(shell, 0, 6000, 64),
+                    DISK_BIND_EBUSY);
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+}
+
+/* A reader holding the volume must not stop a program being launched onto it,
+ * but a writer still does. */
+static void test_assign_ro_tolerates_a_reader_not_a_writer(void)
+{
+    page_owner_t shell = (page_owner_t)(PAGE_OWNER_LIBOS + 2);
+
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(shell, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+    disk_binding_forget(PAGE_OWNER_LIBOS);
+    disk_binding_release(shell, 0);
+
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(shell, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(PAGE_OWNER_LIBOS, 5000, 64),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(shell, 0);
+}
+
+/* Through the real dispatcher: #42 binds read-only, #26 is unchanged. */
+static void test_acquire_ro_syscall(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE_RO, 0, 5000, 64,
+                                         0, 0, 0), 0);
+    CU_ASSERT_EQUAL(do_disk_write(5000, 0, 1), -EXO_EROFS);
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE, 0, 5000, 64,
+                                         0, 0, 0), 0);
+    CU_ASSERT_NOT_EQUAL(do_disk_write(5000, 0, 1), -EXO_EROFS);
+    disk_binding_release(PAGE_OWNER_LIBOS, 0);
+
+    /* Same errors as #26: no such device, malformed extent. */
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE_RO, 99, 0, 0,
+                                         0, 0, 0), -EXO_ENODEV);
+    CU_ASSERT_EQUAL(exo_syscall_dispatch(EXO_SYS_DISK_ACQUIRE_RO, 0, 5, 0,
+                                         0, 0, 0), -EXO_EINVAL);
+}
+
+/* Re-acquiring the same extent in the other mode is refused, not answered
+ * "ok" with the old mode quietly kept. */
+static void test_reacquire_in_other_mode_is_busy(void)
+{
+    page_owner_t shell = (page_owner_t)(PAGE_OWNER_LIBOS + 2);
+
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(shell, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(shell, 0, 5000, 64),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(shell, 0);
+
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(shell, 0, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent_ro(shell, 0, 5000, 64),
+                    DISK_BIND_EBUSY);
+    disk_binding_release(shell, 0);
+}
+
+/* The kernel's own IWAD load (doom_wad_disk_get) binds this way: while a
+ * program holds the program volume read-only it must still get in, and a
+ * write-bind must not. */
+static void test_bdev_acquire_ro_shares_with_a_ro_holder(void)
+{
+    CU_ASSERT_EQUAL(disk_binding_init(), DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_assign_ro(OTHER_LIBOS, 5000, 64),
+                    DISK_BIND_OK);
+    CU_ASSERT_EQUAL(disk_binding_acquire_extent(OTHER_LIBOS, 0, 5000, 64),
+                    DISK_BIND_OK);
+
+    CU_ASSERT_EQUAL(exofs_bdev_acquire_extent(0, 5000, 64), -EXO_EBUSY);
+    CU_ASSERT_EQUAL(exofs_bdev_acquire_extent_ro(0, 5000, 64), 0);
+    exofs_bdev_release(0);
+
+    disk_binding_release(OTHER_LIBOS, 0);
+    disk_binding_forget(OTHER_LIBOS);
+}
+
 void suite_disk_binding_tests(CU_pSuite s)
 {
     CU_add_test(s, "private and program volume coexist",
@@ -802,6 +944,18 @@ void suite_disk_binding_tests(CU_pSuite s)
                 test_ro_holders_share_but_never_with_a_writer);
     CU_add_test(s, "read-only assignment does not fence others out",
                 test_ro_assignment_does_not_fence_others_out);
+    CU_add_test(s, "read-only acquire shares with a read-only holder",
+                test_ro_acquire_shares_with_a_ro_holder);
+    CU_add_test(s, "read-only acquire never shares with a writer",
+                test_ro_acquire_never_shares_with_a_writer);
+    CU_add_test(s, "assign_ro tolerates a reader, not a writer",
+                test_assign_ro_tolerates_a_reader_not_a_writer);
+    CU_add_test(s, "acquire_ro syscall binds read-only",
+                test_acquire_ro_syscall);
+    CU_add_test(s, "bdev read-only acquire shares with a read-only holder",
+                test_bdev_acquire_ro_shares_with_a_ro_holder);
+    CU_add_test(s, "re-acquire in the other mode is busy",
+                test_reacquire_in_other_mode_is_busy);
     CU_add_test(s, "revoke pending is per owner",
                 test_revoke_pending_is_per_owner);
     CU_add_test(s, "owner is free with several holders",

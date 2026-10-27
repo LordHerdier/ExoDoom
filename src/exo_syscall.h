@@ -161,6 +161,11 @@
 #define EXO_SYS_LAUNCH_START        40
 /* Read-only: what the kernel ended a program for (SCRUM-283). */
 #define EXO_SYS_FAULT_INFO          41
+/* Bind a disk extent read-only, so a reader can share it with a program that
+ * holds it read-only (SCRUM-281).  A new number rather than a flag on #26:
+ * exo_disk_acquire passes three arguments and leaves the fourth register
+ * unset, so a program already built against it would hand the kernel noise. */
+#define EXO_SYS_DISK_ACQUIRE_RO     42
 
 /* One past the highest valid number.  The dispatcher rejects anything >= this
  * with -EXO_ENOSYS; keep it last and keep the numbers above dense.
@@ -170,7 +175,7 @@
  * rather than leaving holes the density test would reject. Nothing outside
  * this kernel image depends on these values -- there is no stable userspace
  * ABI yet -- so renumbering is cheaper than a permanently sparse table. */
-#define EXO_SYS_COUNT        42
+#define EXO_SYS_COUNT        43
 
 /* ---- LibOS app ids, the argument to EXO_SYS_LAUNCH ---------------------- */
 /*
@@ -785,6 +790,17 @@ static inline int64_t exo_disk_acquire(uint32_t dev, uint32_t base,
 {
     return exo_syscall3(EXO_SYS_DISK_ACQUIRE, (uint64_t)dev, (uint64_t)base,
                         (uint64_t)count);
+}
+
+/* #42 — #26 for a caller that will only read (SCRUM-281).  The extent is held
+ * read-only: it may be shared with other read-only holders (a program given
+ * the read-only program volume, SCRUM-75) but never with a read-write one, and
+ * exo_disk_write through it returns -EXO_EROFS.  Same return codes as #26. */
+static inline int64_t exo_disk_acquire_ro(uint32_t dev, uint32_t base,
+                                          uint32_t count)
+{
+    return exo_syscall3(EXO_SYS_DISK_ACQUIRE_RO, (uint64_t)dev,
+                        (uint64_t)base, (uint64_t)count);
 }
 
 /* #27 — give the binding of device `dev` back (SCRUM-189, device SCRUM-244);
