@@ -189,20 +189,22 @@ static int64_t sys_disk_write(uint64_t dev, uint64_t lba, uint64_t buf,
  * validate_disk_shape()'s do: truncating a raw-ABI caller's high bits would
  * turn an invalid extent into a valid one. A missing device is -EXO_ENODEV
  * ahead of the extent's shape, the precedence #24/#25 use. */
-static int64_t sys_disk_acquire(uint64_t dev, uint64_t base, uint64_t count,
-                                uint64_t a4, uint64_t a5, uint64_t a6)
+static int64_t disk_acquire(uint64_t dev, uint64_t base, uint64_t count,
+                            int ro)
 {
-    (void)a4; (void)a5; (void)a6;
-
     if (disk_dev(dev) == NULL)
         return -EXO_ENODEV;
 
     if (base > UINT32_MAX || count > UINT32_MAX)
         return -EXO_EINVAL;
 
-    switch (disk_binding_acquire_extent(syscall_current_context(),
-                                        (uint32_t)dev, (uint32_t)base,
-                                        (uint32_t)count)) {
+    int rc = ro ? disk_binding_acquire_extent_ro(syscall_current_context(),
+                                                 (uint32_t)dev, (uint32_t)base,
+                                                 (uint32_t)count)
+                : disk_binding_acquire_extent(syscall_current_context(),
+                                              (uint32_t)dev, (uint32_t)base,
+                                              (uint32_t)count);
+    switch (rc) {
     case DISK_BIND_OK:      return 0;
     case DISK_BIND_EBUSY:   return -EXO_EBUSY;
     case DISK_BIND_ERANGE:  return -EXO_EINVAL;
@@ -210,6 +212,21 @@ static int64_t sys_disk_acquire(uint64_t dev, uint64_t base, uint64_t count,
     case DISK_BIND_ENOSLOT: return -EXO_ENOMEM;
     default:                 return -EXO_ENODEV;
     }
+}
+
+static int64_t sys_disk_acquire(uint64_t dev, uint64_t base, uint64_t count,
+                                uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a4; (void)a5; (void)a6;
+    return disk_acquire(dev, base, count, 0);
+}
+
+/* #42 -- #26 for a bind the caller will only read (SCRUM-281). */
+static int64_t sys_disk_acquire_ro(uint64_t dev, uint64_t base, uint64_t count,
+                                   uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)a4; (void)a5; (void)a6;
+    return disk_acquire(dev, base, count, 1);
 }
 
 /* #27 -- give the binding of device `dev` back (SCRUM-189, device
@@ -319,6 +336,7 @@ void syscall_disk_init(void)
     exo_syscall_register(EXO_SYS_DISK_READ, sys_disk_read);
     exo_syscall_register(EXO_SYS_DISK_WRITE, sys_disk_write);
     exo_syscall_register(EXO_SYS_DISK_ACQUIRE, sys_disk_acquire);
+    exo_syscall_register(EXO_SYS_DISK_ACQUIRE_RO, sys_disk_acquire_ro);
     exo_syscall_register(EXO_SYS_DISK_RELEASE, sys_disk_release);
     exo_syscall_register(EXO_SYS_DISK_STAT, sys_disk_stat);
     exo_syscall_register(EXO_SYS_DISK_EXTENT, sys_disk_extent);
