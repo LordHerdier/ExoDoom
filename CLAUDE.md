@@ -33,6 +33,7 @@ make docker-build              # Build kernel + ISO -> build/exodoom, build/exod
 make docker-run                # Build, then boot the ISO in QEMU (GRUB menu)
 make docker-run-kernel         # Build, then boot the ISO with the GRUB menu skipped -- preferred for dev iteration
 make docker-run-blank         # Like docker-run-kernel but on a zeroed disk: exercises the first-boot format prompt
+make run-uefi                  # Build, then boot the ISO under UEFI firmware (OVMF) on host QEMU: what a UEFI-only laptop sees
 make demo-rehearse             # Build, then run the client demo unattended over QMP (host QEMU; docs/demo.md)
 make docker-test               # Build with TESTING=1, boot, stream serial test output
 make docker-ci                 # Same as docker-test; what CI runs
@@ -109,6 +110,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | Virtual memory (kernel page tables, map/unmap/translate, per-LibOS address spaces) | `src/vmm.c/h` |
 | Ring-3 LibOS launch (image build, CR3 switch, `iretq`) | `src/libos_launch.c/h`, `src/libos_enter.s`, `src/syscall_launch.c` |
 | Process/context table | `src/context.c/h` |
+| Fault containment (ring-3 CPU exception ends the program, fault log, #41, shell relaunch) | `src/fault.c/h` (`fault_terminate_current`), `src/fault_record.c/h`, `src/syscall_fault.c/h`, `src/shell_launch.c/h`, `exc_stub_N` in `src/isr.s`; teardown shared with `exo_exit` in `src/syscall_exit.c` — `docs/syscall_spec.md` §3.4a |
 | Interrupts (IDT/PIC/ISR, TSS, page-fault diagnostics) | `src/idt.c/h`, `src/pic.c/h`, `src/isr.s`, `src/io.h`, `src/tss.c/h`, `src/fault.c/h` |
 | Timer (PIT) | `src/pit.c/h`, `src/sleep.c/h` |
 | PCI bus | `src/pci.c/h` |

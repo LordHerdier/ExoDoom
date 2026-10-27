@@ -4,6 +4,7 @@
 
 #include "shell/shell_err.h"
 #include "exo_errno.h"
+#include "exo_syscall.h"
 
 #include <stddef.h>
 
@@ -77,4 +78,43 @@ const char *shell_err_text(shell_op_t op, int64_t err, int *mapped)
         *mapped = 0;
     }
     return generic_text(op);
+}
+
+const char *shell_fault_text(uint32_t reason)
+{
+    switch (reason) {
+    case EXO_FAULT_REASON_MEMORY:     return "illegal memory access";
+    case EXO_FAULT_REASON_PRIVILEGED: return "tried a privileged operation";
+    case EXO_FAULT_REASON_ARITHMETIC: return "arithmetic error (divide by zero?)";
+    case EXO_FAULT_REASON_ILLEGAL:    return "illegal instruction";
+    default:                          return "crashed";
+    }
+}
+
+/* Append as much of `s` as fits, keeping room for the NUL. */
+static void put(char *buf, size_t n, size_t *pos, const char *s)
+{
+    while (*s != '\0' && *pos + 1 < n) {
+        buf[(*pos)++] = *s++;
+    }
+}
+
+size_t shell_fault_format(char *buf, size_t n, const char *name,
+                          uint32_t reason)
+{
+    size_t pos = 0;
+
+    if (n == 0) {
+        return 0;
+    }
+    if (name != NULL && name[0] != '\0') {
+        put(buf, n, &pos, "program ");
+        put(buf, n, &pos, name);
+    } else {
+        put(buf, n, &pos, "a program");
+    }
+    put(buf, n, &pos, " stopped: ");
+    put(buf, n, &pos, shell_fault_text(reason));
+    buf[pos] = '\0';
+    return pos;
 }

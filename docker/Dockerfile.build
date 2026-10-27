@@ -70,6 +70,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       make \
       xorriso \
       grub-pc-bin \
+      grub-efi-amd64-bin \
+      mtools \
       grub-common \
       ca-certificates \
       curl \

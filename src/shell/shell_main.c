@@ -264,6 +264,12 @@ static char shell_mv_busy_text[] =
  * other writable string in this file does. */
 static char shell_cwd[SHELL_FS_RESOLVED_BUF_LEN] = "/";
 
+/* Idle passes between looks at the fault log. The loop spins on a syscall
+ * already (the keyboard poll), and almost every look finds nothing, so look
+ * once per this many passes: a crash is still on screen within a frame. */
+#define SHELL_FAULT_POLL_EVERY 64
+static uint32_t shell_idle_passes;
+
 static int str_eq(const char *a, const char *b);
 static char shell_key_to_ascii(uint8_t key, uint8_t modifiers);
 static void shell_backspace(fb_console_t *con);
@@ -272,6 +278,10 @@ static void shell_run_command(fb_console_t *con, const char *line);
 static void shell_write_u32(fb_console_t *con, uint32_t v);
 static void shell_write_i64(fb_console_t *con, int64_t v);
 static void shell_err_report(fb_console_t *con, shell_op_t op, int64_t err);
+static int shell_fault_poll(exo_fault_info_t *rec);
+static void shell_fault_print(fb_console_t *con, const exo_fault_info_t *rec);
+static int shell_report_faults(fb_console_t *con);
+static void shell_report_newest_fault(fb_console_t *con);
 static void shell_run_memstat(fb_console_t *con, const char *arg);
 static void shell_run_pslist(fb_console_t *con, const char *arg);
 static int shell_cmd_match(const char *line, const char *cmd, const char **rest);
@@ -354,6 +364,11 @@ void shell_main(void) {
     fbcon_set_color(&con, 220, 220, 220, 0, 0, 0);
     fbcon_write(&con, shell_help_text);
     shell_firstboot_check(&con);
+    /* A shell the kernel relaunched because the last program crashed says so
+     * (SCRUM-283); on a normal boot there is nothing to report. Only the
+     * newest record: it is the one that explains this shell, and the older
+     * ones were reported to the user by the shell it replaced. */
+    shell_report_newest_fault(&con);
     shell_print_prompt(&con);
 
     static char cmd_buf[SHELL_CMD_BUF_LEN];
@@ -391,6 +406,9 @@ void shell_main(void) {
                 shell_hist_push(&hist, cmd_buf);
                 fbcon_write(&con, "\n");
                 shell_run_command(&con, cmd_buf);
+                /* A launched program that crashed hands control back here;
+                 * say what happened before the prompt returns (SCRUM-283). */
+                (void)shell_report_faults(&con);
                 shell_print_prompt(&con);
                 cmd_len = 0;
                 continue;
@@ -431,6 +449,20 @@ void shell_main(void) {
                 cmd_buf[cmd_len++] = c;
                 fbcon_putc(&con, c);
             }
+        }
+
+        /* A background program can crash while the shell is idle at its
+         * prompt: report it on a fresh line, then put the prompt and the
+         * half-typed command back. */
+        exo_fault_info_t crashed;
+        if ((++shell_idle_passes % SHELL_FAULT_POLL_EVERY) == 0 &&
+            shell_fault_poll(&crashed)) {
+            fbcon_write(&con, "\n");
+            shell_fault_print(&con, &crashed);
+            (void)shell_report_faults(&con);
+            shell_print_prompt(&con);
+            cmd_buf[cmd_len] = '\0';
+            fbcon_write(&con, cmd_buf);
         }
     }
 }
@@ -890,6 +922,57 @@ static void shell_err_report(fb_console_t *con, shell_op_t op, int64_t err) {
         fbcon_write(con, ")");
     }
     fbcon_write(con, "\n");
+}
+
+/* The newest fault record this shell has already told the user about
+ * (SCRUM-283). exo_fault_info (#41) hands out records in seq order, so asking
+ * for "newer than this" reports each crash once, whichever program died and
+ * wherever the shell was when it happened. A relaunched shell starts at 0 and
+ * so reports the crash that replaced its predecessor. */
+static uint64_t shell_fault_seen;
+
+/* Fetch the next unreported fault into *rec and mark it seen. 1 if there was
+ * one, 0 if not (-EXO_ENOENT is the normal answer). */
+static int shell_fault_poll(exo_fault_info_t *rec) {
+    if (exo_fault_info(shell_fault_seen, rec) != 0) {
+        return 0;
+    }
+    shell_fault_seen = rec->seq;
+    return 1;
+}
+
+/* "program X stopped: <why>" on its own line, in the warning colour. */
+static void shell_fault_print(fb_console_t *con, const exo_fault_info_t *rec) {
+    char line[80];
+    shell_fault_format(line, sizeof(line), rec->name, rec->reason);
+    fbcon_set_color(con, 255, 120, 120, 0, 0, 0);
+    fbcon_write(con, line);
+    fbcon_write(con, "\n");
+    fbcon_set_color(con, 220, 220, 220, 0, 0, 0);
+}
+
+/* First thing a shell does: say what ended the program before it, if the
+ * kernel relaunched this shell after one. Takes only the newest record and
+ * marks everything up to it seen, so records an earlier shell already
+ * reported are not replayed. */
+static void shell_report_newest_fault(fb_console_t *con) {
+    exo_fault_info_t rec;
+    if (exo_fault_info(EXO_FAULT_NEWEST, &rec) != 0) {
+        return;
+    }
+    shell_fault_seen = rec.seq;
+    shell_fault_print(con, &rec);
+}
+
+/* Report every fault not yet reported. Returns how many. */
+static int shell_report_faults(fb_console_t *con) {
+    exo_fault_info_t rec;
+    int n = 0;
+    while (shell_fault_poll(&rec)) {
+        shell_fault_print(con, &rec);
+        n++;
+    }
+    return n;
 }
 
 /*
@@ -1648,7 +1731,10 @@ static void shell_run_run(fb_console_t *con, const char *arg) {
                                           prog_name);
     libos_heap_free(pkg);
     if (lrc == 0) {
-        fbcon_clear(con);
+        /* Back from the program (SCRUM-292). Nothing to redraw: the shell's
+         * framebuffer is its own shadow (src/fb_shadow.h), which the program
+         * never touched, so the earlier output is still there. Clearing here
+         * was left over from the single shared framebuffer. */
     } else if (lrc == -EXO_ENOMEM) {
         /* The check passed on a snapshot taken before #36 loaded the IWAD
          * (doom_wad_disk_get() allocates it on first use), so the kernel's

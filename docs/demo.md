@@ -100,6 +100,7 @@ in front of the client.
 | `another program is using the disk` on `run` | Doom is running (rule 1) | Ctrl+Tab to Doom and carry on |
 | `run: no such program (try 'programs')` | not installed (rule 4) | `install <name>`, then `run <name>` |
 | Doom: `IWAD not found` | `freedoom2.wad` not installed (rule 5) | Ctrl+Tab to the shell, `install freedoom2.wad`, run Doom again |
+| A program crashes: `program X stopped: illegal memory access` | The program faulted and the kernel ended it (SCRUM-283); nothing else was affected | Carry on at the prompt. `run crash` does this on purpose if you want to show it (it waits three seconds, so Ctrl+Tab to the shell and back is a good variation): the machine stays up and the prompt returns. It is not in the rehearsal script, which asserts that no page fault ever appears on serial |
 | Anything else | | Close QEMU and `make run-blank` again: a rebuild, then the format prompt about 8 s after boot |
 
 ---

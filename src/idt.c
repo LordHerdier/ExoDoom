@@ -27,8 +27,19 @@ extern void error_stub(void);
 extern void pf_stub(void);
 extern void gpf_stub(void);
 
+/* One stub per remaining exception vector (SCRUM-283), src/isr.s EXC_STUB. */
+#define EXC_STUBS(X) \
+    X(0) X(1) X(3) X(4) X(5) X(6) X(7) X(8) X(10) X(11) X(12) X(16) X(17) \
+    X(18) X(19) X(20) X(21) X(28) X(29) X(30)
+#define X(n) extern void exc_stub_##n(void);
+EXC_STUBS(X)
+#undef X
+
 /* Vectors that push a hardware error code (SCRUM-135). default_stub's bare
- * iretq cannot handle these safely — error_stub must be installed instead. */
+ * iretq cannot handle these safely — error_stub must be installed instead.
+ * Since SCRUM-283 every one of them is overridden below (8/10/11/12/17/21/29/30
+ * by exc_stub_N, 13/14 by their own stubs), so error_stub is only the
+ * fallback for a vector someone removes from that list. */
 static const int error_code_vectors[] = { 8, 10, 11, 12, 13, 14, 17, 21, 29, 30 };
 
 void idt_init() {
@@ -50,6 +61,14 @@ void idt_init() {
     /* Vector 13 (#GP) gets the same treatment (SCRUM-56) -- error_stub would
      * otherwise silently re-fault forever on a ring-3 IN/OUT trap. */
     idt_set_gate(13, (uintptr_t)gpf_stub);
+
+    /* Every other CPU exception gets a real handler (SCRUM-283) rather than
+     * default_stub's re-enter-the-faulting-instruction loop: a ring-3 #DE,
+     * #UD, #NM, #SS, #AC, #MF, #XM ... ends that program; ring 0 halts with
+     * a diagnostic. */
+#define X(n) idt_set_gate(n, (uintptr_t)exc_stub_##n);
+    EXC_STUBS(X)
+#undef X
 
     idt_load(&idtp);
 }

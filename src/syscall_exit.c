@@ -64,18 +64,15 @@
  * stays inert until context_destroy() reaps it, exactly as already
  * documented above.
  */
-static int64_t sys_exit(uint64_t code, uint64_t a2, uint64_t a3,
-                        uint64_t a4, uint64_t a5, uint64_t a6)
+/*
+ * SCRUM-283: the reclaim sequence shared by exo_exit and the ring-3 fault
+ * path (src/fault.c), so the two cannot drift. Releases every binding `owner`
+ * holds and frees its pages; does not switch away and does not destroy the
+ * context row (see this file's top comment). Returns 0, or -EXO_EPERM for the
+ * FREE/KERNEL sentinels.
+ */
+int context_teardown(page_owner_t owner)
 {
-    (void)code;
-    (void)a2;
-    (void)a3;
-    (void)a4;
-    (void)a5;
-    (void)a6;
-
-    page_owner_t owner = syscall_current_context();
-
     /*
      * Defense in depth.  A terminating LibOS must never be allowed to trigger
      * reclamation of the FREE sentinel or kernel-owned pages.
@@ -109,6 +106,25 @@ static int64_t sys_exit(uint64_t code, uint64_t a2, uint64_t a3,
     (void)disk_binding_reclaim(owner);
     disk_binding_forget(owner);
     (void)reclaim_pages_owned(owner);
+
+    return 0;
+}
+
+static int64_t sys_exit(uint64_t code, uint64_t a2, uint64_t a3,
+                        uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    (void)code;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    (void)a6;
+
+    page_owner_t owner = syscall_current_context();
+
+    int rc = context_teardown(owner);
+    if (rc != 0)
+        return rc;
 
     /* SCRUM-178: hand off to whatever else is ready, exactly like
      * exo_yield() -- if nothing is, there is still nowhere to send control,

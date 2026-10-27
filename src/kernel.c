@@ -6,6 +6,7 @@
 #include "acpi.h"
 #include "page_alloc.h"
 #include "syscall_exit.h"
+#include "syscall_fault.h"
 
 #include "idt.h"
 #include "tss.h"
@@ -484,6 +485,12 @@ void kernel_main(void *mb2_info_ptr) {
     // syscall *_init().
     rtc_init();
     syscall_rtc_init();
+
+    // ── Fault log (SCRUM-283) ────────────────────────────────────────────
+    // Binds exo_fault_info (#41), which reads what src/fault.c records when
+    // it ends a program. Nothing to initialise first; ahead of the TESTING
+    // branch like every other syscall *_init().
+    syscall_fault_init();
 
     // ── Sound syscalls (SCRUM-100) ───────────────────────────────────────
     // Binds exo_sound_tone/exo_sound_stop (#17/#18) in front of the PC

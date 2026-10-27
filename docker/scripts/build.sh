@@ -529,6 +529,14 @@ build_ring3_link_target libos_hello src/libos_hello "" "" \
   src/libos_hello/libos_hello.c src/fb.c src/fb_console.c src/libos_fb.c
 ring3_embed=1
 
+echo "[2e/7] Build crash-on-purpose LibOS (SCRUM-283)"
+# A program that reads address 0, packaged as crash.exo so fault containment
+# can be seen on a real boot (`run crash`). Same shape as hello above.
+ring3_embed=0
+build_ring3_link_target libos_crash src/libos_crash "" "" \
+  src/libos_crash/libos_crash.c src/fb.c src/fb_console.c src/libos_fb.c
+ring3_embed=1
+
 echo "[2f/7] Build Snake LibOS (SCRUM-182)"
 # Same reasoning and same mechanism as the WAD viewer step just above: built
 # UNCONDITIONALLY, with its blobs built but NOT linked into the kernel
@@ -703,6 +711,7 @@ package_ring3_target libos_snake      src/libos_snake      snake.exo   fb,kbd
 package_ring3_target libos_clock      src/libos_clock      clock.exo   fb,kbd
 package_ring3_target libos_top        src/libos_top        top.exo     fb,kbd
 package_ring3_target libos_hello      src/libos_hello      hello.exo   fb,kbd
+package_ring3_target libos_crash      src/libos_crash      crash.exo   fb,kbd
 package_ring3_target libos_wad_viewer src/libos_wad_viewer wadview.exo fb,disk,kbd,wad \
   --params-len 16
 # SCRUM-267: Doom reads the IWAD off the program volume (progvol) and keeps
