@@ -83,6 +83,10 @@ static struct exofsfuse_opts g_opts = {
     .show_help = 0,
 };
 
+/* The one volume this process serves (exofs_mount() hands back a handle that
+ * every exofs_* call takes since SCRUM-265). */
+static exofs_vol_t *g_vol;
+
 /* Set when the image itself could not be opened for writing (the Docker
  * build leaves build/exodoom_disk.img root-owned), as well as by -o ro.
  * Modifying calls are refused here rather than at exofs_bdev_write(): a
@@ -192,7 +196,7 @@ static int op_getattr(const char *path, struct stat *st,
     }
 
     exofs_stat_t s;
-    int rc = exofs_stat(path, &s);
+    int rc = exofs_stat(g_vol, path, &s);
     if (rc < 0) {
         return rc;
     }
@@ -209,7 +213,7 @@ static int op_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     (void)flags;
 
     exofs_dir_t d;
-    int rc = exofs_opendir(path, &d);
+    int rc = exofs_opendir(g_vol, path, &d);
     if (rc < 0) {
         return rc;
     }
@@ -257,7 +261,7 @@ static int op_open(const char *path, struct fuse_file_info *fi)
     if (!f) {
         return -ENOMEM;
     }
-    int rc = exofs_open(path, flags, f);
+    int rc = exofs_open(g_vol, path, flags, f);
     if (rc < 0) {
         free(f);
         return rc;
@@ -279,7 +283,7 @@ static int op_create(const char *path, mode_t mode,
     if (!f) {
         return -ENOMEM;
     }
-    int rc = exofs_open(path,
+    int rc = exofs_open(g_vol, path,
                         EXOFS_O_READ | EXOFS_O_WRITE | EXOFS_O_CREATE |
                         EXOFS_O_TRUNC, f);
     if (rc < 0) {
@@ -427,7 +431,7 @@ static int op_truncate(const char *path, off_t size,
     if (size == 0) {
         /* The one truncation ExoFS implements directly. */
         exofs_file_t f;
-        int rc = exofs_open(path, EXOFS_O_WRITE | EXOFS_O_TRUNC, &f);
+        int rc = exofs_open(g_vol, path, EXOFS_O_WRITE | EXOFS_O_TRUNC, &f);
         if (rc < 0) {
             return rc;
         }
@@ -436,7 +440,7 @@ static int op_truncate(const char *path, off_t size,
     }
 
     exofs_stat_t s;
-    int rc = exofs_stat(path, &s);
+    int rc = exofs_stat(g_vol, path, &s);
     if (rc < 0) {
         return rc;
     }
@@ -458,7 +462,7 @@ static int op_truncate(const char *path, off_t size,
     /* Grow: write one byte at the new last offset. Every block is zeroed
      * when allocated, so the gap reads as zeros (exofs.h, exofs_write). */
     exofs_file_t f;
-    rc = exofs_open(path, EXOFS_O_WRITE, &f);
+    rc = exofs_open(g_vol, path, EXOFS_O_WRITE, &f);
     if (rc < 0) {
         return rc;
     }
@@ -482,7 +486,7 @@ static int op_unlink(const char *path)
     if (g_ro) {
         return -EROFS;
     }
-    int rc = exofs_unlink(path);
+    int rc = exofs_unlink(g_vol, path);
     return rc < 0 ? rc : 0;
 }
 
@@ -493,7 +497,7 @@ static int op_mkdir(const char *path, mode_t mode)
     if (g_ro) {
         return -EROFS;
     }
-    int rc = exofs_mkdir(path);
+    int rc = exofs_mkdir(g_vol, path);
     return rc < 0 ? rc : 0;
 }
 
@@ -502,7 +506,7 @@ static int op_rmdir(const char *path)
     if (g_ro) {
         return -EROFS;
     }
-    int rc = exofs_rmdir(path);
+    int rc = exofs_rmdir(g_vol, path);
     return rc < 0 ? rc : 0;
 }
 
@@ -534,7 +538,7 @@ static int op_statfs(const char *path, struct statvfs *st)
     (void)path;
 
     exofs_geometry_t g;
-    int rc = exofs_geometry(&g);
+    int rc = exofs_geometry(g_vol, &g);
     if (rc < 0) {
         return rc;
     }
@@ -631,7 +635,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    int rc = exofs_mount((uint32_t)g_opts.base_lba);
+    int rc = exofs_mount(0, (uint32_t)g_opts.base_lba, &g_vol);
     if (rc < 0) {
         fprintf(stderr,
                 "exofsfuse: no ExoFS volume at LBA %d of %s "
@@ -649,7 +653,7 @@ int main(int argc, char *argv[])
 
     int ret = fuse_main(args.argc, args.argv, &exofs_ops, NULL);
 
-    exofs_unmount();
+    exofs_unmount(g_vol);
     host_blockdev_close();
     fuse_opt_free_args(&args);
     free(g_opts.image);
