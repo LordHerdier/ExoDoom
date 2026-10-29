@@ -90,6 +90,7 @@ void suite_doom_net_tests(CU_pSuite s);
 void suite_syscall_stat_tests(CU_pSuite s);
 void suite_ata_tests(CU_pSuite s);
 void suite_blkdev_tests(CU_pSuite s);
+void suite_usb_msc_tests(CU_pSuite s);
 void suite_syscall_disk_tests(CU_pSuite s);
 void suite_disk_binding_tests(CU_pSuite s);
 void suite_exofs_tests(CU_pSuite s);
@@ -629,6 +630,12 @@ int run_tests(void)
      * (SCRUM-244). */
     s = CU_add_suite("blkdev", NULL, NULL);
     suite_blkdev_tests(s);
+
+    /* After "blkdev", ahead of every suite that formats the whole install
+     * stick (multidisk, shell_install): the known-sector test reads the
+     * packer's ExoFS superblock off LBA 0 (SCRUM-247). */
+    s = CU_add_suite("usb_msc", NULL, NULL);
+    suite_usb_msc_tests(s);
 
     s = CU_add_suite("syscall_disk", syscall_disk_suite_init,
                      syscall_disk_suite_cleanup);

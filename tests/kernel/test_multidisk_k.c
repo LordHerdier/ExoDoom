@@ -1,9 +1,9 @@
 /*
  * test_multidisk_k.c — two disks at once (SCRUM-244 acceptance).
  *
- * The test boot attaches a second IDE drive (build/exodoom_disk2.img on the
- * primary slave, `index=1`), which ata_register_blkdevs() makes block device
- * 1. This suite drives the device-indexed syscalls through the real
+ * The test boot attaches a usb-storage stick (build/usb.img; until SCRUM-247
+ * it was a second IDE drive), which usb_msc registers as block device 1.
+ * This suite drives the device-indexed syscalls through the real
  * dispatcher, and ExoFS through its EXO_KERNEL compile (test_exofs_k.c's top
  * comment has why that, and libos_heap_alloc() buffers, are required), to
  * show what SCRUM-233's `install` will need:

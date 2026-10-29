@@ -1005,8 +1005,8 @@ possible without a kernel filesystem — each program links its own
 SCRUM-244 added **the device**. The kernel keeps a block-device registry
 (`src/blkdev.c/h`): each entry is a sector count plus a read op and a write
 op, and a driver registers every disk it finds — `src/ata.c` each IDE
-position that answers IDENTIFY (`docs/drivers/ata.md`), later USB mass
-storage (SCRUM-247). **Index 0 is reserved for the system disk**: only
+position that answers IDENTIFY (`docs/drivers/ata.md`), USB mass
+storage (`src/usb_msc.c`, SCRUM-247). **Index 0 is reserved for the system disk**: only
 `blkdev_register_system()` fills it, and `src/ata.c` calls that for the
 primary master; every other disk takes the first free slot from 1 up. So
 every fixed LBA layout constant (`LIBOS_WAD_DISK_BASE_LBA`, the shell's
@@ -1144,7 +1144,7 @@ ticket needs yet.
 `ata_register_blkdevs()` (registration) and `usb_init()`, then
 `syscall_disk_init()`, which resets the binding table (`disk_binding_init()`)
 before registering any of `#24`/`#25`/`#26`/`#27` — after every driver that
-registers disks, which is what SCRUM-247's USB mass storage will rely on.
+registers disks, which is what SCRUM-247's USB mass storage relies on.
 The registry is the single source of truth for whether a device exists:
 `disk_binding_present(dev)` is `blkdev_get(dev) != NULL`, with no copy kept in
 the binding table, and `src/syscall_disk.c` looks a device up once per call

@@ -145,9 +145,9 @@ _Static_assert(SHELL_CMD_BUF_LEN == SHELL_HIST_LEN,
  * volume and the `dd` window are on it. */
 #define SHELL_SYS_DEV        0u
 
-/* Block device `install` copies from: the install stick. Until USB mass
- * storage (SCRUM-247) that is the second IDE drive, which the kernel numbers
- * 1 (docs/drivers/ata.md); its ExoFS volume starts at LBA 0, as
+/* Block device `install` copies from: the install stick, a usb-storage drive
+ * (SCRUM-247, src/usb_msc.c) that the kernel numbers 1 when the system disk
+ * is the only IDE drive; its ExoFS volume starts at LBA 0, as
  * docker/scripts/build.sh writes it. */
 #define SHELL_SRC_DEV        1u
 #define SHELL_SRC_BASE_LBA   0u

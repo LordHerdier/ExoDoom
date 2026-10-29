@@ -466,7 +466,7 @@ void kernel_main(void *mb2_info_ptr) {
     // ── Disk syscalls (SCRUM-103/SCRUM-188) ─────────────────────────────
     // Binds exo_disk_read/_write/_acquire/_release (#24/#25/#26/#27) in
     // front of the block-device registry, after every driver that registers
-    // disks into it (ATA above; USB mass storage, SCRUM-247, will register
+    // disks into it (ATA above; USB mass storage, SCRUM-247, registers
     // from usb_init()), so the handlers answer -EXO_ENODEV from the registry
     // without re-probing the bus. Same placement rule as every other syscall *_init(): after
     // syscall_init(), ahead of the TESTING branch. syscall_disk_init() also

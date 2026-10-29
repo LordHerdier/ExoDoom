@@ -6,7 +6,7 @@
 #
 # Needs qemu-system-x86_64 and python3 on the host (like `make run`), and a
 # finished build. Run it as `make demo-rehearse`, which builds first and
-# passes DEMO_QEMU_DEVICES: the Makefile's own disk-2 and USB device lists,
+# passes DEMO_QEMU_DEVICES: the Makefile's own USB device list (the install stick),
 # so the rehearsal boots the same machine `make run-blank` does.
 set -euo pipefail
 cd "$(dirname "$0")/../.."

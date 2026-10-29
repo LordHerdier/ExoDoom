@@ -40,6 +40,8 @@
 #define USB_REQ_GET_DESCRIPTOR    0x06
 #define USB_REQ_SET_ADDRESS       0x05
 #define USB_REQ_SET_CONFIGURATION 0x09
+#define USB_REQ_CLEAR_FEATURE     0x01
+#define USB_FEATURE_ENDPOINT_HALT 0
 
 /* bmRequestType: direction | type | recipient. */
 #define USB_RT_IN        0x80
@@ -48,6 +50,7 @@
 #define USB_RT_CLASS     0x20
 #define USB_RT_DEVICE    0x00
 #define USB_RT_INTERFACE 0x01
+#define USB_RT_ENDPOINT  0x02
 
 #define USB_DESC_DEVICE    1
 #define USB_DESC_CONFIG    2
@@ -57,6 +60,7 @@
 #define USB_EP_DIR_IN      0x80
 #define USB_EP_NUM_MASK    0x0F
 #define USB_EP_XFER_MASK   0x03
+#define USB_EP_XFER_BULK   0x02
 #define USB_EP_XFER_INTR   0x03
 
 /* Largest configuration descriptor (with every interface/endpoint behind
@@ -153,8 +157,16 @@ typedef struct {
     int  (*interrupt_open)(usb_hcd_t *hcd, const usb_device_t *dev,
                            uint8_t ep, uint16_t max_packet,
                            usb_intr_cb_t cb, void *ctx);
-    /* Synchronous bulk transfer. USB_ENOTSUP until SCRUM-247. */
+    /* Synchronous bulk transfer on `ep_addr` (number plus direction bit) of
+     * `dev`, in packets of `max_packet`. `*toggle` is the endpoint's data
+     * toggle: the first packet uses it, and on return it holds the toggle
+     * for the next packet (advanced once per packet the device accepted).
+     * An HCD that tracks toggles itself, as xHCI does, may ignore it.
+     * `data` must lie below 4 GB for a 32-bit controller (USB_EINVAL
+     * otherwise). A zero `len` moves nothing. A short IN packet ends the
+     * transfer: *actual (may be NULL) is the bytes moved either way. */
     int  (*bulk)(usb_hcd_t *hcd, const usb_device_t *dev, uint8_t ep_addr,
+                 uint16_t max_packet, uint8_t *toggle,
                  void *data, uint32_t len, uint32_t *actual);
     /* IRQ0 service: check and re-arm interrupt pipes. */
     void (*poll)(usb_hcd_t *hcd);
@@ -218,6 +230,22 @@ int usb_config_find_interface(const uint8_t *config, uint16_t len,
                               uint8_t cls, uint8_t subclass, uint8_t protocol,
                               const usb_interface_desc_t **iface,
                               const usb_endpoint_desc_t **intr_in);
+
+/* Bulk transfer on `ep_addr` of `dev` through its controller; see the
+ * usb_hcd_ops_t.bulk contract for `toggle` and the 4 GB rule. */
+int usb_bulk(const usb_device_t *dev, uint8_t ep_addr, uint16_t max_packet,
+             uint8_t *toggle, void *data, uint32_t len, uint32_t *actual);
+
+/* CLEAR_FEATURE(ENDPOINT_HALT) on `ep_addr` (number plus direction bit).
+ * The caller resets its data toggle for that endpoint to DATA0. */
+int usb_clear_halt(const usb_device_t *dev, uint8_t ep_addr);
+
+/* The first bulk-IN and bulk-OUT endpoint of `iface`, which must point
+ * into `config`. USB_OK if both exist, else USB_ENODEV. */
+int usb_config_find_bulk(const uint8_t *config, uint16_t len,
+                         const usb_interface_desc_t *iface,
+                         const usb_endpoint_desc_t **bulk_in,
+                         const usb_endpoint_desc_t **bulk_out);
 
 /* Print the controller and device tables on serial. */
 void usb_dump(void);

@@ -26,6 +26,7 @@
 #include "ps2.h"
 #include "pit.h"
 #include "serial.h"
+#include "string.h"
 
 #include <stdint.h>
 
@@ -102,15 +103,17 @@ static void test_two_keyboards_claimed(void)
         CU_ASSERT_EQUAL(usb_kbd_live(i), 1);
     }
 
-    /* Only the keyboards are claimed: the mouse and the stick wait for
-     * SCRUM-246/-247. */
+    /* The keyboards are claimed by usb_kbd, and the stick by usb_msc
+     * (test_usb_msc_k.c); the mouse waits for SCRUM-246. */
     for (int i = 0; i < usb_device_count(); i++) {
         const usb_device_t *d = usb_device_at(i);
-        if (d->driver) {
+        if (d->driver && strcmp(d->driver, "usb_kbd") == 0) {
             claimed++;
             CU_ASSERT_EQUAL(d->vendor_id, QEMU_KBD_VENDOR);
             CU_ASSERT_EQUAL(d->product_id, QEMU_KBD_PRODUCT);
             CU_ASSERT_EQUAL(d->iface_protocol, USB_HID_PROTO_KEYBOARD);
+        } else if (d->driver) {
+            CU_ASSERT_STRING_EQUAL(d->driver, "usb_msc");
         }
     }
     CU_ASSERT_EQUAL(claimed, EXPECTED_KBDS);

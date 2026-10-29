@@ -1,15 +1,17 @@
-# Driver: USB host controllers, core and HID keyboard
+# Driver: USB host controllers, core, HID keyboard and mass storage
 
 **Files:** `src/usb.c/h` (core + host-controller interface), `src/uhci.c/h`
-(UHCI), `src/usb_kbd.c/h` (HID boot keyboard), `usb_poll()` hook in
+(UHCI), `src/usb_kbd.c/h` (HID boot keyboard), `src/usb_msc.c/h`
+(mass storage), `usb_poll()` hook in
 `src/pit.c`, `usb_init()` in `src/kernel.c`. Tests:
 `tests/kernel/test_usb_topology_k.c` (`usb_topology`),
 `tests/kernel/test_usb_kbd_k.c` (`usb_kbd_report`),
-`tests/kernel/test_usb_k.c` (`usb`), and `docker/scripts/qmp-keys.sh`.
+`tests/kernel/test_usb_k.c` (`usb`), `tests/kernel/test_usb_msc_k.c`
+(`usb_msc`), and `docker/scripts/qmp-keys.sh`.
 **Status:** ✅ UHCI, enumeration and HID boot keyboards (SCRUM-198), built
-on the design the SCRUM-245 spike settled (§1–§6). Mouse (SCRUM-246), mass
-storage (SCRUM-247) and xHCI (SCRUM-248) are still open.
-**Last updated:** 23 Oct 2026
+on the design the SCRUM-245 spike settled (§1–§6); ✅ mass storage
+(SCRUM-247, §10a). Mouse (SCRUM-246) and xHCI (SCRUM-248) are still open.
+**Last updated:** 29 Oct 2026
 
 ---
 
@@ -25,6 +27,7 @@ storage (SCRUM-247) and xHCI (SCRUM-248) are still open.
 8. [UHCI: takeover and schedule](#8-uhci-takeover-and-schedule)
 9. [Enumeration](#9-enumeration)
 10. [HID boot keyboard](#10-hid-boot-keyboard)
+    - [10a. Mass storage](#10a-mass-storage-bulk-only-transport--scsi)
 11. [What SCRUM-199 builds on](#11-what-scrum-199-builds-on)
 12. [Tests and QMP key injection](#12-tests-and-qmp-key-injection)
 13. [Appendix: measurements](#13-appendix-measurements)
@@ -35,7 +38,7 @@ storage (SCRUM-247) and xHCI (SCRUM-248) are still open.
 
 Before SCRUM-245 nothing in `src/` or `docs/` touched USB. The USB epic
 (SCRUM-243) layers a host controller driver, a small USB core, and class
-drivers: HID keyboard SCRUM-198, HID mouse SCRUM-246, mass storage SCRUM-247.
+drivers: HID keyboard SCRUM-198, HID mouse SCRUM-246, mass storage SCRUM-247 (done).
 Two decisions change the shape of the first of those, so this spike made them
 from QEMU measurements before any driver code was written:
 
@@ -231,7 +234,7 @@ A controller driver fills in a `usb_hcd_ops_t` (`src/usb.h`) and calls
 | `port_disable` | take a port's device off the bus (§9) |
 | `control` | synchronous control transfer on endpoint 0, busy-waited |
 | `interrupt_open` | start polling an interrupt-IN endpoint; each completed packet goes to a callback **from IRQ0** |
-| `bulk` | synchronous bulk transfer; `USB_ENOTSUP` until SCRUM-247 |
+| `bulk` | synchronous bulk transfer, with the endpoint's data toggle passed in and out (§10a) |
 | `poll` | the IRQ0 service (§3 budget) |
 | `pipe_live` | whether an interrupt pipe is still delivering (not stalled, unplugged or halted) |
 | `delay_ms` | busy-wait on the controller's own frame clock |
@@ -260,24 +263,29 @@ back at address 0, unconfigured, whatever SeaBIOS did to them. The
 `usb_topology` suite checks the result: `FRBASEADD` is the driver's frame
 list, `RS` is set and `HCH` is clear.
 
-**DMA memory**: three `alloc_page()` pages per controller, each checked to
+**DMA memory**: four `alloc_page()` pages per controller, each checked to
 be below 4 GB (UHCI pointers are 32-bit) and zeroed:
 
 | Page | Holds |
 |---|---|
 | frame list | 1024 link pointers |
-| sched | interrupt skeleton QH (+0), control QH (+16), then one 128-byte slot per interrupt pipe: QH, TD, packet buffer (max `UHCI_MAX_PIPES` = 8) |
+| sched | interrupt skeleton QH (+0), control QH (+16), bulk QH (+32), then one 128-byte slot per interrupt pipe: QH, TD, packet buffer (max `UHCI_MAX_PIPES` = 8) |
 | ctrl | control-transfer TDs (up to 62) at +0; setup packet at +2048; data from +2064 |
+| bulk | bulk-transfer TDs only (128 of them, 32 bytes each, §10a) |
 
 **Schedule** — fixed, never rebuilt:
 
 ```
-frame list[0..1023] ──► int skeleton QH ──► pipe QH n ──► … ──► pipe QH 0 ──► control QH ──► T
+frame list[0..1023] ──► int skeleton QH ──► pipe QH n ──► … ──► pipe QH 0 ──► control QH ──► bulk QH ──► T
                                               │                   │              │
                                               ▼                   ▼              ▼
                                            1 IN TD             1 IN TD     SETUP/DATA/STATUS chain
                                                                             (only during a transfer)
 ```
+
+The bulk QH (§10a) sits last, so it only runs in the frame time the interrupt
+pipes and a control transfer leave over, which is plenty: both are idle most
+of the time.
 
 Every frame visits every pipe. The `bInterval` in the endpoint descriptor is
 ignored: a HID device NAKs until its report changes (we send `SET_IDLE(0)`),
@@ -368,13 +376,21 @@ uhci: 0:7.0 io 0x0000C080 ports 2 frame list 0x008EE000
 usb: hc 0 port 0: addr 1 id 00000627:00000001 iface 00000003/00000001/00000001 -> usb_kbd
 usb: hc 0 port 1: addr 2 id 00000627:00000001 iface 00000003/00000001/00000001 -> usb_kbd
 usb: hc 1 port 0: addr 3 id 00000627:00000001 iface 00000003/00000001/00000002 (unclaimed)
-usb: hc 2 port 0: addr 4 id 000046F4:00000001 iface 00000008/00000006/00000050 (unclaimed)
+usb: hc 2 port 0: usb_msc: block device 1, 61721 sectors
+addr 4 id 000046F4:00000001 iface 00000008/00000006/00000050 -> usb_msc
 usb: 3 controller(s), 4 device(s), 2 keyboard(s)
 ```
 
-The mouse (HID boot protocol 2) waits for SCRUM-246, and the stick (mass
-storage, SCSI, Bulk-Only Transport) waits for SCRUM-247. The run targets
-don't attach the mouse (§5), so `docker-run*` shows three devices.
+The mouse (HID boot protocol 2) waits for SCRUM-246. The stick (mass storage,
+SCSI, Bulk-Only Transport) is claimed by `usb_msc` (§10a). The log above is a
+test boot, which attaches the mouse; the run targets don't (§5), so
+`docker-run*` shows three devices, as in the sample from a run target:
+
+```
+usb: hc 2 port 0: usb_msc: block device 1, 61721 sectors
+addr 3 id 000046F4:00000001 iface 00000008/00000006/00000050 -> usb_msc
+usb: 3 controller(s), 3 device(s), 2 keyboard(s)
+```
 
 ## 10. HID boot keyboard
 
@@ -417,6 +433,66 @@ counts drops). Its single producer is the interrupt callback, running in
 `irq0_handler()`, and its single consumer is `usb_kbd_pop()`. That meets the
 ring's SPSC contract, and keeps USB input off the PS/2 ring entirely.
 
+## 10a. Mass storage: Bulk-Only Transport + SCSI
+
+`usb_msc_probe()` (`src/usb_msc.c`) claims an interface of class 8, subclass 6
+(SCSI transparent command set), protocol `0x50` (Bulk-Only Transport) that has
+a bulk-IN and a bulk-OUT endpoint (`usb_config_find_bulk()`). It sends
+`SET_CONFIGURATION`, then runs `INQUIRY` (peripheral type 0 or 0x0E),
+`TEST UNIT READY` and `READ CAPACITY(10)`. Only 512-byte sectors and a 32-bit
+LBA are accepted. The unit is registered with `blkdev_register()`, so it lands
+in the first free slot from 1: **block device 1** when the system disk is the
+only IDE drive, which is what `install` (`SHELL_SRC_DEV`) reads. Everything
+above `exo_disk_*` works on it unchanged.
+
+**Bulk transfers (`uhci_bulk`).** A transfer is cut into chunks of up to 128
+packets (64 bytes each at full speed, 8 KiB). Each chunk is a chain of TDs hung
+on the bulk QH, linked depth-first like the control chain, so the controller
+runs as many as the frame has room for instead of one per frame. IN TDs carry
+`SPD`: a short packet parks the QH on that TD, which ends the transfer. A chunk
+times out after 2000 frames (a flash write can NAK for a while). The caller owns
+the data toggle: `*toggle` is the first packet's toggle and comes back as the
+next packet's, advanced once per packet the device accepted. The class driver
+keeps one per endpoint because the toggle has to survive across the CBW, data
+and CSW transfers and be reset by a halt clear. xHCI ignores it.
+
+**Command flow** (`usb_msc_command()`): CBW out (31 bytes, signature `USBC`,
+a tag that increments per command), the data stage in the CBW's direction,
+CSW in (13 bytes, signature `USBS`, tag must match). The status is 0 passed,
+1 failed (`USB_MSC_CHECK`: `REQUEST SENSE` follows), anything else a phase
+error. Recovery:
+
+- **STALL on the data or status stage:** `CLEAR_FEATURE(ENDPOINT_HALT)` on that
+  endpoint, its toggle back to DATA0, and the CSW is read (again) once.
+- **Bad CSW signature, tag mismatch, phase error, or any other failed
+  transfer:** *reset recovery* (`usb_msc_reset_recovery()`): the class
+  Mass Storage Reset request (`0xFF`), `CLEAR_FEATURE(HALT)` on both bulk
+  endpoints, both toggles to DATA0. The command returns `USB_MSC_EIO`.
+
+`TEST UNIT READY` is retried (up to 50 times, 100 ms apart on the controller's
+frame clock, because probe runs with interrupts off) while the sense key is
+NOT READY or UNIT ATTENTION. A read or write that fails with CHECK CONDITION
+is retried once after `REQUEST SENSE`.
+
+**Why a bounce buffer.** A block-device op is handed whatever buffer the syscall
+layer had, and for a ring-3 caller that is a user virtual address, above the
+identity map, so it is not a physical address a TD can hold. Sector data is
+therefore copied through a 64 KiB kernel `.bss` buffer, which is identity-mapped
+and below 4 GB, the same place the CBW, CSW and the small SCSI replies live.
+`uhci_bulk` still refuses a buffer that reaches past 4 GB (`USB_EINVAL`) so a
+direct caller cannot hand it one. At about 1 MB/s the extra copy is noise.
+
+**Context.** The ops are busy-waited and run from a syscall with interrupts on;
+nothing here is touched from IRQ0. `uhci_poll()` reads only the interrupt
+pipes' TDs, never the control or bulk QHs, and one command runs at a time.
+A 64 KiB request holds the CPU for about 60 ms at full-speed rates, fine for
+`install`, not for anything real-time.
+
+**Speed.** Full-speed UHCI tops out near 1 MB/s, so the demo's
+`install freedoom2.wad` (28 MB) is the slow beat (`docs/demo.md`).
+
+Tests: `usb_msc` (`tests/kernel/test_usb_msc_k.c`, §12).
+
 ## 11. What SCRUM-199 builds on
 
 - `usb_kbd_count()`, `usb_kbd_pop(idx, &ev)`, `usb_kbd_dropped(idx)`.
@@ -440,6 +516,7 @@ ring's SPSC contract, and keeps USB input off the PS/2 ring entirely.
 | `usb_topology` | `test_usb_topology_k.c` | yes. §13's CI guard, plus a check that every controller runs the kernel's schedule (§8) |
 | `usb_kbd_report` | `test_usb_kbd_k.c` | no. `decode()` driven on device-less slots (`usb_kbd_test_attach()`, `TESTING` only) |
 | `usb` | `test_usb_k.c` | yes. Controllers, addresses, claimed keyboards, live pipes, pages below 4 GB, and the acceptance test |
+| `usb_msc` | `test_usb_msc_k.c` | half. The stick: claimed and registered, a known sector (the ExoFS superblock at LBA 0), write and read back, a 128-sector read against 128 single reads, a read past the end, a buffer above 4 GB. The rest drives `usb_msc_command()` over a fake controller: bad signature, bad tag, phase error, status-1, a STALL on the CSW, tag increment. Registered right after `blkdev`, ahead of the suites that format the stick |
 
 **The acceptance test** ("two USB keyboards and PS/2 deliver independently")
 needs real keystrokes during a headless test boot:

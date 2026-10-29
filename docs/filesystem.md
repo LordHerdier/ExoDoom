@@ -710,7 +710,7 @@ expect the prompt, `y`, then `programs` reporting `no programs installed`.
 
 `install <name>` copies one file from the install disk onto the system
 volume; `install` alone lists the install disk. The install disk is block
-device 1 (the second IDE drive until USB mass storage, SCRUM-247), with an
+device 1 (a `usb-storage` stick, `src/usb_msc.c`, SCRUM-247), with an
 ExoFS volume at LBA 0 that `docker/scripts/build.sh` rewrites on every build:
 the IWAD plus every `.exo`. A name with no `.` means `<name>.exo`, so
 `install doom` is `/doom.exo`; the IWAD is just another file

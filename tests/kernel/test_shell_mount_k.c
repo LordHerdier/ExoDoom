@@ -352,7 +352,7 @@ static void test_sb_layout_matches(void)
 
 /* ---- Across two disks ----------------------------------------------------
  *
- * The same second IDE drive test_shell_install_k.c and test_multidisk_k.c
+ * The same USB stick test_shell_install_k.c and test_multidisk_k.c
  * use (block device 1): every test below formats from LBA 0 of it, and
  * device 0's 8192-sector region at 8192 (test_exofs_k.c's, reformatted by
  * that suite on every test anyway).

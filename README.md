@@ -69,7 +69,7 @@ ExoDoom.
 | `exodoom` | Kernel ELF (Multiboot 2) |
 | `exodoom.iso` | Bootable GRUB ISO |
 | `exodoom_disk.img` | System disk: the shell's scratch volume and the IWAD |
-| `exodoom_disk2.img` | "Install disk": every `.exo` program plus `freedoom2.wad` |
+| `usb.img` | "Install stick" (a `usb-storage` device): every `.exo` program plus `freedoom2.wad` |
 
 Every build regenerates both disk images, so anything you saved or installed
 inside the guest is gone after the next `make docker-build`.
@@ -187,8 +187,7 @@ network failure there fails all of them and says nothing about your tree.
 | `make docker-link-doom` | Link gate: every libc symbol Doom needs resolves |
 | `make clean` | `rm -rf build` |
 
-The extra devices on every QEMU line (a second IDE disk standing in for an
-install stick, three UHCI controllers, two USB keyboards, Intel HDA) are
+The extra devices on every QEMU line (a `usb-storage` install stick, three UHCI controllers, two USB keyboards, Intel HDA) are
 explained in the comments at the top of the `Makefile`.
 
 ## Architecture overview
