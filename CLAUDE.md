@@ -116,7 +116,7 @@ identity maps (virtual == physical), with page 0 unmapped as a NULL guard.
 | ACPI table parser (RSDP/RSDT/XSDT/FADT; runs before `vmm_init`) | `src/acpi.c/h` |
 | CMOS real-time clock (polled; `exo_rtc_read` #35) | `src/rtc.c/h`, `src/syscall_rtc.c/h` |
 | Intel HDA audio | `src/hda.c/h` |
-| USB: core + host-controller ops, UHCI (polled from IRQ0), HID boot keyboard (one event ring per keyboard) | `src/usb.c/h`, `src/uhci.c/h`, `src/usb_kbd.c/h` |
+| USB: core + host-controller ops, UHCI (polled from IRQ0), HID boot keyboard (one event ring per keyboard), mass storage (BOT + SCSI, registers a block device) | `src/usb.c/h`, `src/uhci.c/h`, `src/usb_kbd.c/h`, `src/usb_msc.c/h` |
 | PC speaker | `src/speaker.c/h` |
 | Doom sound (tone table, speaker sequencer, PCM path) | `src/doom_sfx_tone.c/h`, `src/doom_sound.c/h`, `src/doom_sound_pcm.c/h` |
 | WAD DMX sound lump decoder | `src/doom_dmx.c/h` |

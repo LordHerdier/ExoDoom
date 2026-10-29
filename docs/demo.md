@@ -29,9 +29,9 @@ client's list) is `docs/demo-narration.md`.
    over, close QEMU and run it again: it rebuilds, then boots to the format
    prompt in about 8 s.
 
-The "USB stick" is the second IDE drive, `build/exodoom_disk2.img`. The build
-writes it on every build with the IWAD and every package. It stands in for a
-USB stick until USB mass storage lands (SCRUM-247); say so if asked.
+The "USB stick" is a real `usb-storage` device, `build/usb.img`, on a UHCI
+controller (`src/usb_msc.c`, SCRUM-247). The build writes it on every build with
+the IWAD and every package, and the kernel registers it as block device 1.
 
 ---
 

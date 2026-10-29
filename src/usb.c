@@ -9,12 +9,13 @@
  *   -> GET_DESCRIPTOR(config, wTotalLength) -> offer it to each class driver.
  *
  * A device no class driver claims stays addressed but unconfigured. That is
- * where the mouse (SCRUM-246) and the stick (SCRUM-247) sit for now.
+ * where the mouse (SCRUM-246) sits for now.
  */
 
 #include "usb.h"
 #include "uhci.h"
 #include "usb_kbd.h"
+#include "usb_msc.h"
 #include "serial.h"
 #include "string.h"
 
@@ -39,6 +40,7 @@ typedef struct {
 
 static const usb_class_driver_t g_drivers[] = {
     { "usb_kbd", usb_kbd_probe },
+    { "usb_msc", usb_msc_probe },
 };
 
 int usb_hcd_register(usb_hcd_t *hcd)
@@ -84,6 +86,58 @@ int usb_set_configuration(const usb_device_t *dev, uint8_t value)
 {
     return usb_control(dev, USB_RT_OUT | USB_RT_STANDARD | USB_RT_DEVICE,
                        USB_REQ_SET_CONFIGURATION, value, 0, NULL, 0, NULL);
+}
+
+int usb_bulk(const usb_device_t *dev, uint8_t ep_addr, uint16_t max_packet,
+             uint8_t *toggle, void *data, uint32_t len, uint32_t *actual)
+{
+    return dev->hcd->ops->bulk(dev->hcd, dev, ep_addr, max_packet, toggle,
+                               data, len, actual);
+}
+
+int usb_clear_halt(const usb_device_t *dev, uint8_t ep_addr)
+{
+    return usb_control(dev, USB_RT_OUT | USB_RT_STANDARD | USB_RT_ENDPOINT,
+                       USB_REQ_CLEAR_FEATURE, USB_FEATURE_ENDPOINT_HALT,
+                       ep_addr, NULL, 0, NULL);
+}
+
+int usb_config_find_bulk(const uint8_t *config, uint16_t len,
+                         const usb_interface_desc_t *iface,
+                         const usb_endpoint_desc_t **bulk_in,
+                         const usb_endpoint_desc_t **bulk_out)
+{
+    int in_iface = 0;
+
+    *bulk_in = NULL;
+    *bulk_out = NULL;
+    if ((const uint8_t *)iface < config || (const uint8_t *)iface >= config + len) {
+        return USB_EINVAL;
+    }
+
+    for (uint16_t off = 0; off + 2 <= len;) {
+        uint8_t blen = config[off];
+        uint8_t type = config[off + 1];
+        if (blen < 2 || off + blen > len) {
+            break;
+        }
+        if (type == USB_DESC_INTERFACE) {
+            in_iface = (const uint8_t *)iface == config + off;
+        } else if (in_iface && type == USB_DESC_ENDPOINT
+                   && blen >= sizeof(usb_endpoint_desc_t)) {
+            const usb_endpoint_desc_t *e =
+                (const usb_endpoint_desc_t *)(config + off);
+            if ((e->bmAttributes & USB_EP_XFER_MASK) == USB_EP_XFER_BULK) {
+                const usb_endpoint_desc_t **slot =
+                    (e->bEndpointAddress & USB_EP_DIR_IN) ? bulk_in : bulk_out;
+                if (*slot == NULL) {
+                    *slot = e;
+                }
+            }
+        }
+        off = (uint16_t)(off + blen);
+    }
+    return (*bulk_in && *bulk_out) ? USB_OK : USB_ENODEV;
 }
 
 int usb_config_find_interface(const uint8_t *config, uint16_t len,

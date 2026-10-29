@@ -13,6 +13,7 @@
 #include "kunit.h"
 #include "blkdev.h"
 #include "ata.h"
+#include "usb_msc.h"
 #include "string.h"
 
 #include <stdint.h>
@@ -214,7 +215,9 @@ static void test_ata_positions_registered_in_order(void)
             CU_ASSERT_EQUAL(bd->sectors, ata_drive_sector_count(pos));
         n++;
     }
-    CU_ASSERT_EQUAL(blkdev_count(), n);
+    /* usb_init() registers its mass-storage units after the IDE drives
+     * (SCRUM-247), so they fill the slots that follow the last one. */
+    CU_ASSERT_EQUAL(blkdev_count(), n + (uint32_t)usb_msc_count());
     if (!ata_drive_present(0))
         CU_ASSERT_PTR_NULL(blkdev_get(BLKDEV_SYSTEM));
 }

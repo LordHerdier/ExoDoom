@@ -5,7 +5,7 @@
  * tests/kernel/test_shell_libos_k.c), so this drives the two halves it
  * delegates to src/shell/shell_install.c: name resolution, and the
  * volume-to-volume copy between the install disk (block device 1, the
- * second IDE drive) and a volume on the system disk. ExoFS runs through its
+ * USB stick) and a volume on the system disk. ExoFS runs through its
  * EXO_KERNEL compile with libos_heap_alloc() buffers, as in
  * test_multidisk_k.c, whose two_disks() guard and LBA use this copies.
  *

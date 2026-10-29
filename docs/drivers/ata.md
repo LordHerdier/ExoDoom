@@ -48,7 +48,7 @@ positions, which QEMU numbers with `index=`:
 | Position (`index=`) | Bus       | Drive  | Command block | Control | Test boot attaches |
 | ------------------- | --------- | ------ | ------------- | ------- | ------------------ |
 | 0                   | primary   | master | `0x1F0`–`0x1F7` | `0x3F6` | `build/exodoom_disk.img` — device 0, the system disk |
-| 1                   | primary   | slave  | `0x1F0`–`0x1F7` | `0x3F6` | `build/exodoom_disk2.img` — device 1 (SCRUM-244) |
+| 1                   | primary   | slave  | `0x1F0`–`0x1F7` | `0x3F6` | not attached by default; device 1 when present (the install stick is USB since SCRUM-247) |
 | 2                   | secondary | master | `0x170`–`0x177` | `0x376` | the `-cdrom` ISO (ATAPI, skipped) |
 | 3                   | secondary | slave  | `0x170`–`0x177` | `0x376` | nothing |
 
@@ -287,8 +287,8 @@ attached to the primary bus:
   to prove the run landed at the right LBAs.
 
 Every QEMU line in the `Makefile` attaches `build/exodoom_disk.img` at
-`index=0` and the blank `build/exodoom_disk2.img` (8 MiB, created by
-`docker/scripts/build.sh` when missing) at `index=1` (SCRUM-244). A boot
+`index=0` (SCRUM-244 also attached a second IDE drive at `index=1`; the install
+stick is a `usb-storage` device now, SCRUM-247). A boot
 without a disk still soft-fails: `ata_init()` reports `ATA_ENODEV` (logged on
 serial, boot continues — see `src/kernel.c`).
 

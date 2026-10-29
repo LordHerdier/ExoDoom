@@ -787,20 +787,16 @@ if [[ "$(stat -c %s build/exodoom_disk.img)" -lt "$vol_end_bytes" ]]; then
   truncate -s "$vol_end_bytes" build/exodoom_disk.img
 fi
 
-# The disk behind every QEMU line's `-device usb-storage` (SCRUM-245,
-# docs/drivers/usb.md section 2). Blank for now -- QEMU only needs the file to
-# exist; SCRUM-247 has the packer write an ExoFS volume of .exo packages here.
-# Created only when missing, so whatever a developer put on it survives a
-# rebuild.
-[[ -f build/usb.img ]] || truncate -s 16M build/usb.img
-
-# The second IDE drive behind every QEMU line's $(QEMU_DISK2_ARGS) (SCRUM-244):
-# block device 1, the install-stick stand-in. SCRUM-233: an ExoFS volume at
-# LBA 0 holding the IWAD and every package, which the shell's `install` copies
-# onto the system volume. Rewritten on every build (mkexofsimg truncates its
-# output), because the multidisk and shell_install KUnit suites reformat the
-# whole drive on a test boot; the next build puts the packages back.
-build/mkexofsimg build/exodoom_disk2.img "$WAD_PATH" "$wad_file" 0 \
+# The disk behind every QEMU line's `-device usb-storage` (SCRUM-245, SCRUM-247,
+# docs/drivers/usb.md): block device 1, the install stick. SCRUM-233: an ExoFS
+# volume at LBA 0 holding the IWAD and every package (plus any wads/ extras),
+# which the shell's `install` copies onto the system volume. The IWAD has to be
+# here: a first boot formats the system volume, so the stick is the only way
+# `freedoom2.wad` gets back onto it. Rewritten on every build (mkexofsimg
+# truncates its output), because the multidisk and shell_install KUnit suites
+# reformat the whole drive on a test boot; the next build puts the packages
+# back.
+build/mkexofsimg build/usb.img "$WAD_PATH" "$wad_file" 0 \
   "${pkg_args[@]}" "${wad_args[@]}"
 
 echo "[3/7] Compile C sources"
@@ -1250,4 +1246,4 @@ echo "[7/7] Create ISO -> build/exodoom.iso"
 grub-mkrescue -o build/exodoom.iso build/isodir >/dev/null
 
 echo "Done:"
-ls -lh build/exodoom build/exodoom.iso build/exodoom_disk.img build/exodoom_disk2.img build/usb.img
+ls -lh build/exodoom build/exodoom.iso build/exodoom_disk.img build/usb.img

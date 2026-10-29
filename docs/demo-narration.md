@@ -76,10 +76,12 @@ programs."
 bytes)`.
 
 **If asked.**
-- *Is that a real USB stick?* Not yet. It is a second disk drive standing in
-  for one, because the USB storage driver is still to come (SCRUM-247). The
-  install path is the same either way: read a file from one disk, write it to
-  the other.
+- *Is that a real USB stick?* It is a real USB mass-storage device as far as
+  the machine can tell: the kernel enumerates it on the USB bus, speaks the
+  Bulk-Only Transport and SCSI protocols to it, and registers it as a disk.
+  In QEMU it is backed by an image file, so it is emulated hardware, not a
+  physical stick. `install` neither knows nor cares: it reads a file from one
+  disk and writes it to the other.
 - *Is Doom built into the kernel?* The kernel image still carries an older
   built-in copy of Doom from before packages existed. The demo never uses it:
   it runs the package you just watched being installed. Snake, next, has no

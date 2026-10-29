@@ -77,8 +77,18 @@ typedef struct {
 #define CTRL_DATA_OFF  (CTRL_BUF_OFF + 16)
 #define CTRL_DATA_MAX  (4096 - CTRL_DATA_OFF)
 
-/* Sched page layout: interrupt skeleton QH at 0, control QH at 16, then
- * one 128-byte slot per interrupt pipe: QH, TD, packet buffer. */
+/* Bulk page: nothing but TDs (32 bytes each, so 128 of them). The data
+ * stage points straight at the caller's buffer, so there is no bounce
+ * buffer; a transfer longer than BULK_MAX_TDS packets goes out in chunks. */
+#define BULK_MAX_TDS   128
+
+/* A bulk chunk may wait this many frames for a slow device (flash can NAK
+ * for a while on a write) before it is given up on. */
+#define BULK_TIMEOUT_FRAMES 2000
+
+/* Sched page layout: interrupt skeleton QH at 0, control QH at 16, bulk QH
+ * at 32, then one 128-byte slot per interrupt pipe: QH, TD, packet buffer. */
+#define SCHED_BULK_QH_OFF 32
 #define SCHED_PIPE_OFF  64
 #define SCHED_PIPE_SIZE 128
 #define PIPE_TD_OFF     32
@@ -118,8 +128,10 @@ typedef struct {
     uint32_t  *frame_list;
     uint8_t   *sched;
     uint8_t   *ctrl;
+    uint8_t   *bulk;
     uhci_qh_t *int_qh;
     uhci_qh_t *ctrl_qh;
+    uhci_qh_t *bulk_qh;
     uhci_pipe_t pipes[UHCI_MAX_PIPES];
     volatile int npipes;
     volatile uint32_t pipe_errors;
@@ -498,15 +510,130 @@ static int uhci_interrupt_open(usb_hcd_t *hcd, const usb_device_t *dev,
     return idx;
 }
 
-static int uhci_bulk(usb_hcd_t *hcd, const usb_device_t *dev,
-                     uint8_t ep_addr, void *data, uint32_t len,
-                     uint32_t *actual)
+/* ── Bulk transfers ───────────────────────────────────────────────────── */
+
+/* One chunk: `n` packets of up to `mps` bytes from `buf`, on the bulk QH.
+ * The TDs are chained depth-first, so the controller runs the whole chain
+ * as bandwidth allows within a frame instead of one TD per frame. A short
+ * IN packet carries SPD and parks the QH on that TD, which ends the chunk
+ * (and the transfer). *toggle advances once per packet that completed. */
+static int bulk_chunk(uhci_t *hc, const usb_device_t *dev, uint8_t ep,
+                      int in, uint16_t mps, uint8_t *toggle, uint8_t *buf,
+                      uint32_t len, uint32_t *moved, int *short_pkt)
 {
-    (void)hcd; (void)dev; (void)ep_addr; (void)data; (void)len;
+    uhci_td_t *td = (uhci_td_t *)hc->bulk;
+    uint32_t base_ctrl = TD_ACTIVE | TD_CERR3 | (in ? TD_SPD : 0);
+    int ntd = (int)((len + mps - 1) / mps);
+    uint8_t t = *toggle;
+    int rc = USB_OK;
+
+    for (int i = 0; i < ntd; i++) {
+        uint32_t off = (uint32_t)i * mps;
+        uint32_t n = (len - off) < mps ? (len - off) : mps;
+
+        td[i].ctrl   = base_ctrl;
+        td[i].token  = td_token(in ? PID_IN : PID_OUT, dev->address, ep,
+                                t, (uint16_t)n);
+        td[i].buffer = phys32(buf + off);
+        td[i].link   = (i + 1 < ntd) ? (phys32(&td[i + 1]) | UHCI_LP_VF)
+                                     : UHCI_LP_TERM;
+        t ^= 1;
+    }
+
+    barrier();
+    hc->bulk_qh->element = phys32(&td[0]);
+
+    uint16_t start = frnum(hc);
+    uint32_t spins = 0;
+    uint32_t got = 0;
+    int done = 0;
+
+    *short_pkt = 0;
+    while (done < ntd) {
+        uint32_t s = td[done].ctrl;
+
+        if (s & TD_ACTIVE) {
+            if (hc_halted(hc)) {
+                rc = USB_EIO;
+                break;
+            }
+            if (((frnum(hc) - start) & 0x7FF) >= BULK_TIMEOUT_FRAMES
+                || spins++ >= SPIN_CAP) {
+                rc = USB_ETIMEOUT;
+                break;
+            }
+            io_wait();
+            continue;
+        }
+        if (s & TD_ERRORS) {
+            rc = td_error(s);
+            break;
+        }
+
+        uint32_t n = td_actlen(s);
+        got += n;
+        *toggle ^= 1;
+        done++;
+        if (in && n < td_maxlen(td[done - 1].token)) {
+            *short_pkt = 1;
+            break;
+        }
+    }
+
+    /* Unhook the chain whatever happened, and let the controller finish any
+     * frame that might still be looking at it before the TDs are reused. */
+    hc->bulk_qh->element = UHCI_LP_TERM;
+    wait_frames(hc, 1);
+
+    *moved = got;
+    return rc;
+}
+
+static int uhci_bulk(usb_hcd_t *hcd, const usb_device_t *dev,
+                     uint8_t ep_addr, uint16_t max_packet, uint8_t *toggle,
+                     void *data, uint32_t len, uint32_t *actual)
+{
+    uhci_t *hc = hcd->priv;
+    int in = (ep_addr & USB_EP_DIR_IN) != 0;
+    uint8_t ep = ep_addr & USB_EP_NUM_MASK;
+    uint32_t total = 0;
+    int rc = USB_OK;
+
     if (actual) {
         *actual = 0;
     }
-    return USB_ENOTSUP;   /* SCRUM-247 */
+    if (max_packet == 0 || max_packet > 64 || toggle == NULL
+        || (len && data == NULL) || dev->speed == USB_SPEED_LOW) {
+        return USB_EINVAL;
+    }
+    /* UHCI TDs hold 32-bit buffer addresses. */
+    if (len && ((uint64_t)(uintptr_t)data + len) >> 32) {
+        return USB_EINVAL;
+    }
+    if (hc_halted(hc)) {
+        return USB_EIO;
+    }
+
+    while (total < len) {
+        uint32_t chunk = len - total;
+        uint32_t moved = 0;
+        int short_pkt = 0;
+
+        if (chunk > (uint32_t)BULK_MAX_TDS * max_packet) {
+            chunk = (uint32_t)BULK_MAX_TDS * max_packet;
+        }
+        rc = bulk_chunk(hc, dev, ep, in, max_packet, toggle,
+                        (uint8_t *)data + total, chunk, &moved, &short_pkt);
+        total += moved;
+        if (rc != USB_OK || short_pkt) {
+            break;
+        }
+    }
+
+    if (actual) {
+        *actual = total;
+    }
+    return rc;
 }
 
 /* Every HEALTH_PERIOD ticks: a halted controller retires all its pipes, and
@@ -677,9 +804,13 @@ static void uhci_teardown(uhci_t *hc)
     if (hc->ctrl) {
         free_page(hc->ctrl);
     }
+    if (hc->bulk) {
+        free_page(hc->bulk);
+    }
     hc->frame_list = NULL;
     hc->sched = NULL;
     hc->ctrl = NULL;
+    hc->bulk = NULL;
 }
 
 static int uhci_start(uhci_t *hc, const pci_device_t *d)
@@ -725,7 +856,8 @@ static int uhci_start(uhci_t *hc, const pci_device_t *d)
     hc->frame_list = alloc_dma_page();
     hc->sched = alloc_dma_page();
     hc->ctrl = alloc_dma_page();
-    if (!hc->frame_list || !hc->sched || !hc->ctrl) {
+    hc->bulk = alloc_dma_page();
+    if (!hc->frame_list || !hc->sched || !hc->ctrl || !hc->bulk) {
         log_hc(hc, "no DMA page below 4 GB\n");
         uhci_teardown(hc);
         return USB_ENOMEM;
@@ -733,7 +865,10 @@ static int uhci_start(uhci_t *hc, const pci_device_t *d)
 
     hc->int_qh = (uhci_qh_t *)hc->sched;
     hc->ctrl_qh = (uhci_qh_t *)(hc->sched + 16);
-    hc->ctrl_qh->head = UHCI_LP_TERM;
+    hc->bulk_qh = (uhci_qh_t *)(hc->sched + SCHED_BULK_QH_OFF);
+    hc->bulk_qh->head = UHCI_LP_TERM;
+    hc->bulk_qh->element = UHCI_LP_TERM;
+    hc->ctrl_qh->head = phys32(hc->bulk_qh) | UHCI_LP_QH;
     hc->ctrl_qh->element = UHCI_LP_TERM;
     hc->int_qh->head = phys32(hc->ctrl_qh) | UHCI_LP_QH;
     hc->int_qh->element = UHCI_LP_TERM;
